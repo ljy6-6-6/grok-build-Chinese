@@ -1550,12 +1550,7 @@ fn kitty_skip_vte_brand() {
     assert_eq!(ctx.kitty_skip_reason(), Some("vte"));
 }
 
-// =====================================================================
-// shift_enter_unavailable: VTE version gating for Shift+Enter
-// =====================================================================
-//
-// VTE 0.82.0 (VTE_VERSION 8200) is the first release containing the Kitty keyboard protocol
-// Earlier versions cannot distinguish Shift+Enter from bare Enter, so the UI should advertise Alt+Enter for newline insertion instead
+// VTE 0.82.0 (8200) is the first with Kitty keyboard protocol; earlier builds cannot tell Shift+Enter from Enter.
 
 #[test]
 fn shift_enter_unavailable_legacy_vte_version() {

@@ -3,14 +3,8 @@
 use crate::buffers::unicode_display_width;
 
 /// Two-dimensional text box with an anchor row where horizontal flow attaches.
-///
 /// Multi-row content (matrix-family environments) extends above/below the anchor row; subsequent output continues on the anchor row.
 /// This keeps a prefix, a matrix, and a suffix aligned:
-///
-/// ```text
-/// A = ⎛1  2⎞,   det(A) = −2
-///     ⎝3  4⎠
-/// ```
 pub(super) struct MathBox {
     lines: Vec<String>,
     /// Row index that horizontal flow currently appends to.

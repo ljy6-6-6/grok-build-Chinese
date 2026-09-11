@@ -29,11 +29,8 @@ fn test_map_event_kind() {
     assert_eq!(map_event_kind(&EventKind::Other), None);
 }
 
-// ========================================================================
-// Integration tests with real filesystem and debouncer
-// These tests are serialized because macOS FSEvents has limited resources
-// when many watchers are created simultaneously.
-// ========================================================================
+// Integration tests with a real filesystem and debouncer.
+// Serialized because macOS FSEvents has limited resources when many watchers are created at once.
 
 mod integration {
     use super::*;
@@ -162,10 +159,8 @@ mod integration {
         let (mut rx, handle) = start_with_retry(watch_path.clone(), config).unwrap();
         let _ = collect_events(&mut rx); // drain startup stragglers
 
-        // Drop joins the watcher thread, which drops the debouncer and the
-        // event sender. Run it on a watchdog thread so a broken Shutdown
-        // path (hung join) fails fast as an assertion rather than hanging
-        // the whole test/CI.
+        // Drop joins the watcher thread, which drops the debouncer and the event sender.
+        // Run it on a watchdog thread so a hung join fails fast instead of hanging CI.
         let dropper = std::thread::spawn(move || drop(handle));
         let drop_deadline = std::time::Instant::now() + Duration::from_secs(5);
         while !dropper.is_finished() {

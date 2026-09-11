@@ -30,14 +30,8 @@ struct OverlayMetadata {
     /// Always "overlay".
     #[serde(rename = "type")]
     kind: String,
-    /// Path to the btrfs snapshot root (the subvolume to pass to `btrfs subvolume delete`).
-    ///
-    /// - **New layout:** `<wt_base>/root` — the entire overlay_root is snapshotted,
-    ///   and `root/upper/` is the overlayfs upper dir.
-    /// - **Old layout (via alias):** `<wt_base>/upper` — the upper dir was itself the
-    ///   btrfs subvolume and also the overlayfs upper dir.
-    ///
-    /// In both cases, this field is the correct path for `btrfs subvolume delete`.
+    /// Subvolume for `btrfs subvolume delete`. New layout: `<wt_base>/root`
+    /// (`root/upper/` is the overlay upper). Old layout: `<wt_base>/upper`.
     #[serde(alias = "snapshot_upper")]
     snapshot_root: PathBuf,
     /// Path to the overlay work dir.
@@ -52,11 +46,7 @@ struct OverlayMetadata {
 
 const METADATA_FILENAME: &str = ".fast-worktree-meta.json";
 
-/// Create an overlay worktree: snapshot upper → write metadata → mount overlay.
-///
-/// # Arguments
-/// * `info` - The detected FUSE+overlay info for the source repo.
-/// * `dest` - Where the worktree should appear (the overlay mount target).
+/// Overlay worktree: snapshot upper, write metadata, mount overlay at `dest`.
 pub fn create_overlay_worktree(
     info: &OverlayInfo,
     dest: &Path,
@@ -68,25 +58,14 @@ pub fn create_overlay_worktree(
         .and_then(|n| n.to_str())
         .unwrap_or("overlay-wt");
 
-    // Layout: <overlay_root>/worktrees/<wt_name>/root (btrfs snapshot)
-    //   root/upper        — the snapshot's upper dir (used as overlayfs upperdir)
-    //   root/overlay-work — the overlay work dir (created fresh; see below)
-    //   root/work         — inert copy of the source's work dir, reclaimed with
-    //                       the snapshot subvolume (not used by this worktree)
-    //
-    // IMPORTANT: work dir MUST be inside the snapshot (same btrfs subvolume as
-    // upper). Btrfs snapshots get their own subvolume with a distinct device ID.
-    // If work is outside the snapshot (different device), overlayfs returns
-    // EXDEV ("Invalid cross-device link") on unlink() — breaking git and most
-    // file-replacing workflows. This was the case with the old layout where
-    // work lived at <wt_base>/work (parent subvolume, different device ID).
+    // Work dir must live inside the snapshot (same subvolume/device as upper).
+    // A work dir on another device makes overlayfs return EXDEV on unlink,
+    // breaking git and other file-replacing workflows.
     let wt_base = info.overlay_root.join("worktrees").join(wt_name);
     let snapshot_root = wt_base.join("root");
-    // Dedicated work dir, not the source's `work/`: the snapshot copies that
-    // `work/` whose root-owned, mode-000 internals a rootless creator can't
-    // delete, so a fresh name avoids that cleanup. (Still inside the snapshot
-    // per the same-subvolume requirement above; the stale copy is reclaimed
-    // with the snapshot subvolume.)
+    // Fresh work dir, not the source's `work/`: that copy has root-owned
+    // mode-000 internals a rootless creator cannot delete. Still inside the
+    // snapshot; the stale copy is reclaimed with the subvolume.
     let work_dir = snapshot_root.join("overlay-work");
 
     // Clean up if a previous attempt left debris.
@@ -107,12 +86,8 @@ pub fn create_overlay_worktree(
     std::fs::create_dir_all(&wt_base)
         .with_context(|| format!("create worktree base dir {}", wt_base.display()))?;
 
-    // Step 1: Snapshot the overlay root (the btrfs subvolume).
-    //
-    // The overlay_root is the btrfs subvolume; upper_dir is a regular directory
-    // inside it — not a subvolume itself. `btrfs subvolume snapshot` requires the
-    // source to be a subvolume, so we snapshot overlay_root and then use the
-    // `upper/` subdirectory from within the snapshot.
+    // Snapshot overlay_root: it is the subvolume. `upper/` is a regular dir
+    // inside it, so `btrfs subvolume snapshot` cannot target upper directly.
     tracing::debug!(
         source = %info.overlay_root.display(),
         dest = %snapshot_root.display(),
@@ -167,12 +142,8 @@ pub fn create_overlay_worktree(
     })
 }
 
-/// Remove an overlay worktree: unmount → delete snapshot → cleanup.
-///
-/// `delegate` is `Some` for rootless callers that lack `CAP_SYS_ADMIN`; the
-/// overlay unmount is then delegated to a privileged helper (mirroring the
-/// create path). Privileged callers (e.g. an orphan-cleanup job) pass `None`
-/// and unmount in-process.
+/// Unmount, delete snapshot, cleanup. `Some` delegate for rootless callers
+/// lacking `CAP_SYS_ADMIN`; privileged callers pass `None` and unmount in-process.
 pub fn remove_overlay_worktree(
     target: &Path,
     snapshot_root: &Path,
@@ -192,11 +163,9 @@ pub fn remove_overlay_worktree(
         );
     }
 
-    // Cross-namespace safety gate: an in-process (`delegate: None`) unmount can't
-    // detach an overlay living in another process's namespace, so before deleting
-    // the backing snapshot confirm it's unmounted in ANY namespace — else we'd
-    // reclaim the lower/upper under a live worktree. upperdir is
-    // `<snapshot_root>/upper` (new layout) or `<snapshot_root>` (old).
+    // In-process unmount cannot detach another namespace's overlay. Confirm
+    // unmounted in every namespace before deleting the snapshot, or a live
+    // worktree loses its lower/upper.
     let overlay_upper = if snapshot_root.file_name().is_some_and(|n| n == "root") {
         snapshot_root.join("upper")
     } else {
@@ -259,6 +228,9 @@ pub fn remove_overlay_worktree(
     }
 
     Ok(RemoveReport {
+        // Overlay teardown also btrfs-deletes its backing snapshot, but the
+        // authoritative label is overlay so it isn't mislabeled btrfs.
+        method: crate::metrics::DisposeMethod::Overlay,
         used_btrfs_delete: true,
         unmounted_bind: false,
         unmounted_overlay: true,
@@ -318,12 +290,8 @@ pub fn try_remove_from_mountinfo(
     remove_overlay_worktree(target, &snapshot_root, &work_dir, delegate).map(Some)
 }
 
-/// Try to remove via persisted metadata (Method 2 — crash recovery).
-///
-/// Scans known overlay roots under `/local/repo-fuse-*/worktrees/*/` for
-/// `.fast-worktree-meta.json` files whose `mount_target` matches `target`.
-/// This works even after the overlay has been unmounted — the metadata lives
-/// on the btrfs filesystem next to the snapshot upper dir.
+/// Crash recovery via `.fast-worktree-meta.json` under known overlay roots.
+/// Metadata lives on btrfs beside the snapshot, so this works after unmount.
 pub fn try_remove_from_metadata(
     target: &Path,
     delegate: Option<&std::sync::Arc<dyn crate::BtrfsDelegate>>,
@@ -386,18 +354,9 @@ pub fn try_remove_from_metadata(
     Ok(None)
 }
 
-/// Scan known overlay roots under `/local/repo-fuse-*/worktrees/` for orphaned
-/// overlay snapshots.
-///
-/// An overlay snapshot is orphaned if:
-/// - Its metadata file exists but the `mount_target` doesn't exist or isn't mounted
-/// - Or the worktrees/ dir contains snapshot dirs without metadata (crashed mid-create)
-///
-/// For each orphan: delete the btrfs snapshot, remove the work dir,
-/// remove the metadata file, clean up the parent dir.
-///
-/// Intended for host startup / periodic cleanup of leftovers left behind when
-/// a previous session exited uncleanly.
+/// Orphan overlay snapshots: meta whose mount is gone, or snapshot dirs with
+/// no meta (crashed mid-create). For host startup / periodic cleanup after an
+/// unclean exit.
 pub fn cleanup_orphaned_overlay_snapshots() -> crate::api::CleanupReport {
     let mut report = crate::api::CleanupReport::default();
 
@@ -581,11 +540,8 @@ fn delete_btrfs_snapshot(path: &Path) -> Result<()> {
     crate::btrfs::snapshot::delete_snapshot(path)
 }
 
-/// Write metadata JSON to the worktree base dir for crash recovery.
-///
-/// Written to `<wt_base>/.fast-worktree-meta.json` (next to `upper/` and
-/// `work/` dirs), NOT inside the overlay. This ensures the metadata is
-/// always readable from the btrfs filesystem regardless of overlay mount state.
+/// Crash-recovery metadata at `<wt_base>/.fast-worktree-meta.json`, not inside
+/// the overlay, so it stays readable on btrfs regardless of mount state.
 fn write_metadata(
     wt_base: &Path,
     snapshot_root: &Path,

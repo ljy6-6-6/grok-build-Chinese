@@ -79,7 +79,7 @@ pub enum IntraSummarizer {
 /// `min_steps_before_compact` [ignored by FullReplace], `steps_trigger_ratio`
 /// [HistoryThenSteps], `compaction_model_name`); the remaining fields are
 /// never sent remotely and therefore always take the defaults here.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct IntraCompactionConfig {
     // ───────────────────────────── Common (all modes) ─────────────────────────────

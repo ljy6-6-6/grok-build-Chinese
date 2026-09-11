@@ -3,8 +3,9 @@
 //! Single source of truth shared by the hub that registers the tools and
 //! by agent hosts that gate the tools per agent config.
 
-/// Handwritten v1 harness tool ids. The hub's registration specs are
-/// tested against this list so the surface cannot drift silently.
+/// Handwritten harness tool ids: every id a hub may register or Plane may
+/// allowlist. A hub registers a prefix of this list, so an id can be
+/// declared (validated, offered, reserved) before any hub implements it.
 pub const GROK_BOT_TOOL_IDS: &[&str] = &[
     "bot_create_agent",
     "bot_list_agents",
@@ -15,6 +16,7 @@ pub const GROK_BOT_TOOL_IDS: &[&str] = &[
     "bot_get_agent_transcript_window",
     "bot_transcript_offbox",
     "bot_await_turn",
+    "bot_search_agents",
 ];
 
 /// Whether `name` is a hub-synthesized Grok Bot harness tool.
@@ -22,121 +24,86 @@ pub fn is_grok_bot_tool(name: &str) -> bool {
     GROK_BOT_TOOL_IDS.contains(&name)
 }
 
+/// Bot tools a toolbox receives when `grok_bot_allowed_tools` is empty.
+/// A new id is added here only once a hub implements it; until then it
+/// needs explicit per-toolbox opt-in.
+pub const GROK_BOT_DEFAULT_TOOL_IDS: &[&str] = &[
+    "bot_create_agent",
+    "bot_list_agents",
+    "bot_send_prompt",
+    "bot_get_agent_transcript",
+    "bot_get_agent_transcript_page",
+    "bot_get_agent_transcript_tail",
+    "bot_get_agent_transcript_window",
+    "bot_transcript_offbox",
+    "bot_await_turn",
+    "bot_search_agents",
+];
+
+/// Whether `name` is in the empty-allowlist default set.
+pub fn is_grok_bot_default_tool(name: &str) -> bool {
+    GROK_BOT_DEFAULT_TOOL_IDS.contains(&name)
+}
+
 /// Model-facing descriptions, one per [`GROK_BOT_TOOL_IDS`] entry (same
-/// order). Agent hosts use these to advertise opted-in bot tools before the
-/// hub connection is live; the hub's registration specs are tested against
-/// this table so the two surfaces cannot drift.
+/// order). The hub registers its tools with these strings, and agent hosts
+/// use them to advertise opted-in bot tools before the hub connection is
+/// live, so both surfaces render the same text.
 pub const GROK_BOT_TOOL_DESCRIPTIONS: &[(&str, &str)] = &[
     (
         "bot_create_agent",
-        "Create a Grok Bot agent on the user's box with a short name and an \
-         optional persona/description. Returns the new agent's id so you can \
-         send to it with bot_send_prompt. Use this to spin up a focused \
-         teammate for a job. There is no tool to delete an agent, so only \
-         create one when it is genuinely useful; list existing agents with \
-         bot_list_agents first.",
+        "Create a Grok Bot agent. It greets the user itself; send no first \
+         prompt, never quote its id. Cannot be deleted; check bot_list_agents \
+         first.",
     ),
     (
         "bot_list_agents",
-        "List Grok Bot agents on the user's box. Returns each agent's id \
-         (and name / activity flags). Use this to get an agent_id for \
-         bot_send_prompt, bot_await_turn, or a transcript tool. Takes no \
-         arguments. Prefer listing before creating a duplicate with \
-         bot_create_agent. This command wakes the box.",
+        "List all Grok Bot agents on the user's box with id, name, description, \
+         and status. Wakes the box.",
     ),
     (
         "bot_send_prompt",
-        "Send a prompt to a Grok Bot agent. Use this to deliver user text \
-         (and optional workspace files via paths) to an existing agent_id \
-         from bot_list_agents or bot_create_agent. mode (default \
-         fire_and_forget) is fire_and_forget | blocking | async. \
-         fire_and_forget returns {accepted} immediately. blocking waits and \
-         returns the assistant text (timeout_ms is server-clamped; timeout \
-         is finished:false, not an error). async returns {accepted, handle} \
-         immediately and wakes the model when the turn ends (async may be \
-         unavailable during rollout; on refusal use blocking or \
-         fire_and_forget). Empty finished:true text means the turn ended \
-         (interrupted, tools-only, or a non-text reply), not an error; \
-         inspect a non-text reply with bot_get_agent_transcript_tail. On \
-         timeout or failure, call bot_await_turn with the returned handle \
-         — do not re-send the prompt. paths requires a bound workspace that \
-         serves workspace.client_fs_read_file; omit or pass [] for no files. \
-         Attachments are refused for live streaming agents. Waiting \
-         (blocking/async) is not supported for live streaming agents or \
-         agents that cannot stream live turns — use fire_and_forget and \
-         read the transcript (bot_get_agent_transcript_tail after a send \
-         that woke the box; bot_transcript_offbox when live waiting is \
-         unsupported). Do not send another prompt while a turn is in \
-         progress.",
+        "Send a prompt to a Grok Bot agent. Returns once accepted unless mode \
+         waits for the reply. on_busy is reject (default), queue, or supersede. \
+         After a timeout or a missing notification, resume with bot_await_turn \
+         and the returned handle; never re-send. Empty reply with \
+         finished:true means no text. A <grok_bot agent_id> tag is that \
+         agent's id.",
     ),
     (
         "bot_get_agent_transcript",
-        "Read a Grok Bot agent's full transcript from the box. Use this when \
-         you need the entire conversation, not just recent entries. This \
-         command wakes a hibernated box. Prefer bot_get_agent_transcript_tail \
-         for the latest page, bot_get_agent_transcript_page for a \
-         time-bounded retained page, or bot_transcript_offbox when you must \
-         not wake the box (including agents that cannot stream live turns). Do not use \
-         this to wait for a reply after bot_send_prompt — call \
-         bot_await_turn with the returned handle; do not re-send the prompt.",
+        "Read an agent's entire transcript. Wakes the box.",
     ),
     (
         "bot_get_agent_transcript_page",
-        "Read one time-bounded page of a Grok Bot agent's retained transcript \
-         from the box. Requires limit and until_ms (inclusive unix-epoch \
-         milliseconds). Optional since_ms is an inclusive lower bound; \
-         optional before_seq is an exclusive sequence cursor from a previous \
-         page. This command wakes a hibernated box. Use this to page older \
-         retained history. Prefer tail for the latest entries, or \
-         bot_transcript_offbox when you must not wake the box. Do not use \
-         this to wait for an in-flight turn — call bot_await_turn; do not \
-         re-send the prompt.",
+        "Read a time-bounded page of an agent's transcript. Wakes the box.",
     ),
     (
         "bot_get_agent_transcript_tail",
-        "Read the latest page of a Grok Bot agent's transcript from the box. \
-         Requires limit. Pass before_seq from a previous page to walk older \
-         entries. Use this as the covering read after a fire-and-forget send \
-         or a finished turn. This command wakes a hibernated box. Prefer \
-         bot_transcript_offbox when you must not wake the box, including \
-         agents that cannot stream live turns. Do not poll this while a handle is \
-         outstanding — call bot_await_turn instead of re-sending the prompt.",
+        "Read the latest page of an agent's transcript, such as the reply after \
+         a send. Wakes the box. Do not poll it to wait for a turn; use \
+         bot_await_turn.",
     ),
     (
         "bot_get_agent_transcript_window",
-        "Read a Grok Bot agent's transcript from the box, including \
-         per-thread counts (threadCounts) when present. Shares tail's \
-         limit / before_seq pagination (omit before_seq for the latest \
-         page). This command wakes a hibernated box. Use this when the \
-         reply needs per-thread counts; prefer \
-         bot_get_agent_transcript_tail as the covering latest-page read, \
-         or bot_transcript_offbox when you must not wake the box. Do not \
-         use this to wait for an in-flight turn — call bot_await_turn; do \
-         not re-send the prompt.",
+        "Like bot_get_agent_transcript_tail, plus per-thread counts.",
     ),
     (
         "bot_transcript_offbox",
-        "Read a Grok Bot agent's transcript off-box. Never wakes the \
-         box. Use this for cold hydration, for agents that cannot stream \
-         live turns (waiting and live box events are unsupported), or whenever you must \
-         not wake the box. Pass cursor from a previous off-box page to \
-         continue; omit it on the first page. Prefer this over the box \
-         transcript tools when waking the box would be wasteful. This does \
-         not wait for an in-flight turn — after bot_send_prompt, use \
-         bot_await_turn with the handle; do not re-send the prompt.",
+        "Read an agent's transcript without waking the box. Pass the previous \
+         page's nextCursor to continue.",
     ),
     (
         "bot_await_turn",
-        "Re-await a Grok Bot turn after a timeout, a lost notification, or \
-         pod death. Pass the handle from bot_send_prompt unchanged. Without \
-         a handle, waits for the agent to go idle and returns the last \
-         send-message (agent-level). Do not send another prompt; that would \
-         interrupt the turn. timeout_ms is server-clamped; timeout is \
-         finished:false, not an error. Not supported for live streaming \
-         agents or agents that cannot stream live turns — use \
-         fire_and_forget and read the transcript (bot_transcript_offbox \
-         when live waiting is unsupported). Use this instead \
-         of re-sending the same prompt.",
+        "Wait for an agent's turn to finish. Pass the handle from \
+         bot_send_prompt to keep waiting after a timeout instead of re-sending. \
+         Without a handle, waits for idle and returns the last message.",
+    ),
+    (
+        "bot_search_agents",
+        "Find Grok Bot agents by name or description when you know what you \
+         want. Returns the best matches only; bot_list_agents shows every bot. \
+         Wakes the box.",
     ),
 ];
 
@@ -162,11 +129,11 @@ pub fn grok_bot_tool_arguments_schema(name: &str) -> Option<serde_json::Value> {
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": "Short human-readable name for the new agent. Required. Empty is rejected."
+                    "description": "Display name."
                 },
                 "description": {
                     "type": "string",
-                    "description": "Optional persona / instructions for the new agent. Shapes how it behaves. Omitted becomes an empty string on the box."
+                    "description": "Optional persona or instructions."
                 }
             }
         }),
@@ -182,25 +149,30 @@ pub fn grok_bot_tool_arguments_schema(name: &str) -> Option<serde_json::Value> {
             "properties": {
                 "agent_id": {
                     "type": "string",
-                    "description": "Target agent id from bot_list_agents or bot_create_agent. Required. Empty is rejected."
+                    "description": "Agent id."
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "User text to send to the agent. Required. Empty is rejected. Do not put file bytes here; attach workspace files with paths."
+                    "description": "Text to send."
                 },
                 "mode": {
                     "type": "string",
                     "enum": ["fire_and_forget", "blocking", "async"],
-                    "description": "fire_and_forget (default) returns {accepted} immediately. blocking waits and returns assistant text. async returns {accepted, handle} and wakes the model when the turn ends. On timeout call bot_await_turn with the handle. Do not re-send. Waiting modes are not supported for live streaming agents or agents that cannot stream live turns."
+                    "description": "fire_and_forget (default) returns on accept; blocking waits and returns the reply; async returns a handle and notifies when the turn ends."
                 },
                 "timeout_ms": {
                     "type": "integer",
-                    "description": "Caller timeout in milliseconds for blocking/async. Server clamps to 5000..=600000. Default 300000. Timeout is finished:false plus a handle, not an error. Ignored for fire_and_forget."
+                    "description": "Wait limit in ms for blocking. Async uses the safety max. Out-of-range values are clamped."
+                },
+                "on_busy": {
+                    "type": "string",
+                    "enum": ["reject", "queue", "supersede"],
+                    "description": "reject (default), queue after idle, or supersede the current wait."
                 },
                 "paths": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Workspace files to attach. Each path is client-fs-base-relative (the bound session cwd when that cwd is under the workspace root, otherwise the workspace root). Same contract as grok.com client-fs and grok-build model paths. Empty or omitted means no files. At most 8 paths; each file is capped at 25 MiB. Requires a bound workspace that serves workspace.client_fs_read_file. Attachments are refused for live streaming agents. Hub reads raw bytes, uploads to the box, then sends. First attach failure fails the whole send."
+                    "description": "Up to 8 files, 25 MiB each. Workspace-relative paths such as attachments/note.pdf; absolute guest paths are rewritten. Without a connected workspace, artifacts/ and attachments/ paths fetch conversation files."
                 }
             }
         }),
@@ -211,7 +183,7 @@ pub fn grok_bot_tool_arguments_schema(name: &str) -> Option<serde_json::Value> {
             "properties": {
                 "agent_id": {
                     "type": "string",
-                    "description": "Agent id whose full transcript to read. From bot_list_agents or bot_create_agent."
+                    "description": "Agent id."
                 }
             }
         }),
@@ -222,23 +194,23 @@ pub fn grok_bot_tool_arguments_schema(name: &str) -> Option<serde_json::Value> {
             "properties": {
                 "agent_id": {
                     "type": "string",
-                    "description": "Agent id whose retained transcript page to read. From bot_list_agents or bot_create_agent."
+                    "description": "Agent id."
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum number of entries to return. Required. Must be greater than 0."
+                    "description": "Max entries, at least 1."
                 },
                 "until_ms": {
                     "type": "integer",
-                    "description": "Inclusive upper bound as unix epoch milliseconds. Required."
+                    "description": "Inclusive upper bound, unix ms."
                 },
                 "before_seq": {
                     "type": "integer",
-                    "description": "Optional exclusive sequence cursor from a previous page. Return entries before this seq."
+                    "description": "Return entries before this seq."
                 },
                 "since_ms": {
                     "type": "integer",
-                    "description": "Optional inclusive lower bound as unix epoch milliseconds."
+                    "description": "Inclusive lower bound, unix ms."
                 }
             }
         }),
@@ -249,15 +221,15 @@ pub fn grok_bot_tool_arguments_schema(name: &str) -> Option<serde_json::Value> {
             "properties": {
                 "agent_id": {
                     "type": "string",
-                    "description": "Agent id whose transcript tail to read. From bot_list_agents or bot_create_agent."
+                    "description": "Agent id."
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum number of entries to return. Required. Must be greater than 0."
+                    "description": "Max entries, at least 1."
                 },
                 "before_seq": {
                     "type": "integer",
-                    "description": "Optional exclusive sequence cursor from a previous page. Return entries before this seq. Omit on the first (latest) page."
+                    "description": "Return entries before this seq; omit for the latest page."
                 }
             }
         }),
@@ -268,15 +240,15 @@ pub fn grok_bot_tool_arguments_schema(name: &str) -> Option<serde_json::Value> {
             "properties": {
                 "agent_id": {
                     "type": "string",
-                    "description": "Agent id whose transcript window to read. From bot_list_agents or bot_create_agent."
+                    "description": "Agent id."
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum number of entries to return. Required. Must be greater than 0."
+                    "description": "Max entries, at least 1."
                 },
                 "before_seq": {
                     "type": "integer",
-                    "description": "Optional exclusive sequence cursor from a previous page. Return entries before this seq. Omit on the first page."
+                    "description": "Return entries before this seq; omit for the latest page."
                 }
             }
         }),
@@ -287,11 +259,11 @@ pub fn grok_bot_tool_arguments_schema(name: &str) -> Option<serde_json::Value> {
             "properties": {
                 "agent_id": {
                     "type": "string",
-                    "description": "Agent id. Read off-box; never wakes the box. From bot_list_agents or bot_create_agent."
+                    "description": "Agent id."
                 },
                 "cursor": {
                     "type": "string",
-                    "description": "Opaque pagination cursor from a previous off-box page. Omit on the first page. Not an agent id."
+                    "description": "nextCursor from the previous page; omit on the first."
                 }
             }
         }),
@@ -302,16 +274,36 @@ pub fn grok_bot_tool_arguments_schema(name: &str) -> Option<serde_json::Value> {
             "properties": {
                 "agent_id": {
                     "type": "string",
-                    "description": "Agent id to wait on. Must match handle.agentId when a handle is passed. From bot_list_agents or bot_create_agent."
+                    "description": "Agent id; must match the handle's agent."
                 },
                 "handle": {
                     "type": "object",
                     "default": null,
-                    "description": "Opaque handle returned by bot_send_prompt or a prior bot_await_turn. Pass it back unchanged. Omit to wait until the agent is idle and return the last send-message. Do not construct a handle yourself."
+                    "description": "From bot_send_prompt or a prior bot_await_turn, unchanged. Omit to wait for idle."
                 },
                 "timeout_ms": {
                     "type": "integer",
-                    "description": "Caller timeout in milliseconds. Server clamps to 5000..=600000. Default 300000. Timeout is finished:false, not an error. Use the returned handle to call this tool again."
+                    "description": "Wait limit in ms; on timeout, finished:false plus a handle to wait again."
+                }
+            }
+        }),
+        "bot_search_agents" => serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["query"],
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "What the agent is for, or its name."
+                },
+                "status": {
+                    "type": "string",
+                    "enum": ["running", "idle"],
+                    "description": "Filter by status."
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max agents, 1 to 64."
                 }
             }
         }),
@@ -345,5 +337,91 @@ mod tests {
             assert_eq!(schema["type"], "object", "{id}");
         }
         assert!(grok_bot_tool_arguments_schema("bot_typo").is_none());
+    }
+
+    #[test]
+    fn default_tool_ids_are_a_prefix_of_shared_ids() {
+        for id in GROK_BOT_DEFAULT_TOOL_IDS {
+            assert!(is_grok_bot_tool(id), "{id} is not in GROK_BOT_TOOL_IDS");
+        }
+        assert_eq!(
+            GROK_BOT_DEFAULT_TOOL_IDS.len(),
+            10,
+            "default set size changed; check the surface budget and the agent-host copies of this list"
+        );
+        assert_eq!(
+            GROK_BOT_DEFAULT_TOOL_IDS,
+            &GROK_BOT_TOOL_IDS[..GROK_BOT_DEFAULT_TOOL_IDS.len()],
+            "new ids go after the default set"
+        );
+    }
+
+    #[test]
+    fn search_agents_is_a_default_tool() {
+        assert!(is_grok_bot_default_tool("bot_search_agents"));
+        assert!(!is_grok_bot_default_tool("bot_future_tool"));
+    }
+
+    /// Agent hosts advertise this schema from the shared table before the
+    /// hub bind resolves, so its shape is pinned here rather than only by a
+    /// hub's schema goldens.
+    #[test]
+    fn search_agents_schema_shape() {
+        let schema = grok_bot_tool_arguments_schema("bot_search_agents").unwrap();
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(schema["required"], serde_json::json!(["query"]));
+        let props = schema["properties"].as_object().unwrap();
+        let mut names: Vec<&str> = props.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["limit", "query", "status"]);
+        assert_eq!(props["query"]["type"], "string");
+        assert_eq!(props["status"]["type"], "string");
+        assert_eq!(
+            props["status"]["enum"],
+            serde_json::json!(["running", "idle"])
+        );
+        assert_eq!(props["limit"]["type"], "integer");
+        for key in ["minimum", "maximum", "format"] {
+            assert!(
+                props["limit"].get(key).is_none(),
+                "limit must not carry {key}"
+            );
+        }
+    }
+
+    /// Model-facing bytes of one tool as advertised to the model.
+    fn surface_bytes(id: &str) -> usize {
+        serde_json::json!({
+            "name": id,
+            "description": grok_bot_tool_description(id),
+            "parameters": grok_bot_tool_arguments_schema(id),
+        })
+        .to_string()
+        .len()
+    }
+
+    /// Every byte of the default set is prompt context on every turn of an
+    /// opted-in toolbox with an empty allowlist, so it keeps its own cap; an
+    /// opt-in tool is paid for only by the toolboxes that list it and must
+    /// not squeeze the default descriptions to fit.
+    #[test]
+    fn surface_fits_budget() {
+        const DEFAULT_SET_BUDGET: usize = 6_000;
+        const OPT_IN_TOOL_BUDGET: usize = 700;
+        let default_total: usize = GROK_BOT_DEFAULT_TOOL_IDS
+            .iter()
+            .map(|id| surface_bytes(id))
+            .sum();
+        assert!(
+            default_total <= DEFAULT_SET_BUDGET,
+            "default bot tool surface is {default_total} bytes (budget {DEFAULT_SET_BUDGET}); trim before raising the budget"
+        );
+        for id in &GROK_BOT_TOOL_IDS[GROK_BOT_DEFAULT_TOOL_IDS.len()..] {
+            let bytes = surface_bytes(id);
+            assert!(
+                bytes <= OPT_IN_TOOL_BUDGET,
+                "opt-in tool {id} is {bytes} bytes (budget {OPT_IN_TOOL_BUDGET}); trim before raising the per-tool budget"
+            );
+        }
     }
 }

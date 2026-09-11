@@ -16,7 +16,9 @@ pub mod app_view;
 pub mod bundle;
 pub(crate) mod cancel_latency;
 pub mod cli;
+pub(crate) mod command_catalog;
 pub mod consent;
+pub(crate) mod deferred_subagent_finishes;
 pub use crate::link_opener;
 use xai_grok_telemetry::region;
 use xai_grok_telemetry::region::Parent;
@@ -24,15 +26,12 @@ use xai_grok_telemetry::region::Parent;
 pub mod edit_highlight_worker;
 /// Off-thread Mermaid diagram render worker (out of process) + per-session cache.
 pub mod mermaid_worker;
+pub(crate) mod prompt_ack;
 pub use xai_prompt_queue as prompt_queue;
 mod acp_handler;
 mod connect_timeout;
 mod csi_filter;
 mod dispatch;
-/// Display-refresh probe + motion cadence + terminal telemetry at startup.
-mod display_refresh_startup;
-mod effects;
-pub(crate) mod error_display;
 pub mod roster;
 pub mod session_startup;
 pub(crate) mod session_title_resolve;
@@ -41,8 +40,14 @@ pub(crate) mod status_line;
 mod status_line_policy;
 pub mod subagent;
 pub mod subscription;
+pub(crate) mod worktree_session;
+pub(crate) use dispatch::dashboard_stop_readiness;
+/// Display-refresh probe + motion cadence + terminal telemetry at startup.
+mod display_refresh_startup;
+mod effects;
+pub(crate) mod error_display;
 mod x10_filter;
-pub(crate) use effects::sanitize_user_error;
+pub(crate) use effects::{cancel_notification_meta, sanitize_user_error};
 mod event_loop;
 mod event_loop_stall;
 mod exit_timeout;
@@ -60,9 +65,14 @@ mod session_load_barrier;
 pub mod signal_handler;
 mod startup_failure;
 mod turn_completion;
+pub(crate) mod workspace_layout;
+pub(crate) mod workspace_membership;
 pub(crate) mod workspace_sync;
+#[cfg(test)]
+pub(crate) mod workspace_test_fixtures;
 mod xt_filter;
 pub(crate) use crate::terminal::{kitty_flags_pushed, kitty_releases_reported};
+use anyhow::Context as _;
 pub use cli::{
     AgentArgs, AgentCmd, Command, HeadlessArgs, LeaderArgs, LeaderMgmtArgs, LeaderMgmtCommand,
     LeaderTargetArgs, OutputFormat, PagerArgs, ServeArgs, WrapArgs,
@@ -92,20 +102,24 @@ static GBOOM_KEYBOARD_PUSHED: AtomicBool = AtomicBool::new(false);
 /// While the `/gboom` game owns input, additionally request `REPORT_ALL_KEYS_AS_ESCAPE_CODES` so plain letter keys (WASD) emit release events.
 /// Tracking several keys held at once needs those release events.
 /// Does nothing unless the Kitty keyboard protocol is active.
-/// [`pop_gboom_keyboard_flags`] pops the layer again (so does `restore_terminal` on teardown).
-pub(crate) fn push_gboom_keyboard_flags() {
+pub(crate) fn push_gboom_keyboard_flags(writer: &EscapeWriter) {
     if !kitty_flags_pushed() || GBOOM_KEYBOARD_PUSHED.swap(true, Ordering::AcqRel) {
         return;
     }
     let flags = event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
         | event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES
         | event::KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES;
-    xai_grok_shell::util::with_locked_stderr(|stderr| {
-        let _ = execute!(stderr, event::PushKeyboardEnhancementFlags(flags));
-    });
+    writer.emit_command(event::PushKeyboardEnhancementFlags(flags));
 }
-/// Pop the extra keyboard layer pushed by [`push_gboom_keyboard_flags`].
-pub(crate) fn pop_gboom_keyboard_flags() {
+/// Pop the extra keyboard layer pushed by [`push_gboom_keyboard_flags`], via the writer queue.
+pub(crate) fn pop_gboom_keyboard_flags(writer: &EscapeWriter) {
+    if GBOOM_KEYBOARD_PUSHED.swap(false, Ordering::AcqRel) {
+        writer.emit_command(event::PopKeyboardEnhancementFlags);
+    }
+}
+/// Teardown/panic variant of [`pop_gboom_keyboard_flags`]: writes inline because the writer thread is already drained (or being abandoned) on those paths.
+/// writer thread is already drained (or being abandoned) on those paths.
+fn pop_gboom_keyboard_flags_inline() {
     if GBOOM_KEYBOARD_PUSHED.swap(false, Ordering::AcqRel) {
         xai_grok_shell::util::with_locked_stderr(|stderr| {
             let _ = execute!(stderr, event::PopKeyboardEnhancementFlags);
@@ -145,9 +159,6 @@ pub(crate) fn set_current_screen_mode(mode: ScreenMode) {
 pub(crate) fn current_screen_mode() -> ScreenMode {
     ScreenMode::from_u8(CURRENT_SCREEN_MODE.load(Ordering::Acquire))
 }
-/// Whether this process runs the minimal (scrollback-native) screen mode.
-/// Set once by [`apply_screen_mode_globals`] from the *effective* mode.
-///
 /// Exists for code like `AgentView::handle_input` that needs minimal-mode behavior but sits below `AppView` and cannot see `AppView::screen_mode`.
 /// Do NOT gate behavior off the styling globals (`modal_window::embedded()`, `scrollbar hidden`, …): those are mode-agnostic render toggles.
 /// A future embedded host flipping them must not inherit minimal's key remaps or scrollback writes.
@@ -162,14 +173,6 @@ pub(crate) fn minimal_mode_active() -> bool {
 #[cfg(test)]
 pub(crate) fn set_minimal_mode_active_for_test(on: bool) {
     MINIMAL_MODE_ACTIVE.store(on, Ordering::Release);
-}
-/// Whether a bare Esc cancels a running turn: minimal mode and non-vim fullscreen get the single-Esc cancel.
-/// Fullscreen vim mode keeps the mid-turn swallow (Ctrl+C stays the cancel gesture there).
-///
-/// Production callers pass `AgentView::is_minimal_mode` (seeded by `apply_app_scoped_gates`), never the [`minimal_mode_active`] process global.
-/// `vim_mode` is the scrollback-nav setting (`[ui].vim_mode` / `/vim-mode`), not the prompt `simple_mode`.
-pub(crate) fn esc_cancels_turn(is_minimal: bool, vim_mode: bool) -> bool {
-    is_minimal || !vim_mode
 }
 /// Whether the opt-in mouse-reporting toggle feature is enabled (`[ui] mouse_reporting_toggle` / `GROK_MOUSE_REPORTING_TOGGLE`).
 /// Seeded once at startup; gates both the `Ctrl+R` shortcut registration and the `/toggle-mouse-reporting` slash command's visibility/execution.
@@ -207,6 +210,29 @@ pub(crate) fn resolve_dock_enabled(remote: Option<bool>) -> bool {
     sources.config = dock_config_value();
     sources.remote = remote;
     Feature::Dock.resolve(sources).value
+}
+fn terminal_theme_flag_in(layer: &toml::Value) -> Option<bool> {
+    layer
+        .get("features")?
+        .get(xai_grok_shell::agent::config::Feature::TerminalTheme.key())?
+        .as_bool()
+}
+/// `[features] terminal_theme` from merged `requirements.toml`.
+fn terminal_theme_requirement_pin() -> Option<bool> {
+    terminal_theme_flag_in(&xai_grok_config::load_merged_requirements()?)
+}
+/// `[features] terminal_theme` from effective config (user + managed).
+fn terminal_theme_config_value() -> Option<bool> {
+    terminal_theme_flag_in(&xai_grok_shell::config::load_effective_config().ok()?)
+}
+/// Registry precedence: pin, `GROK_TERMINAL_THEME`, config, remote `terminal_theme_enabled`, default off.
+pub(crate) fn resolve_terminal_theme_enabled(remote: Option<bool>) -> bool {
+    use xai_grok_shell::agent::config::{Feature, FeatureSources};
+    let mut sources = FeatureSources::from_process_env(Feature::TerminalTheme);
+    sources.pin = terminal_theme_requirement_pin();
+    sources.config = terminal_theme_config_value();
+    sources.remote = remote;
+    Feature::TerminalTheme.resolve(sources).value
 }
 pub(crate) fn voice_mode_enabled() -> bool {
     VOICE_MODE_ENABLED.load(Ordering::Acquire)
@@ -304,22 +330,17 @@ pub(crate) const MOUSE_OFF_HINT_PROMPT: &str =
 /// Uses [`xai_ratatui_inline::Terminal`] instead of stock `ratatui::Terminal`: our `flush()` returns a `bool` saying whether any cells changed.
 /// This lets [`crate::render::draw::draw_frame`] skip cursor escape sequences on frames with empty diffs (e.g., off-screen animation ticks).
 /// Skipping them preserves the cursor blink timer; see [`crate::render::draw`] for details.
-///
-/// The backend writes to a [`TermWriter`](crate::render::draw::TermWriter), which buffers frame data in memory and channels it to a writer thread.
-/// The writer thread performs the actual blocking `write()` to stderr / the pty fd.
-/// That keeps the tokio event loop free of pty back-pressure (e.g. when Ghostty is busy with another pane).
 pub use crate::render::draw::PagerTerminal;
+use crate::render::draw::{
+    EscapeWriter, TermWriter, WriterJoin, WriterSender, WriterSync, WriterThread,
+};
 /// Whether the pager uses the alternate screen (fullscreen) or stays inline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScreenMode {
     Fullscreen,
     Inline,
     /// Scrollback-native (experimental, `--minimal`): finalized blocks are printed into the terminal's native scrollback via `insert_before`.
-    /// A small pinned live region holds the prompt, status, and running turn.
-    ///
-    /// All minimal-mode rendering lives in the sibling `xai-grok-pager-minimal` crate.
     /// This crate keeps only three hooks for it: `crate::minimal_hook`, `crate::minimal_api`, and `AppView::minimal_state`.
-    /// `crate::minimal_hook` dispatches into minimal's `draw`/transcript; `crate::minimal_api` is what minimal reads.
     /// If you don't work on minimal, treat this variant as opaque; the fullscreen/inline paths are unaffected.
     Minimal,
 }
@@ -357,9 +378,6 @@ impl ScreenMode {
         }
     }
 }
-/// Install the process-wide render globals that depend on the screen mode.
-///
-/// Consolidates every "minimal behaves differently here" toggle into one place.
 /// The rest of startup (and any future contributor) then never has to sprinkle `is_minimal()` checks through `run`.
 /// All of these globals do nothing outside minimal (they default to the full-TUI behavior).
 /// Calling this for every mode is therefore safe and keeps a single source of truth for the effective mode.
@@ -415,14 +433,21 @@ pub(crate) struct ExitSummary {
     /// `None` when the newest prompt is still unanswered.
     pub last_response: Option<String>,
 }
+/// Seed this process's UI caches from remote settings. `None` restores defaults.
+fn seed_remote_ui_caches(remote_settings: Option<&xai_grok_shell::util::config::RemoteSettings>) {
+    xai_grok_shell::util::config::cache_remote_auto_mode(
+        remote_settings.and_then(|s| s.auto_mode.clone()),
+    );
+    xai_grok_shell::util::config::cache_remote_prompt_suggestions(
+        remote_settings.and_then(|s| s.prompt_suggestions.clone()),
+    );
+    xai_grok_shell::util::config::set_remote_campaigns_from_settings(remote_settings);
+}
 /// Resolve leader mode, reporting both why it is off and what turned it off.
 ///
 /// Precedence, highest first: `--no-leader`, `--leader`, eligibility, local config `use_leader`, remote `leader_mode` (release-dist), default off.
 /// `requested_confinement` then vetoes leader use when `Some` (in-process tools stay under the OS sandbox) without reclaiming a shared leader.
-///
 /// `policy_disable_reason` is `Some("config"|"remote")` only when leader mode is *definitively* off by policy.
-/// Policy here means local `use_leader = false`, or remote `leader_mode` fetched as `false`.
-/// Unknown remote state (`None` / prefetch timeout), the default, `--no-leader`, and ineligibility are `None`.
 /// Never reclaim a leader on an unknown signal.
 pub fn resolve_leader_mode<'p>(
     leader_flag: bool,
@@ -498,10 +523,8 @@ pub fn resolve_use_leader(
 /// Paid only when the note was printed and the screen is about to hide it.
 const SANDBOX_NOTICE_LINGER: std::time::Duration = std::time::Duration::from_millis(1_200);
 /// Tell the user at startup that the sandbox turned leader mode off.
-///
 /// Writes to the dup'd terminal stderr, which survives the TUI's fd-2 redirect (`redirect_native_stderr`).
 /// A fullscreen TUI still paints over it, leaving the line to be read on exit.
-/// `leader_disabled_by_sandbox` on the leader-mode decision log is the durable record.
 pub fn warn_leader_disabled_by_sandbox(profile: &str) {
     xai_grok_shell::util::with_locked_stderr(|stderr| {
         print_leader_disabled_by_sandbox(profile, stderr)
@@ -509,7 +532,6 @@ pub fn warn_leader_disabled_by_sandbox(profile: &str) {
 }
 /// Says only that the profile was *requested*.
 /// Enforcement can still fail (`apply_sandbox` warns and continues) while the leader is refused either way.
-///
 /// Write errors are dropped; `eprintln!` would panic on a closed stderr.
 fn print_leader_disabled_by_sandbox(profile: &str, w: &mut impl Write) {
     let _ = writeln!(
@@ -604,10 +626,14 @@ struct ConnectFailure {
     timeout_secs: Option<u64>,
     longest_step: Option<crate::acp::StartupPhase>,
 }
+/// Slice the connect wait so a launch-profile escalation can extend the budget
+/// without parking on the original timeout.
+const CONNECT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 /// Bound connect so a hung leader/spawn cannot blank-screen forever.
 async fn bounded_connect(
     cancel: &CancellationToken,
     timeout: std::time::Duration,
+    connect_ui_timeout_env: Option<&str>,
     target: crate::acp::AgentKind,
     attempt: startup_failure::ConnectAttempt,
     timer: &crate::acp::StartupTimer,
@@ -623,52 +649,74 @@ async fn bounded_connect(
         ),
         log_path: xai_grok_telemetry::unified_log::path(),
     };
-    tokio::select! {
-        biased;
-        () = cancel.cancelled() => Err(ConnectFailure {
-            outcome: StartupOutcome::Cancelled,
-            error: anyhow::Error::new(startup_failure::StartupFailure::cancelled(context())),
-            timeout_secs: None,
-            longest_step: None,
-        }),
-        connected = connect => connected.map_err(|error| ConnectFailure {
-            outcome: StartupOutcome::Error,
-            error,
-            timeout_secs: None,
-            longest_step: None,
-        }),
-        () = tokio::time::sleep(timeout) => {
-            let timings = timer.phase_snapshot();
-            let longest_step = timings.longest_step();
-            // `connect_target`: tracing reserves bare `target=`.
-            tracing::error!(
-                connect_target = target.label(),
-                stuck_in = timings.stuck_in(),
-                phases = %timings.summary(),
-                timeout_secs = timeout.as_secs(),
-                "connect timed out"
-            );
-            Err(ConnectFailure {
-                outcome: StartupOutcome::Timeout,
-                error: anyhow::Error::new(startup_failure::StartupFailure::timed_out(
-                    context(),
-                    // Measured, not the budget: a synchronous step can overrun it.
-                    timer.elapsed(),
-                    timings,
-                )),
-                timeout_secs: Some(timeout.as_secs()),
-                longest_step,
-            })
+    let started = std::time::Instant::now();
+    let mut deadline = started + timeout;
+    let mut connect = std::pin::pin!(connect);
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let slice = remaining.min(CONNECT_POLL_INTERVAL);
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(ConnectFailure {
+                outcome: StartupOutcome::Cancelled,
+                error: anyhow::Error::new(startup_failure::StartupFailure::cancelled(context())),
+                timeout_secs: None,
+                longest_step: None,
+            }),
+            connected = connect.as_mut() => {
+                return connected.map_err(|error| ConnectFailure {
+                    outcome: StartupOutcome::Error,
+                    error,
+                    timeout_secs: None,
+                    longest_step: None,
+                });
+            }
+            () = tokio::time::sleep(slice) => {
+                let profile = xai_grok_shell::managed_config::startup_profile();
+                let floor = connect_timeout::resolve(connect_ui_timeout_env, profile);
+                let escalated = started + floor;
+                if escalated > deadline {
+                    tracing::info!(
+                        timeout_secs = floor.as_secs(),
+                        "connect budget extended after launch profile escalated to managed"
+                    );
+                    deadline = escalated;
+                }
+            }
         }
     }
+    let timings = timer.phase_snapshot();
+    let longest_step = timings.longest_step();
+    let timeout_secs = timeout.as_secs();
+    tracing::error!(
+        connect_target = target.label(),
+        stuck_in = timings.stuck_in(),
+        phases = %timings.summary(),
+        timeout_secs,
+        "connect timed out"
+    );
+    Err(ConnectFailure {
+        outcome: StartupOutcome::Timeout,
+        error: anyhow::Error::new(startup_failure::StartupFailure::timed_out(
+            context(),
+            timer.elapsed(),
+            timings,
+        )),
+        timeout_secs: Some(
+            deadline
+                .saturating_duration_since(started)
+                .as_secs()
+                .max(timeout_secs),
+        ),
+        longest_step,
+    })
 }
 /// Main entry point: connect to agent, init terminal, run event loop, restore.
-///
 /// If a session ID is provided via `--resume` / `--load` / `--continue`, the pager skips the welcome screen and immediately loads that session.
 /// The load replays the session's history; sessions not found locally are restored from remote storage.
-///
-/// Returns `Ok(true)` when the user accepted a pending update.
-/// The caller should print a message telling the user to relaunch `grok`.
 pub async fn run(
     mut args: PagerArgs,
     bg_update_rx: Option<
@@ -682,31 +730,35 @@ pub async fn run(
     let startup_start = std::time::Instant::now();
     let raw_config = xai_grok_shell::config::load_effective_config()
         .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-    let grok_com_config = match xai_grok_shell::agent::config::Config::new_from_toml_cfg(
-        &raw_config,
-    ) {
-        Ok(c) => c.grok_com_config,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to parse config for auth refresh, using defaults");
-            xai_grok_shell::auth::GrokComConfig::default()
-        }
-    };
-    if matches!(
-        xai_grok_shell::auth::maybe_run_pre_tui_external_login_with_locale(
+    let (grok_com_config, proxy_base_url) =
+        match xai_grok_shell::agent::config::Config::new_from_toml_cfg(&raw_config) {
+            Ok(c) => (c.grok_com_config, c.endpoints.proxy_url()),
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to parse config for auth refresh, using defaults");
+                (
+                    xai_grok_login::GrokComConfig::default(),
+                    xai_grok_shell::agent::config::EndpointsConfig::default().proxy_url(),
+                )
+            }
+        };
+    if let xai_grok_login::PreTuiLoginOutcome::SignedIn(auth) =
+        xai_grok_login::maybe_run_pre_tui_external_login_with_locale(
             &grok_com_config,
+            proxy_base_url.clone(),
             args.force_login,
             io::stdin().is_terminal(),
             locale.as_ref(),
         )
-        .await?,
-        xai_grok_shell::auth::PreTuiLoginOutcome::SignedIn(_)
-    ) {
+        .await?
+    {
+        xai_grok_shell::agent::init::apply_post_login_config_with_locale(*auth, locale.as_ref())
+            .await?;
         args.force_login = false;
     }
     xai_tty_utils::redirect_native_stderr();
     let refreshed_auth = tokio::time::timeout(
         xai_grok_shell::http::STARTUP_AUTH_REFRESH_TIMEOUT,
-        xai_grok_shell::auth::try_ensure_fresh_auth(&grok_com_config),
+        xai_grok_login::try_ensure_fresh_auth(&grok_com_config, proxy_base_url),
     )
     .await
     .unwrap_or(None);
@@ -724,12 +776,17 @@ pub async fn run(
                 xai_grok_announcements::load_events::subscribe(),
             )
         });
-    let had_prefetch = match refreshed_auth {
-        Some(auth) => xai_grok_shell::agent::models::startup_prefetch::begin_with_auth(Some(auth)),
-        None => {
-            xai_grok_shell::agent::models::startup_prefetch::begin(Some(grok_com_config.clone()))
-        }
-    };
+    let settings_query = xai_grok_shell::agent::remote_config::settings_get::SettingsQuery::resolve(
+        refreshed_auth,
+        Some(grok_com_config.clone()),
+    );
+    let had_prefetch =
+        xai_grok_shell::agent::remote_config::settings_get::is_eligible(&settings_query);
+    if had_prefetch {
+        xai_grok_shell::agent::remote_config::settings_get::warm_startup_settings(
+            settings_query.clone(),
+        );
+    }
     xai_grok_shell::agent::mvp_agent::warm_async_http_client();
     tokio::task::spawn_blocking(|| {});
     if let Ok(cwd) = std::env::current_dir() {
@@ -738,22 +795,30 @@ pub async fn run(
     let prefetch_wait_started = std::time::Instant::now();
     let remote_settings = if had_prefetch {
         let _wait_span = region!("startup.prefetch_join_wait", Parent::Inherit);
-        let settings =
-            xai_grok_shell::agent::models::startup_prefetch::wait_settings(EARLY_PREFETCH_WAIT);
+        let warmed_auth = settings_query.auth().cloned();
+        let wait = {
+            let _settings = region!(
+                "startup.prefetch_join_wait.settings",
+                Parent::Explicit(_wait_span.span())
+            );
+            xai_grok_shell::agent::remote_config::settings_get::await_startup_settings(
+                settings_query,
+                EARLY_PREFETCH_WAIT,
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+        };
+        let settings = xai_grok_shell::agent::remote_config::settings_get::consume_wait(
+            wait,
+            warmed_auth.as_ref(),
+            &grok_com_config,
+        );
         xai_grok_telemetry::startup::record_prefetch_wait(prefetch_wait_started.elapsed());
         settings
     } else {
         None
     };
-    xai_grok_shell::util::config::cache_remote_auto_mode(
-        remote_settings.as_ref().and_then(|s| s.auto_mode.clone()),
-    );
-    xai_grok_shell::util::config::cache_remote_prompt_suggestions(
-        remote_settings
-            .as_ref()
-            .and_then(|s| s.prompt_suggestions.clone()),
-    );
-    xai_grok_shell::util::config::set_remote_campaigns_from_settings(remote_settings.as_ref());
+    seed_remote_ui_caches(remote_settings.as_ref());
     let raw_config = xai_grok_shell::config::load_effective_config()
         .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
     let prefetch_elapsed = startup_start.elapsed();
@@ -786,10 +851,12 @@ pub async fn run(
         anyhow::bail!("{}", session_startup::CHAT_MODE_LEADER_CONFLICT);
     }
     if args.trust {
+        use xai_grok_workspace::folder_trust::{grant_folder_trust, report_cli_trust_grant};
         match std::env::current_dir() {
-            Ok(cwd) => xai_grok_workspace::folder_trust::grant_folder_trust(&cwd),
+            Ok(cwd) => report_cli_trust_grant(&grant_folder_trust(&cwd)),
             Err(e) => {
-                tracing::warn!(error = %e, "--trust: failed to resolve cwd; folder not trusted")
+                tracing::warn!(error = %e, "--trust: failed to resolve cwd; folder not trusted");
+                eprintln!("error: --trust: failed to resolve cwd; folder not trusted: {e}");
             }
         }
     }
@@ -982,10 +1049,16 @@ pub async fn run(
     if disabled_by_confinement.is_some() && screen_mode.is_fullscreen() {
         tokio::time::sleep(SANDBOX_NOTICE_LINGER).await;
     }
+    crate::theme::cache::set_terminal_theme_enabled(resolve_terminal_theme_enabled(
+        remote_settings
+            .as_ref()
+            .and_then(|s| s.terminal_theme_enabled),
+    ));
     engage_startup_theme(screen_mode);
     let minimal_live_rows = config_watcher.current().minimal_live_rows;
     let (frame_tx, writer_sync, writer_event_rx, writer_thread) =
-        crate::render::draw::spawn_writer_thread();
+        crate::render::draw::spawn_writer_thread()
+            .context("failed to spawn the term-writer thread")?;
     let cursor_blink = event_loop::load_initial_ui_config().cursor_blink;
     let TerminalInit {
         mut terminal,
@@ -1009,8 +1082,11 @@ pub async fn run(
         set_terminal_title(t);
     }
     let connect_ui_timeout_env = std::env::var(connect_timeout::CONNECT_UI_TIMEOUT_ENV).ok();
-    let connect_ui_timeout = connect_timeout::resolve(connect_ui_timeout_env.as_deref());
-    if let Some(raw) = connect_ui_timeout_env {
+    let connect_ui_timeout = connect_timeout::resolve(
+        connect_ui_timeout_env.as_deref(),
+        xai_grok_shell::managed_config::startup_profile(),
+    );
+    if let Some(ref raw) = connect_ui_timeout_env {
         crate::unified_log::write_direct_info(
             "startup connect budget from env",
             Some(serde_json::json!({
@@ -1034,9 +1110,6 @@ pub async fn run(
             },
         ),
     );
-    if args.log_sampling {
-        unsafe { std::env::set_var("GROK_LOG_SAMPLING", "1") };
-    }
     let tracing_handle = crate::tracing::init_tracing();
     let pending_startup = xai_grok_telemetry::startup::PendingStartup::new();
     let timer = xai_grok_telemetry::startup::begin(crate::acp::Owner::Client);
@@ -1044,20 +1117,24 @@ pub async fn run(
     let connect_result = bounded_connect(
         &cancel,
         connect_ui_timeout,
+        connect_ui_timeout_env.as_deref(),
         primary_target,
         startup_failure::ConnectAttempt::First,
         &timer,
         async {
-            if use_leader {
-                crate::acp::connect_via_leader(&cancel, connect_flags, &raw_config).await
-            } else {
-                crate::acp::connect(&cancel, connect_flags).await
+            match primary_target {
+                crate::acp::AgentKind::Leader => {
+                    crate::acp::connect_via_leader(&cancel, connect_flags, &raw_config).await
+                }
+                crate::acp::AgentKind::Embedded => {
+                    crate::acp::connect(&cancel, connect_flags).await
+                }
             }
         },
     )
     .await;
     let (connect_result, embedded_fallback, timer, connect_target) = match connect_result {
-        Err(f) if use_leader && !cancel.is_cancelled() => {
+        Err(f) if primary_target == crate::acp::AgentKind::Leader && !cancel.is_cancelled() => {
             tracing::warn!(error = %f.error, "leader connect failed; falling back to embedded agent");
             timer.emit_telemetry(primary_target, f.outcome, f.timeout_secs, false);
             let flags = fallback_flags.expect("set on the use_leader path");
@@ -1066,6 +1143,7 @@ pub async fn run(
             let fallback = bounded_connect(
                 &cancel,
                 connect_ui_timeout,
+                connect_ui_timeout_env.as_deref(),
                 target,
                 startup_failure::ConnectAttempt::AfterFallback(startup_failure::EarlierAttempt {
                     target: primary_target,
@@ -1165,7 +1243,8 @@ pub async fn run(
     xai_grok_telemetry::session_ctx::drain_at_process_exit().await;
     xai_tty_utils::global_process_scope().kill_all();
     crate::app::status_line::metrics::global().report_health();
-    if let Err(cleanup_error) = restore_result {
+    let terminal_reading = !matches!(restore_result, Ok(WriterJoin::TimedOut));
+    if let Err(cleanup_error) = &restore_result {
         match &result {
             Ok(_) => {
                 tracing::warn!(
@@ -1184,6 +1263,11 @@ pub async fn run(
     }
     match result {
         Ok(run_result) => {
+            if let Some(msg) = run_result.trust_quit_error.as_deref()
+                && terminal_reading
+            {
+                let _ = writeln!(io::stderr(), "{msg}");
+            }
             if run_result.quit_for_update {
                 return Ok(true);
             }
@@ -1193,16 +1277,20 @@ pub async fn run(
                     relaunch.minimal,
                 ) {
                     tracing::error!(error = %e, "screen-mode relaunch failed");
-                    print_relaunch_failure_hint(
-                        &e,
-                        &relaunch.session_id,
-                        relaunch.minimal,
-                        &mut io::stderr(),
-                    );
+                    if terminal_reading {
+                        print_relaunch_failure_hint(
+                            &e,
+                            &relaunch.session_id,
+                            relaunch.minimal,
+                            &mut io::stderr(),
+                        );
+                    }
                 }
                 return Ok(false);
             }
-            if let Some(info) = run_result.exit_info {
+            if let Some(info) = run_result.exit_info
+                && terminal_reading
+            {
                 let width = crossterm::terminal::size().map_or(80, |(cols, _)| cols as usize);
                 print_exit_resume_hint(&info, width, &mut io::stderr());
             }
@@ -1212,10 +1300,8 @@ pub async fn run(
     }
 }
 /// Plain-quit "Resume this session with…" lines (after terminal restore).
-///
-/// A summary, when present (title, last prompt, last response, one line each, width-truncated), precedes the command.
-/// That way a glance at the pane shows which session lives there and where it left off.
 /// Best-effort: closed-pane EIO/BrokenPipe must not panic (`panic = "abort"`).
+/// TODO: extend beyond --minimal by rebuilding resume argv from launch flags (see screen_mode_relaunch)
 fn print_exit_resume_hint(info: &ExitInfo, max_width: usize, w: &mut impl Write) {
     use crate::render::line_utils::truncate_str;
     let _ = writeln!(w);
@@ -1274,22 +1360,9 @@ fn disable_mouse_paste_raw() {
         let _ = stderr.flush();
     });
 }
-/// Set the console output code page to UTF-8 and enable `ENABLE_VIRTUAL_TERMINAL_PROCESSING` on the stderr console handle.
-///
-/// **Code page**: the pager outputs UTF-8 (Braille art in the logo, Powerline icons, box-drawing characters).
-/// On Windows the default console code page is a legacy OEM page (e.g. CP437).
-/// That misreads multi-byte UTF-8 sequences as individual single-byte characters, garbling the output.
-/// Setting the output code page to 65001 (UTF-8) fixes this.
-///
-/// **VTP on stderr**: each console handle (stdin, stdout, stderr) has independent mode flags.
 /// `crossterm::enable_raw_mode()` sets flags on stdin only.
 /// The pager renders to stderr (via `TermWriter`), so the stderr handle must process its ANSI sequences.
-/// Those cover background colors (SGR 48;2;R;G;B), the alternate screen, and cursor control.
 /// Without the VTP flag the console silently drops background-color sequences while foreground colors work.
-/// That is the "text renders but backgrounds are missing" symptom.
-///
-/// Best-effort: if any call fails (e.g. stderr is redirected to a file), the pager continues.
-/// Rendering may be degraded but the TUI is still usable.
 #[cfg(windows)]
 fn configure_windows_console() {
     const STD_ERROR_HANDLE: u32 = 0xFFFF_FFF4u32;
@@ -1318,23 +1391,9 @@ fn configure_windows_console() {
         );
     }
 }
-/// On legacy conhost windows (classic `powershell.exe` / `cmd.exe`), native drag-to-select is conhost's **QuickEdit** mode.
-/// QuickEdit is controlled by console-input mode flags on the *stdin* handle, not by DEC private-mode escapes.
-///
-/// Minimal mode's contract is "the terminal owns the mouse", and on conhost merely *skipping* `EnableMouseCapture` is not enough:
-///
-/// - crossterm's `EnableMouseCapture` is winapi-only on Windows (`is_ansi_code_supported() == false`).
-///   It **replaces** the stdin mode with `ENABLE_MOUSE_INPUT | ENABLE_EXTENDED_FLAGS | ENABLE_WINDOW_INPUT`.
-///   `ENABLE_EXTENDED_FLAGS` without `ENABLE_QUICK_EDIT_MODE` turns QuickEdit *off*.
-/// - `SetConsoleMode` state **outlives the process** for the console window, and teardown historically reset mouse state with ANSI only.
-///   One fullscreen/inline run therefore left the window with QuickEdit off and `ENABLE_MOUSE_INPUT` on.
-///   That broke native drag-select for every later `--minimal` run in that same window.
-///   The report: "works in a fresh cmd window but not in my PowerShell window".
-/// - Some PowerShell shortcuts ship QuickEdit disabled per window title (`HKCU\Console\<title>`), so even a pristine window may need it asserted.
-///
-/// Modern terminals (Windows Terminal, Warp) select host-side and decide "app owns the mouse" from the DEC `?100x` escapes.
+/// crossterm's `EnableMouseCapture` is winapi-only on Windows (`is_ansi_code_supported() == false`).
+/// `SetConsoleMode` state **outlives the process** for the console window, and teardown historically reset mouse state with ANSI only.
 /// Minimal never emits those escapes, so these conhost flags are inert there and asserting them is harmless.
-/// Everything is best-effort: if stdin is not a console, calls are no-ops.
 #[cfg(any(windows, test))]
 pub(crate) mod win_native_selection {
     const ENABLE_WINDOW_INPUT: u32 = 0x0008;
@@ -1481,15 +1540,13 @@ pub(crate) struct TerminalInit {
 }
 /// Initialize the terminal for `mode`.
 /// Returns the live terminal handle and the *effective* screen mode, which may differ from the requested one.
-/// A `Minimal` request downgrades to `Inline` if the inline-viewport probe fails.
 /// Minimal's `insert_before` / `set_viewport_height` commit pipeline is a no-op on the `Viewport::Fixed` fallback, so it cannot function there.
-/// Also returns any startup type-ahead captured by the post-raw-mode drains.
 fn init_terminal(
     mode: ScreenMode,
     minimal_live_rows: u16,
     clear_main_screen: bool,
-    frame_tx: crate::render::draw::WriterSender,
-    writer_sync: crate::render::draw::WriterSync,
+    frame_tx: WriterSender,
+    writer_sync: WriterSync,
     cursor_blink: Option<bool>,
 ) -> io::Result<TerminalInit> {
     xai_crash_handler::enable_terminal_escape_restore();
@@ -1600,8 +1657,7 @@ fn init_terminal(
         event_loop::normalize_startup_submissions(&mut startup_typeahead);
         if mode.is_fullscreen() {
             let backend = CrosstermBackend::new(
-                crate::render::draw::TermWriter::new(frame_tx, writer_sync)
-                    .map_err(io::Error::other)?,
+                TermWriter::new(frame_tx, writer_sync).map_err(io::Error::other)?,
             );
             Ok((
                 xai_ratatui_inline::Terminal::new(backend)?,
@@ -1615,8 +1671,7 @@ fn init_terminal(
                 rows
             };
             let probe_backend = CrosstermBackend::new(
-                crate::render::draw::TermWriter::new(frame_tx.clone(), writer_sync.clone())
-                    .map_err(io::Error::other)?,
+                TermWriter::new(frame_tx.clone(), writer_sync.clone()).map_err(io::Error::other)?,
             );
             if let Ok(term) = xai_ratatui_inline::Terminal::with_options(
                 probe_backend,
@@ -1642,7 +1697,7 @@ fn init_terminal(
                 })?;
                 MOUSE_CAPTURE_ENABLED.store(true, Ordering::Release);
                 let retry_backend = CrosstermBackend::new(
-                    crate::render::draw::TermWriter::new(frame_tx.clone(), writer_sync.clone())
+                    TermWriter::new(frame_tx.clone(), writer_sync.clone())
                         .map_err(io::Error::other)?,
                 );
                 if let Ok(term) = xai_ratatui_inline::Terminal::with_options(
@@ -1664,8 +1719,7 @@ fn init_terminal(
                 )
             })?;
             let backend = CrosstermBackend::new(
-                crate::render::draw::TermWriter::new(frame_tx, writer_sync)
-                    .map_err(io::Error::other)?,
+                TermWriter::new(frame_tx, writer_sync).map_err(io::Error::other)?,
             );
             let term = xai_ratatui_inline::Terminal::with_options(
                 backend,
@@ -1690,20 +1744,28 @@ fn init_terminal(
         startup_typeahead,
     })
 }
-/// Drop the terminal (closing the writer mpsc channel) and join the writer thread.
-/// After this returns, subsequent direct stderr writes are guaranteed to land strictly after every queued frame.
+/// How long teardown waits for the writer thread to drain before detaching it. Same order as the panic hook's grace: a terminal that stopped reading must not turn `/quit` into a hang.
+/// the panic hook's grace: a terminal that stopped reading must not turn `/quit` into a hang.
+const WRITER_JOIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+/// Drop the terminal (closing the writer mpsc channel) and join the writer thread within
+/// [`WRITER_JOIN_GRACE`]. Every `EscapeWriter` clone is already gone here: they all live in `AppView`, which is local to `event_loop::run` and dropped when it returns.
+/// A `TimedOut` join means the writer thread may still hold the stderr lock inside its tty write, so the caller must not take that lock unbounded.
 fn drain_writer_thread_before_teardown(
     terminal: PagerTerminal,
-    writer_thread: crate::render::draw::WriterThread,
-) -> io::Result<()> {
+    writer_thread: WriterThread,
+) -> io::Result<WriterJoin> {
     drop(terminal);
-    writer_thread.join()
+    let join = writer_thread.join_within(WRITER_JOIN_GRACE)?;
+    if join == WriterJoin::TimedOut {
+        crate::unified_log::warn(
+            "term.writer.join_timeout",
+            None,
+            Some(serde_json::json!({ "grace_ms": WRITER_JOIN_GRACE.as_millis() as u64 })),
+        );
+    }
+    Ok(join)
 }
-/// Inline teardown escape sequences in the canonical order.
 /// Shared by `restore_terminal` and `set_panic_hook` so the on-wire byte order is defined exactly once.
-///
-/// Order: EndSynchronizedUpdate, reset_cursor_color, disable_mouse_paste_raw, DisableFocusChange, kitty pop (if pushed), mode-specific block.
-/// EndSynchronizedUpdate is emitted first so multiplexers (zellij/tmux) stop buffering before the resets arrive.
 /// Does NOT call `disable_raw_mode`.
 /// Callers should drain queued writer-thread frames first when possible; the panic hook can't (it would deadlock).
 fn emit_terminal_teardown_sequences(mode: ScreenMode, inline_cursor_row: Option<u16>) {
@@ -1714,7 +1776,7 @@ fn emit_terminal_teardown_sequences(mode: ScreenMode, inline_cursor_row: Option<
     xai_grok_shell::util::with_locked_stderr(|stderr| {
         let _ = execute!(stderr, crossterm::terminal::EndSynchronizedUpdate);
     });
-    crate::theme::reset_cursor_color();
+    crate::theme::reset_cursor_color_if_applied();
     disable_mouse_paste_raw();
     if MOUSE_CAPTURE_ENABLED.swap(false, Ordering::AcqRel) {
         #[cfg(windows)]
@@ -1725,7 +1787,7 @@ fn emit_terminal_teardown_sequences(mode: ScreenMode, inline_cursor_row: Option<
     xai_grok_shell::util::with_locked_stderr(|stderr| {
         let _ = execute!(stderr, event::DisableFocusChange);
     });
-    pop_gboom_keyboard_flags();
+    pop_gboom_keyboard_flags_inline();
     if crate::terminal::take_kitty_flags_pushed() {
         xai_grok_shell::util::with_locked_stderr(|stderr| {
             let _ = execute!(stderr, event::PopKeyboardEnhancementFlags);
@@ -1755,16 +1817,19 @@ fn emit_terminal_teardown_sequences(mode: ScreenMode, inline_cursor_row: Option<
     #[cfg(windows)]
     win_native_selection::restore_stdin_mode();
 }
+/// Bound on teardown writes when the stderr lock may be wedged: the panic hook, and a restore
+/// whose writer thread is still parked in its tty write after a timed-out join.
+const TEARDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 /// Consumes `terminal` and `writer_thread`: queues a final fullscreen clear, drains every accepted frame, then emits teardown sequences.
 /// Teardown still runs if draining fails, so terminal state is restored before returning that error.
 /// Draining first prevents a late frame after `LeaveAlternateScreen`.
 fn restore_terminal_with(
     mut terminal: PagerTerminal,
-    writer_thread: crate::render::draw::WriterThread,
+    writer_thread: WriterThread,
     mode: ScreenMode,
-    drain: impl FnOnce(PagerTerminal, crate::render::draw::WriterThread) -> io::Result<()>,
-    teardown: impl FnOnce(ScreenMode, Option<u16>),
-) -> io::Result<()> {
+    drain: impl FnOnce(PagerTerminal, WriterThread) -> io::Result<WriterJoin>,
+    teardown: impl FnOnce(ScreenMode, Option<u16>) + Send + 'static,
+) -> io::Result<WriterJoin> {
     if mode.is_fullscreen() && !writer_thread.writer_sync().failed() {
         let _ = terminal.clear();
         {
@@ -1774,7 +1839,11 @@ fn restore_terminal_with(
     }
     let inline_cursor_row = (!mode.is_fullscreen()).then(|| terminal.viewport_area().bottom());
     let drain_result = drain(terminal, writer_thread);
-    teardown(mode, inline_cursor_row);
+    if matches!(drain_result, Ok(WriterJoin::TimedOut)) {
+        run_bounded_teardown(move || teardown(mode, inline_cursor_row), TEARDOWN_GRACE);
+    } else {
+        teardown(mode, inline_cursor_row);
+    }
     let _ = event_loop::drain_pending_events(std::time::Duration::from_millis(10), |_| false);
     let _ = terminal::disable_raw_mode();
     signal_handler::mark_restored();
@@ -1782,11 +1851,13 @@ fn restore_terminal_with(
     xai_tty_utils::restore_native_stderr();
     drain_result
 }
+/// The `WriterJoin` tells the caller whether the terminal is still reading: after a `TimedOut` join every further stderr write blocks until the exit watchdog fires.
+/// `TimedOut` join every further stderr write blocks until the exit watchdog fires.
 fn restore_terminal(
     terminal: PagerTerminal,
-    writer_thread: crate::render::draw::WriterThread,
+    writer_thread: WriterThread,
     mode: ScreenMode,
-) -> io::Result<()> {
+) -> io::Result<WriterJoin> {
     restore_terminal_with(
         terminal,
         writer_thread,
@@ -1804,7 +1875,6 @@ pub(crate) fn set_terminal_title(title: &str) {
 /// Sanitized/truncated window title.
 /// Strips control characters: crossterm's `SetTitle` emits the string raw inside an OSC sequence.
 /// An embedded BEL/ESC would terminate the OSC early and let the remainder inject arbitrary escape sequences into the terminal.
-/// Titles can arrive from grok.com conversation metadata.
 fn terminal_title_string(title: &str) -> String {
     let sanitized: String = title.chars().filter(|c| !c.is_control()).collect();
     if sanitized.is_empty() {
@@ -1818,11 +1888,39 @@ fn terminal_title_string(title: &str) -> String {
         format!("{truncated} - {}", xai_grok_product::CLI_NAME)
     }
 }
+/// Run a best-effort teardown `f` on a helper thread, waiting at most `grace` for it.
+/// For paths where the stderr lock may be wedged (the panic hook; a restore whose writer thread is still parked in its tty write): an unbounded teardown would hang forever, never restoring raw mode. On timeout the helper is detached; the process is exiting anyway. Runs `f` inline if no thread can spawn.
+fn run_bounded_teardown(f: impl FnOnce() + Send + 'static, grace: std::time::Duration) {
+    let slot = std::sync::Arc::new(parking_lot::Mutex::new(Some(f)));
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    let worker_slot = std::sync::Arc::clone(&slot);
+    let spawned = std::thread::Builder::new()
+        .name("bounded-teardown".into())
+        .spawn(move || {
+            if let Some(f) = worker_slot.lock().take() {
+                f();
+            }
+            let _ = done_tx.send(());
+        });
+    match spawned {
+        Ok(_) => {
+            let _ = done_rx.recv_timeout(grace);
+        }
+        Err(_) => {
+            if let Some(f) = slot.lock().take() {
+                f();
+            }
+        }
+    }
+}
 /// Reads [`current_screen_mode`] at panic time; never capture a mode here, or an in-process mode switch tears down the wrong screen.
 fn set_panic_hook() {
     let hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
-        emit_terminal_teardown_sequences(current_screen_mode(), None);
+        run_bounded_teardown(
+            || emit_terminal_teardown_sequences(current_screen_mode(), None),
+            TEARDOWN_GRACE,
+        );
         let _ = terminal::disable_raw_mode();
         signal_handler::mark_restored();
         xai_crash_handler::disable_terminal_escape_restore();
@@ -1835,14 +1933,46 @@ fn set_panic_hook() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The loop-top gboom keyboard-layer sync runs on the event-loop thread: its push/pop escapes must ride the writer queue.
+    /// push/pop escapes must ride the writer queue.
+    #[cfg(not(windows))]
     #[test]
-    fn restore_runs_teardown_even_when_writer_failed() {
+    fn gboom_keyboard_flags_ride_the_writer_queue() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let writer = EscapeWriter::new(tx, WriterSync::new());
+        let prev = crate::terminal::pushed_kitty_flags();
+        crate::terminal::set_pushed_kitty_flags(
+            event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+        );
+        push_gboom_keyboard_flags(&writer);
+        pop_gboom_keyboard_flags(&writer);
+        crate::terminal::set_pushed_kitty_flags(prev);
+        let push = rx.try_recv().expect("push escape queued");
+        let pop = rx.try_recv().expect("pop escape queued");
+        assert!(String::from_utf8_lossy(push.data()).contains("\x1b[>"));
+        assert!(String::from_utf8_lossy(pop.data()).contains("\x1b[<"));
+        assert!(rx.try_recv().is_err());
+    }
+    /// The panic hook's teardown writes stay bounded so a wedged stderr lock cannot
+    /// keep the hook from restoring raw mode and reaching the delegated hook/abort.
+    #[test]
+    fn panic_teardown_is_bounded_when_the_stderr_lock_is_wedged() {
+        fn takes_the_lock() {
+            let _guard = xai_grok_shell::util::stderr_lock();
+        }
+        let _guard = xai_grok_shell::util::stderr_lock();
+        let started = std::time::Instant::now();
+        run_bounded_teardown(takes_the_lock, std::time::Duration::from_millis(100));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "bounded teardown must give up on a wedged stderr lock"
+        );
+    }
+    fn test_terminal_and_writer_thread() -> (PagerTerminal, WriterThread) {
         use ratatui::{TerminalOptions, Viewport};
         let (tx, _rx) = std::sync::mpsc::channel::<crate::render::draw::WriterPayload>();
-        let sync = crate::render::draw::WriterSync::new();
-        let backend = CrosstermBackend::new(
-            crate::render::draw::TermWriter::new(tx, sync).expect("single test writer"),
-        );
+        let sync = WriterSync::new();
+        let backend = CrosstermBackend::new(TermWriter::new(tx, sync).expect("single test writer"));
         let terminal = xai_ratatui_inline::Terminal::with_options(
             backend,
             TerminalOptions {
@@ -1851,9 +1981,15 @@ mod tests {
         )
         .expect("test terminal");
         let (writer_tx, _writer_sync, _events, writer_thread) =
-            crate::render::draw::spawn_writer_thread();
+            crate::render::draw::spawn_writer_thread().expect("spawn test writer thread");
         drop(writer_tx);
-        let teardown_called = std::cell::Cell::new(false);
+        (terminal, writer_thread)
+    }
+    #[test]
+    fn restore_runs_teardown_even_when_writer_failed() {
+        let (terminal, writer_thread) = test_terminal_and_writer_thread();
+        let teardown_called = std::sync::Arc::new(AtomicBool::new(false));
+        let observed = std::sync::Arc::clone(&teardown_called);
         let result = restore_terminal_with(
             terminal,
             writer_thread,
@@ -1863,10 +1999,37 @@ mod tests {
                 drop(writer_thread);
                 Err(io::Error::other("injected drain failure"))
             },
-            |_, _| teardown_called.set(true),
+            move |_, _| observed.store(true, Ordering::Release),
         );
         assert!(result.is_err());
-        assert!(teardown_called.get());
+        assert!(teardown_called.load(Ordering::Acquire));
+    }
+    /// A timed-out writer join leaves the writer thread possibly parked on the stderr lock,
+    /// so the teardown that follows must be bounded: `/quit` returns even if teardown wedges.
+    #[test]
+    fn restore_bounds_teardown_after_a_timed_out_writer_join() {
+        let (terminal, writer_thread) = test_terminal_and_writer_thread();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let started = std::time::Instant::now();
+        let result = restore_terminal_with(
+            terminal,
+            writer_thread,
+            ScreenMode::Inline,
+            |terminal, writer_thread| {
+                drop(terminal);
+                drop(writer_thread);
+                Ok(WriterJoin::TimedOut)
+            },
+            move |_, _| {
+                let _ = release_rx.recv();
+            },
+        );
+        assert!(matches!(result, Ok(WriterJoin::TimedOut)));
+        assert!(
+            started.elapsed() < TEARDOWN_GRACE + std::time::Duration::from_secs(5),
+            "restore must give up on a wedged teardown after TEARDOWN_GRACE"
+        );
+        let _ = release_tx.send(());
     }
     /// `[ui].cursor_blink` tri-state maps to the startup cursor policy; the `None` default must be Inherit (emit nothing).
     #[test]

@@ -469,6 +469,7 @@ fn method_serialises_with_dot_notation_for_dotted_methods() {
         (Method::ToolsSearch, "tools.search"),
         (Method::SessionOpen, "session_open"),
         (Method::SessionClose, "session_close"),
+        (Method::SessionDetach, "session_detach"),
         (Method::SessionBindServer, "session_bind_server"),
         (Method::SessionUnbindServer, "session_unbind_server"),
         (Method::SubscribeNotifications, "subscribe_notifications"),

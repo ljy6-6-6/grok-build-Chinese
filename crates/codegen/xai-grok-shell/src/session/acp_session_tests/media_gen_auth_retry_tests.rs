@@ -1,6 +1,6 @@
 use super::*;
-use crate::auth::{AuthManager, AuthMode, GrokAuth, GrokComConfig};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use xai_grok_login::{AuthManager, AuthMode, GrokAuth, GrokComConfig};
 use xai_grok_tools::types::output::{ToolOutput, ToolRunResult};
 
 fn succeeding_am() -> Arc<AuthManager> {
@@ -15,12 +15,12 @@ fn succeeding_am() -> Arc<AuthManager> {
     });
     struct Ok;
     #[async_trait::async_trait]
-    impl crate::auth::refresh::TokenRefresher for Ok {
+    impl xai_grok_login::refresh::TokenRefresher for Ok {
         async fn refresh(
             &self,
-            _: crate::auth::refresh::RefreshReason,
-        ) -> crate::auth::refresh::RefreshOutcome {
-            crate::auth::refresh::RefreshOutcome::Success(Box::new(GrokAuth {
+            _: xai_grok_login::refresh::RefreshReason,
+        ) -> xai_grok_login::refresh::RefreshOutcome {
+            xai_grok_login::refresh::RefreshOutcome::Success(Box::new(GrokAuth {
                 key: "fresh".into(),
                 expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
                 refresh_token: Some("rt-new".into()),
@@ -46,13 +46,13 @@ fn failing_am() -> Arc<AuthManager> {
     });
     struct Fail;
     #[async_trait::async_trait]
-    impl crate::auth::refresh::TokenRefresher for Fail {
+    impl xai_grok_login::refresh::TokenRefresher for Fail {
         async fn refresh(
             &self,
-            _: crate::auth::refresh::RefreshReason,
-        ) -> crate::auth::refresh::RefreshOutcome {
-            crate::auth::refresh::RefreshOutcome::permanent(
-                crate::auth::RefreshTokenFailedReason::RefreshTokenRejected,
+            _: xai_grok_login::refresh::RefreshReason,
+        ) -> xai_grok_login::refresh::RefreshOutcome {
+            xai_grok_login::refresh::RefreshOutcome::permanent(
+                xai_grok_login::RefreshTokenFailedReason::RefreshTokenRejected,
                 None,
             )
         }
@@ -108,10 +108,9 @@ fn is_auth_tool_error_classification() {
                 serde_json::json!({"code": "http_failure", HTTP_STATUS_DETAILS_KEY: 401}),
             ),
         ),
-        // Negative: 403 Forbidden must NOT trigger a refresh
-        // This mirrors the inference path's gate in xai-grok-sampling-types/src/error.rs
-        // 403 means "authenticated but not permitted" (content safety, ZDR, remote settings gates)
-        // Refreshing the token is a no-op that surfaces as a spurious auth_required teardown
+        // Negative: 403.
+        // Forbidden must NOT trigger a refresh.
+        // This mirrors the inference path's gate in xai-grok-sampling-types/src/error.rs 403 means "authenticated but not permitted" (content safety, ZDR, remote settings gates).
         (
             false,
             xai_tool_runtime::ToolError::new(

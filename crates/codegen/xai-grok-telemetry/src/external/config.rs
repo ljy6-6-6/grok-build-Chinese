@@ -108,12 +108,9 @@ pub struct ExternalClientInfo {
     pub app_entrypoint: String,
 }
 
-/// Config-file layer for the external stream, built by the shell from the `otel_*` keys of the `[telemetry]` table.
-/// Resolution layers it *under* the env vars.
-/// The field names here are internal; users write `otel_enabled`, `otel_metrics_exporter`, and so on (see [`crate::config::TelemetryConfig`]).
-///
-/// There is deliberately **no `headers` key**: collector auth comes from the `OTEL_EXPORTER_OTLP_HEADERS` env var only.
-/// That keeps collector tokens off disk.
+/// Resolution layers it *under* the env vars. The field names here are internal; users write `otel_enabled`,
+/// `otel_metrics_exporter`, and so on (see [`crate::config::TelemetryConfig`]). There is deliberately no `headers` key:
+/// collector auth comes from the `OTEL_EXPORTER_OTLP_HEADERS` env var only. That keeps collector tokens off disk.
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct ExternalOtelFileConfig {
@@ -185,6 +182,8 @@ pub struct ExternalOtelConfig {
     pub metrics_client_key: Option<String>,
     /// `OTEL_EXPORTER_OTLP_TIMEOUT` (ms). Default 10 s.
     pub timeout: Duration,
+    /// `OTEL_BLRP_EXPORT_TIMEOUT` (ms). Bounds each log export; falls back to [`Self::timeout`].
+    pub logs_export_timeout: Duration,
     /// `OTEL_METRIC_EXPORT_INTERVAL` (ms). Default 60 s.
     pub metric_export_interval: Duration,
     /// `OTEL_BLRP_SCHEDULE_DELAY` (spec name, wins) / `OTEL_LOGS_EXPORT_INTERVAL` (compatibility alias). Default 5 s.
@@ -662,6 +661,11 @@ impl ExternalOtelConfig {
             _ => TemporalityPreference::Delta,
         };
 
+        let timeout = parse_ms(
+            getenv("OTEL_EXPORTER_OTLP_TIMEOUT").or_else(|| file.and_then(|f| f.timeout.clone())),
+            Duration::from_millis(10_000),
+        );
+
         Some(Self {
             metrics_exporter,
             logs_exporter,
@@ -677,11 +681,8 @@ impl ExternalOtelConfig {
             logs_client_key,
             metrics_client_certificate,
             metrics_client_key,
-            timeout: parse_ms(
-                getenv("OTEL_EXPORTER_OTLP_TIMEOUT")
-                    .or_else(|| file.and_then(|f| f.timeout.clone())),
-                Duration::from_millis(10_000),
-            ),
+            timeout,
+            logs_export_timeout: parse_ms(getenv("OTEL_BLRP_EXPORT_TIMEOUT"), timeout),
             metric_export_interval: parse_ms(
                 getenv("OTEL_METRIC_EXPORT_INTERVAL")
                     .or_else(|| file.and_then(|f| f.metric_export_interval.clone())),
@@ -1183,6 +1184,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cfg.timeout, Duration::from_millis(2500));
+        assert_eq!(cfg.logs_export_timeout, Duration::from_millis(2500));
         assert_eq!(cfg.metric_export_interval, Duration::from_millis(30_000));
         // Spec name wins over the compatibility alias.
         assert_eq!(cfg.logs_export_interval, Duration::from_millis(1000));

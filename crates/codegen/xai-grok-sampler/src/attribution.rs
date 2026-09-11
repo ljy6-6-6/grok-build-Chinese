@@ -43,9 +43,7 @@ impl SamplingConsumer {
 }
 
 /// Hook invoked by [`crate::SamplingClient`] at every 401 response site.
-///
 /// Implementations must be cheap and non-blocking; this runs on the user-visible 401 error path.
-///
 /// Do not remove the `Debug` bound: [`crate::SamplerConfig`] derives `Debug` and holds an `Option<Arc<dyn Auth401AttributionCallback>>`.
 pub trait Auth401AttributionCallback: Send + Sync + std::fmt::Debug {
     /// `sent_bearer_suffix` is the [`BEARER_SUFFIX_LEN`]-char tail of the bearer sent on the wire.

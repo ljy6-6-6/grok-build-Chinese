@@ -9,8 +9,6 @@ use bytes::Bytes;
 use std::borrow::Cow;
 use xai_grok_tools::util::format_bytes;
 use xai_grok_tools::util::image_compress::{FilterType, ReEncodeParams, re_encode_under_limit};
-/// Decoded attachment bytes above this are re-encoded to fit this cap.
-///
 /// Kept low so many images fit under the inference proxy's ~50 MB request-body limit before the downstream byte budget starts evicting images.
 /// Base64 inflates raw bytes by ~4/3, so a 1.5 MB image is ~2 MB on the wire and ~25 fit under the limit.
 /// A low per-image cost means a conversation rarely reaches the eviction threshold, so the server-side KV-cache prefix is rarely rewritten.
@@ -34,7 +32,6 @@ const JPEG_QUALITY_STEPS: &[u8] = &[88, 80, 72, 64, 56, 48, 40, 32];
 /// Upper bound on decoded pixel count before refusing to decode.
 /// Matches the API ceiling ([`MAX_VISION_TOTAL_PX`]) so any image the API would accept can be decoded for the downscale re-encode.
 /// A 20-48 Mpx camera photo must not be refused client-side (it downscales to the wire caps anyway).
-/// Worst case is a transient ~716 MB RGBA bitmap inside `spawn_blocking`, one image at a time.
 const MAX_DECODE_PIXELS: u64 = MAX_VISION_TOTAL_PX;
 /// Bounded ICO decode for load-time verification: real icons are far smaller.
 /// Bytes claiming more are kept un-verified rather than decoded on the session-load path.
@@ -243,7 +240,6 @@ pub(crate) fn render_compression_notice(
 }
 /// Why persisted-history image bytes would be rejected by the API, or `None` when sendable.
 /// Cheap: a format sniff, a structural walk, and a header dimension probe; a pixel decode only for ICO, bounded.
-/// Used at session load to strip payloads that draw a 400 on every subsequent turn, leaving the session unusable.
 /// The reason is logged when the loader strips an image; the strip is re-persisted (irreversible), so the evidence must reach logs.
 pub(crate) fn persisted_image_reject_reason(bytes: &[u8]) -> Option<String> {
     use image::ImageFormat as F;

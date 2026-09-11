@@ -52,8 +52,6 @@ impl GoalNotifySender {
     }
 
     /// Like [`Self::emit_goal_updated`] but fire-and-forget to the gateway ONLY: the update is not appended to the session JSONL.
-    /// Used by the high-frequency `SubagentProgress` live-token path.
-    /// Those ticks recur (~every `PROGRESS_PUBLISH_INTERVAL`) while a subagent runs, so persisting each one would grow the updates log without bound.
     /// The durable goal total survives via `PersistenceMsg::GoalModeState` and the next persisted state-transition `GoalUpdated`.
     /// The pager self-heals the live figure on the next tick.
     pub(crate) fn emit_goal_updated_ephemeral(

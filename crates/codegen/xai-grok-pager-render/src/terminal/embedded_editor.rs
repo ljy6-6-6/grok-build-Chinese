@@ -19,10 +19,7 @@ pub enum EmbeddedEditor {
     Emacs,
 }
 
-/// Empty values are treated as absent (matching the sibling `detect_*_from_env` detectors via `env_get`).
-///
-/// Adding a new env marker here requires extending `HOST_TERMINAL_ENV_VARS` in `xai-grok-pager-pty-harness/src/pty.rs`.
-/// The PTY harness strips those markers so the host terminal cannot leak into tests.
+/// Empty values are absent. A new marker must be added to the PTY harness strip list so the host terminal cannot leak into tests.
 pub fn embedded_editor_from_env(env: &HashMap<String, String>) -> Option<EmbeddedEditor> {
     // The markers cannot tell the editor running inside tmux (where wrapping always renders garbage) from tmux running inside the editor
     // We target the former; the latter still works because tmux forwards plain OSC 52

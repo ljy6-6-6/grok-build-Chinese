@@ -36,10 +36,7 @@ pub enum Command {
         )]
         device_auth: bool,
         /// Authenticate for remote development environments (hidden).
-        ///
-        /// Field is always present so match arms stay feature-unification-safe
-        /// across Bazel/cargo graphs; clap only registers `--devbox` when
-        /// `devbox-login` is enabled (`arg(skip)` otherwise → always false).
+        /// Field is always present so match arms stay feature-unification-safe; clap registers `--devbox` only when that feature is enabled (`arg(skip)` otherwise → always false).
         #[arg(skip)]
         devbox: bool,
     },
@@ -139,11 +136,9 @@ Terminal）时，这会让复制功能正常工作。包装命令的终端也会
     /// `GROK_WORKSPACE_COMMAND=1` 以启用。
     #[command(hide = true)]
     Workspace(WorkspaceMgmtArgs),
-    /// 启动时打开 Agent Dashboard 视图。
-    ///
-    /// 集中、agent 原生地概览所有会话（顶层和 subagents）。当
-    /// `~/.grok/config.toml` 中 `[dashboard].enabled = false`，或设置
-    /// `GROK_AGENT_DASHBOARD=0` 时禁用。
+    /// Open the Agent Dashboard view at startup.
+    /// The dashboard shows every session, top-level and subagents.
+    /// Disabled when `[dashboard].enabled = false` in `~/.grok/config.toml` or when the `GROK_AGENT_DASHBOARD=0` env var is set.
     Dashboard,
 }
 /// `wrap` 子命令的参数：要运行的命令及其参数。
@@ -382,10 +377,9 @@ pub struct LeaderArgs {
     /// 最后一个客户端断开连接后仍保持 leader 运行。
     #[arg(long)]
     pub no_exit_on_disconnect: bool,
-    /// 将 grok.com relay WebSocket 延迟到首个 headless IPC 客户端注册后再连接。
-    /// 没有此选项时，leader 会在启动时主动连接 relay——对无头远程环境或 systemd
-    /// 中通过 relay 接收远程提示的裸 leader 是必需的。由交互式客户端（TUI/IDE）
-    /// 自动启动的 leader 会传入此选项，因为它们只有在出现 headless 客户端时才需要 relay。
+    /// Defer the grok.com relay WebSocket until the first headless IPC client registers.
+    /// Without this flag the leader connects the relay eagerly at startup.
+    /// Passed by leaders auto-spawned from interactive clients (TUI/IDE), which only need the relay if a headless client appears.
     #[arg(long)]
     pub relay_on_demand: bool,
     /// 禁用 leader 的定期自动更新检查。
@@ -589,9 +583,8 @@ pub struct PagerArgs {
     /// （可通过 `--session-id` 设置）。
     #[arg(long = "fork-session")]
     pub fork_session: bool,
-    /// 在新的 git worktree 中启动会话，可选择名称。恢复远程会话时，传入
-    /// `--restore-code` 可应用快照代码库（无论是否传入，对话都会恢复）。
-    /// 无头模式（`-p`）不会根据此参数创建 worktree。
+    /// Start the session in a new git worktree, optionally named.
+    /// With `--resume` of a remote session, pass `--restore-code` to apply the snapshot codebase (conversation is restored either way).
     #[arg(short = 'w', long = "worktree", num_args = 0..= 1, default_missing_value = "")]
     pub worktree: Option<String>,
     /// 指定用于创建 worktree 的分支、标签或提交（配合 `--worktree`）。省略时默认
@@ -651,7 +644,9 @@ pub struct PagerArgs {
         hide = true
     )]
     pub no_memory: bool,
-    /// 在无头回合后刷新跨会话记忆；无提示词时须配合恢复或继续参数。
+    /// Run a memory flush after the headless turn (or instead of a prompt when resuming). Calls `x.ai/memory/flush` and waits for the flush LLM.
+    /// resuming). Calls `x.ai/memory/flush` and waits for the flush LLM.
+    /// Headless only: `/flush` as `-p` text is not a reliable flush trigger.
     #[arg(long = "memory-flush", hide = true)]
     pub memory_flush: bool,
     /// agent 名称或定义文件路径。
@@ -686,7 +681,6 @@ pub struct PagerArgs {
     #[arg(long = "disable-web-search")]
     pub disable_web_search: bool,
     /// Exit as soon as the first agent turn ends, without waiting for pending background bash/monitor tasks or background subagents (headless only).
-    /// Default for all `grok -p` runs is to wait (up to `--background-wait-timeout`) so eval harnesses see full task completion.
     /// Use this for fast scripts that only need the first turn's text.
     /// Does not wait for server-side auto-wake output or persistent monitors (those hit the timeout).
     #[arg(long = "no-wait-for-background", hide = true)]
@@ -694,7 +688,6 @@ pub struct PagerArgs {
     /// Max seconds to wait for background work after the first turn ends (headless only).
     /// Applies to bash/monitor `task_completed`, background subagents (`SubagentFinished`), and any still-running non-persistent work.
     /// Persistent `monitor(persistent:true)` never completes and always waits the full timeout.
-    /// Use `--no-wait-for-background` or a lower timeout for throughput. Conflicts with `--no-wait-for-background`.
     #[arg(
         long = "background-wait-timeout",
         value_name = "SECS",
@@ -729,7 +722,6 @@ pub struct PagerArgs {
     #[arg(long = "no-auto-update", hide = true)]
     pub no_auto_update: bool,
     /// Enable the runtime turn-end TodoGate for this session.
-    ///
     /// Session-scoped (not persisted).
     /// Highest precedence: overrides remote `todo_gate_enabled` and the built-in default (which is `false`).
     #[arg(long = "todo-gate", hide = true)]
@@ -740,10 +732,9 @@ pub struct PagerArgs {
     /// 以内联方式运行，而不是使用终端备用屏幕。
     #[arg(long = "no-alt-screen")]
     pub no_alt_screen: bool,
-    /// 实验性：滚动区原生渲染。已完成的区块会打印到终端原生滚动区（使用终端自身的
-    /// 滚动和选择）；小型固定区域保留提示和运行中的回合。仅限会话范围，不写入配置。
-    /// 若要让普通 `grok-zh` 默认使用 minimal，请在 ~/.grok/config.toml 中设置
-    /// `[ui] screen_mode = "minimal"`。
+    /// Experimental: scrollback-native rendering.
+    /// Finalized blocks are printed into the terminal's native scrollback (use the terminal's own scroll / selection).
+    /// Session-scoped only, does not write config.
     #[arg(long = "minimal")]
     pub minimal: bool,
     /// 在此会话中以标准全屏 TUI 打开，覆盖配置中的
@@ -913,7 +904,6 @@ impl PagerArgs {
         self.local_workspace_cwd.as_deref()
     }
     /// Get the session ID to resume, from either --resume or --load (hidden alias).
-    ///
     /// Returns `None` when `--resume` was used without a value (the empty-string sentinel).
     /// Use [`resume_most_recent`] to detect that case.
     pub fn session_to_resume(&self) -> Option<&str> {
@@ -968,21 +958,14 @@ impl PagerArgs {
     }
     /// Resolve the sandbox profile to apply at startup, accounting for the profile the resumed session was created with.
     /// `saved` is the resumed session's persisted profile (read once via [`Self::saved_resume_profile`]).
-    ///
-    /// A session's profile is fixed at creation. Resuming restores it.
     /// An explicit `--sandbox`/`GROK_SANDBOX` that differs from the saved profile is refused: changing a session's sandbox on resume would be unsafe.
-    /// A matching flag, or no flag, resumes with the saved profile.
     pub fn startup_sandbox_profile(&self, saved: Option<&str>) -> SandboxStartup {
         let explicit = self.sandbox.as_deref().filter(|s| !s.is_empty());
         Self::resolve_startup_sandbox(explicit, saved.map(String::from))
     }
-    /// Pin an explicit non-UUID, non-chat resume/load target to its canonical local session id, before the (irreversible) OS sandbox is applied.
-    ///
-    /// Resolving once makes the saved-profile peek and materialization consume the same immutable target.
     /// `resume_target_pinned` records the pin so materialization never re-runs local title selection.
     /// Re-selecting after the sandbox would race a concurrent rename/create.
     /// Listing failures and ambiguity are hard errors here, reported before the sandbox (fail closed).
-    /// A definitive no-match keeps the raw arg for the legacy remote/worktree id path.
     pub fn pin_local_resume_target(&mut self) -> anyhow::Result<()> {
         let cwd_buf = std::env::current_dir().ok();
         let cwd_str = cwd_buf.as_deref().map(|p| p.to_string_lossy());

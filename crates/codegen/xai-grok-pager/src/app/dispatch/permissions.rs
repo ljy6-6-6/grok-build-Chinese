@@ -41,7 +41,6 @@ pub(super) fn take_edited_pattern(
 /// Build the ACP response meta for a permission selection, the one copy shared by the main and dashboard dispatch paths.
 /// MCP scope wins for the `allow-always-mcp` id.
 /// Otherwise a free-form edited pattern (glob when dirty) wins over the arrow word-scope (literal prefix).
-/// `None` when there is nothing to scope.
 pub(super) fn build_selection_meta(
     perm: &PermissionViewState,
     option_id: &acp::PermissionOptionId,
@@ -110,20 +109,8 @@ pub(super) fn build_selection_meta(
 }
 
 /// Handle permission option selection (AllowOnce, AllowAlways, RejectAlways).
-///
-/// Pops the front request, sends the response, and handles queue transitions (prompt restore on empty, prompt clear on next-front).
-///
-/// Special case for [`xai_grok_workspace::permission::ENABLE_ALWAYS_APPROVE_OPTION_ID`]:
-/// when the user picks the prepended "Yes, and don't ask again for anything"
-/// option, this dispatcher (a) sends the standard `Selected` response so the
-/// in-flight request is allowed once (the shell's `map_selected_outcome`
-/// resolves the id to `PromptOutcome::AllowOnce`), then (b) reuses the
-/// existing `set_yolo_mode(true)` flow to flip the local YOLO state, drain
-/// any remaining queued permissions, persist `[ui] permission_mode =
-/// "always-approve"` to `~/.grok/config.toml`, and fire the
-/// `x.ai/yolo_mode_changed` ACP notification.
-/// See the option-id constant doc-comment for the full client/shell split.
-/// Under a managed-policy pin step (b) is refused with a toast; the request is still allowed once.
+/// when the user picks the prepended "Yes, and don't ask again for anything" option, this dispatcher (a) sends the standard `Selected` response so the in-flight request is allowed once (the shell's `map_selected_outcome`
+/// resolves the id to `PromptOutcome::AllowOnce`), then (b) reuses the existing `set_yolo_mode(true)` flow to flip the local YOLO state, drain any remaining queued permissions, persist `[ui] permission_mode = "always-approve"` to `~/.grok/config.toml`, and fire the `x.ai/yolo_mode_changed` ACP notification.
 pub(super) fn dispatch_permission_select(
     app: &mut AppView,
     option_id: acp::PermissionOptionId,
@@ -147,10 +134,7 @@ pub(super) fn dispatch_permission_select(
 
     // Remember the user's choice (by option kind) so the next prompt's cursor sticks to it
     // Allow-flavored choices only: a rejection must not steer a later prompt's cursor onto a reject row
-    // Also skip the two options that aren't per-prompt choices:
-    //  - the global always-approve (YOLO) option flips global auto-approve, so there will be no subsequent prompt to land on;
-    //  - "allow all edits during this session" is edit-scoped (kind `AllowAlways`)
-    //    Letting it stick would steer an unrelated later prompt onto its "always allow this command" row, escalating scope
+    // Letting it stick would steer an unrelated later prompt onto its "always allow this command" row, escalating scope
     let steers_next_cursor = !enable_always_approve
         && option_id.0.as_ref() != xai_grok_workspace::permission::ALLOW_EDITS_SESSION_OPTION_ID;
     if steers_next_cursor
@@ -183,9 +167,6 @@ pub(super) fn dispatch_permission_select(
     resolve_permission_queue_transition(agent);
 
     // "Enable always-approve" side effect: flip YOLO, persist, and notify
-    // Reuses the existing `set_yolo_mode` flow so telemetry, queue drain, toast, modal refresh, persistence, and the notification share a path
-    //
-    // Idempotency: if YOLO is already on, the pager auto-approves in `handle_permission_request` before the panel is shown
     // So the user couldn't have selected this option
     // The `is_yolo()` guard is defensive; a redundant call would re-emit the toast and a duplicate `PersistPermissionMode` effect, but is safe
     if enable_always_approve {
@@ -279,7 +260,6 @@ pub(super) fn dispatch_permission_cancel(app: &mut AppView) -> Vec<Effect> {
 }
 
 /// Drain all queued permission requests, sending `Cancelled` to each.
-///
 /// Called on turn-end and turn-cancel; after draining, restores the stashed prompt/pane.
 /// Distinct from `dispatch_permission_cancel` (front only).
 pub(super) fn drain_permission_queue(agent: &mut AgentView) {
@@ -299,9 +279,8 @@ pub(super) fn drain_permission_queue(agent: &mut AgentView) {
 }
 
 /// Handle queue transition after resolving (select/followup/cancel) the front permission request.
-///
-/// - Queue now empty: restore the stashed prompt/pane.
-/// - Queue still has items: clear prompt text and reset the next front to Options.
+/// Queue now empty: restore the stashed prompt/pane.
+/// Queue still has items: clear prompt text and reset the next front to Options.
 pub(crate) fn resolve_permission_queue_transition(agent: &mut AgentView) {
     agent.last_permission_click = None;
     // The pattern editor is front-request scoped: drop any buffer when the front request is resolved (covers cancel/followup/select paths)

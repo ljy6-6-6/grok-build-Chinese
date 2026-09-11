@@ -10,9 +10,8 @@ pub(super) use tokio::net::UnixListener as LeaderListener;
 pub(super) use tokio::net::UnixStream as LeaderStream;
 
 /// Has a leader bound a listener at `path`?
-///
-/// - Unix: stats the socket file.
-/// - Windows: probes the named pipe (Named Pipes don't appear in the filesystem, so `path.exists()` doesn't work).
+/// Unix: stats the socket file.
+/// Windows: probes the named pipe (Named Pipes don't appear in the filesystem, so `path.exists()` doesn't work).
 pub fn listener_is_ready(path: &std::path::Path) -> bool {
     #[cfg(unix)]
     {
@@ -178,10 +177,7 @@ mod windows_impl {
         }
     }
 
-    /// Whether a leader has a pipe bound at `path`.
-    ///
-    /// Probes with `WaitNamedPipeW` (non-connecting), not `ClientOptions::open`.
-    /// The latter would open a real client that `accept()` consumes as a phantom session.
+    /// Whether a leader has a pipe bound at `path`. Probes with `WaitNamedPipeW` (non-connecting), not `ClientOptions::open`. The latter would open a real client that `accept()` consumes as a phantom session.
     /// `ERROR_FILE_NOT_FOUND` means absent; `TRUE` or any other error (e.g. `ERROR_SEM_TIMEOUT`: exists but busy) means ready.
     pub(super) fn listener_is_ready(path: &Path) -> bool {
         use std::os::windows::ffi::OsStrExt;

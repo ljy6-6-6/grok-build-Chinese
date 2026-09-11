@@ -19,14 +19,7 @@ use crate::metrics::InferenceLatencyStats;
 use crate::types::RequestId;
 
 /// The output stream emits exactly one terminal event per request.
-/// A normal stream end emits [`SamplingEvent::Completed`]; an error or idle timeout emits [`SamplingEvent::Failed`].
 /// Callers must not consume past the terminal event (the implementation `return`s after yielding it).
-///
-/// `idle_timeout` covers two cases:
-/// 1. The transport stops yielding chunks at all (`tokio::time::timeout`).
-/// 2. The transport keeps yielding empty / keepalive chunks but no meaningful content (separate `last_content_chunk_at` timer).
-///
-/// Both produce `SamplingEvent::Failed { kind: IdleTimeout }`.
 pub fn stream_chat_completions<'a>(
     raw_stream: BoxStream<'a, Result<ChatCompletionChunk, SamplingError>>,
     model_metadata: Option<ResponseModelMetadata>,
@@ -34,6 +27,13 @@ pub fn stream_chat_completions<'a>(
     idle_timeout: Duration,
 ) -> impl Stream<Item = SamplingEvent> + Send + 'a {
     async_stream::stream! {
+        let decode_region = crate::span_timing::Region::from_span(tracing::info_span!(
+            "sampling.stream_decode",
+            ttft_ms = tracing::field::Empty,
+            ttlb_ms = tracing::field::Empty,
+            output_tokens = tracing::field::Empty,
+            chunk_count = tracing::field::Empty,
+        ));
         let stream_start = Instant::now();
         let mut chunk_timestamps: Vec<Instant> = Vec::new();
 
@@ -241,7 +241,6 @@ pub fn stream_chat_completions<'a>(
 
         // Tool calls override the stop reason, even an explicit `length`.
         // NOTE: the Messages backend has the opposite precedence: Length wins there
-        // That lets the `LengthPolicy` gate refuse a trailing call whose arguments may be truncated
         // Load-bearing; don't "fix" here
         if !tool_calls.is_empty() {
             if finish_reason == Some(StopReason::Length) {
@@ -276,6 +275,22 @@ pub fn stream_chat_completions<'a>(
         let stream_end = Instant::now();
         let metrics =
             InferenceLatencyStats::from_timestamps(stream_start, &chunk_timestamps, stream_end);
+
+        decode_region
+            .span()
+            .record("ttlb_ms", metrics.time_to_last_byte_ms as i64);
+        decode_region
+            .span()
+            .record("chunk_count", metrics.chunk_count as i64);
+        if let Some(ttft) = metrics.time_to_first_token_ms {
+            decode_region.span().record("ttft_ms", ttft as i64);
+        }
+        if let Some(u) = usage.as_ref() {
+            decode_region
+                .span()
+                .record("output_tokens", u.completion_tokens as i64);
+        }
+        drop(decode_region);
 
         let response = ConversationResponse {
             items,

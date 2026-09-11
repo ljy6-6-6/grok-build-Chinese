@@ -25,10 +25,8 @@ pub trait AsyncFileSystem: Send + Sync {
 
     async fn read_file(&self, path: &Path) -> Result<Vec<u8>, FsError>;
 
-    /// Read a file if it exists, returning `Ok(None)` when the file is not found.
-    ///
-    /// The default implementation calls `exists()` then `read_file()` (two operations).
-    /// Backends should override this to collapse both into a single operation (one ACP RPC or one syscall) to avoid a redundant round trip.
+    /// Read a file if it exists, returning `Ok(None)` when not found.
+    /// The default is `exists()` then `read_file()`; backends should collapse that into one RPC or syscall.
     async fn try_read_file(&self, path: &Path) -> Result<Option<Vec<u8>>, FsError> {
         if self.exists(path).await? {
             Ok(Some(self.read_file(path).await?))
@@ -51,20 +49,7 @@ pub fn bytes_to_string(file_bytes: Vec<u8>) -> Result<String, FsError> {
 // AsyncFsWrapper: Generic wrapper that accepts any path type
 // ============================================================================
 
-/// A wrapper around `AsyncFileSystem` that accepts any path type implementing `ToAbsPath`.
-///
-/// Callers pass `AbsPathBuf`, `RelPathBuf`, `&Path`, or `&PathBuf` directly.
-/// The wrapper resolves them to absolute paths using the filesystem's root.
-///
-/// # Example
-/// ```ignore
-/// let wrapper = AsyncFsWrapper::new(fs);
-///
-/// // All of these work:
-/// wrapper.read_to_string(&abs_path).await?;
-/// wrapper.read_to_string(&rel_path).await?;
-/// wrapper.read_to_string(Path::new("relative/path")).await?;
-/// ```
+/// Wrapper around `AsyncFileSystem` that accepts any `ToAbsPath` and resolves it against the filesystem root.
 #[derive(Clone)]
 pub struct AsyncFsWrapper {
     inner: Arc<dyn AsyncFileSystem>,

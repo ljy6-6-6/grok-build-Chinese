@@ -12,12 +12,7 @@ use crate::events::{SamplingErrorInfo, SamplingErrorKind, SamplingEvent};
 use crate::metrics::InferenceLatencyStats;
 
 /// Drain a [`SamplingEvent`] stream, returning the final response.
-///
-/// Returns `Ok((response, metrics))` on the first [`SamplingEvent::Completed`] and `Err(error)` on the first [`SamplingEvent::Failed`].
 /// Intermediate events (deltas, retries, metadata) are silently consumed; this function is for callers that only need the final result.
-///
-/// If the stream ends without yielding either terminal event, returns an `Err` of kind [`SamplingErrorKind::Api`] indicating truncation.
-/// The Layer-2 transforms guarantee a terminal event in every successful return path.
 /// This error only fires when the stream was dropped mid-flight, e.g. the producer panicked or the underlying `tokio::spawn` was cancelled.
 pub async fn collect_response(
     stream: impl Stream<Item = SamplingEvent>,

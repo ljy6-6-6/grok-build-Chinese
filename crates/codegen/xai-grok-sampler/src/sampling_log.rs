@@ -21,7 +21,7 @@ pub fn request_span(
 ) -> tracing::Span {
     tracing::info_span!(
         target: TARGET,
-        "sampling_request",
+        "sampling.request",
         request_id = %request_id,
         model = model,
         api_backend = api_backend,
@@ -32,5 +32,6 @@ pub fn request_span(
         reasoning_effort = tracing::field::Empty,
         output_tokens = tracing::field::Empty,
         reasoning_tokens = tracing::field::Empty,
+        total_attempts = tracing::field::Empty,
     )
 }

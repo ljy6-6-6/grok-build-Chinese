@@ -4,7 +4,7 @@
 use std::sync::{Arc, OnceLock};
 
 use agent_client_protocol as acp;
-use xai_grok_shell::auth::{AuthManager, GrokComConfig};
+use xai_grok_login::{AuthManager, GrokComConfig};
 use xai_grok_shell::session::info::Info;
 use xai_grok_shell::session::persistence::delete_session_history;
 use xai_grok_shell::session::storage::search::{

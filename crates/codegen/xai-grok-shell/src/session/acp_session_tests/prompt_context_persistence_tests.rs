@@ -229,10 +229,8 @@ fn test_load_prompt_context_returns_none_for_corrupt_json() {
     );
 }
 
-// ── Large-prompt truncation: maybe_truncate_large_prompt_with_skills ────
-//
-// Oversized prompts are offloaded to an owner-only file
-// The bounding logic is the pure `build_truncated_prompt_message` helper, tested directly below
+// ── Large-prompt truncation: maybe_truncate_large_prompt_with_skills ────.
+// Oversized prompts are offloaded to an owner-only file The bounding logic is the pure `build_truncated_prompt_message` helper, tested directly below.
 
 // Distinctive markers so head/middle/tail are individually assertable.
 const HEAD_TOKEN: &str = "HEADSTART_TOKEN_aaa";
@@ -502,10 +500,8 @@ fn build_offload_notice_reports_bytes_marker_and_path() {
     assert!(notice.contains("read_file"));
 }
 
-// ── Method gate and call-site wiring (hermetic) ─────────────────────────
-//
-// `grok_home()` is a process-wide `OnceLock`, so the real async method is only exercised for the no-offload gate
-// The offload and fallback wiring is covered by injecting the writer function instead
+// ── Method gate and call-site wiring (hermetic) ─────────────────────────.
+// `grok_home()` is a process-wide `OnceLock`, so the real async method is only exercised for the no-offload gate The offload and fallback wiring is covered by injecting the writer function instead.
 
 /// Threshold gate: a prompt exactly at `LARGE_PROMPT_THRESHOLD` is returned unchanged and no file is written.
 #[tokio::test(flavor = "current_thread")]

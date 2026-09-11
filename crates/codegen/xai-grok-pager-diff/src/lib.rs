@@ -165,24 +165,9 @@ pub fn diff_hunks_from_strings(old_text: &str, new_text: &str, start_line: usize
     build_diff_hunks(&[detail])
 }
 
-/// Stitches overlapping or adjacent hunks from consecutive edits to the same file into unified hunks.
-///
-/// Consecutive edits to nearby lines each carry context lines from their own file snapshot.
-/// When the pager merges those edits into one block, their concatenated hunks repeat context and re-show intermediate file states.
-/// Folding each hunk into the accumulated previous one in `ln` (post-state) coordinates:
-///
-/// - a later edit of a shown context line swaps that Equal row for its `-`/`+` pair;
-/// - a line edited twice collapses to `-original +final` (no intermediate);
-/// - repeated context is dropped; new trailing rows extend the hunk.
-///
-/// Anything the shared `ln` coordinates cannot describe truthfully keeps the pair as separate hunks (the pager draws a gap marker between them):
-///
-/// - non-monotonic or non-adjacent pairs;
-/// - text disagreement at a shared `ln` (the line counts drifted between snapshots, so the coordinates lie);
-/// - shapes inside the covered range that change the line count (pure deletes, unpaired inserts, multi-line replacement runs).
-///
-/// The bail exists so the pager never renders wrong content.
-/// Kept rows retain the `lo` of their own snapshot, the same convention the unmerged per-hunk display already uses for its old-file column.
+/// Fold consecutive edits of the same file in post-state `ln` coordinates so merged hunks don't repeat context or show intermediate states.
+/// A later edit of a shown context line replaces that Equal row; a line edited twice collapses to `-original +final`.
+/// If shared `ln` coordinates cannot describe the pair truthfully, keep separate hunks — the bail exists so the pager never renders wrong content.
 pub fn stitch_overlapping_hunks(hunks: Vec<DiffHunk>) -> Vec<DiffHunk> {
     let mut out: Vec<DiffHunk> = Vec::with_capacity(hunks.len());
     for hunk in hunks {
@@ -288,15 +273,8 @@ fn stitch_hunk_pair(a: &DiffHunk, b: &DiffHunk) -> Option<DiffHunk> {
     Some(out)
 }
 
-/// Extract diff hunks from an ACP ToolCall's raw_output or content.
-///
-/// Tries three strategies in order:
-/// 1. Parse `raw_output` as `SearchReplaceOutput::EditsApplied` for one hunk per edit, with context lines and accurate line numbers.
-/// 2. Parse `Diff.meta` as `SearchReplaceEditContextInformation` for edit details embedded in the Diff content block (set by acp_conversion).
-/// 3. Fall back to `ToolCallContent::Diff` old_text/new_text for a full-text diff.
-///    Line numbers come from `meta` when available (pre-execution previews).
-///
-/// Returns `(hunks, edit_count)`.
+/// Extract diff hunks from an ACP ToolCall's raw_output or content. Fall back to `ToolCallContent::Diff`
+/// old_text/new_text for a full-text diff. Line numbers come from `meta` when available (pre-execution previews).
 pub fn extract_edit_hunks(tc: &agent_client_protocol::ToolCall) -> (Vec<DiffHunk>, usize) {
     use xai_grok_tools::types::output::{
         SearchReplaceEditContextInformation, SearchReplaceOutput, ToolOutput,
@@ -360,16 +338,7 @@ pub fn extract_edit_hunks(tc: &agent_client_protocol::ToolCall) -> (Vec<DiffHunk
 }
 
 /// Generate a unified diff patch string from diff hunks.
-///
 /// Produces output suitable for `git apply` or clipboard sharing:
-/// ```text
-/// --- a/path/to/file
-/// +++ b/path/to/file
-/// @@ -old_start,old_count +new_start,new_count @@
-///  context line
-/// +added line
-/// -removed line
-/// ```
 pub fn diff_hunks_to_patch(path: &str, hunks: &[DiffHunk]) -> String {
     if hunks.is_empty() {
         return String::new();
@@ -627,13 +596,8 @@ mod tests {
         assert_eq!(hunks.len(), 1);
         let hunk = &hunks[0];
 
-        // Expected layout:
-        //   3 3  fn main() {       (context_before)
-        //   4 4      // setup      (context_before)
-        //   5        let x = 1;    (delete)
-        //     5      let x = 42;   (insert)
-        //   6 6      let y = x + 1; (context_after)
-        //   7 7  }                 (context_after)
+        // Expected layout: 3 3 fn main() { (context_before). 4 4 // setup (context_before). 5 let x = 1; (delete). 5 let x
+        // = 42; (insert). 6 6 let y = x + 1; (context_after). 7 7 } (context_after).
 
         // Context before: lines 3, 4 (old_line - 2, old_line - 1)
         let ctx_before: Vec<_> = hunk

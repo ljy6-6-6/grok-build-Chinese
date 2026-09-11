@@ -8,5 +8,5 @@ pub use info::Info;
 pub use prod_mc_cli_chat_proxy_types::feedback_types::FeedbackTerminalInfo;
 
 pub fn session_dir(info: &Info) -> PathBuf {
-    xai_grok_tools::util::grok_home::sessions_cwd_dir(&info.cwd).join(info.id.to_string())
+    xai_grok_config::sessions_cwd_dir(&info.cwd).join(info.id.to_string())
 }

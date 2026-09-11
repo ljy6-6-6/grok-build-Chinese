@@ -60,6 +60,7 @@ fn runtime_request(text: &str) -> TurnInputRequest {
         persist_ack: None,
         parsed_prompt_tx: None,
         traceparent: None,
+        start_gate: None,
     }
 }
 
@@ -87,6 +88,7 @@ fn parent_request(text: &str, prompt_blocks: Vec<acp::ContentBlock>) -> TurnInpu
         persist_ack: None,
         parsed_prompt_tx: None,
         traceparent: None,
+        start_gate: None,
     }
 }
 
@@ -158,7 +160,6 @@ async fn actor_with_sampler(
         sampling_config,
         xai_grok_sampler::RetryPolicy {
             max_retries: 0,
-            rate_limit_retry_threshold: 0,
             ..Default::default()
         },
         sampler_event_tx,
@@ -253,6 +254,7 @@ async fn human_non_slash_runs_dynamic_preparation_but_model_non_slash_does_not()
                     persist_ack: None,
                     parsed_prompt_tx: None,
                     traceparent: None,
+                    start_gate: None,
                 },
             )
             .await
@@ -812,6 +814,53 @@ async fn parent_bash_metadata_and_placeholder_path_cannot_reach_host_routes() {
             let bodies = server.request_bodies();
             let rendered = serde_json::to_string(&bodies).unwrap();
             assert!(!rendered.contains("data:image/"), "{rendered}");
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn human_parent_message_keeps_compact_and_file_refs_literal() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let marker_name = "human-parent-literal-marker.txt";
+            let marker_path = std::path::Path::new("/tmp").join(marker_name);
+            std::fs::write(&marker_path, "HUMAN_PARENT_FILE_MARKER").expect("write marker");
+            let server = MockInferenceServer::start()
+                .await
+                .expect("mock inference server");
+            server.enqueue_response(
+                "/v1/responses",
+                ScriptedResponse::sse(responses_api_script_exact("handled", "test")),
+            );
+            let (actor, mut hook_rx, _user_chunk_rx, policy_recorder) = actor_with_sampler(
+                &server,
+                Arc::new(RecordingTerminal {
+                    calls: Arc::new(AtomicUsize::new(0)),
+                }),
+            )
+            .await;
+            let text = format!("/compact keep going @{marker_name}");
+            let mut request = parent_request(&text, Vec::new());
+            request.input_origin = InputOrigin::new(PromptOrigin::ParentHumanMessage {
+                message_id: "human-literal".into(),
+                sender_session_id: "root-session".into(),
+            });
+            run_parent_turn(&actor, request)
+                .await
+                .expect("human parent text reaches the model");
+            tokio::task::yield_now().await;
+            assert_eq!(actor.compaction.count.load(Ordering::Relaxed), 0);
+            assert_eq!(
+                policy_recorder.0.get(),
+                Some(InputAuthority::ModelAuthoredUntrusted)
+            );
+            assert!(hook_rx.try_recv().is_err());
+            let rendered = serde_json::to_string(&server.request_bodies()).unwrap();
+            assert!(rendered.contains("/compact keep going"), "{rendered}");
+            assert!(rendered.contains(&format!("@{marker_name}")), "{rendered}");
+            assert!(!rendered.contains("HUMAN_PARENT_FILE_MARKER"), "{rendered}");
+            let _ = std::fs::remove_file(marker_path);
         })
         .await;
 }

@@ -285,6 +285,7 @@ pub async fn render_subagent_initial_user_message(
     definition: &AgentDefinition,
     working_directory: &Path,
     compat: CompatConfig,
+    project_trusted: bool,
 ) -> Option<String> {
     if !definition.agents_md {
         return None;
@@ -292,6 +293,7 @@ pub async fn render_subagent_initial_user_message(
     let agents_md_files = xai_grok_agent::prompt::agents_md::read_agents_config_with_paths(
         &working_directory.to_string_lossy(),
         compat,
+        project_trusted,
     )
     .await;
     PromptContext {
@@ -492,10 +494,14 @@ mod tests {
         let toggles = HashMap::new();
         let definition =
             resolve_agent_definition("explore", &context(cwd.path(), &toggles)).unwrap();
-        let message =
-            render_subagent_initial_user_message(&definition, cwd.path(), CompatConfig::default())
-                .await
-                .unwrap();
+        let message = render_subagent_initial_user_message(
+            &definition,
+            cwd.path(),
+            CompatConfig::default(),
+            true,
+        )
+        .await
+        .unwrap();
         assert!(message.contains("Use the project contract."));
     }
 }

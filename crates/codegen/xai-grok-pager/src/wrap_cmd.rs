@@ -17,11 +17,7 @@ use anyhow::Result;
 
 use crate::app::WrapArgs;
 
-/// Run the `grok wrap` command.
-///
-/// On Unix interactive sessions the command runs inside a local PTY.
-/// Its OSC 52 clipboard sequences are intercepted and written to the local clipboard.
-/// Otherwise the command is executed directly (no wrapping).
+/// Run the `grok wrap` command. Otherwise the command is executed directly (no wrapping).
 pub fn run(args: &WrapArgs) -> Result<()> {
     // `command` is `required` in clap, so it always has at least one element.
     let program = args
@@ -109,10 +105,9 @@ fn derive_spawn(
         return via_shell(command[0].clone());
     }
 
-    // A bare program name that PATH cannot resolve is usually a shell alias (`alias mycli=remote`); only a shell can expand it
-    // Explicit paths (containing `/`) spawn directly so their errors stay precise, as do empty and whitespace-containing first words
-    // Neither can be an alias name
-    // An empty one (`grok wrap "$PROG" ...` with `$PROG` unset) must keep failing fast instead of silently running the tail
+    // A bare program name that PATH cannot resolve is usually a shell alias (`alias mycli=remote`); only a shell can
+    // expand it. An empty one (`grok wrap "$PROG".` with `$PROG` unset) must keep failing fast instead of silently
+    // running the tail.
     if !command[0].is_empty()
         && !command[0].contains('/')
         && !command[0].contains(char::is_whitespace)
@@ -167,16 +162,8 @@ fn resolve_shell(shell: Option<&str>) -> String {
     }
 }
 
-/// Returns true when the command should be wrapped in a local PTY.
-///
-/// Unlike `grok ssh`, `grok wrap` does not gate on the terminal brand.
-/// The user has explicitly asked to forward the clipboard.
-/// Interception works regardless of whether the outer terminal supports OSC 52 (the payload is written to the local clipboard directly).
-///
-/// It requires a platform `portable-pty` can drive, Unix (`openpty`) or Windows (ConPTY), and an interactive (TTY) session.
-/// Wrapping a non-interactive pipe would make the child think it has a terminal and has no clipboard destination anyway.
-/// On Windows the OSC 52 clipboard bridge works the same.
-/// Only the live outer-to-inner resize is not forwarded (see [`crate::pty_wrap::run_wrapped_command`]).
+/// Wrapping a non-interactive pipe would make the child think it has a terminal and has no clipboard destination
+/// anyway. Only the live outer-to-inner resize is not forwarded.
 fn should_wrap() -> bool {
     // PTY wrapping requires native pseudo-terminal APIs (Unix openpty / Windows ConPTY), both of which `portable-pty` supports
     if !cfg!(any(unix, windows)) {

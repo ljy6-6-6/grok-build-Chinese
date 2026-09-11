@@ -8,7 +8,6 @@ const AI_TIMEOUT: Duration = Duration::from_secs(2);
 const AI_PRIORITY: i32 = -10;
 
 /// Request AI-powered shell command suggestions via the session actor.
-///
 /// Sends `SessionCommand::AISuggest` and awaits the response with a 2-second timeout.
 /// Returns at most one `RankedSuggestion` with `source: AI` and `priority: -10` (below history and path results).
 pub(crate) async fn suggest(

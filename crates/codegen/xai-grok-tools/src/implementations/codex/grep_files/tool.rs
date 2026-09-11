@@ -56,13 +56,9 @@ pub struct CodexGrepFilesInput {
 
 // ─── Tool ───────────────────────────────────────────────────────────
 
-/// Codex-namespace grep_files tool — file-path-only regex search.
-///
-/// Shares `ToolKind::Search` with the grok-build `GrepTool`. These tools are
-/// namespace-exclusive — consumers enable either `GrokBuild` or `Codex` search,
-/// never both simultaneously. This follows the same pattern as
-/// `CodexListDirTool`/`ListDirTool` (`ToolKind::ListDir`) and
-/// `CodexReadFileTool`/`ReadFileImpl` (`ToolKind::Read`).
+/// Codex-namespace grep_files tool — file-path-only regex search. Shares `ToolKind::Search` with the grok-build `GrepTool`. These tools are
+/// namespace-exclusive — consumers enable either `GrokBuild` or `Codex` search, never both simultaneously. This follows the same pattern as
+/// `CodexListDirTool`/`ListDirTool` (`ToolKind::ListDir`) and `CodexReadFileTool`/`ReadFileImpl` (`ToolKind::Read`).
 #[derive(Debug, Default)]
 pub struct CodexGrepFilesTool;
 

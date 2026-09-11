@@ -47,11 +47,8 @@ impl TermVersion {
     }
 }
 
-/// Whether the brand `TERM_PROGRAM` names vouches for `env_brand`'s version.
-///
-/// Identity, widened for VS Code forks: they export `TERM_PROGRAM=vscode` from the host process that writes their brand marker and draws our output.
-/// The version is therefore that host's, and `brand` records whose numbering it is.
-/// The widening is one-directional, so a leaked marker cannot borrow another brand's version; Zed is excluded as it is not an xterm.js host.
+/// Identity, widened one way for VS Code forks: they export `TERM_PROGRAM=vscode` from the host that draws our output.
+/// A leaked marker cannot borrow another brand's version. Zed is not an xterm.js host.
 fn corroborates(named: TerminalName, env_brand: TerminalName) -> bool {
     named == env_brand
         || (named == TerminalName::VsCode
@@ -79,10 +76,7 @@ fn env_trimmed<'a>(env: &'a HashMap<String, String>, key: &str) -> Option<&'a st
     (!value.is_empty()).then_some(value)
 }
 
-/// Resolve the terminal version from the environment, taking the first variable corroborated by `env_brand`.
-///
-/// `env_brand` is the *pre-refinement* brand, before `refine_unknown_brand_for_host` may rewrite `TerminalContext::brand`.
-/// The native-Windows `Unknown -> WindowsTerminal` guess must not be used to attribute a version.
+/// First env var corroborated by the pre-refinement brand. The Windows `Unknown -> WindowsTerminal` guess must not attribute a version.
 pub(super) fn detect_env_term_version(
     env: &HashMap<String, String>,
     env_brand: TerminalName,

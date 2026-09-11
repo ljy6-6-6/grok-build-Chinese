@@ -28,11 +28,28 @@ pub fn spawn_agent(
     let (agent_out_read, agent_out_write) = simplex(SIMPLEX_BUF);
 
     let agent = tokio::task::spawn_local(async move {
-        let config = AgentConfig::default();
+        let mut config = AgentConfig::default();
         let auth_manager = Arc::new(config.create_auth_manager());
+        // This runs on a current-thread `LocalSet`, where the sync bootstrap in `MvpAgent::new`
+        // cannot drive the settings load itself. Resolve it on the async runtime first so
+        // bootstrap observes a finished wait rather than falling open to bundled defaults.
+        let boot = crate::agent::init::resolve_boot_startup_settings(
+            &mut config,
+            &tokio_util::sync::CancellationToken::new(),
+            true,
+            auth_manager.current(),
+        )
+        .await
+        .ok();
         let (gateway_tx, gateway_rx) = tokio::sync::mpsc::unbounded_channel();
-        let agent = MvpAgent::new(GatewaySender::new(gateway_tx), &config, auth_manager, None)
-            .expect("valid agent config");
+        let agent = MvpAgent::new(
+            GatewaySender::new(gateway_tx),
+            &config,
+            auth_manager,
+            None,
+            boot,
+        )
+        .expect("valid agent config");
         let incoming = LineBufferedRead::spawn_local(agent_in_read.compat());
         let (conn, handle_io) =
             acp::AgentSideConnection::new(agent, agent_out_write.compat_write(), incoming, |fut| {
@@ -40,7 +57,7 @@ pub fn spawn_agent(
             });
         tokio::task::spawn_local(
             GatewayReceiver::new(gateway_rx, conn)
-                .with_on_meta(xai_file_utils::trace_context::span_from_meta_traceparent)
+                .with_on_meta(xai_grok_otel::span_from_meta_traceparent)
                 .run(),
         );
         let _ = handle_io.await;

@@ -2,6 +2,7 @@
 
 use super::turn_end_hooks::{cancel_details, cancel_reason_for_completion};
 use super::*;
+use prod_mc_cli_chat_proxy_types::feedback_types;
 
 fn completion_cancel_trigger(result: &PromptTurnResult) -> Option<&str> {
     match result.as_ref().ok()?.completion_kind {
@@ -15,9 +16,7 @@ fn completion_cancel_trigger(result: &PromptTurnResult) -> Option<&str> {
 
 impl SessionActor {
     /// Emit a cosmetic `Plan` update at turn end to clear stale spinners.
-    ///
     /// When the model ends the turn without a cleanup `todo_write` call, remaining `in_progress` items keep spinning in the UI.
-    /// This does not mutate `TodoState`: it emits a transient, non-persisted `Plan` notification with `in_progress` entries shown as `completed`.
     /// No-op if no `in_progress` items exist.
     pub(super) async fn emit_turn_end_plan_cleanup(&self) {
         use crate::tools::todo::{TodoState, TodoStatus, plan_entry_from_todo_item};
@@ -340,10 +339,8 @@ impl SessionActor {
             .await;
         }
 
-        // Durable counterpart of the fire-and-forget `prompt_complete` emitted from `MvpAgent::prompt`
-        // The turn's terminal goes on the persisted and replayed `_x.ai/session/update` rail
-        // A viewer that re-attaches mid-turn then finalizes from replay instead of stranding on "Waiting…"
-        // The caller flushed the replay buffer first, so this lands strictly after the turn's last `session/update` delta
+        // Durable counterpart of the fire-and-forget `prompt_complete` emitted from `MvpAgent::prompt`.
+        // The turn's terminal goes on the persisted and replayed `_x.ai/session/update` rail A viewer that re-attaches mid-turn then finalizes from replay instead of stranding on "Waiting…" The caller flushed the replay buffer.
         if finalizes_turn {
             let mapped = result
                 .as_ref()
@@ -377,6 +374,10 @@ impl SessionActor {
                 cancellation_category.as_deref(),
                 cancellation_context,
                 elapsed_ms,
+                result
+                    .as_ref()
+                    .ok()
+                    .and_then(|ok| ok.turn_snapshot.as_ref()),
             )
             .await;
         }
@@ -391,16 +392,8 @@ impl SessionActor {
     }
 
     /// Emit the durable, replayable `TurnCompleted` terminal, the single path shared by `handle_completion` and `cancel_running_task`.
-    ///
     /// `(stop_reason, agent_result)` come from `prompt_complete_fields`, the same source as `prompt_complete`, so the two signals never disagree.
     /// `cancel_trigger` (when `Some`) rides the `_meta` as `cancelTrigger`; `"send_now"` marks a cancel-and-send end (marker suppressed).
-    /// `cancellation_category` (when `Some`) rides as `cancellationCategory` (e.g. `"HookDenied"`) so viewers pick category-aware terminal copy.
-    /// A failed turn's error kind rides the variant's own `error_kind` field, derived the same way as the `prompt_complete` payload's `errorKind`.
-    /// `elapsed_ms` is `None` when no running task supplied a start time.
-    /// Both callers queue the turn-end report before this, but the worker can dispatch first, so the terminal and the report race.
-    /// The pager handles either order.
-    /// The append is durable and happens after the turn's last flush barrier.
-    /// On the buffered rail a power loss could keep the turn's content while dropping its terminal.
     pub(super) async fn emit_turn_completed(
         &self,
         prompt_id: String,
@@ -410,6 +403,7 @@ impl SessionActor {
         cancellation_category: Option<&str>,
         cancellation_context: Option<serde_json::Value>,
         elapsed_ms: Option<u64>,
+        snapshot: Option<&TurnDeltaSnapshot>,
     ) {
         let (stop_reason, agent_result, error_kind) =
             crate::sampling::error::prompt_complete_fields(mapped);
@@ -426,7 +420,7 @@ impl SessionActor {
         let extra_meta = (!extra.is_empty()).then_some(extra);
         self.send_xai_notification_with_extra_meta(
             crate::session::turn_completion::build_turn_completed(
-                prompt_id,
+                prompt_id.clone(),
                 stop_reason,
                 agent_result,
                 error_kind,
@@ -437,6 +431,30 @@ impl SessionActor {
             crate::session::storage::jsonl::AppendDurability::Durable,
         )
         .await;
+
+        // Behind the finalization lease, so a turn posts exactly one delta whichever path settles it.
+        let turn_outcome = match mapped {
+            Ok(acp::StopReason::Cancelled) => feedback_types::TurnOutcome::Cancelled,
+            Ok(_) => feedback_types::TurnOutcome::Completed,
+            Err(_) => feedback_types::TurnOutcome::Error,
+        };
+        let taken;
+        let snapshot = match snapshot {
+            Some(snapshot) => Some(snapshot),
+            None => {
+                taken = self
+                    .signals_handle()
+                    .take_unfinished_turn_snapshot()
+                    .await
+                    .map(|mut snapshot| {
+                        self.apply_prompt_modes_to_snapshot(&mut snapshot);
+                        snapshot
+                    });
+                taken.as_ref()
+            }
+        };
+        self.report_turn_delta(&prompt_id, snapshot, elapsed_ms, turn_outcome)
+            .await;
 
         // Cost, context occupancy and the turn timer all moved during the turn.
         self.emit_status_snapshot_detached();
@@ -456,6 +474,23 @@ impl SessionActor {
         .to_string()
     }
 
+    pub(super) fn turn_error_fields(err: &acp::Error) -> (String, String, Option<String>) {
+        let category = Self::classify_turn_error(err);
+        let code = crate::sampling::error::error_kind_str_from_error(err)
+            .or_else(|| crate::sampling::error::error_code_from_data(err))
+            .map(str::to_owned)
+            .unwrap_or_else(|| category.clone());
+        // Only HTTP 400 is the backend's bad-request reason; 403 content-safety and 404 model/auth enrichment also fold into invalid_request but must not ship their bodies.
+        let detail =
+            (crate::sampling::error::http_status_from_error(err) == Some(400)).then(|| {
+                let named = crate::sampling::error::rewrite_service_names(
+                    &crate::sampling::error::acp_error_message(err),
+                );
+                xai_grok_telemetry::redact_error_detail(&named)
+            });
+        (category, code, detail)
+    }
+
     /// The `StopFailure` hook input's classified `error`.
     /// Structured markers win over the JSON-RPC code because they are more specific; anything the runtime cannot distinguish stays `Unknown`.
     pub(super) fn stop_failure_error_type(
@@ -465,10 +500,9 @@ impl SessionActor {
         if crate::sampling::error::is_max_tokens_turn_error(err) {
             return K::MaxOutputTokens;
         }
-        // The HTTP status carried in `err.data` is more specific than the JSON-RPC code, so it is checked first
-        // 403 is content-safety, not auth
-        // On the turn path it carries `http_status: 403` and folds into `invalid_request`
-        // On the setup path it has no status, so `-32603` below makes it `server_error`
+        // The HTTP status carried in `err.data` is more specific than the JSON-RPC code, so it is checked first 403 is content-safety, not auth.
+        // On the turn path it carries `http_status: 403` and folds into `invalid_request`.
+        // On the setup path it has no status, so `-32603` below makes it `server_error`.
         match crate::sampling::error::http_status_from_error(err) {
             Some(401) => return K::AuthenticationFailed,
             Some(429) | Some(503) | Some(529) => return K::RateLimit,
@@ -570,10 +604,54 @@ impl SessionActor {
             format!("Turn failed: {}", Self::classify_turn_error(err))
         }
     }
+}
 
-    pub(super) fn classify_install_error(
-        err: &xai_grok_agent::plugins::install_registry::InstallError,
-    ) -> String {
-        crate::plugin::classify_install_error(err)
+#[cfg(test)]
+mod turn_error_fields_tests {
+    use super::*;
+
+    fn err_with_status(message: &str, status: u16) -> acp::Error {
+        acp::Error::internal_error().data(crate::sampling::error::error_data_with_status(
+            message.to_string(),
+            Some(status),
+        ))
+    }
+
+    #[test]
+    fn http_400_detail_is_redacted_and_a_closed_code_is_emitted() {
+        let err = err_with_status(
+            "invalid request https://api.example.com/v1/chat?token=CANARYSECRET",
+            400,
+        );
+        let (_category, code, detail) = SessionActor::turn_error_fields(&err);
+        assert!(!code.is_empty(), "a closed error_code is always emitted");
+        let detail = detail.expect("an HTTP 400 turn error ships a redacted detail");
+        assert!(
+            !detail.contains("CANARYSECRET"),
+            "url token survived: {detail}"
+        );
+        assert!(!detail.contains("/v1/chat"), "url path survived: {detail}");
+    }
+
+    #[test]
+    fn detail_is_capped() {
+        let err = err_with_status(&"a".repeat(1000), 400);
+        let (_c, _code, detail) = SessionActor::turn_error_fields(&err);
+        assert_eq!(
+            detail.expect("400 ships a detail").chars().count(),
+            256,
+            "detail must be capped"
+        );
+    }
+
+    #[test]
+    fn non_400_errors_omit_detail() {
+        // 401 auth, 403 content-safety, 429 rate-limit, 500 server all fold into
+        // invalid_request/other but must never ship their (PII-bearing) bodies.
+        for status in [401u16, 403, 429, 500] {
+            let err = err_with_status("secret path /Users/someone/keys", status);
+            let (_c, _code, detail) = SessionActor::turn_error_fields(&err);
+            assert!(detail.is_none(), "status {status} must not ship a detail");
+        }
     }
 }

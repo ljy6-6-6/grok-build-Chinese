@@ -25,11 +25,9 @@ pub enum AutoScrollDirection {
     Down,
 }
 
-/// State for timer-driven drag auto-scroll.
-///
-/// While active, `tick_drag_autoscroll` scrolls by `speed` rows per tick in the given direction.
-/// The direction and speed are recomputed from the mouse position each time the pointer moves.
-/// The state is cleared when the pointer returns inside the content area or the drag ends.
+/// State for timer-driven drag auto-scroll. While active, `tick_drag_autoscroll` scrolls by `speed` rows per tick
+/// in the given direction. The direction and speed are recomputed from the mouse position each time the pointer
+/// moves. The state is cleared when the pointer returns inside the content area or the drag ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DragAutoScrollState {
     pub direction: AutoScrollDirection,
@@ -41,7 +39,6 @@ pub struct DragAutoScrollState {
 const EDGE_THRESHOLD: u16 = 2;
 
 /// Compute autoscroll direction and speed from mouse position relative to the scrollback content area.
-///
 /// Returns `Some(state)` when the pointer is above, below, or within [`EDGE_THRESHOLD`] rows of the content boundary.
 /// Returns `None` when the pointer is comfortably inside the viewport.
 pub fn compute_autoscroll(mouse_row: u16, content_area: Rect) -> Option<DragAutoScrollState> {
@@ -166,11 +163,9 @@ pub struct ResolvedSelectableLine {
 }
 
 impl ResolvedSelectableLine {
-    /// `(col distance, clamped col-within-range)` for a pointer at screen `col` on this line.
-    /// Distance is 0 with the exact offset inside the selectable span, otherwise the gap to the nearer edge with the offset clamped to that edge.
-    /// `None` when the line has no selectable width.
-    ///
-    /// Every hit test resolves columns through this, so their same-row behavior cannot diverge.
+    /// `(col distance, clamped col-within-range)` for a pointer at screen `col` on this line. Distance is 0 with the
+    /// exact offset inside the selectable span, otherwise the gap to the nearer edge with the offset clamped to that
+    /// edge. Every hit test resolves columns through this, so their same-row behavior cannot diverge.
     fn col_metrics(&self, col: u16) -> Option<(u16, u16)> {
         let start = self.screen_x.saturating_add(self.selectable_cols.start);
         let end = self.screen_x.saturating_add(self.selectable_cols.end);
@@ -338,15 +333,9 @@ impl ResolvedSelectionModel {
         best.map(|(_, hit)| hit)
     }
 
-    /// Nearest line of the anchor's `(entry_idx, range_id)` to `(col, row)`, by `(|screen_y - row|, then col distance)`: the drag-head resolver.
-    ///
-    /// Unlike [`Self::hit_test_selectable_range`] this never lands on another range and never misses while the anchor's range has visible lines.
-    /// So the head tracks the pointer across gap/vpad/chrome rows and past the range's last line, like a native drag.
-    /// Same-row behavior is identical to `hit_test_selectable_range` restricted to that range.
-    /// Full ties (a pointer row equidistant between two lines) resolve to the line farther from the anchor.
-    /// That way a drag over a dead row keeps extending the selection instead of retreating.
-    ///
-    /// `None` only when the range has no selectable lines in this model (scrolled fully out); callers keep the previous head then.
+    /// Unlike [`Self::hit_test_selectable_range`] this never lands on another range and never misses while the anchor's
+    /// range has visible lines. That way a drag over a dead row keeps extending the selection instead of retreating.
+    /// `None` only when the range has no selectable lines in this model (scrolled fully out).
     pub fn hit_test_nearest_in_range(
         &self,
         anchor: RangeHit,
@@ -550,7 +539,6 @@ pub fn render_active_selection_overlay(
 }
 
 /// Render a persistent text selection overlay (after mouse-up).
-///
 /// Unlike [`render_active_selection_overlay`], which reads from [`ActiveTextDrag`], this reads from [`PersistentTextSelection`].
 /// It maps stable `block_line_idx` coordinates back to screen positions using the current frame's [`ResolvedSelectionModel`].
 pub fn render_persistent_selection_overlay(
@@ -886,10 +874,8 @@ fn selection_slice_for_line_by_block_idx(
         .selectable_cols
         .end
         .saturating_sub(line.selectable_cols.start);
-    // Columns are visual cells of the painted row
-    // Slice the painted region (the exact drawn cells) back to logical order for the clipboard
-    // Otherwise a trailing-trimmed or overridden `text` could drift from the cells the user dragged
-    // When reordering is off this falls back to `text` unchanged
+    // Columns are visual cells of the painted row. Otherwise a trailing-trimmed or overridden `text` could drift from
+    // the cells the user dragged.
     let selected = if crate::render::bidi::is_enabled() {
         match line.painted_region.as_deref() {
             // Override rows (tool headers) paint a display that differs from the stored copy text
@@ -931,16 +917,9 @@ pub(crate) fn apply_selection_boundary(
     boundary.apply(selected, include_prefix, include_suffix)
 }
 
-/// Compute the selected column range for a given line based on anchor/head endpoints.
-///
-/// Shared implementation used by both active drag and persistent selection overlays.
-/// Endpoints snap to grapheme boundaries: starts floor onto the grapheme under the anchor, ends advance past the grapheme under the head.
-/// - Single-line: `floor(min(anchor_col, head_col))..past(max(anchor_col, head_col))`
-/// - Multi-line first: `floor(start_col)..width`
-/// - Multi-line last: `0..past(end_col)`
-/// - Multi-line middle: `0..width` (full line)
-///
-/// Returns `None` if the line falls outside the anchor/head range.
+/// Compute the selected column range for a given line based on anchor/head endpoints. Single-line:
+/// `floor(min(anchor_col, head_col)).past(max(anchor_col, head_col))`. Multi-line first: `floor(start_col).width`.
+/// Multi-line last: `0.past(end_col)`. Multi-line middle: `0.width` (full line).
 fn selected_cols_for_endpoints(
     anchor_block_line: usize,
     anchor_col: u16,
@@ -1025,7 +1004,6 @@ fn selected_cols_for_line_by_block_idx(
 }
 
 /// Reconstruct the full selected text from the block's complete output lines.
-///
 /// Unlike [`reconstruct_selection_text`], which only sees lines currently visible on screen, this reads the block's full output.
 /// Copy produces the complete selection even when the anchor or head has scrolled off-screen.
 pub fn reconstruct_full_selection_text(
@@ -1301,12 +1279,9 @@ fn display_width(text: &str) -> u16 {
     })
 }
 
-/// Try to find a URL that spans the given display column in `text`.
-///
-/// Scans `text` for URLs matching common schemes (`https?://`, `ftp://`, `file://`).
-/// Returns the display-column range of the URL containing `col`, or `None` if `col` is not within any URL.
-///
-/// Trailing punctuation (`.`, `,`, `)`, etc.) is stripped when unbalanced, handling prose contexts like `"see https://example.com."`.
+/// Try to find a URL that spans the given display column in `text`. Scans `text` for URLs matching common schemes
+/// (`https?://`, `ftp://`, `file://`). Trailing punctuation (`.`, `,`, `)`, etc.) is stripped when unbalanced,
+/// handling prose contexts like `"see https://example.com."`.
 pub fn url_range_at_col(text: &str, col: u16) -> Option<Range<u16>> {
     for m in URL_RE.find_iter(text) {
         let col_start = display_width(&text[..m.start()]);
@@ -1351,13 +1326,8 @@ enum JoinerColSnap {
     Backward,
 }
 
-/// Select the wrap-group word or URL at `hit`.
-///
-/// The wrap group is the maximal run of `Some` joiners inside one range.
-/// `head` is inclusive; `text` is the joined fragment text and is never empty.
-/// `None` means nothing selectable.
-///
-/// `joiner_to_previous: None` is a hard source-line break and is not crossed, even though `'\n'` is not in `word_separators`.
+/// Select the wrap-group word or URL at `hit`. `head` is inclusive; `text` is the joined fragment text and is never
+/// empty.
 #[must_use]
 pub fn semantic_selection_at(
     model: &ResolvedSelectionModel,
@@ -1451,7 +1421,6 @@ pub fn semantic_selection_at(
 }
 
 /// Map a fragment-local click column into concat display columns.
-///
 /// When a wrap splits a grapheme, the continuation still has local width but adds little or none in concat.
 /// Those absorbed columns snap to the last concat column of the split cluster instead of drifting into later text.
 fn map_local_hit_to_concat_col(
@@ -1604,10 +1573,9 @@ mod tests {
         }
     }
 
-    // Serialize the process-global bidi latch
-    // Restore it on scope exit even if `f` panics, so a failed assertion can't leak `rtl_bidi = true` into other tests in the process
-    // LTR cases need no reorder so only these RTL cases need the guard
-    // "خوب" avoids the lam-alef ligature so columns map 1:1
+    // Serialize the process-global bidi latch. Restore it on scope exit even if `f` panics, so a failed assertion
+    // can't leak `rtl_bidi = true` into other tests in the process. LTR cases need no reorder so only these RTL cases
+    // need the guard.
     static BIDI_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     struct BidiLatchGuard(bool);
     impl Drop for BidiLatchGuard {

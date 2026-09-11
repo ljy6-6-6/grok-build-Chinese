@@ -35,6 +35,54 @@ pub(crate) const MAX_OUTPUT_BYTES: usize =
     CAPTURE_HEADROOM_OVER_REPLACEMENT * MAX_HOOK_OUTPUT_REPLACEMENT_CHARS;
 
 const GATE_EXIT_CODE: i32 = 2;
+const HOOK_GROUP_REAP: Duration = Duration::from_millis(500);
+
+tokio::task_local! {
+    static HOOK_GROUP_REAPS: std::cell::RefCell<Vec<tokio::task::JoinHandle<()>>>;
+}
+
+pub async fn join_hook_group_reaps<F: std::future::Future>(work: F) -> F::Output {
+    HOOK_GROUP_REAPS
+        .scope(std::cell::RefCell::new(Vec::new()), async {
+            let out = work.await;
+            let joins = HOOK_GROUP_REAPS.with(|slot| std::mem::take(&mut *slot.borrow_mut()));
+            if !joins.is_empty() {
+                let _ = tokio::time::timeout(HOOK_GROUP_REAP, async {
+                    for join in joins {
+                        let _ = join.await;
+                    }
+                })
+                .await;
+            }
+            out
+        })
+        .await
+}
+
+struct HookProcessGuard {
+    group: Option<Arc<ProcessGroup>>,
+}
+
+impl HookProcessGuard {
+    fn arm(group: Option<Arc<ProcessGroup>>) -> Self {
+        Self { group }
+    }
+
+    fn disarm(&mut self) {
+        self.group = None;
+    }
+}
+
+impl Drop for HookProcessGuard {
+    fn drop(&mut self) {
+        if let Some(group) = self.group.take() {
+            let _ = group.kill();
+            if let Some(join) = group.schedule_reap(HOOK_GROUP_REAP) {
+                let _ = HOOK_GROUP_REAPS.try_with(|slot| slot.borrow_mut().push(join));
+            }
+        }
+    }
+}
 
 // SECURITY: a process group lets session close killpg the whole tree; kill_on_drop would leak detached grandchildren.
 fn hook_process_group(child: &tokio::process::Child) -> Option<Arc<ProcessGroup>> {
@@ -189,19 +237,22 @@ pub async fn run_command_hook(
         }
     };
 
-    let mut hook_group = None;
-    if let Some(scope) = ctx.process_scope.as_ref()
-        && let Some(group) = hook_process_group(&child)
+    let hook_group = hook_process_group(&child);
+    if let (Some(scope), Some(group)) = (ctx.process_scope.as_ref(), hook_group.as_ref())
+        && !scope.register(group)
     {
-        if !scope.register(&group) {
-            return (
-                HookRunnerResult::Failed("session closed before the hook ran".to_string()),
-                start.elapsed(),
-                None,
-            );
+        let _ = group.kill();
+        if let Some(join) = group.schedule_reap(HOOK_GROUP_REAP) {
+            let _ = join.await;
         }
-        hook_group = Some(group);
+        drop(child);
+        return (
+            HookRunnerResult::Failed("session closed before the hook ran".to_string()),
+            start.elapsed(),
+            None,
+        );
     }
+    let mut reap = HookProcessGuard::arm(hook_group.clone());
 
     let stdin = child.stdin.take();
     let timeout = Duration::from_millis(spec.timeout_ms);
@@ -218,9 +269,9 @@ pub async fn run_command_hook(
 
     let elapsed = start.elapsed();
 
-    if !matches!(result, Ok(Ok(_)))
-        && let Some(group) = &hook_group
-    {
+    if matches!(result, Ok(Ok(_))) {
+        reap.disarm();
+    } else if let Some(group) = &hook_group {
         let _ = group.kill();
     }
 
@@ -281,13 +332,7 @@ pub async fn run_command_hook(
                     if exit_code == 0 {
                         (HookRunnerResult::Success, elapsed)
                     } else {
-                        (
-                            HookRunnerResult::Failed(append_stderr_line(
-                                &format!("exit code {exit_code}"),
-                                &stderr,
-                            )),
-                            elapsed,
-                        )
+                        (failed_with_exit_code(exit_code, &stderr), elapsed)
                     }
                 }
                 GateKind::Tool => {
@@ -587,9 +632,10 @@ fn append_stderr_line(message: &str, stderr: &str) -> String {
     }
 }
 
-fn failed_with_exit_code(hook_name: &str, exit_code: i32, stderr: &str) -> HookRunnerResult {
+/// Same shape in every mode (`exit code N: <first stderr line>`); the dispatcher and the UI name the hook and the verb.
+fn failed_with_exit_code(exit_code: i32, stderr: &str) -> HookRunnerResult {
     HookRunnerResult::Failed(append_stderr_line(
-        &format!("hook '{hook_name}' failed with exit code {exit_code}"),
+        &format!("exit code {exit_code}"),
         stderr,
     ))
 }
@@ -708,7 +754,7 @@ fn parse_blocking_result(
             },
             elapsed,
         ),
-        _ => (failed_with_exit_code(hook_name, exit_code, stderr), elapsed),
+        _ => (failed_with_exit_code(exit_code, stderr), elapsed),
     }
 }
 
@@ -756,7 +802,7 @@ fn parse_stop_result(
                 elapsed,
             )
         }
-        _ => (failed_with_exit_code(hook_name, exit_code, stderr), elapsed),
+        _ => (failed_with_exit_code(exit_code, stderr), elapsed),
     }
 }
 
@@ -822,13 +868,7 @@ fn parse_prompt_result(
             },
             elapsed,
         ),
-        _ => (
-            HookRunnerResult::Failed(append_stderr_line(
-                &format!("hook '{hook_name}' failed with exit code {exit_code}"),
-                stderr,
-            )),
-            elapsed,
-        ),
+        _ => (failed_with_exit_code(exit_code, stderr), elapsed),
     }
 }
 
@@ -870,10 +910,7 @@ fn parse_post_tool_use_result(
     }
 
     if exit_code != 0 && exit_code != GATE_EXIT_CODE {
-        let exit_failure = append_stderr_line(
-            &format!("hook '{hook_name}' failed with exit code {exit_code}"),
-            stderr,
-        );
+        let exit_failure = append_stderr_line(&format!("exit code {exit_code}"), stderr);
         if outcome.is_empty() {
             return (HookRunnerResult::Failed(exit_failure), elapsed);
         }
@@ -972,7 +1009,7 @@ mod tests {
         match result {
             HookRunnerResult::Deny { reason, .. } => assert_eq!(
                 reason,
-                "unknown decision value 'denied' in 'hookSpecificOutput.permissionDecision' from hook 'typo': writes outside the repo"
+                "unknown decision value 'denied' in 'hookSpecificOutput.permissionDecision': writes outside the repo"
             ),
             other => panic!("expected Deny, got {other:?}"),
         }
@@ -987,7 +1024,7 @@ mod tests {
         match result {
             HookRunnerResult::Deny { reason, .. } => assert!(
                 reason.starts_with(
-                    "unknown decision value 'denied' in 'hookSpecificOutput.permissionDecision' from hook 'typo'"
+                    "unknown decision value 'denied' in 'hookSpecificOutput.permissionDecision'"
                 ),
                 "the error must survive a full-length stderr line, got: {reason}"
             ),
@@ -1032,7 +1069,7 @@ mod tests {
             (r#"{"decision":"deny"}"#, "deny: denied by hook 'test'"),
             (
                 r#"{"decision":"maybe"}"#,
-                "failed: unknown decision value 'maybe' in 'decision' from hook 'test'",
+                "failed: unknown decision value 'maybe' in 'decision'",
             ),
             (
                 r#"{"decision":"allow","continue":false,"systemMessage":"hi"}"#,
@@ -1091,7 +1128,7 @@ mod tests {
             ),
             (
                 r#"{"hookSpecificOutput":{"permissionDecision":"maybe"}}"#,
-                "failed: unknown decision value 'maybe' in 'hookSpecificOutput.permissionDecision' from hook 'test'",
+                "failed: unknown decision value 'maybe' in 'hookSpecificOutput.permissionDecision'",
             ),
             (
                 r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"defer","permissionDecisionReason":"because"}}"#,
@@ -1104,7 +1141,7 @@ mod tests {
             ),
             (
                 r#"{"decision":"defer","hookSpecificOutput":{"permissionDecision":"maybe"}}"#,
-                "failed: unknown decision value 'maybe' in 'hookSpecificOutput.permissionDecision' from hook 'test'",
+                "failed: unknown decision value 'maybe' in 'hookSpecificOutput.permissionDecision'",
             ),
         ] {
             assert_eq!(summarize(parse(json)), expected, "for {json}");
@@ -1258,11 +1295,11 @@ mod tests {
         let cases = [
             (
                 r#"{"decision":"maybe"}"#,
-                "unknown decision value 'maybe' in 'decision' from hook 'test'",
+                "unknown decision value 'maybe' in 'decision'",
             ),
             (
                 r#"{"hookSpecificOutput":{"permissionDecision":"maybe"}}"#,
-                "unknown decision value 'maybe' in 'hookSpecificOutput.permissionDecision' from hook 'test'",
+                "unknown decision value 'maybe' in 'hookSpecificOutput.permissionDecision'",
             ),
         ];
         for (json, expected) in cases {
@@ -1945,6 +1982,7 @@ mod tests {
             session_id: "test-session",
             workspace_root: "/tmp",
             process_scope: None,
+            disabled: Default::default(),
         }
     }
 
@@ -2045,6 +2083,7 @@ mod tests {
             session_id: "test-session",
             workspace_root: &workspace,
             process_scope: None,
+            disabled: Default::default(),
         };
         let (result, _, _) = run_command_hook(&spec, &envelope, &ctx, GateKind::Observe).await;
 
@@ -2346,6 +2385,48 @@ mod tests {
         assert!(
             !marker.exists(),
             "grandchild outlived session close, so the group was not killpg'd"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_command_hook_kills_and_reaps_grandchild() {
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = tmp.path().join("grandchild_alive");
+        let child_pid = tmp.path().join("child.pid");
+        let mut spec = make_shell_spec(&format!(
+            "sh -c 'echo $$ > \"{}\"; sleep 30; echo alive > \"{}\"' & wait",
+            child_pid.display(),
+            marker.display()
+        ));
+        spec.timeout_ms = 60_000;
+        let envelope = make_envelope();
+        let ctx = make_ctx();
+        let hook = tokio::spawn(async move {
+            run_command_hook(&spec, &envelope, &ctx, GateKind::Observe).await
+        });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if child_pid.exists() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("grandchild pid");
+        hook.abort();
+        let _ = tokio::time::timeout(Duration::from_secs(2), hook).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!marker.exists(), "grandchild wrote after hook drop");
+        let pid: u32 = std::fs::read_to_string(&child_pid)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(
+            !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+            "grandchild {pid} still live after hook drop"
         );
     }
 

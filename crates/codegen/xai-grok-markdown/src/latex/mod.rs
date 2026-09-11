@@ -35,7 +35,6 @@ pub(crate) const MAX_MATH_SOURCE_LEN: usize = 4096;
 const MAX_DEPTH: usize = 32;
 
 /// Convert inline math to a single-line Unicode string.
-///
 /// Row separators (`\\`) collapse to `; ` and multi-row environments render single-row, so inline math never introduces a line break mid-paragraph.
 /// Returns `None` when the source is too large to convert (see [`MAX_MATH_SOURCE_LEN`]).
 pub(crate) fn latex_to_unicode_inline(src: &str) -> Option<String> {
@@ -53,11 +52,7 @@ pub(crate) fn latex_to_unicode_inline(src: &str) -> Option<String> {
 }
 
 /// Convert display math to one or more Unicode lines.
-///
-/// Lines come from `\\` row separators and multi-row environments, which lay out as 2D boxes anchored to the surrounding flow (see [`MathBox`]).
 /// Leading whitespace is structural (box alignment) and preserved; only line ends are trimmed.
-/// Returns `None` when the source is too large to convert, and an empty `Vec` when the math has no visible content.
-/// Callers should fall back in both cases.
 pub(crate) fn latex_to_unicode_display(src: &str) -> Option<Vec<String>> {
     if src.len() > MAX_MATH_SOURCE_LEN {
         return None;

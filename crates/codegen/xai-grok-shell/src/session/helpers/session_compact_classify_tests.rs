@@ -325,10 +325,10 @@ fn stream_timing_boundaries() {
 
 #[test]
 fn compaction_outcome_as_str_is_stable() {
-    assert_eq!(CompactionOutcome::Success.as_str(), "success");
-    assert_eq!(CompactionOutcome::Truncated.as_str(), "truncated");
-    assert_eq!(CompactionOutcome::Deterministic.as_str(), "deterministic");
-    assert_eq!(CompactionOutcome::Transient.as_str(), "transient");
-    assert_eq!(CompactionOutcome::Degenerate.as_str(), "degenerate");
-    assert_eq!(CompactionOutcome::Failed.as_str(), "failed");
+    assert_eq!(CompactionOutcome::Success.as_ref(), "success");
+    assert_eq!(CompactionOutcome::Truncated.as_ref(), "truncated");
+    assert_eq!(CompactionOutcome::Deterministic.as_ref(), "deterministic");
+    assert_eq!(CompactionOutcome::Transient.as_ref(), "transient");
+    assert_eq!(CompactionOutcome::Degenerate.as_ref(), "degenerate");
+    assert_eq!(CompactionOutcome::Failed.as_ref(), "failed");
 }

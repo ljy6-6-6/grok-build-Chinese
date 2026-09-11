@@ -208,11 +208,7 @@ impl ImportClaudeModalState {
         plan
     }
 
-    /// Handle a mouse event. Recognizes:
-    /// - Left click on an item row: focus and toggle that item.
-    /// - Left click on a section/type header: focus and tri-state toggle (selects all if any unselected, deselects all if everything selected).
-    /// - Scroll wheel: scroll up/down through the content.
-    /// - Clicks outside the content area are ignored.
+    /// Handle a mouse event. Recognizes.
     pub fn handle_mouse(
         &mut self,
         kind: crossterm::event::MouseEventKind,
@@ -713,6 +709,14 @@ pub fn render_import_claude_modal_with_locale(
             height: 1,
         };
         Paragraph::new(line).render(row_rect, buf);
+        // Terminal theme (Reset band slots): reverse-video focus cue; RGB
+        // themes keep the bg_highlight underlay painted above.
+        if is_focused && !is_blank && theme.is_bandless() {
+            buf.set_style(
+                row_rect,
+                Style::default().add_modifier(ratatui::style::Modifier::REVERSED),
+            );
+        }
     }
 }
 
@@ -1058,10 +1062,9 @@ fn render_item_line_with_locale<'a>(
     ])
 }
 
-/// Conditionally apply the row-hover background to a span style.
-///
-/// When a row is focused the renderer pre-fills the row's cells with `bg_highlight`.
-/// Setting bg explicitly on each span too keeps the highlight when a span resets its background and makes hovering read as a continuous bar.
+/// Conditionally apply the row-hover background to a span style. When a row is focused the renderer
+/// pre-fills the row's cells with `bg_highlight`. Setting bg explicitly on each span too keeps the
+/// highlight when a span resets its background and makes hovering read as a continuous bar.
 fn with_bg(style: Style, focused: bool, theme: &Theme) -> Style {
     if focused {
         style.bg(theme.bg_highlight)

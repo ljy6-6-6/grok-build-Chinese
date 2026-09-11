@@ -23,11 +23,9 @@ fn item_kind_str(item: &ConversationItem) -> &'static str {
     }
 }
 
-/// The derived-state matrix for in-place history rewrites: each kind picks
-/// its turn-capture handling and persistence flavor here instead of
-/// hand-rolling the sequence. Item-count-CHANGING rewrites (compaction,
-/// rewind, …) use [`ChatStateActor::replace_conversation`] instead, which
-/// also reseeds token totals.
+/// Derived-state matrix for in-place history rewrites: each kind picks turn-capture
+/// handling and persistence flavor here. Item-count-changing rewrites use
+/// [`ChatStateActor::replace_conversation`], which also reseeds token totals.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum HistoryRewrite {
     /// Dedup / dangling-tool-call repair: may add or remove items ahead of
@@ -44,10 +42,9 @@ pub(super) enum HistoryRewrite {
 }
 
 impl ChatStateActor {
-    /// Apply `mutate` to the conversation and drive the derived-state matrix
-    /// for `kind` (see [`HistoryRewrite`]). Persists only when `mutate`
-    /// reports a nonzero change count. Returns that count plus, for the
-    /// strip flavor, the disk acknowledgement.
+    /// Apply `mutate` and drive the derived-state matrix for `kind`.
+    /// Persists only when `mutate` reports a nonzero change count.
+    /// Returns that count plus, for the strip flavor, the disk acknowledgement.
     pub(super) fn rewrite_history(
         &mut self,
         kind: HistoryRewrite,
@@ -81,22 +78,9 @@ impl ChatStateActor {
         (changed, disk_ack)
     }
 
-    /// Repair any dangling tool calls in the conversation and persist the fix.
-    ///
-    /// A "dangling" tool call is an assistant message with tool call IDs that
-    /// lack matching `ToolResult` entries. This can happen when:
-    /// - The user cancels (Ctrl+C) mid-tool-execution in a live session
-    /// - The process crashes between pushing the assistant and tool results
-    /// - The tokio task is aborted at an `.await` point
-    ///
-    /// This method repairs the state in-place and persists the fix to disk.
-    /// It is idempotent — calling it on a clean conversation is a cheap no-op
-    /// (single forward scan, no allocations).
-    ///
-    /// Only call at write boundaries where the previous turn is definitively
-    /// over (`ChatState::new()`, `push_user_message()`, `BuildConversationRequest`).
-    /// Do NOT call from read handlers — background tasks run concurrently with
-    /// tool execution and would misidentify in-flight calls as dangling.
+    /// Repair dangling tool calls (assistant call IDs with no `ToolResult`) and persist.
+    /// Idempotent. Only call at write boundaries where the previous turn is over.
+    /// Do not call from read handlers — concurrent tool execution would look dangling.
     pub(super) fn ensure_conversation_integrity(&mut self) {
         self.ensure_conversation_integrity_with_reason(DanglingToolCallReason::UserCancelled);
     }
@@ -125,11 +109,8 @@ impl ChatStateActor {
         });
     }
 
-    /// Repair dangling tool calls after a harness-initiated halt: the
-    /// shell's cancel teardown calls this eagerly so the on-disk tail is
-    /// clean even if the session ends there; the next push (see
-    /// [`Self::push_user_message_with_repair_reason`]) repairs the same way
-    /// lazily as a backstop.
+    /// Repair dangling tool calls after a harness-initiated halt so the on-disk tail is clean.
+    /// The next push repairs the same way lazily as a backstop.
     pub(super) fn repair_dangling_after_harness_halt(&mut self, class: &'static str) {
         self.pop_stranded_continue_reminder();
         self.ensure_conversation_integrity_with_reason(DanglingToolCallReason::HarnessHalted {
@@ -137,13 +118,9 @@ impl ChatStateActor {
         });
     }
 
-    /// Drop a trailing continue reminder whose continuation will never
-    /// sample. Only called where the turn is known dead (harness halt, or a
-    /// new real user prompt arriving) — a live reminder awaiting its
-    /// continuation must survive the per-build integrity repair.
-    /// `IntegrityRepair` leaves token totals untouched, so the reminder's
-    /// push-time estimate lingers until the next provider usage reseeds it —
-    /// a small, safe-direction overcount.
+    /// Drop a trailing continue reminder whose continuation will never sample.
+    /// Only where the turn is known dead — a live reminder must survive integrity repair.
+    /// `IntegrityRepair` leaves token totals untouched, so the reminder's estimate lingers until reseed.
     pub(super) fn pop_stranded_continue_reminder(&mut self) {
         if !matches!(
             self.state.conversation.last(),
@@ -169,11 +146,8 @@ impl ChatStateActor {
         });
     }
 
-    /// Out-of-band history repair (`x.ai/session/repair`): run
-    /// [`crate::compaction_utils::repair_history`] and persist changes via
-    /// [`Self::replace_conversation`]. Unlike
-    /// [`Self::ensure_conversation_integrity`], this also removes orphaned
-    /// `ToolResult`s — the shape that bricks a session with provider 400s.
+    /// Out-of-band history repair: run [`crate::compaction_utils::repair_history`] and persist.
+    /// Unlike integrity repair, this also removes orphaned `ToolResult`s that brick sessions with 400s.
     /// `dry_run` only reports.
     pub(super) fn repair_history(
         &mut self,
@@ -285,16 +259,8 @@ impl ChatStateActor {
         self.state.conversation.push(item);
     }
 
-    /// Push a user message, ensuring conversation integrity first.
-    ///
-    /// When the user cancels a turn while the model was executing parallel
-    /// tool calls, the conversation may have dangling tool call IDs. This
-    /// method repairs them before appending the new message so the on-disk
-    /// and in-memory state stay consistent.
-    ///
-    /// Also runs [`prune_retained_conversation`] to eagerly hard-clear very
-    /// old tool results from the in-memory state, bounding long-session
-    /// retained memory without waiting for the context-window threshold.
+    /// Push a user message, repairing dangling tool calls first so cancel/crash tails stay consistent.
+    /// Also runs [`prune_retained_conversation`] to hard-clear very old tool results in memory.
     pub(super) fn push_user_message(&mut self, item: ConversationItem) {
         self.push_user_message_with_repair_reason(item, DanglingToolCallReason::UserCancelled);
     }
@@ -305,14 +271,9 @@ impl ChatStateActor {
         item: ConversationItem,
         reason: DanglingToolCallReason,
     ) {
-        // A turn-starting user item (same predicate as the trailing-report
-        // walk) or a mid-turn user input (recovery prompt, stop-hook
-        // feedback, goal directive, directory switch, drained interjection)
-        // landing on a trailing continue reminder means the continuation is
-        // dead — the stranded reminder must not sit before the new
-        // instruction, or be buried by it. A live reminder is never trailing
-        // at these pushes: its continuation is still in flight (interjection
-        // drains are deferred while one is).
+        // A turn-starting or mid-turn user item landing on a trailing continue reminder
+        // means the continuation is dead — the stranded reminder must not sit before the new instruction.
+        // A live reminder is never trailing here: its continuation is still in flight.
         {
             use xai_grok_sampling_types::SyntheticReason as R;
             if matches!(
@@ -348,47 +309,9 @@ impl ChatStateActor {
         self.prune_retained_conversation();
     }
 
-    /// Eagerly hard-clear tool results from very old turns in the retained
-    /// in-memory conversation, freeing the actual string bytes.
-    ///
-    /// Unlike the API-copy pruning in `build_conversation_request` (which runs
-    /// on a *clone* only when context > 50% full), this operates on
-    /// `self.state.conversation` directly and runs after every user turn.
-    ///
-    /// # What this does
-    ///
-    /// Only **hard-clears** are applied (no soft-trim).  Soft-trimming is a
-    /// context-management operation that changes what the model sees;
-    /// hard-clearing is a memory-management operation that replaces content
-    /// that is so old the model should not need it again.  The threshold is
-    /// controlled by `PruningConfig::hard_clear_age_turns`.
-    ///
-    /// # Retained-memory measurement
-    ///
-    /// When any clearing occurs, a `tracing::debug!` event reports:
-    /// - `hard_cleared` — number of tool results cleared
-    /// - `bytes_freed` — approximate bytes recovered (sum of content lengths)
-    /// - `conversation_len` — total item count after the pass
-    ///
-    /// # Synthetic User items and turn-age accuracy
-    ///
-    /// The shell can inject synthetic `User` items mid-turn (e.g. system
-    /// corrective warnings) without calling `increment_prompt_index`.  These
-    /// do not represent real user turns.  The backward scan here counts every
-    /// `User` item as a turn boundary, so synthetic items would normally cause
-    /// old tool results to appear older than they really are.
-    ///
-    /// This is compensated by raising the effective clearing threshold by the
-    /// number of synthetic User items (`total_user_items - prompt_index`).
-    /// The result: a tool result is never cleared before `hard_clear_age_turns`
-    /// REAL turns have elapsed, even in sessions with many synthetic messages.
-    ///
-    /// # Replay / rewind correctness
-    ///
-    /// `updates.jsonl` is **never touched**, so cross-compaction
-    /// `replay_to_prompt` is unaffected.  The pruned `chat_history.jsonl`
-    /// on disk mirrors the in-memory state — both lose old bulk content but
-    /// `updates.jsonl` retains the original data for replay.
+    /// Eagerly hard-clear tool results from very old turns in the retained conversation.
+    /// Unlike API-copy pruning, this mutates `self.state.conversation` after every user turn.
+    /// `updates.jsonl` is never touched, so replay stays intact; synthetic User items raise the age threshold.
     pub(super) fn prune_retained_conversation(&mut self) -> usize {
         if !self.pruning_config.enabled {
             return 0;
@@ -398,17 +321,9 @@ impl ChatStateActor {
             return 0;
         }
 
-        // Compute how many synthetic User items exist (system reminders, etc.).
-        // Synthetic User items are NOT real user turns — they are injected by the
-        // shell mid-turn and do not increment `prompt_index`.  The naive backward
-        // scan counts every User item as a turn boundary, so synthetic items make
-        // old tool results appear older than they really are and can cause
-        // premature hard-clears.
-        //
-        // Fix: raise the effective clearing threshold by the number of synthetic
-        // User items.  This guarantees a tool result is never cleared before
-        // `hard_clear_age_turns` REAL turns have elapsed, regardless of how many
-        // synthetic messages the session contains.
+        // Synthetic User items are not real turns (they do not increment `prompt_index`).
+        // Raise the clearing threshold by their count so a result is never cleared before
+        // `hard_clear_age_turns` real turns have elapsed.
         let total_user_items = self
             .state
             .conversation
@@ -466,9 +381,7 @@ impl ChatStateActor {
     }
 
     /// Approximate byte footprint of all string content in the conversation.
-    ///
     /// Used for before/after measurement logging when pruning runs.
-    /// Sums the byte lengths of all string fields; does not allocate.
     fn conversation_content_bytes(&self) -> usize {
         self.state
             .conversation
@@ -549,10 +462,8 @@ impl ChatStateActor {
                 .get_or_insert_default()
                 .record_subagent(by_model, incomplete);
         }
-        // The session ledger always folds, even when the usage is not
-        // attributable to the open prompt (its pin may belong to an earlier
-        // prompt). Reporting that gap is the coordinator's sticky flag's job —
-        // never mark a different live prompt's ledger.
+        // The session ledger always folds, even when usage is not attributable to the open prompt.
+        // Reporting that gap is the coordinator's sticky flag — never mark a different live prompt's ledger.
         self.state
             .session_usage
             .record_subagent(by_model, incomplete);
@@ -578,11 +489,8 @@ impl ChatStateActor {
         });
     }
 
-    /// Reseed for `total_tokens` after a conversation rewrite (compaction,
-    /// rewind, mode switch, goal-directive prune): the raw `base_estimate`
-    /// scaled by the provider-confirmed ratio (`total_tokens ÷
-    /// estimate_at_last_response`), capped at the pre-rewrite total (see
-    /// `COMPACTION.md`).
+    /// Reseed `total_tokens` after a conversation rewrite.
+    /// Scales `base_estimate` by the provider-confirmed ratio, capped at the pre-rewrite total.
     pub(super) fn reseed_total_tokens(&self, base_estimate: u64) -> u64 {
         let pre_replace_total = self.state.total_tokens;
         let mut estimated_tokens =
@@ -600,10 +508,8 @@ impl ChatStateActor {
         estimated_tokens
     }
 
-    /// Replace the entire conversation, persist, re-estimate `total_tokens`
-    /// via [`Self::reseed_total_tokens`], and emit reset + token-update events.
-    /// `is_compaction` only marks the turn capture; the reseed math is the
-    /// same for every rewrite.
+    /// Replace the entire conversation, persist, re-estimate `total_tokens`, and emit reset events.
+    /// `is_compaction` only marks the turn capture; the reseed math is the same for every rewrite.
     pub(super) fn replace_conversation(
         &mut self,
         items: Vec<ConversationItem>,
@@ -632,15 +538,9 @@ impl ChatStateActor {
         });
     }
 
-    /// Atomically swap the leading `System` message with `prompt` (or insert one
-    /// if absent), persisting when changed. Runs inside the actor's command loop
-    /// so it serializes with turn pushes — no lost-update race on a mid-turn
-    /// reconnect. Returns whether the conversation changed.
-    ///
-    /// The conversation is cloned (items are `Arc`-backed, so the clone is
-    /// shallow) rather than `mem::take`n: `replace_conversation` snapshots the
-    /// in-flight turn-capture tail from `state.conversation` before swapping,
-    /// so the state must stay intact until then.
+    /// Atomically swap the leading `System` message with `prompt` (or insert one).
+    /// Runs in the actor loop so it serializes with turn pushes — no lost-update on mid-turn reconnect.
+    /// Clone, do not `mem::take`: `replace_conversation` snapshots the turn-capture tail first.
     pub(super) fn replace_system_head(&mut self, prompt: &str) -> bool {
         if let Some(ConversationItem::System(sys)) = self.state.conversation.first()
             && crate::conversation_util::canonical_system_prompt_eq(sys.content.as_ref(), prompt)
@@ -701,10 +601,9 @@ impl ChatStateActor {
         }
     }
 
-    /// Fail-safe `conversation[offset..]` for turn capture: a capture accounting
-    /// slip must never abort the user's session (a raw index here SIGABRT-crashed
-    /// a live CLI), so an out-of-range offset yields an empty slice — loud in dev
-    /// via `debug_assert!`, with a prod breadcrumb via `error!`.
+    /// Fail-safe `conversation[offset..]` for turn capture.
+    /// An out-of-range offset yields an empty slice — a raw index here SIGABRT-crashed a live CLI.
+    /// Loud in dev via `debug_assert!`, with a prod breadcrumb via `error!`.
     pub(super) fn turn_tail(
         conversation: &[ConversationItem],
         offset: usize,

@@ -291,10 +291,9 @@ async fn normal_completion_persists_turn_completed_after_buffered_delta_flush() 
                 "the buffered delta must not be persisted before the flush"
             );
 
-            // This is the exact flush `run_session`'s completion branch performs before calling `handle_completion`
-            // The Cancel/Shutdown arms perform the same flush
-            // Removing it leaves the held delta stranded, so the terminal would be the only persisted update
-            // Ownership validation happens after this flush, so a stale completion may still flush buffered replay
+            // This is the exact flush `run_session`'s completion branch performs before calling `handle_completion` The.
+            // Cancel/Shutdown arms perform the same flush.
+            // Removing it leaves the held delta stranded, so the terminal would be the only persisted update.
             if let Some(notification) = replay_buffer.flush() {
                 actor.emit_buffered(notification).await;
             }
@@ -358,10 +357,9 @@ async fn normal_completion_persists_turn_completed_after_buffered_delta_flush() 
                  after the turn's flush barrier could keep the content but drop the terminal"
             );
 
-            // Limitation: this calls `handle_completion` and mirrors the completion-branch flush; it does not drive the full `run_session` loop
-            // Injecting a real completion would need a mock-model turn
-            // The negative case is a buffered delta NEVER reaching persistence without the flush
-            // `buffered_chunk_does_not_reach_persistence_without_explicit_flush` in `replay_buffer_send_update_tests` covers it
+            // Limitation: this calls `handle_completion` and mirrors the completion-branch flush; it does not drive the full `run_session` loop.
+            // Injecting a real completion would need a mock-model turn.
+            // The negative case is a buffered delta NEVER reaching persistence without the flush.
         })
         .await;
 }
@@ -764,7 +762,6 @@ fn turn_completed_meta(msgs: &[PersistenceMsg]) -> Option<serde_json::Value> {
 }
 
 /// The completion-race window: `current_prompt_id` is already cleared while the finished front and its task slot are still queued.
-/// (Either the scope guard dropped or `handle_completion` ran first.)
 /// The cancel identity must come from `running_task.prompt_id`, so the durable `TurnCompleted` (with `cancelTrigger=send_now`) is still persisted.
 /// Without it viewers strand on "Waiting…" with no terminal.
 #[tokio::test(flavor = "current_thread")]
@@ -1075,4 +1072,466 @@ async fn unknown_prompt_completion_emits_no_turn_completed() {
             );
         })
         .await;
+}
+
+// ── Analytics turn delta ──────────────────────────────────────────────────────.
+// The turn delta posts once per turn from `emit_turn_completed`, behind the finalization lease.
+// These drive the actor's own install path (`maybe_start_running_task` → `AgentTask::new_prompt`) and settle the turn the way the run loop does, so the turn-open, cancel and completion order is the shipped one.
+
+/// Localhost turn-deltas endpoint; every posted body is forwarded on the returned channel.
+async fn turn_delta_sink() -> (
+    std::net::SocketAddr,
+    mpsc::UnboundedReceiver<serde_json::Value>,
+) {
+    use axum::{Json, Router, routing::post};
+    let (tx, rx) = mpsc::unbounded_channel::<serde_json::Value>();
+    let router = Router::new().route(
+        "/v1/sessions/{id}/turn-deltas",
+        post(move |Json(body): Json<serde_json::Value>| {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send(body);
+                Json(serde_json::json!({
+                    "sessionId": "test-actor",
+                    "turnNumber": 1,
+                    "recordedAt": chrono::Utc::now(),
+                }))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    (addr, rx)
+}
+
+/// A telemetry-enabled feedback manager that posts turn deltas to `addr`.
+#[allow(clippy::disallowed_methods)] // test client hits a localhost mock
+fn turn_delta_feedback_manager(addr: std::net::SocketAddr) -> Arc<FeedbackManager> {
+    Arc::new(FeedbackManager::new(
+        "test-actor",
+        Some(crate::agent::feedback_client::FeedbackClient::with_client(
+            reqwest::Client::new(),
+            format!("http://{addr}/v1"),
+            None,
+        )),
+        FeedbackManagerConfig {
+            telemetry_enabled: true,
+            ..Default::default()
+        },
+    ))
+}
+
+async fn next_turn_delta(rx: &mut mpsc::UnboundedReceiver<serde_json::Value>) -> serde_json::Value {
+    tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+        .await
+        .expect("a turn delta must be posted")
+        .expect("delta channel open")
+}
+
+async fn assert_no_turn_delta(rx: &mut mpsc::UnboundedReceiver<serde_json::Value>, why: &str) {
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(300), rx.recv())
+            .await
+            .is_err(),
+        "{why}"
+    );
+}
+
+/// Queue `prompt_id` as a user row and promote it through the actor's own install path.
+/// Returns the prompt's RPC receiver; the promoted task is running (or about to) when this returns.
+async fn promote_prompt(
+    actor: &Arc<SessionActor>,
+    prompt_id: &str,
+    completion_tx: &mpsc::UnboundedSender<super::turn_task::TurnCompletionMsg>,
+) -> oneshot::Receiver<PromptTurnResult> {
+    let (item, rx) = user_item_with_rx(prompt_id, "owner");
+    actor.state.lock().await.pending_inputs.push_back(item);
+    actor
+        .clone()
+        .maybe_start_running_task(completion_tx.clone())
+        .await;
+    assert_eq!(
+        actor.state.lock().await.running_prompt_id(),
+        Some(prompt_id),
+        "the row must have promoted"
+    );
+    rx
+}
+
+/// Await the turn task's completion message, as the run loop does.
+async fn next_completion(
+    completion_rx: &mut mpsc::UnboundedReceiver<super::turn_task::TurnCompletionMsg>,
+) -> super::turn_task::TurnCompletionMsg {
+    tokio::time::timeout(std::time::Duration::from_secs(60), completion_rx.recv())
+        .await
+        .expect("the turn task must finish")
+        .expect("completion channel open")
+}
+
+/// Settle a completion the way the run loop does; returns whether it owned the turn.
+async fn settle(actor: &SessionActor, msg: super::turn_task::TurnCompletionMsg) -> bool {
+    actor
+        .handle_completion(
+            msg.prompt_id,
+            msg.epoch,
+            &msg.task_identity,
+            msg.result,
+            msg.elapsed_ms,
+        )
+        .await
+}
+
+fn esc() -> crate::session::CancelOptions {
+    crate::session::CancelOptions {
+        cancel_subagents: true,
+        trigger: Some(crate::session::CancelTrigger::Esc),
+        user_initiated: true,
+        ..Default::default()
+    }
+}
+
+/// A cancel that wins the finalization lease before the turn task ever runs still posts the.
+/// turn's own row: the turn opens at install (`AgentTask::new_prompt`), not inside the spawned.
+/// future, so the row carries this turn's number and the cancellation. An idle Esc afterwards.
+#[test]
+fn cancel_before_the_turn_task_runs_posts_this_turns_cancelled_delta() {
+    use super::disk_full_tests::{
+        actor_with_mock_sampler_configured, block_on_session, current_thread_local,
+    };
+    use xai_grok_test_support::sse::responses_api_script_exact;
+    use xai_grok_test_support::{MockInferenceServer, ScriptedResponse};
+
+    block_on_session(|| {
+        current_thread_local(async {
+            let server = MockInferenceServer::start().await.expect("mock server");
+            server.enqueue_response(
+                "/v1/responses",
+                ScriptedResponse::sse(responses_api_script_exact("done", "test")),
+            );
+            let (addr, mut delta_rx) = turn_delta_sink().await;
+            let (gateway_tx, gateway_rx) = mpsc::unbounded_channel();
+            drain_gateway(gateway_rx);
+            let (persistence_tx, persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
+            super::support::drain_persistence(persistence_rx);
+            let actor = actor_with_mock_sampler_configured(
+                &server,
+                persistence_tx,
+                gateway_tx,
+                None,
+                |actor| actor.feedback_manager = turn_delta_feedback_manager(addr),
+            )
+            .await;
+            let (completion_tx, mut completion_rx) = mpsc::unbounded_channel();
+            // A previous turn's mode is still in the trackers; install must replace it with
+            // this request's mode before the future resolves the final one.
+            *actor.turn_start_prompt_mode.lock() = PromptMode::Plan;
+            *actor.turn_prompt_mode.lock() = PromptMode::Plan;
+
+            // Turn 1: Esc lands before the promoted task's future is first polled.
+            let rx = promote_prompt(&actor, "p1", &completion_tx).await;
+            let outcome = actor.cancel_running_task(esc()).await;
+            assert!(outcome.settled);
+            assert_eq!(
+                rx.await
+                    .expect("cancel resolves the RPC")
+                    .map(|ok| ok.stop_reason),
+                Ok(acp::StopReason::Cancelled)
+            );
+            let delta = next_turn_delta(&mut delta_rx).await;
+            assert_eq!(delta["turnNumber"], 1, "{delta}");
+            assert_eq!(delta["requestId"], "p1");
+            assert_eq!(delta["turnOutcome"], "cancelled");
+            assert_eq!(delta["deltaCancellations"], 1);
+            assert!(delta["turnDurationMs"].is_number(), "{delta}");
+            assert_eq!(
+                delta["metadata"]["startPromptMode"], "agent",
+                "the row carries this request's mode, not the previous turn's: {delta}"
+            );
+
+            // Idle Esc: no turn to end, so nothing is recorded or posted.
+            let outcome = actor.cancel_running_task(esc()).await;
+            assert!(!outcome.turn_stopped);
+            assert_no_turn_delta(&mut delta_rx, "an idle cancel has no turn to report").await;
+
+            // Turn 2 completes through the mock sampler.
+            let rx = promote_prompt(&actor, "p2", &completion_tx).await;
+            let msg = next_completion(&mut completion_rx).await;
+            assert!(settle(&actor, msg).await);
+            let ok = rx
+                .await
+                .expect("completion resolves the RPC")
+                .expect("the turn completes");
+            assert_eq!(ok.stop_reason, acp::StopReason::EndTurn);
+            let snapshot = ok
+                .turn_snapshot
+                .expect("a completed turn carries its snapshot");
+            assert_eq!(snapshot.turn_input_tokens, 10);
+            assert_eq!(snapshot.turn_output_tokens, 5);
+            let delta = next_turn_delta(&mut delta_rx).await;
+            assert_eq!(delta["turnNumber"], 2, "{delta}");
+            assert_eq!(delta["requestId"], "p2");
+            assert_eq!(delta["turnOutcome"], "completed");
+            assert_eq!(
+                delta["deltaCancellations"], 0,
+                "the idle Esc must not land on this turn's row"
+            );
+            assert!(delta["turnDurationMs"].is_number(), "{delta}");
+            assert_no_turn_delta(&mut delta_rx, "one row per turn").await;
+        });
+    });
+}
+
+/// Whichever path settles the turn posts its one row with the settled outcome: a completed
+/// turn's terminal posts the task's snapshot; max-turns (the turn future's own cancelled ending)
+/// and a failed sampler take theirs at the terminal, with no user cancellation counted.
+#[test]
+fn every_terminal_posts_one_delta_with_the_settled_outcome() {
+    use super::disk_full_tests::{
+        TODO_ARGS, actor_with_mock_sampler_configured, block_on_session, current_thread_local,
+    };
+    use xai_grok_test_support::sse::{
+        responses_api_reasoning_then_tool_call_events, responses_api_script_exact,
+    };
+    use xai_grok_test_support::{MockInferenceServer, ScriptedResponse};
+
+    block_on_session(|| {
+        current_thread_local(async {
+            let server = MockInferenceServer::start().await.expect("mock server");
+            server.enqueue_response(
+                "/v1/responses",
+                ScriptedResponse::sse(responses_api_script_exact("done", "test")),
+            );
+            server.enqueue_response(
+                "/v1/responses",
+                ScriptedResponse::sse(responses_api_reasoning_then_tool_call_events(
+                    "poll",
+                    "max-turns-call",
+                    "todo_write",
+                    TODO_ARGS,
+                    "test",
+                )),
+            );
+            // A 400 is terminal for the turn; a 5xx would be retried against an empty script queue.
+            server.enqueue_response(
+                "/v1/responses",
+                ScriptedResponse::json(
+                    400,
+                    serde_json::json!({ "error": { "message": "bad request", "type": "invalid_request_error" } }),
+                ),
+            );
+            let (addr, mut delta_rx) = turn_delta_sink().await;
+            let (gateway_tx, gateway_rx) = mpsc::unbounded_channel();
+            drain_gateway(gateway_rx);
+            let (persistence_tx, persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
+            super::support::drain_persistence(persistence_rx);
+            let actor = actor_with_mock_sampler_configured(
+                &server,
+                persistence_tx,
+                gateway_tx,
+                Some(1),
+                |actor| actor.feedback_manager = turn_delta_feedback_manager(addr),
+            )
+            .await;
+            let (completion_tx, mut completion_rx) = mpsc::unbounded_channel();
+
+            let expected = [
+                ("p-completed", "completed", 0),
+                ("p-max-turns", "cancelled", 1),
+                ("p-failed", "error", 0),
+            ];
+            for (turn, (prompt_id, outcome, tool_calls)) in (1..).zip(expected) {
+                let rx = promote_prompt(&actor, prompt_id, &completion_tx).await;
+                let msg = next_completion(&mut completion_rx).await;
+                assert!(settle(&actor, msg).await, "{prompt_id}");
+                let result = rx.await.expect("the terminal resolves the RPC");
+                match outcome {
+                    "completed" => assert!(
+                        result.as_ref().is_ok_and(|ok| ok.turn_snapshot.is_some()),
+                        "{prompt_id}: a completed turn carries its snapshot"
+                    ),
+                    "cancelled" => assert!(
+                        result.as_ref().is_ok_and(|ok| matches!(
+                            ok.completion_kind,
+                            PromptCompletionKind::MaxTurnsReached { .. }
+                        ) && ok.turn_snapshot.is_none()),
+                        "{prompt_id}: {result:?}"
+                    ),
+                    _ => assert!(result.is_err(), "{prompt_id}: {result:?}"),
+                }
+                let delta = next_turn_delta(&mut delta_rx).await;
+                assert_eq!(delta["turnNumber"], turn, "{prompt_id}: {delta}");
+                assert_eq!(delta["requestId"], prompt_id);
+                assert_eq!(delta["turnOutcome"], outcome, "{prompt_id}");
+                assert_eq!(delta["deltaToolCalls"], tool_calls, "{prompt_id}");
+                assert_eq!(
+                    delta["deltaCancellations"], 0,
+                    "{prompt_id}: not a user cancel"
+                );
+                assert!(delta["turnDurationMs"].is_number(), "{prompt_id}: {delta}");
+            }
+            assert_no_turn_delta(&mut delta_rx, "one row per turn").await;
+        });
+    });
+}
+
+/// A cancel that wins the lease against an already finished task settles the turn as cancelled
+/// and posts that one row; the task's completion is then stale and posts nothing, so the backend
+/// never sees two rows for one turn.
+#[test]
+fn cancel_racing_a_finished_task_posts_one_cancelled_delta() {
+    use super::disk_full_tests::{
+        actor_with_mock_sampler_configured, block_on_session, current_thread_local,
+    };
+    use xai_grok_test_support::sse::responses_api_script_exact;
+    use xai_grok_test_support::{MockInferenceServer, ScriptedResponse};
+
+    block_on_session(|| {
+        current_thread_local(async {
+            let server = MockInferenceServer::start().await.expect("mock server");
+            server.enqueue_response(
+                "/v1/responses",
+                ScriptedResponse::sse(responses_api_script_exact("done", "test")),
+            );
+            let (addr, mut delta_rx) = turn_delta_sink().await;
+            let (gateway_tx, gateway_rx) = mpsc::unbounded_channel();
+            drain_gateway(gateway_rx);
+            let (persistence_tx, persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
+            super::support::drain_persistence(persistence_rx);
+            let actor = actor_with_mock_sampler_configured(
+                &server,
+                persistence_tx,
+                gateway_tx,
+                None,
+                |actor| actor.feedback_manager = turn_delta_feedback_manager(addr),
+            )
+            .await;
+            let (completion_tx, mut completion_rx) = mpsc::unbounded_channel();
+
+            let rx = promote_prompt(&actor, "p-race", &completion_tx).await;
+            // The task finished (its completion is queued) but the run loop has not settled it.
+            let msg = next_completion(&mut completion_rx).await;
+            let outcome = actor.cancel_running_task(esc()).await;
+            assert!(outcome.settled);
+            assert_eq!(
+                rx.await
+                    .expect("cancel resolves the RPC")
+                    .map(|ok| ok.stop_reason),
+                Ok(acp::StopReason::Cancelled)
+            );
+            let delta = next_turn_delta(&mut delta_rx).await;
+            assert_eq!(delta["turnNumber"], 1, "{delta}");
+            assert_eq!(delta["turnOutcome"], "cancelled");
+            assert_eq!(delta["deltaCancellations"], 1);
+
+            assert!(!settle(&actor, msg).await, "the completion lost the lease");
+            assert_no_turn_delta(&mut delta_rx, "a stale completion posts no second row").await;
+        });
+    });
+}
+
+/// A multi-round turn (a Stop hook keeps the agent working once) posts one row spanning every
+/// round: the duration runs from install to terminal (it includes the gate wait) and the token
+/// sums cover both rounds.
+#[test]
+fn multi_round_turn_posts_one_delta_spanning_every_round() {
+    use super::disk_full_tests::{
+        actor_with_mock_sampler_configured, block_on_session, current_thread_local,
+    };
+    use xai_grok_test_support::sse::responses_api_script_exact;
+    use xai_grok_test_support::{MockInferenceServer, ScriptedResponse};
+
+    const GATE_WAIT: std::time::Duration = std::time::Duration::from_millis(300);
+
+    block_on_session(|| {
+        current_thread_local(async {
+            let server = MockInferenceServer::start().await.expect("mock server");
+            for text in ["first", "second"] {
+                server.enqueue_response(
+                    "/v1/responses",
+                    ScriptedResponse::sse(responses_api_script_exact(text, "test")),
+                );
+            }
+            let (addr, mut delta_rx) = turn_delta_sink().await;
+            let (gateway_tx, mut gateway_rx) = mpsc::unbounded_channel();
+            let (persistence_tx, persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
+            super::support::drain_persistence(persistence_rx);
+
+            // The Stop hook keeps the agent working once, after `GATE_WAIT`, then lets it stop.
+            tokio::task::spawn_local(async move {
+                let mut kept_working = false;
+                while let Some(msg) = gateway_rx.recv().await {
+                    match msg {
+                        xai_acp_lib::AcpClientMessage::ExtMethod(args) => {
+                            let reply = if kept_working {
+                                serde_json::json!({})
+                            } else {
+                                kept_working = true;
+                                tokio::time::sleep(GATE_WAIT).await;
+                                serde_json::json!({ "decision": "deny", "systemMessage": "more" })
+                            };
+                            let body: Arc<serde_json::value::RawValue> =
+                                serde_json::value::to_raw_value(&reply).unwrap().into();
+                            let _ = args.response_tx.send(Ok(acp::ExtResponse::new(body)));
+                        }
+                        xai_acp_lib::AcpClientMessage::SessionNotification(args) => {
+                            let _ = args.response_tx.send(Ok(()));
+                        }
+                        _ => {}
+                    }
+                }
+            });
+
+            let actor = actor_with_mock_sampler_configured(
+                &server,
+                persistence_tx,
+                gateway_tx,
+                None,
+                |actor| {
+                    actor.feedback_manager = turn_delta_feedback_manager(addr);
+                    let mut hooks = crate::extensions::hooks::ClientHooks::new();
+                    hooks.insert(
+                        xai_grok_hooks::event::HookEventName::Stop,
+                        vec![crate::extensions::hooks::ClientHookGroup {
+                            matcher: None,
+                            callback_ids: vec!["cb".to_string()],
+                            timeout: None,
+                        }],
+                    );
+                    *actor.client_hooks.borrow_mut() = hooks;
+                },
+            )
+            .await;
+            let (completion_tx, mut completion_rx) = mpsc::unbounded_channel();
+
+            let rx = promote_prompt(&actor, "p-two-rounds", &completion_tx).await;
+            let msg = next_completion(&mut completion_rx).await;
+            assert!(settle(&actor, msg).await);
+            let ok = rx
+                .await
+                .expect("completion resolves the RPC")
+                .expect("the turn completes after the hook lets it stop");
+            assert_eq!(ok.stop_reason, acp::StopReason::EndTurn);
+            let snapshot = ok
+                .turn_snapshot
+                .expect("a completed turn carries its snapshot");
+            assert_eq!(snapshot.turn_input_tokens, 20, "both rounds' prompts");
+            assert_eq!(snapshot.turn_output_tokens, 10, "both rounds' completions");
+
+            let delta = next_turn_delta(&mut delta_rx).await;
+            assert_eq!(delta["turnNumber"], 1, "{delta}");
+            assert_eq!(delta["turnOutcome"], "completed");
+            assert_eq!(delta["deltaAssistantMessages"], 2, "{delta}");
+            let duration_ms = delta["turnDurationMs"]
+                .as_u64()
+                .expect("rows carry a duration");
+            assert!(
+                duration_ms >= GATE_WAIT.as_millis() as u64,
+                "the row spans the whole turn, gate wait included: {duration_ms}ms"
+            );
+            assert_no_turn_delta(&mut delta_rx, "one row per turn, not one per round").await;
+        });
+    });
 }

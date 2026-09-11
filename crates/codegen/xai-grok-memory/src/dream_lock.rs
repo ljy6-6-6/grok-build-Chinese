@@ -105,12 +105,7 @@ impl DreamLock {
         Ok(None)
     }
 
-    /// Returns `Ok(Some(token))` iff we now hold the mutex, where `token` is the owner id written
-    /// into the file.
-    ///
-    /// Acquisition is atomic-exclusive: the mutex file is created with `create_new`, so at most one
-    /// acquirer — intra- or inter-process — can create it. When the file already exists it is
-    /// reclaimed (and the create retried) only if the holder is dead or the file is older than
+    /// Acquisition is atomic-exclusive: the mutex file is created with `create_new`, so at most one acquirer — intraor inter-process — can create it. When the file already exists it is reclaimed (and the create retried) only if the holder is dead or the file is older than
     /// `stale_secs`; a live, fresh holder returns `Ok(None)`.
     fn try_acquire(&self, stale_secs: u64) -> io::Result<Option<String>> {
         // Bounded so racing acquirers that keep recreating the file cannot spin forever.
@@ -152,11 +147,8 @@ impl DreamLock {
         Ok(None)
     }
 
-    /// Whether the current mutex holder can be reclaimed: the file is gone, older than `stale_secs`,
-    /// or its token names a PID that is no longer alive.
-    ///
-    /// A fresh unparseable body (empty or garbage) is a holder still writing its token between the
-    /// exclusive create and the write, so it is left alone; the age check reclaims it once stale.
+    /// Whether the current mutex holder can be reclaimed: the file is gone, older than `stale_secs`, or its token names a PID that is no longer alive.
+    /// A fresh unparseable body (empty or garbage) is a holder still writing its token between the exclusive create and the write, so it is left alone; the age check reclaims it once stale.
     fn holder_is_reclaimable(&self, stale_secs: u64) -> io::Result<bool> {
         let meta = match fs::metadata(&self.path) {
             Ok(meta) => meta,
@@ -212,10 +204,7 @@ impl DreamLockGuard {
 }
 
 impl Drop for DreamLockGuard {
-    /// Release the mutex, but only if we still own it. After a stale reclaim (for example a
-    /// wall-clock jump) the path may hold another session's token; removing it would let a third
-    /// session join, so we leave it. A crash skips this, but the token names a now-dead PID that
-    /// `holder_is_reclaimable` reclaims immediately.
+    /// Release the mutex, but only if we still own it. After a stale reclaim (for example a wall-clock jump) the path may hold another session's token; removing it would let a third session join, so we leave it. A crash skips this, but the token names a now-dead PID that `holder_is_reclaimable` reclaims immediately.
     fn drop(&mut self) {
         if fs::read_to_string(&self.path).is_ok_and(|c| c.trim() == self.token) {
             let _ = fs::remove_file(&self.path);

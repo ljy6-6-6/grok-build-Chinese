@@ -24,7 +24,7 @@ pub use consent::*;
 pub use hints::*;
 pub use load::*;
 pub use mcp::*;
-pub(crate) use mcp_reenable::reenableable_disabled_stubs;
+pub(crate) use mcp_reenable::{McpDefinitionIndex, needs_definition_scan};
 pub use permissions::*;
 pub use persist::*;
 // These types live in `xai-grok-config-types`; the re-export keeps `crate::util::config::{RemoteSettings, GoalRoleModel}` working

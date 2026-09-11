@@ -1272,13 +1272,9 @@ fn test_needs_update_alpha_to_beta_same_base_is_upgrade_per_semver() {
 
 #[test]
 fn test_needs_update_with_build_metadata_uses_semver_crate_ordering() {
-    // SUBTLE: per the semver SPEC, build metadata (after `+`) MUST be ignored when determining version precedence
-    // However the `semver` crate's `PartialOrd` impl compares build metadata lexicographically for differing values
-    // So `0.1.141+xyz > 0.1.141+abc` returns true here even though spec-wise they are equal
-    //
-    // This means CI publishers MUST NOT publish multiple builds of the same version differing only in build metadata
-    // Auto-update would bounce users between them
-    // Today our pipeline doesn't, so this is latent; the test locks in the surprising behavior so it can't change silently
+    // SUBTLE: per the semver SPEC, build metadata (after `+`) MUST be ignored when determining version precedence. This
+    // means CI publishers MUST NOT publish multiple builds of the same version differing only in build metadata. Today our
+    // pipeline doesn't, so this is latent; the test locks in the surprising behavior so it can't change silently
     assert_eq!(
         needs_update("0.1.141+abc", "0.1.141+xyz", "stable", false),
         Some(true),
@@ -1671,16 +1667,9 @@ fn test_user_facing_constants_are_stable() {
     );
 }
 
-// ──────────────────────────────────────────────────────────────────────
-// env_installer — env-var based, must run serially.
-//
-// Resolution order (matches function body):
-//   1. GROK_INSTALLER (npm | internal | gh-release | gh)
-//   2. GROK_MANAGED_BY_NPM       → npm
-//   3. GROK_MANAGED_BY_INTERNAL  → internal
-//   4. npm_config_user_agent      → npm
-//   5. None
-// ──────────────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────────────── env_installer — env-var based, must run
+// serially. GROK_INSTALLER (npm | internal | gh-release | gh); GROK_MANAGED_BY_NPM → npm; GROK_MANAGED_BY_INTERNAL →
+// internal. ──────────────────────────────────────────────────────────────────────
 
 /// Snapshot every installer-related env var so the test can clear them at start and restore them at end.
 /// Without the guard, a parent shell that sets e.g. `npm_config_user_agent` (as `npm run` always does) makes every "no env vars" test misbehave.

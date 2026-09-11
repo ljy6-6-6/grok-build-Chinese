@@ -18,9 +18,7 @@ pub(crate) struct PendingRunningAdoption {
 }
 
 /// Wire payload of `x.ai/session/prompt_complete`, emitted by `MvpAgent::prompt()` on the shell after every turn.
-///
 /// `Serialize` is derived so tests construct payloads through the same type they are parsed into (shape drift fails at compile time, not at runtime).
-/// Unknown fields (e.g. `turnId`, future additions) are ignored.
 /// Every field except `sessionId` is optional for wire compatibility with older shells; `promptId` only exists on shells with the lost-response fix.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -89,6 +87,15 @@ impl PromptCompletePayload {
     }
 }
 
+/// Decided on the raw broadcast (before it moves into the queue mirror): listing the awaited prompt, queued or running, proves the shell holds it.
+fn broadcast_acks_watch(
+    view: Option<&AgentView>,
+    changed: &crate::app::prompt_queue::QueueChanged,
+) -> bool {
+    view.and_then(|v| v.prompt_ack.as_ref())
+        .is_some_and(|watch| crate::app::prompt_ack::queue_changed_acks(changed, watch.prompt_id()))
+}
+
 pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     let Ok(changed) =
         serde_json::from_str::<crate::app::prompt_queue::QueueChanged>(notif.params.get())
@@ -103,6 +110,13 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
     let sid = acp::SessionId::new(session_id.clone());
     let session_match = find_session_match(app, &sid);
     if let Some(SessionMatch::Child(parent_id)) = session_match {
+        let acks_watch = broadcast_acks_watch(
+            app.agents
+                .get(&parent_id)
+                .and_then(|parent| parent.subagent_views.get(&session_id))
+                .map(|child| &**child),
+            &changed,
+        );
         let snapshot = changed.entries;
         if snapshot.is_empty() {
             app.shared_prompt_queues.remove(&session_id);
@@ -122,6 +136,12 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
         };
         child.shared_queue = snapshot;
         child.sync_queue_pane();
+        if acks_watch {
+            child.note_prompt_ack(
+                crate::app::prompt_ack::AckSignal::QueueChanged,
+                std::time::Instant::now(),
+            );
+        }
         return is_active;
     }
 
@@ -180,6 +200,7 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
         "received x.ai/queue/changed broadcast",
     );
 
+    let acks_watch = broadcast_acks_watch(agent_id.and_then(|aid| app.agents.get(&aid)), &changed);
     let rekeyed_echo_ids = app.apply_queue_changed(changed);
 
     // Mirror the reconciled shared queue into the owning agent
@@ -196,10 +217,15 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
             .map(|p| p.prompt_id.clone());
         if let Some(agent) = app.agents.get_mut(&aid) {
             agent.shared_queue = snapshot;
+            if acks_watch {
+                agent.note_prompt_ack(
+                    crate::app::prompt_ack::AckSignal::QueueChanged,
+                    std::time::Instant::now(),
+                );
+            }
             // A re-keyed echo's old id is dead everywhere; only its content matched the broadcast
             // Drop it from the optimistic set and any send-now parked on it
             // The row is visible under its new id, so a fresh Enter sends it normally
-            // A painted send-now block moves to the new id (the message still runs there)
             for (old_id, new_id) in &rekeyed_echo_ids {
                 agent.note_queue_echo_rekeyed(old_id, new_id);
             }
@@ -294,14 +320,12 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
     }
 
     // Adoption and turn-start correlation
-    //
     // The single-client idle path stays inert: the pager already set `current_prompt_id` locally at `start_turn`
     // The confirming broadcast then arrives with `running_prompt_id == current_prompt_id` and the `Some(c) if c == pid` arm makes this a no-op
     match (running_prompt_id, agent_id) {
         // No turn running on the server: drop any stale pending adoption
         // Exception (`turn_ended`, one-shot): a turn ending inside the handoff window must leave the stash for the previous turn's PromptResponse
         // The stash stays whatever the update buffer holds
-        // This ext broadcast can overtake the turn's `session/update`s (separate, reorderable channels)
         (None, Some(aid)) => {
             let retain = app
                 .pending_running_adoptions
@@ -317,16 +341,9 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
                 agent.discard_pending_adoption_updates(&p.prompt_id);
             }
         }
-        // Non-adoptable running prompt (see `AgentView::should_adopt_running_prompt`); two cases
         // One: an actor-run synthetic turn with no `prompt_complete` or `PromptResponse` exit, so nothing would ever call `finish_turn`
-        // Two: a turn whose durable `TurnCompleted` already arrived in THIS load's replay (terminal-in-replay: it already ended)
         // Adopting either via `apply_turn_start_shim` would call `start_turn()` and enter `AgentState::TurnRunning`
-        // The pager would then sit on "Responding…" or "Waiting…" forever
-        // The agent-aware check matters: `replayed_terminal_prompts` stays populated after a load
-        // A later `queue/changed` can re-report the already-ended `running_prompt_id`
         // It must NOT re-adopt the turn the `SessionLoaded` or reconnect adoption already skipped
-        // Skip the turn-start adoption
-        // A live synthetic turn's streaming content still renders via the live-delta path in `handle` WITHOUT calling `start_turn`
         (Some(pid), Some(aid))
             if app
                 .agents
@@ -364,24 +381,11 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
                 }
                 // A different prompt is still finishing locally: the FIFO handoff race
                 // The next broadcast can arrive before the previous turn's `PromptResponse`
-                // Stash it; the `PromptResponse` handler adopts it after `finish_turn` clears `current_prompt_id`
                 // Never corrupt the in-flight turn
                 Some(_) => {
                     // The leader emits this prompt's user-echo right after this broadcast (it has no `promptId`, so the gate can't drop it)
-                    // That echo lands before the previous turn's `PromptResponse` runs the deferred shim
-                    // Set the echo-skip now so the echo doesn't render a duplicate user block
                     // Do that ONLY when THIS client will actually paint the block via the deferred shim
-                    //
-                    // The deferred shim runs exclusively in the `PromptResponse` handler
                     // That handler fires only for the client that DROVE the currently-finishing turn (`!attached_as_viewer`)
-                    // A viewer of that turn ends it via `prompt_complete`, which clears (and removes) the stash without ever running the shim
-                    // On a viewer the echo is the ONLY source of the user block and must not be swallowed
-                    //
-                    // Key the guard on driver-vs-viewer of the *current* turn, NOT on who originated the draining prompt
-                    // A client can be `attached_as_viewer` on another client's turn yet immediate-send (self-originate) a queued prompt of its own
-                    // That client still won't run the shim, so an `is_self_originated`-based guard would wrongly swallow the echo and drop the block
-                    // The symmetric hazard: a driver adopting ANOTHER client's drained prompt DOES run the shim, so it must swallow the echo
-                    // An origination-based guard would miss that and double-render the block
                     let drives_current_turn =
                         app.agents.get(&aid).is_some_and(|a| !a.attached_as_viewer);
                     let will_render_own_block = drives_current_turn
@@ -433,13 +437,7 @@ pub(super) fn handle_queue_changed(notif: &acp::ExtNotification, app: &mut AppVi
 
 /// `prompt_complete` carries `sessionId`, `stopReason`, `agentResult`, `turnId`, and (on shells with the lost-response fix) `promptId`.
 /// For viewers, turns are serialized per session, so "finish the running viewer turn for this session" is unambiguous even without the prompt id.
-///
-/// This is the one-release compat rail, kept until every leader emits the durable [`XaiSessionUpdate::TurnCompleted`].
-/// It parses the payload and delegates finalization to [`finalize_turn_from_terminal`](super::super::turn_completion::finalize_turn_from_terminal).
-/// That function carries the driver-arm and viewer-finish behavior verbatim.
-///
 /// TODO: prompt_complete-deprecation — the durable turn_completed is already consumed via finalize_turn_from_terminal.
-/// Re-point the lost-RPC reconcile to the durable rail before deleting this legacy rail.
 pub(super) fn handle_prompt_complete(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     let Ok(payload) = serde_json::from_str::<PromptCompletePayload>(notif.params.get()) else {
         tracing::warn!("Failed to parse x.ai/session/prompt_complete");

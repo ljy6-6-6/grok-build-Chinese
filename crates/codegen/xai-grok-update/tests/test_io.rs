@@ -140,14 +140,9 @@ async fn write_version_cache_idempotent_for_same_version() {
     assert_eq!(v1["version"], "0.1.180");
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// get_installed_grok_version env override
-//
-// The function honors `GROK_TEST_VERSION` for testing. We exercise it
-// via the public re-export only — no private items leaked.
-// ─────────────────────────────────────────────────────────────────────────────
-//
-// `get_installed_grok_version` is not re-exported from `lib.rs`, but it's `pub` from `version` module and accessible via `version::`
+// The function honors `GROK_TEST_VERSION` for testing. We exercise it via the public re-export only — no private items
+// leaked. ─────────────────────────────────────────────────────────────────────────────. `get_installed_grok_version` is
+// not re-exported from `lib.rs`, but it's `pub` from `version` module and accessible via `version::`
 #[tokio::test]
 #[serial]
 async fn get_installed_version_falls_back_to_cargo_pkg_version_when_env_unset() {

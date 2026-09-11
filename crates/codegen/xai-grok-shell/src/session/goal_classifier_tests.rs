@@ -1597,7 +1597,6 @@ fn format_verifier_details_path_substitutes_all_placeholders() {
 }
 
 /// Canned per-skeptic response; the spawner pops one off the internal queue per `spawn_classifier` call.
-/// `terminal` is the subagent's terminal-token text.
 /// `verdict_json` (if `Some`) is written to the `{VERDICT_FILE}` path embedded in the prompt.
 /// `details_md` (if non-empty) is written to the `{DETAILS_FILE}` path the spawner receives as its `details_path` argument.
 struct MockResponse {
@@ -2881,7 +2880,6 @@ async fn verification_stage_resume_spawn_failure_falls_back_to_cold() {
 /// When the resume fails and downgrades to cold, skeptic-0's configured `skeptic_model_assignment[0]` model must land on the COLD `SubagentRequest`.
 /// Drives the real `ChannelSpawner` (which applies per-index overrides) through `run_verification_stage`.
 /// A raw coordinator FAILS every resume spawn (`resume_from = Some`) and succeeds the cold spawns (`resume_from = None`).
-/// It captures each spawn's `runtime_overrides.model`.
 #[tokio::test]
 async fn cold_fallback_after_resume_failure_carries_pool0_model_on_request() {
     use std::sync::Mutex as StdMutex;

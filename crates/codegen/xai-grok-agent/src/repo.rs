@@ -7,21 +7,9 @@
 
 use std::path::{Path, PathBuf};
 
-/// The git worktree root for `cwd` (if any) plus the directory chain from `cwd` up to that root (inclusive, cwd-first).
-/// Both come from ONE `git2` discovery and ONE upward walk.
-///
-/// The folder-trust gate's `repo_configs_present` probes a dozen repo-local code-exec markers back-to-back on the agent startup path.
-/// The markers are `.mcp.json`, `.grok/config.toml`, `.claude/settings.json`, the project plugin/agent dirs, and more.
-/// Each marker walker used to run its own `discover` and cwd-to-root walk; sharing one `RepoDirChain` collapses that to a single traversal.
-/// Each redundant syscall is taxed 10-100x on Windows, and on a non-git dir each `discover` walks to the filesystem root.
-/// Both the gate and the real loaders consume the same chain via `*_in` walker variants, so detection can't drift from loading.
-///
-/// The public cwd-taking delegators (`find_project_configs`, `project_plugin_dirs`, `project_agent_dirs`, …) resolve through this chain too.
-/// Their non-gate callers (config watcher, reloader, the mcp/config loaders, inspect, upload, mcp_doctor) gain the per-level canonicalize below.
-/// All those callers are cold (startup / file-change / session-setup / manual commands), never per-keystroke.
-/// The canonical stop is strictly more correct for them.
-///
-/// Outside a git repo `git_root` is `None` and `dirs` is just `[cwd]`, matching every walker's no-repo branch (probe `cwd` only).
+/// Git worktree root for `cwd` plus the cwd-to-root chain, from one `git2` discovery and one walk.
+/// Shared so the folder-trust gate and loaders cannot drift, and so startup does not repeat the walk.
+/// Outside a git repo `git_root` is `None` and `dirs` is just `[cwd]`.
 #[derive(Debug, Clone)]
 pub struct RepoDirChain {
     /// Git worktree root (`workdir`), or `None` when `cwd` is not inside a repo.
@@ -36,18 +24,15 @@ impl RepoDirChain {
         let git_root = git2::Repository::discover(cwd)
             .ok()
             .and_then(|repo| repo.workdir().map(|p| p.to_path_buf()))
-            // Home-is-a-git-repo (dotfiles in $HOME): a discovery that walks up to $HOME must NOT treat the whole home subtree as one repo
-            // Otherwise home-level `.grok`/`.mcp.json`/plugins would look repo-local
-            // Drop it so cwd is handled as no-repo (probe cwd only)
-            // Home is compared canonically to match the symlink handling in the walk below
+            // Home-is-a-git-repo: a walk up to $HOME must not treat the whole home subtree as one repo.
+            // Otherwise home-level `.grok`/plugins would look repo-local. Drop it so cwd is probed as no-repo.
+            // Home is compared canonically to match the symlink handling below.
             .filter(|root| !is_home_dir(root));
 
         let mut dirs = Vec::new();
         if let Some(ref root) = git_root {
-            // Canonicalize only for the stop test
-            // A symlinked cwd/ancestor then still halts at the worktree root instead of walking on to the filesystem root
-            // Pushed dirs keep their original spelling (callers `join` markers onto them, which resolve the same either way)
-            // Do NOT reduce this to a 2-call `starts_with` variant: it would mis-handle a mid-chain absolute symlink and walk past the root again
+            // Canonicalize only for the stop test so a symlinked cwd still halts at the worktree root.
+            // Pushed dirs keep their original spelling. Do not reduce this to `starts_with`: a mid-chain absolute symlink would walk past the root.
             let root_canonical = dunce::canonicalize(root).unwrap_or_else(|_| root.clone());
             let mut current = Some(cwd.to_path_buf());
             while let Some(dir) = current {
@@ -65,6 +50,58 @@ impl RepoDirChain {
 
         Self { git_root, dirs }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct StartupProjectSources {
+    pub chain: RepoDirChain,
+    workspace_user_dir: Option<PathBuf>,
+}
+
+impl StartupProjectSources {
+    pub fn resolve(cwd: &Path) -> Self {
+        Self::with_workspace_user(
+            cwd,
+            crate::prompt::workspace_user::optional_workspace_user_dir(),
+        )
+    }
+
+    pub fn with_workspace_user(cwd: &Path, workspace_user_dir: Option<PathBuf>) -> Self {
+        let chain = RepoDirChain::resolve(cwd);
+        let workspace_user_dir = workspace_user_dir.filter(|user_dir| {
+            let canonical = canonical_or_raw(user_dir);
+            chain
+                .dirs
+                .iter()
+                .all(|dir| canonical_or_raw(dir) != canonical)
+        });
+        Self {
+            chain,
+            workspace_user_dir,
+        }
+    }
+
+    pub fn skill_dirs(&self) -> impl Iterator<Item = &Path> {
+        self.chain
+            .dirs
+            .iter()
+            .map(PathBuf::as_path)
+            .chain(self.workspace_user_dir.as_deref())
+    }
+
+    pub fn instruction_dirs(&self) -> Vec<&Path> {
+        let mut dirs: Vec<&Path> = self.chain.dirs.iter().rev().map(PathBuf::as_path).collect();
+        if self.chain.git_root.is_some()
+            && let Some(user_dir) = self.workspace_user_dir.as_deref()
+        {
+            dirs.insert(1.min(dirs.len()), user_dir);
+        }
+        dirs
+    }
+}
+
+fn canonical_or_raw(path: &Path) -> PathBuf {
+    dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Whether `path` canonicalizes to the user's home directory.

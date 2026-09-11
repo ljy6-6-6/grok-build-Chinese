@@ -38,11 +38,7 @@ struct Cli {
     #[arg(long, value_name = "SUBSTR")]
     filter: Option<String>,
 
-    /// Concurrent cells.
-    /// Default 1 because the host paces gestures: parallel cells contend for CPU and stretch the inter-report sleeps.
-    /// That can flip Auto-mode classifications.
-    /// The invariant suite judges timing from the recorder's clock, so raising this stays sound.
-    /// It just makes captures less representative of real gesture timing.
+    /// Default 1: parallel cells stretch inter-report sleeps and can flip Auto classification. Invariants use the recorder clock, so more jobs stay sound.
     #[arg(long, value_name = "N", default_value_t = 1)]
     jobs: usize,
 

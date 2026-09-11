@@ -82,7 +82,7 @@ fn voice_final_appends_to_prompt_with_single_space() {
 }
 
 #[test]
-fn voice_final_preserves_mid_text_cursor() {
+fn voice_final_inserts_at_mid_text_cursor() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     app.voice_state = VoiceState::Recording {
@@ -92,7 +92,7 @@ fn voice_final_preserves_mid_text_cursor() {
     };
     let p = &mut app.agents.get_mut(&id).unwrap().prompt;
     p.set_text("hello world");
-    p.set_cursor(5);
+    p.set_cursor(5); // Cursor after "hello"
 
     crate::voice::handle_voice_event(
         &mut app,
@@ -102,10 +102,173 @@ fn voice_final_preserves_mid_text_cursor() {
     );
 
     let p = &app.agents.get(&id).unwrap().prompt;
-    assert_eq!(p.text(), "hello world again");
-    assert_eq!(p.cursor(), 5);
+    // Text should be inserted at cursor position with smart spacing
+    assert_eq!(p.text(), "hello again world");
+    // Cursor should be after the inserted text (" again")
+    assert_eq!(p.cursor(), 5 + " again".len()); // 11
     assert!(app.voice_listening());
     assert!(app.voice_interim().is_none());
+}
+
+#[test]
+fn voice_final_inserts_at_start_of_text() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.voice_state = VoiceState::Recording {
+        hold: false,
+        target: VoiceTarget::Agent(id),
+        interim: None,
+    };
+    let p = &mut app.agents.get_mut(&id).unwrap().prompt;
+    p.set_text("world");
+    p.set_cursor(0); // Cursor at start
+
+    crate::voice::handle_voice_event(
+        &mut app,
+        xai_grok_voice::VoiceEvent::UtteranceFinal {
+            text: "hello".into(),
+        },
+    );
+
+    let p = &app.agents.get(&id).unwrap().prompt;
+    assert_eq!(p.text(), "hello world");
+    assert_eq!(p.cursor(), "hello ".len());
+}
+
+#[test]
+fn voice_final_inserts_between_words_with_spacing() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.voice_state = VoiceState::Recording {
+        hold: false,
+        target: VoiceTarget::Agent(id),
+        interim: None,
+    };
+    let p = &mut app.agents.get_mut(&id).unwrap().prompt;
+    p.set_text("helloworld");
+    p.set_cursor(5); // Cursor between "hello" and "world"
+
+    crate::voice::handle_voice_event(
+        &mut app,
+        xai_grok_voice::VoiceEvent::UtteranceFinal {
+            text: "there".into(),
+        },
+    );
+
+    let p = &app.agents.get(&id).unwrap().prompt;
+    // Should add spaces on both sides since neither side has whitespace
+    assert_eq!(p.text(), "hello there world");
+    assert_eq!(p.cursor(), "hello there ".len());
+}
+
+#[test]
+fn voice_final_inserts_after_existing_space() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.voice_state = VoiceState::Recording {
+        hold: false,
+        target: VoiceTarget::Agent(id),
+        interim: None,
+    };
+    let p = &mut app.agents.get_mut(&id).unwrap().prompt;
+    p.set_text("hello world");
+    p.set_cursor(6); // Cursor after "hello "
+
+    crate::voice::handle_voice_event(
+        &mut app,
+        xai_grok_voice::VoiceEvent::UtteranceFinal {
+            text: "there".into(),
+        },
+    );
+
+    let p = &app.agents.get(&id).unwrap().prompt;
+    // Should not add leading space since cursor is after existing space
+    assert_eq!(p.text(), "hello there world");
+    assert_eq!(p.cursor(), "hello there ".len());
+}
+
+#[test]
+fn voice_final_replaces_select_all_without_leading_space() {
+    // Select-all then dictate should replace without adding a leading space
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.voice_state = VoiceState::Recording {
+        hold: false,
+        target: VoiceTarget::Agent(id),
+        interim: None,
+    };
+    let p = &mut app.agents.get_mut(&id).unwrap().prompt;
+    p.set_text("old text");
+    p.set_cursor(0);
+    // Simulate select-all via textarea
+    p.textarea.set_selection(0, "old text".len());
+
+    crate::voice::handle_voice_event(
+        &mut app,
+        xai_grok_voice::VoiceEvent::UtteranceFinal {
+            text: "new text".into(),
+        },
+    );
+
+    let p = &app.agents.get(&id).unwrap().prompt;
+    assert_eq!(
+        p.text(),
+        "new text",
+        "select-all replace must not add leading space"
+    );
+}
+
+#[test]
+fn voice_final_replaces_mid_word_selection_with_spacing() {
+    // Replace a mid-word selection, spacing from neighbors outside the selection
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.voice_state = VoiceState::Recording {
+        hold: false,
+        target: VoiceTarget::Agent(id),
+        interim: None,
+    };
+    let p = &mut app.agents.get_mut(&id).unwrap().prompt;
+    p.set_text("hello world");
+    // Select "worl" (positions 6-10)
+    p.set_cursor(6);
+    p.textarea.set_selection(6, 10);
+
+    crate::voice::handle_voice_event(
+        &mut app,
+        xai_grok_voice::VoiceEvent::UtteranceFinal {
+            text: "there".into(),
+        },
+    );
+
+    let p = &app.agents.get(&id).unwrap().prompt;
+    // "hello " + "there" + "d" - leading space from 'o', trailing space from 'd'
+    assert_eq!(p.text(), "hello there d");
+}
+
+#[test]
+fn voice_final_no_selection_mid_cursor_insert_unchanged() {
+    // Regression: no-selection mid-cursor insert still works
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.voice_state = VoiceState::Recording {
+        hold: false,
+        target: VoiceTarget::Agent(id),
+        interim: None,
+    };
+    let p = &mut app.agents.get_mut(&id).unwrap().prompt;
+    p.set_text("hello world");
+    p.set_cursor(5); // After "hello"
+
+    crate::voice::handle_voice_event(
+        &mut app,
+        xai_grok_voice::VoiceEvent::UtteranceFinal {
+            text: "there".into(),
+        },
+    );
+
+    let p = &app.agents.get(&id).unwrap().prompt;
+    assert_eq!(p.text(), "hello there world");
 }
 
 #[test]
@@ -155,11 +318,9 @@ fn voice_final_preserves_trailing_newline() {
         target: VoiceTarget::Agent(id),
         interim: None,
     };
-    app.agents
-        .get_mut(&id)
-        .unwrap()
-        .prompt
-        .set_text("line one\n");
+    let p = &mut app.agents.get_mut(&id).unwrap().prompt;
+    p.set_text("line one\n");
+    p.set_cursor("line one\n".len()); // Cursor at end after newline
     crate::voice::handle_voice_event(
         &mut app,
         xai_grok_voice::VoiceEvent::UtteranceFinal {
@@ -213,7 +374,7 @@ fn voice_keybinding_on_restricted_tier_opens_upsell() {
     let mut app = test_app_with_agent();
     app.voice_mode_enabled = true;
     // A personal login without a subscription tier is free tier, so voice is restricted
-    app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta::default());
+    app.apply_auth_meta(&xai_grok_login::AuthMeta::default());
     assert!(app.is_voice_tier_restricted());
 
     dispatch(Action::EnableVoiceMode, &mut app);
@@ -236,7 +397,7 @@ fn voice_keybinding_on_paid_tier_not_gated() {
     }
     let mut app = test_app_with_agent();
     app.voice_mode_enabled = true;
-    let meta = xai_grok_shell::auth::AuthMeta {
+    let meta = xai_grok_login::AuthMeta {
         subscription_tier: Some("SuperGrok".into()),
         ..Default::default()
     };
@@ -277,6 +438,180 @@ fn voice_interim_sets_then_error_clears_state() {
     );
     assert!(!app.voice_listening());
     assert!(app.voice_interim().is_none());
+}
+
+#[test]
+fn voice_interim_preview_at_mid_prompt_cursor() {
+    use crate::views::prompt_widget::{PromptStyle, VoicePromptOverlay};
+    use ratatui::style::{Color, Modifier};
+    use ratatui::{buffer::Buffer, layout::Rect};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.voice_state = VoiceState::Recording {
+        hold: false,
+        target: VoiceTarget::Agent(id),
+        interim: None,
+    };
+    let p = &mut app.agents.get_mut(&id).unwrap().prompt;
+    p.set_text("hello world");
+    p.set_cursor(5); // Caret after "hello", on the space.
+
+    crate::voice::handle_voice_event(
+        &mut app,
+        xai_grok_voice::VoiceEvent::InterimTranscript {
+            text: "there".into(),
+        },
+    );
+
+    // The interim is overlay-only: it must not mutate the draft text or move the caret.
+    assert_eq!(app.voice_interim(), Some("there"));
+    {
+        let p = &app.agents.get(&id).unwrap().prompt;
+        assert_eq!(p.text(), "hello world", "interim must not mutate the draft");
+        assert_eq!(p.cursor(), 5, "interim must not move the caret");
+    }
+
+    // Render the bound prompt and assert the interim previews AT the caret (in the italic overlay
+    // style) while the text after the caret stays visible — shifted right, not overwritten.
+    let interim_text = app.voice_interim().unwrap().to_string();
+    let style = PromptStyle {
+        focused: true,
+        show_prefix: false,
+        vpad_top: 0,
+        chrome: false,
+        ..Default::default()
+    };
+    let area = Rect::new(0, 0, 40, 3);
+    let mut buf = Buffer::empty(area);
+    let overlay = VoicePromptOverlay {
+        interim: Some(interim_text.as_str()),
+        color: Color::Cyan,
+    };
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .prompt
+        .draw(&mut buf, area, None, &style, None, Some(overlay));
+
+    let row: String = (0..area.width)
+        .filter_map(|x| buf.cell((x, 0)).map(|c| c.symbol().to_string()))
+        .collect();
+    assert_eq!(
+        row.trim_end(),
+        "hello there world",
+        "interim must insert at the caret and keep the trailing text visible"
+    );
+    // The ghost fragment carries the italic interim style; 't' of "there" sits at column 6.
+    let ghost = buf.cell((6, 0)).unwrap();
+    assert_eq!(ghost.symbol(), "t");
+    assert!(
+        ghost.style().add_modifier.contains(Modifier::ITALIC),
+        "interim preview must use the italic overlay style"
+    );
+    // The real draft after the caret keeps its normal (non-italic) style.
+    let tail = buf.cell((12, 0)).unwrap();
+    assert_eq!(tail.symbol(), "w");
+    assert!(!tail.style().add_modifier.contains(Modifier::ITALIC));
+}
+
+#[test]
+fn voice_interim_preview_replaces_active_selection() {
+    // Dictating over a highlight must preview a replace of that span (same as the live insert),
+    // not an insert at the caret into the selected text.
+    use crate::views::prompt_widget::{PromptStyle, VoicePromptOverlay};
+    use ratatui::style::{Color, Modifier};
+    use ratatui::{buffer::Buffer, layout::Rect};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.voice_state = VoiceState::Recording {
+        hold: false,
+        target: VoiceTarget::Agent(id),
+        interim: None,
+    };
+    let p = &mut app.agents.get_mut(&id).unwrap().prompt;
+    p.set_text("hello world");
+    p.textarea.set_selection(0, 5); // "hello" selected
+
+    crate::voice::handle_voice_event(
+        &mut app,
+        xai_grok_voice::VoiceEvent::InterimTranscript { text: "hi".into() },
+    );
+
+    assert_eq!(app.voice_interim(), Some("hi"));
+    {
+        let p = &app.agents.get(&id).unwrap().prompt;
+        assert_eq!(p.text(), "hello world", "interim must not mutate the draft");
+        assert_eq!(
+            p.selection_range(),
+            Some(0..5),
+            "interim must not clear the selection"
+        );
+    }
+
+    let interim_text = app.voice_interim().unwrap().to_string();
+    let style = PromptStyle {
+        focused: true,
+        show_prefix: false,
+        vpad_top: 0,
+        chrome: false,
+        ..Default::default()
+    };
+    let area = Rect::new(0, 0, 40, 3);
+    let mut buf = Buffer::empty(area);
+    let overlay = VoicePromptOverlay {
+        interim: Some(interim_text.as_str()),
+        color: Color::Cyan,
+    };
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .prompt
+        .draw(&mut buf, area, None, &style, None, Some(overlay));
+
+    let row: String = (0..area.width)
+        .filter_map(|x| buf.cell((x, 0)).map(|c| c.symbol().to_string()))
+        .collect();
+    assert_eq!(
+        row.trim_end(),
+        "hi world",
+        "interim must preview replacing the selection, not inserting into it"
+    );
+    let ghost = buf.cell((0, 0)).unwrap();
+    assert_eq!(ghost.symbol(), "h");
+    assert!(
+        ghost.style().add_modifier.contains(Modifier::ITALIC),
+        "replacement preview must use the italic overlay style"
+    );
+    let tail = buf.cell((3, 0)).unwrap();
+    assert_eq!(tail.symbol(), "w");
+    assert!(!tail.style().add_modifier.contains(Modifier::ITALIC));
+}
+
+#[test]
+fn commit_interim_replaces_active_selection() {
+    // Leftover-interim submit records the selection span so merge_voice_fragment
+    // drops the highlighted text the same way the live insert does.
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.voice_state = VoiceState::Recording {
+        hold: false,
+        target: VoiceTarget::Agent(id),
+        interim: Some("hi".into()),
+    };
+    let p = &mut app.agents.get_mut(&id).unwrap().prompt;
+    p.set_text("hello world");
+    p.textarea.set_selection(0, 5);
+
+    let commit = crate::voice::commit_interim_into_prompt(&mut app).expect("commit");
+    assert_eq!(commit.fragment, "hi");
+    assert_eq!(commit.replace, Some(0..5));
+    assert_eq!(
+        app.agents.get(&id).unwrap().prompt.text(),
+        "hi world",
+        "commit must replace the selection, not insert into it"
+    );
 }
 
 #[test]
@@ -649,7 +984,6 @@ fn voice_stop_leaves_non_hold_cold_start_armed() {
 }
 
 /// Changing the STT language shuts down a running pipeline (it holds the VoiceConfig it was spawned with) and persists the preference.
-/// The next capture then cold-starts a pipeline with the new language.
 /// A mid-recording change also ends the in-flight session so the mic indicator clears at once.
 /// Otherwise it would linger until the dead pipeline's channel-close is misreported.
 #[test]
@@ -776,7 +1110,11 @@ fn voice_submit_includes_interim() {
     let id = AgentId(0);
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
     app.voice_cmd_tx = Some(tx);
-    app.agents.get_mut(&id).unwrap().prompt.set_text("hello");
+    {
+        let p = &mut app.agents.get_mut(&id).unwrap().prompt;
+        p.set_text("hello");
+        p.set_cursor("hello".len()); // Caret at end: the leftover interim appends.
+    }
     app.voice_state = VoiceState::Recording {
         hold: false,
         target: VoiceTarget::Agent(id),
@@ -793,6 +1131,31 @@ fn voice_submit_includes_interim() {
         rx.try_recv(),
         Ok(xai_grok_voice::VoiceCommand::PttRelease)
     ));
+}
+
+#[test]
+fn voice_merge_replaces_selection_range() {
+    // Submit-time merge with a selection replaces the selected span (matching the live insert),
+    // rather than keeping the selected text and inserting at the caret.
+    assert_eq!(
+        crate::voice::merge_voice_fragment("hello world", Some(0..5), "hi"),
+        "hi world"
+    );
+    // An empty range at the caret inserts with smart spacing on both sides.
+    assert_eq!(
+        crate::voice::merge_voice_fragment("foobar", Some(3..3), "baz"),
+        "foo baz bar"
+    );
+    // No range appends with a single space.
+    assert_eq!(
+        crate::voice::merge_voice_fragment("hello", None, "world"),
+        "hello world"
+    );
+    // A blank draft is replaced outright regardless of the range.
+    assert_eq!(
+        crate::voice::merge_voice_fragment("   ", Some(0..3), "hi"),
+        "hi"
+    );
 }
 
 #[test]
@@ -817,7 +1180,9 @@ fn voice_submit_interim_only() {
 fn voice_submit_follow_up_keeps_chip_literal() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    app.agents.get_mut(&id).unwrap().prompt.set_text("draft");
+    let p = &mut app.agents.get_mut(&id).unwrap().prompt;
+    p.set_text("draft");
+    p.set_cursor("draft".len()); // Cursor at end for append behavior
     app.voice_state = VoiceState::Recording {
         hold: false,
         target: VoiceTarget::Agent(id),

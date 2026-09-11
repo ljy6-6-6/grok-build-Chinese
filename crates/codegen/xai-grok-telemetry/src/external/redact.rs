@@ -146,6 +146,8 @@ impl<E: LogExporter> LogExporter for RedactingLogExporter<E> {
                 Err(e) => {
                     self.health.export_failures.fetch_add(1, Ordering::Relaxed);
                     *self.health.last_export_error.lock() = Some(e.to_string());
+                    // A bounded/timed-out export fails one batch, not the stream.
+                    tracing::warn!(error = %e, "external otel: log export failed; stream stays enabled");
                 }
             };
             result
@@ -195,11 +197,9 @@ fn metrics_are_clean(metrics: &ResourceMetrics) -> bool {
     })
 }
 
-/// Wraps the OTLP `MetricExporter`.
-/// `opentelemetry_sdk` 0.30's `ResourceMetrics` read path is iterator-based and cannot be mutated.
-/// On any attribute-key violation the wrapper therefore **drops the entire export** rather than scrubbing in place.
-/// It returns `Ok`, logs an internal warning, and increments the export-health counter.
-/// This is coarse, but genuinely fail-closed.
+/// `opentelemetry_sdk` 0.30's `ResourceMetrics` read path is iterator-based and cannot be mutated. On any attribute-key
+/// violation the wrapper therefore drops the entire export rather than scrubbing in place. It returns `Ok`, logs an
+/// internal warning, and increments the export-health counter. This is coarse, but genuinely fail-closed.
 #[derive(Debug)]
 pub(crate) struct ValidatingMetricExporter<E> {
     inner: E,

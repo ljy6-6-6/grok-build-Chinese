@@ -15,6 +15,7 @@ use super::{SessionActor, ToolLoop};
 use crate::extensions::hooks::{
     ClientHookDecision, ClientHookDispatch, ClientHookGroup, ClientHookResponse,
 };
+use crate::extensions::notification::HookAnnotationKind;
 use crate::sampling::types::ToolCallResponse;
 
 const HOOK_EVENT_METHOD: &str = "x.ai/hooks/event";
@@ -168,7 +169,9 @@ impl SessionActor {
         self.hook_registry
             .borrow()
             .as_ref()
-            .is_some_and(|registry| registry.has_enabled_hooks_for_canonical(event))
+            .is_some_and(|registry| {
+                registry.has_enabled_hooks_for_canonical(event, &self.hook_disabled.borrow())
+            })
             || self.client_hooks.borrow().contains_key(&event.canonical())
     }
 
@@ -247,9 +250,12 @@ impl SessionActor {
             format!("Hook denied: {detail}"),
         )
         .await?;
-        self.send_hook_annotation(&format!(
-            "\u{26a0} `{tool_name}` blocked by hook `{hook_name}`: {detail}"
-        ))
+        // Tier copy ("a managed policy hook") for config-tier sources; real names pass through
+        let shown = xai_grok_hooks::config::hook_display_name(&hook_name);
+        self.send_hook_annotation_of(
+            &format!("`{tool_name}` blocked by {shown}: {detail}"),
+            HookAnnotationKind::ToolOutcome,
+        )
         .await;
         Ok(ToolLoop::HookDenied { hook_name })
     }

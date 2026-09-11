@@ -1,6 +1,6 @@
 //! Every managed-config file read and write, and every flock acquisition site. Synchronous only.
 
-use crate::auth::GrokAuth;
+use xai_grok_login::GrokAuth;
 
 use super::policy::{
     GateSnapshot, ManagedPolicyRefusal, auth_mode, claim_binds_to, served_principal_of,
@@ -101,22 +101,24 @@ fn remove_managed_path(path: &std::path::Path) -> std::io::Result<bool> {
 
 /// Non-expired only: an expired token would just 401.
 pub(super) fn eligible_team_principal(auth: GrokAuth) -> Option<GrokAuth> {
-    (auth.is_team_principal() && !crate::auth::is_expired(&auth)).then_some(auth)
+    (auth.is_team_principal() && !xai_grok_login::is_expired(&auth)).then_some(auth)
 }
 
 /// Single-team: managed config is a grok.com feature with one grok.com auth.
-pub(super) fn read_active_team_auth() -> Option<GrokAuth> {
+fn read_team_principal() -> std::io::Result<Option<GrokAuth>> {
     let home = crate::util::grok_home::grok_home();
-    let store = crate::auth::read_auth_json(&home.join("auth.json")).ok()?;
-    let team = store.values().find(|a| a.is_team_principal())?.clone();
-    eligible_team_principal(team)
+    let store = xai_grok_login::read_auth_json(&xai_grok_login::auth_json_path(&home))?;
+    Ok(store.into_values().find(|a| a.is_team_principal()))
+}
+
+pub(super) fn read_active_team_auth() -> Option<GrokAuth> {
+    eligible_team_principal(read_team_principal().ok().flatten()?)
 }
 
 /// Ignores expiry; `Err` is not a logout — treating it as one would wipe policy on a read blip.
 pub(super) fn team_principal_signed_in() -> std::io::Result<bool> {
-    let home = crate::util::grok_home::grok_home();
-    match crate::auth::read_auth_json(&home.join("auth.json")) {
-        Ok(store) => Ok(store.values().any(|a| a.is_team_principal())),
+    match read_team_principal() {
+        Ok(team) => Ok(team.is_some()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(e),
     }
@@ -124,7 +126,10 @@ pub(super) fn team_principal_signed_in() -> std::io::Result<bool> {
 
 /// Best-effort; a fail_closed opt-in is kept — swapping `auth.json` must not escape policy.
 pub fn clear_orphan() {
-    if resolve_deployment_key().is_some() {
+    // Env switch only: a served `[features] managed_config = false` must not veto evicting itself.
+    if crate::agent::config::env_bool("GROK_MANAGED_CONFIG") == Some(false)
+        || resolve_deployment_key().is_some()
+    {
         return;
     }
     match team_principal_signed_in() {
@@ -624,13 +629,9 @@ pub fn current_serving_identity() -> crate::config::ServingIdentity {
 
 /// Ignores expiry; no deployment-key special case, or envelope binding would be off for team users.
 pub(super) fn active_team_id_any_expiry() -> Option<String> {
-    let home = crate::util::grok_home::grok_home();
-    let store = crate::auth::read_auth_json(&home.join("auth.json")).ok()?;
-    store
-        .values()
-        .find(|a| a.is_team_principal())
-        // The id must read the same everywhere it feeds (gate, purge, envelope binding).
-        .and_then(|a| crate::config::normalize_identity(a.team_id.as_deref()))
+    let team = read_team_principal().ok().flatten()?;
+    // The id must read the same everywhere it feeds (gate, purge, envelope binding).
+    crate::config::normalize_identity(team.team_id.as_deref())
 }
 
 pub(super) fn current_serving_identity_any_expiry() -> crate::config::ServingIdentity {

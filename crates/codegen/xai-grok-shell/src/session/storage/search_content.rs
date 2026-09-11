@@ -318,6 +318,8 @@ pub(super) fn test_summary(
             id: acp::SessionId::new(session_id),
             cwd: cwd.to_string(),
         },
+        agent_id: None,
+        attempt_id: None,
         cwd_generation: 0,
         previous_cwd: None,
         pending_cwd_switch_reminder: None,

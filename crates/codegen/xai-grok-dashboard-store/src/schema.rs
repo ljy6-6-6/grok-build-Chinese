@@ -69,13 +69,7 @@ pub(crate) enum SchemaInit {
 }
 
 /// Idempotent create-or-heal of schema v1 inside one IMMEDIATE transaction.
-///
 /// `PRAGMA user_version` is re-read under the write lock because the caller's gate read is autocommit.
-/// A peer can commit between the two reads: a racing first init today, a migration once a newer schema exists.
-/// Stamping from the stale value would downgrade the version and let every older writer past the gate.
-///
-/// The stamp itself is conditional (only when the in-transaction value is below [`USER_VERSION`]).
-/// An unconditional re-stamp would dirty page 1 on every open, making each open a commit that bumps every peer's `data_version`.
 /// A healthy reopen therefore commits zero pages and never takes the write lock for real.
 pub(crate) fn init_schema(conn: &mut rusqlite::Connection) -> Result<SchemaInit> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;

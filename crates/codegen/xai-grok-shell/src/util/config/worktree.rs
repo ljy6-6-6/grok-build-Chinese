@@ -166,10 +166,17 @@ pub fn gate_grove_worktree_layers(
         enabled = true;
         src = "remote";
     }
-    match remote {
-        None => (false, "remote_unavailable"),
-        Some(r) if r.grove_worktree == Some(false) => (false, "remote_kill"),
-        _ => (enabled, src),
+    let refusal = match remote {
+        None => Some("remote_unavailable"),
+        Some(r) if r.grove_worktree == Some(false) => Some("remote_kill"),
+        _ => None,
+    };
+    match refusal {
+        // A refusal is only the *reason* when a layer actually asked for grove;
+        // otherwise callers would read `remote_unavailable` (returned on every
+        // settings-fetch failure) as proof of a grove request that never happened.
+        Some(reason) => (false, if enabled { reason } else { src }),
+        None => (enabled, src),
     }
 }
 
@@ -409,10 +416,7 @@ worktree_type = "invalid"
             resolve_grove_worktree(&root, Some(&remote_unset())),
             (false, "default")
         );
-        assert_eq!(
-            resolve_grove_worktree(&root, None),
-            (false, "remote_unavailable")
-        );
+        assert_eq!(resolve_grove_worktree(&root, None), (false, "default"));
     }
 
     #[test]
@@ -501,6 +505,16 @@ worktree_type = "invalid"
             gate_grove_worktree_layers(None, Some(true), &empty, None),
             (false, "remote_unavailable"),
             "true unavailability must fail-close even if env asked for grove"
+        );
+        assert_eq!(
+            gate_grove_worktree_layers(None, None, &empty, None),
+            (false, "default"),
+            "a missing remote must not be reported as a refused grove request"
+        );
+        assert_eq!(
+            gate_grove_worktree_layers(Some(false), None, &local_grove, Some(&remote_kill)),
+            (false, "request"),
+            "the kill switch must not claim a request that asked for copy"
         );
     }
 

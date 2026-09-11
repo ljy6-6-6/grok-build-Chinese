@@ -9,6 +9,25 @@ use xai_tool_types::is_not_sentinel;
 /// Maximum UTF-8 byte length of one in-memory V0 agent message.
 pub const MAX_ACTIVE_AGENT_MESSAGE_BYTES: usize = 32 * 1024;
 
+pub use xai_message_delivery_core::AgentAddress;
+
+/// How a caller names the owned child. The variant is the principal:
+/// a child id is agent ingress, an address is human ingress.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActiveMessageTarget {
+    ChildId(String),
+    Address(AgentAddress),
+}
+
+impl ActiveMessageTarget {
+    pub fn source(&self) -> ActiveAgentMessageSource {
+        match self {
+            Self::ChildId(_) => ActiveAgentMessageSource::Agent,
+            Self::Address(_) => ActiveAgentMessageSource::Human,
+        }
+    }
+}
+
 /// Closed delivery operation. No bool below the model adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveAgentMessageOperation {
@@ -16,10 +35,26 @@ pub enum ActiveAgentMessageOperation {
     Steer,
 }
 
+impl From<ActiveAgentMessageOperation> for xai_message_delivery_core::Operation {
+    fn from(operation: ActiveAgentMessageOperation) -> Self {
+        match operation {
+            ActiveAgentMessageOperation::Queue => xai_message_delivery_core::Operation::Queue,
+            ActiveAgentMessageOperation::Steer => xai_message_delivery_core::Operation::Steer,
+        }
+    }
+}
+
+/// Principal that caused the coordinator to mint an active-child delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActiveAgentMessageSource {
+    Agent,
+    Human,
+}
+
 /// Bounded caller request for the internal active-descendant route.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveAgentMessageRequest {
-    subagent_id: String,
+    target: ActiveMessageTarget,
     text: Arc<str>,
     operation: ActiveAgentMessageOperation,
 }
@@ -41,6 +76,29 @@ impl ActiveAgentMessageRequest {
         if !is_not_sentinel(&subagent_id) {
             return Err(ActiveAgentMessageOutcome::NotFoundOrNotOwned);
         }
+        Self::try_from_parts(
+            ActiveMessageTarget::ChildId(subagent_id.trim().to_owned()),
+            text,
+            operation,
+        )
+    }
+
+    pub fn try_new_from_human(
+        address: impl AsRef<str>,
+        text: impl Into<Arc<str>>,
+        operation: ActiveAgentMessageOperation,
+    ) -> Result<Self, ActiveAgentMessageOutcome> {
+        let Some(address) = AgentAddress::parse(address.as_ref()) else {
+            return Err(ActiveAgentMessageOutcome::NotFoundOrNotOwned);
+        };
+        Self::try_from_parts(ActiveMessageTarget::Address(address), text, operation)
+    }
+
+    fn try_from_parts(
+        target: ActiveMessageTarget,
+        text: impl Into<Arc<str>>,
+        operation: ActiveAgentMessageOperation,
+    ) -> Result<Self, ActiveAgentMessageOutcome> {
         let text = text.into();
         if text.is_empty() {
             return Err(ActiveAgentMessageOutcome::Limit {
@@ -55,7 +113,7 @@ impl ActiveAgentMessageRequest {
             });
         }
         Ok(Self {
-            subagent_id: subagent_id.trim().to_owned(),
+            target,
             text,
             operation,
         })
@@ -68,14 +126,14 @@ impl ActiveAgentMessageRequest {
 
     fn placeholder() -> Self {
         Self {
-            subagent_id: String::new(),
+            target: ActiveMessageTarget::ChildId(String::new()),
             text: Arc::from(""),
             operation: ActiveAgentMessageOperation::Queue,
         }
     }
 
-    pub fn subagent_id(&self) -> &str {
-        &self.subagent_id
+    pub fn target(&self) -> &ActiveMessageTarget {
+        &self.target
     }
 
     pub fn text(&self) -> &Arc<str> {
@@ -84,6 +142,10 @@ impl ActiveAgentMessageRequest {
 
     pub fn operation(&self) -> ActiveAgentMessageOperation {
         self.operation
+    }
+
+    pub fn source(&self) -> ActiveAgentMessageSource {
+        self.target.source()
     }
 }
 
@@ -100,6 +162,7 @@ pub struct ActiveAgentMessage {
 pub struct ActiveAgentMessageDelivery {
     message: ActiveAgentMessage,
     operation: ActiveAgentMessageOperation,
+    source: ActiveAgentMessageSource,
     admission_lease: Arc<ActiveMessageAdmissionLease>,
 }
 
@@ -107,11 +170,13 @@ impl ActiveAgentMessageDelivery {
     pub(crate) fn new(
         message: ActiveAgentMessage,
         operation: ActiveAgentMessageOperation,
+        source: ActiveAgentMessageSource,
         admission_lease: Arc<ActiveMessageAdmissionLease>,
     ) -> Self {
         Self {
             message,
             operation,
+            source,
             admission_lease,
         }
     }
@@ -122,6 +187,10 @@ impl ActiveAgentMessageDelivery {
 
     pub fn operation(&self) -> ActiveAgentMessageOperation {
         self.operation
+    }
+
+    pub fn source(&self) -> ActiveAgentMessageSource {
+        self.source
     }
 
     /// Run synchronous protected-row insertion only while admission is open.

@@ -44,7 +44,6 @@ fn session_loaded_with_restore_shows_summary_in_scrollback() {
             ),
             restore_degree: Some(xai_grok_workspace::session::git::RestoreDegree::Full),
             running_prompt_id: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -357,7 +356,6 @@ fn session_loaded_without_adoption_finishes_replayed_running_entries() {
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -474,7 +472,6 @@ fn session_loaded_purges_replay_transient() {
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -490,6 +487,9 @@ fn session_loaded_during_open_reload_window_defers_to_window() {
     dispatch(Action::LoadSession("sess-w".into(), None, false), &mut app);
     let id = AgentId(0);
     app.agents.get_mut(&id).unwrap().begin_session_reload(1);
+    let suppressed = xai_grok_dashboard_store::SessionId::new("sess-w").unwrap();
+    app.workspace_membership
+        .suppress_for_test(suppressed.clone());
     let effects = dispatch(
         Action::TaskComplete(TaskResult::SessionLoaded {
             agent_id: id,
@@ -499,7 +499,6 @@ fn session_loaded_during_open_reload_window_defers_to_window() {
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -510,6 +509,11 @@ fn session_loaded_during_open_reload_window_defers_to_window() {
     let agent = app.agents.get(&id).unwrap();
     assert!(agent.session_reload.is_some(), "the window stays open");
     assert!(agent.session.loading_replay, "the replay gate stays open");
+    assert!(
+        app.workspace_membership
+            .removal_suppressed_for_test(&suppressed),
+        "a deferred load must not re-enable workspace adoption"
+    );
 }
 /// Failure variant of the above: no `TurnFailed` block may be pushed into the staging state.
 #[test]
@@ -605,7 +609,6 @@ fn session_loaded_with_restore_failure_shows_warning_banner() {
             ),
             restore_degree: None,
             running_prompt_id: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -647,7 +650,6 @@ fn session_loaded_without_restore_no_summary() {
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -688,7 +690,6 @@ fn session_loaded_without_restore_resets_restore_degree() {
             restore_summary: Some("checked out abc".into()),
             restore_degree: Some(xai_grok_workspace::session::git::RestoreDegree::Full),
             running_prompt_id: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -705,7 +706,6 @@ fn session_loaded_without_restore_resets_restore_degree() {
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -734,7 +734,6 @@ fn session_loaded_with_flag_emits_five_fetches_and_clears_flag() {
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -933,7 +932,6 @@ fn session_loaded_drains_pending_first_prompt_to_front() {
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -963,7 +961,6 @@ fn session_loaded_with_no_pending_first_prompt_does_not_enqueue() {
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -1068,7 +1065,6 @@ fn session_loaded_clears_stale_running_entries() {
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -1104,7 +1100,6 @@ fn a_restored_transcript_stays_recallable_after_a_failed_fetch() {
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -1156,7 +1151,6 @@ fn resume_focuses_existing_agent_for_open_session() {
             agent_id: agent_0,
             session_id: "wt-sess-1".into(),
             models: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -1174,7 +1168,6 @@ fn resume_focuses_existing_agent_for_open_session() {
             agent_id: agent_1,
             session_id: "new-sess-2".into(),
             models: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -1205,7 +1198,6 @@ fn resume_unknown_session_still_creates_new_agent() {
             agent_id: AgentId(0),
             session_id: "sess-aaa".into(),
             models: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -1236,7 +1228,6 @@ fn resume_open_session_does_not_rearm_stale_overlay() {
             agent_id: agent_0,
             session_id: "sess-a".into(),
             models: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -1247,7 +1238,6 @@ fn resume_open_session_does_not_rearm_stale_overlay() {
             agent_id: agent_1,
             session_id: "sess-b".into(),
             models: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -1273,7 +1263,6 @@ fn resume_conversation_does_not_focus_build_id_collision() {
             agent_id: agent_0,
             session_id: "shared-id".into(),
             models: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -1305,7 +1294,6 @@ fn duplicate_load_unbind_invalidates_old_minimal_btw_response() {
             agent_id: old_owner,
             session_id: "shared-id".into(),
             models: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -1348,7 +1336,6 @@ fn resume_under_chat_mode_focuses_despite_entry_false() {
             agent_id: agent_0,
             session_id: "chat-mode-sess".into(),
             models: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -1360,7 +1347,6 @@ fn resume_under_chat_mode_focuses_despite_entry_false() {
             agent_id: agent_1,
             session_id: "other".into(),
             models: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -1386,7 +1372,6 @@ fn resume_stale_attached_target_focuses_dashboard_row() {
             agent_id: agent_0,
             session_id: "sess-a".into(),
             models: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -1397,7 +1382,6 @@ fn resume_stale_attached_target_focuses_dashboard_row() {
             agent_id: agent_1,
             session_id: "sess-b".into(),
             models: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -1471,7 +1455,6 @@ fn session_restored_clears_stale_session_id() {
             agent_id: AgentId(0),
             session_id: "remote-sess".into(),
             models: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -2120,7 +2103,6 @@ fn modal_search_response_lands_and_stale_is_dropped() {
         "stale response must not clear the newer search's indicator"
     );
 }
-/// Closing the modal picker invalidates its in-flight chat-mode search.
 /// With the modal gone the response would fall through to the WELCOME picker fields, whose search box never held the modal's query.
 /// That would leave mismatched entries and a stale fetch-query stamp for the next resume view.
 /// The close must bump the seq so the late response is dropped.
@@ -2262,7 +2244,6 @@ fn welcome_esc_drops_in_flight_fetch_response() {
 /// Build-mode sibling of the chat Esc test, pinning Esc during load.
 /// The fast foreign fetch has landed (its rows hidden behind the Grok-default CTA) while the native fetch is still in flight.
 /// Esc must really dismiss the picker: drop the loading flag and invalidate the fetch so its late response cannot resurrect the picker.
-/// A lingering loading flag holds `show_picker` in a spinner limbo that ignores input.
 #[test]
 fn build_welcome_esc_during_load_dismisses_without_resurrection() {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -3066,6 +3047,8 @@ fn welcome_fetch_response_does_not_retarget_open_modal() {
 #[test]
 fn dashboard_host_results_route_to_surface_only() {
     use crate::views::session_picker_surface::SessionPickerSurface;
+    let cwd = std::env::current_dir().expect("cwd");
+    let planted = plant_local_build_session(&cwd, "dash-fresh");
     let mut app = test_app();
     let generation = app.alloc_picker_generation();
     let mut surface = SessionPickerSurface::new(generation);
@@ -3076,7 +3059,7 @@ fn dashboard_host_results_route_to_surface_only() {
             host: SessionPickerHost::Dashboard,
             generation,
             scope: ListScope::Cwd,
-            sessions: vec![make_picker_entry(id, "/r")],
+            sessions: vec![make_picker_entry(id, &cwd.to_string_lossy())],
             partial: None,
             seq: 0,
             query: None,
@@ -3193,6 +3176,7 @@ fn dashboard_host_results_route_to_surface_only() {
         app.session_picker_entries.is_none(),
         "an unmounted dashboard result must not fall through to welcome storage"
     );
+    std::fs::remove_dir_all(planted).expect("remove planted session");
 }
 /// A fetch issued for one agent's modal cannot land on another agent's modal: the generations differ, so the late result is dropped.
 /// The requesting (now background) modal stays loading; nothing routes back to a non-active modal.

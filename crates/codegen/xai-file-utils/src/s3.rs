@@ -92,10 +92,7 @@ fn parse_aws_credentials(content: &str) -> anyhow::Result<aws_sdk_s3::config::Cr
 }
 
 /// Build an S3 client. Uses path-style addressing when `endpoint_url` is set.
-///
-/// Reads `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY` environment
-/// variables so that S3 traffic can route through a corporate HTTP proxy when
-/// the S3-compatible endpoint is not directly reachable.
+/// Reads proxy env vars so S3 traffic can route through a corporate HTTP proxy.
 pub(crate) async fn build_s3_client(
     region: &str,
     credentials_content: Option<&str>,
@@ -103,6 +100,7 @@ pub(crate) async fn build_s3_client(
     endpoint_url: Option<&str>,
 ) -> anyhow::Result<aws_sdk_s3::Client> {
     let proxy_config = aws_smithy_http_client::proxy::ProxyConfig::from_env();
+    let tls_context = extra_ca_tls_context()?;
     let http_client = aws_smithy_http_client::Builder::new().build_with_connector_fn(
         move |settings, _runtime_components| {
             let mut builder =
@@ -114,6 +112,7 @@ pub(crate) async fn build_s3_client(
                 .tls_provider(aws_smithy_http_client::tls::Provider::Rustls(
                     aws_smithy_http_client::tls::rustls_provider::CryptoMode::Ring,
                 ))
+                .tls_context(tls_context.clone())
                 .build()
         },
     );
@@ -151,6 +150,18 @@ pub(crate) async fn build_s3_client(
         builder = builder.endpoint_url(url);
     }
     Ok(aws_sdk_s3::Client::from_conf(builder.build()))
+}
+
+fn extra_ca_tls_context() -> anyhow::Result<aws_smithy_http_client::tls::TlsContext> {
+    use aws_smithy_http_client::tls::{TlsContext, TrustStore};
+    let mut trust_store = TrustStore::default();
+    for pem in xai_grok_extra_ca::extra_root_pems() {
+        trust_store = trust_store.with_pem_certificate(pem.clone());
+    }
+    TlsContext::builder()
+        .with_trust_store(trust_store)
+        .build()
+        .context("build S3 TLS context with extra CA roots")
 }
 
 /// Static access-key credentials for presigning S3 URLs.
@@ -223,10 +234,9 @@ pub async fn presign_get_url(
     Ok(presigned.uri().to_string())
 }
 
-/// Aborts a created multipart upload when its future is dropped before
-/// completion. Callers bound uploads with deadlines and cancel by drop; a
-/// dropped future skips both Complete and the in-scope error-path abort,
-/// leaving orphaned billable parts in the (possibly customer-managed) bucket.
+/// Aborts a created multipart upload when its future is dropped before completion.
+/// Callers cancel by drop; a dropped future skips Complete and the error-path abort.
+/// That leaves orphaned billable parts in the (possibly customer-managed) bucket.
 struct AbortMultipartOnDrop {
     client: aws_sdk_s3::Client,
     bucket: String,
@@ -241,9 +251,8 @@ impl AbortMultipartOnDrop {
     }
 
     /// In-scope abort for the error path: awaited, unlike the drop hook.
-    /// Disarms only after the send completes, so a caller cancelling this
-    /// await still gets the drop-hook abort (AbortMultipartUpload is
-    /// idempotent server-side).
+    /// Disarms only after the send completes, so cancelling this await still gets the drop-hook abort.
+    /// AbortMultipartUpload is idempotent server-side.
     async fn abort(mut self) {
         let _ = self
             .client
@@ -280,11 +289,8 @@ impl Drop for AbortMultipartOnDrop {
 }
 
 /// Multipart upload for payloads that exceed [`MULTIPART_THRESHOLD`].
-///
-/// Splits `content` into [`MULTIPART_PART_SIZE`] chunks and uploads each as a
-/// separate part via the S3 multipart upload API. Aborts the upload on any
-/// part failure — or on cancellation (dropped future) — so we don't leak
-/// incomplete multipart uploads.
+/// Splits into [`MULTIPART_PART_SIZE`] chunks. Aborts on any part failure or cancellation
+/// so incomplete multipart uploads are not leaked.
 async fn multipart_upload_bytes(
     client: &aws_sdk_s3::Client,
     bucket: &str,
@@ -453,11 +459,8 @@ pub async fn upload_file(
 }
 
 /// Upload an async reader to S3.
-///
-/// Buffers the reader into memory before uploading because S3 PutObject
-/// requires a known Content-Length. For the primary caller (zstd-compressed
-/// dedup blobs from the upload queue), the compressed output is typically
-/// small enough that buffering is acceptable.
+/// Buffers first because S3 PutObject requires a known Content-Length.
+/// Acceptable for the primary caller: zstd-compressed dedup blobs are typically small.
 pub async fn upload_stream<R: tokio::io::AsyncRead + Send + Sync + 'static>(
     bucket: &str,
     object_path: &str,
@@ -496,9 +499,7 @@ pub struct S3ExistsResponse {
 }
 
 /// S3-native storage client providing batch operations via concurrent SDK calls.
-///
-/// Caches the AWS SDK `Client` for the lifetime of the struct, avoiding the
-/// per-call `build_s3_client()` overhead.
+/// Caches the AWS SDK `Client` for the lifetime of the struct.
 #[allow(dead_code)] // Used once the S3 storage backend is wired up.
 pub struct S3StorageClient {
     client: aws_sdk_s3::Client,
@@ -525,9 +526,7 @@ impl S3StorageClient {
     }
 
     /// Check existence of multiple S3 objects via concurrent HeadObject calls.
-    ///
-    /// Aggregates per-key outcomes worst-first: 401/403 → `Unauthorized`,
-    /// non-404 transient → `ProbeFailed`, all-404 → `NotFound`, else `Found`.
+    /// Aggregates worst-first: 401/403 → `Unauthorized`, non-404 transient → `ProbeFailed`, else found/not.
     pub async fn batch_check_exists<S: AsRef<str>>(
         &self,
         paths: &[S],
@@ -596,9 +595,7 @@ impl S3StorageClient {
     }
 
     /// Upload multiple small files via concurrent PutObject calls.
-    ///
-    /// Returns the proxy-compatible `BatchUploadResult` type directly so
-    /// downstream result-handling code stays unchanged.
+    /// Returns the proxy-compatible `BatchUploadResult` so downstream handling stays unchanged.
     pub async fn batch_upload(
         &self,
         files: Vec<(String, Vec<u8>, String)>,
@@ -1269,10 +1266,8 @@ mod tests {
         assert_eq!(objects.get("small-single.txt").unwrap(), &content);
         assert!(state.multipart_uploads.read().await.is_empty());
     }
-    /// Regression: cancelling (dropping) a multipart upload mid-part must
-    /// still abort the upload. A dropped future skips both Complete and the
-    /// in-scope error-path abort, leaving orphaned billable parts in the
-    /// bucket — reachable from callers that bound uploads with a deadline.
+    /// Regression: dropping a multipart upload mid-part must still abort the upload.
+    /// A dropped future skips Complete and the error-path abort, leaving orphaned billable parts.
     #[tokio::test]
     async fn dropped_multipart_upload_aborts_the_upload() {
         use axum::extract::Query;

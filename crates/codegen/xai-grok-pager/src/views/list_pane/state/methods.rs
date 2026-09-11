@@ -1,10 +1,8 @@
 use super::*;
 
 impl ListPaneState {
-    /// Create a new state with the given wrap mode and follow-mode flag.
-    ///
-    /// Uses default config (all features enabled).
-    /// For custom config, use [`new_with_config`].
+    /// Create a new state with the given wrap mode and follow-mode flag. Uses default config (all
+    /// features enabled). For custom config, use [`new_with_config`].
     pub fn new(wrap_mode: WrapMode, follow_mode: bool) -> Self {
         Self::new_with_config(wrap_mode, follow_mode, ListPaneConfig::default())
     }
@@ -91,11 +89,9 @@ impl ListPaneState {
         self.multi_range.clone()
     }
 
-    /// Get the range of physical item indices to copy.
-    ///
-    /// In visual mode: the visual selection range.
-    /// Without visual mode: the single selected item (range of 1).
-    /// Returns `None` if nothing is selected.
+    /// Get the range of physical item indices to copy. In visual mode: the visual selection range.
+    /// Without visual mode: the single selected item (range of 1). Returns `None` if nothing is
+    /// selected.
     pub fn copy_range(&self) -> Option<Range<usize>> {
         if self.visual_mode {
             self.multi_range.clone()
@@ -128,10 +124,8 @@ impl ListPaneState {
             .map(|m| ListFilter { matcher: m.clone() })
     }
 
-    /// Map a visible index to a physical index.
-    ///
-    /// When no filter is active, returns `vi` unchanged (identity).
-    /// When filtering, looks up the stored vis map.
+    /// Map a visible index to a physical index. When no filter is active, returns `vi` unchanged
+    /// (identity). When filtering, looks up the stored vis map.
     #[inline]
     pub fn to_physical(&self, vi: usize) -> usize {
         match &self.vis_map {
@@ -140,10 +134,16 @@ impl ListPaneState {
         }
     }
 
-    /// Resolve a visible index to an item.
-    ///
-    /// Returns `None` when layout/`vis_map` is stale relative to `items`
-    /// (model cleared or shrunk between `prepare_layout` and a key/mouse handler).
+    #[inline]
+    pub fn to_visible(&self, pi: usize) -> Option<usize> {
+        match &self.vis_map {
+            Some(v) => v.binary_search(&pi).ok(),
+            None => Some(pi),
+        }
+    }
+
+    /// Resolve a visible index to an item. Returns `None` when layout/`vis_map` is stale relative to
+    /// `items`. (model cleared or shrunk between `prepare_layout` and a key/mouse handler).
     #[inline]
     fn item_at<'a, T: ListItem>(&self, vi: usize, items: &'a [T]) -> Option<&'a T> {
         let pi = match &self.vis_map {
@@ -208,11 +208,8 @@ impl ListPaneState {
         self.input_mode
     }
 
-    /// Number of rows the bottom bar (editable input bar or accepted-matcher status) will occupy when this pane renders into the given height.
-    /// Returns `0` when no bar is shown.
-    ///
-    /// Mirrors the split logic in [`ListPane::render`](super::render).
-    /// Panes that draw their own overlays (the tasks pane's kill/view buttons and spinners) can then avoid painting over the bar row.
+    /// Number of rows the bottom bar (editable input bar or accepted-matcher status) will occupy when
+    /// this pane renders into the given height.
     pub fn bottom_bar_height(&self, area_height: u16) -> u16 {
         // Comment mode may need multiple rows for multi-line input; every other mode (and the accepted-matcher status line) uses a single row
         let bar_height = if matches!(self.input_mode, Some(InputBarMode::Comment)) {
@@ -258,10 +255,9 @@ impl ListPaneState {
         &self.input_textarea
     }
 
-    /// Render the input textarea into the given area, with visible cursor.
-    ///
-    /// Encapsulates the borrow split (textarea and textarea_state are both fields on `self`).
-    /// Called by the renderer. Stores the cursor screen position for [`cursor_position`].
+    /// Render the input textarea into the given area, with visible cursor. Encapsulates the borrow
+    /// split (textarea and textarea_state are both fields on `self`). Called by the renderer. Stores
+    /// the cursor screen position for [`cursor_position`].
     pub fn render_input_textarea(&mut self, area: Rect, buf: &mut ratatui::buffer::Buffer) {
         use ratatui::style::Modifier;
         use ratatui::widgets::StatefulWidgetRef;
@@ -285,11 +281,9 @@ impl ListPaneState {
         }
     }
 
-    /// Screen position of the input bar cursor, if the input bar is active.
-    ///
-    /// Returns `Some((x, y))` after rendering.
-    /// The caller can pass this to `Frame::set_cursor_position()` for a hardware blinking cursor.
-    /// Returns `None` when the input bar is closed or before the first render.
+    /// Screen position of the input bar cursor, if the input bar is active. Returns `Some((x, y))`
+    /// after rendering. The caller can pass this to `Frame::set_cursor_position()` for a hardware
+    /// blinking cursor. Returns `None` when the input bar is closed or before the first render.
     pub fn cursor_position(&self) -> Option<(u16, u16)> {
         if self.input_mode.is_some() {
             self.input_cursor_screen_pos
@@ -302,10 +296,8 @@ impl ListPaneState {
     // Visual select mode
     // =======================================================================
 
-    /// Enter visual selection mode, anchored at the current selection.
-    ///
-    /// If in follow mode, exits follow first (placing a cursor), then enters visual.
-    /// No-op if visual select is disabled.
+    /// Enter visual selection mode, anchored at the current selection. If in follow mode, exits follow
+    /// first (placing a cursor), then enters visual. No-op if visual select is disabled.
     pub fn enter_visual_mode<T: ListItem>(&mut self, items: &[T]) {
         if !self.config.visual_select_enabled || self.visual_mode {
             return;
@@ -345,10 +337,8 @@ impl ListPaneState {
         self.clipboard = provider;
     }
 
-    /// Disable follow mode permanently (sets `follow_enabled = false`).
-    ///
-    /// After this, `G` selects the last item instead of engaging follow.
-    /// Use when the data source is no longer streaming.
+    /// Disable follow mode permanently (sets `follow_enabled = false`). After this, `G` selects the
+    /// last item instead of engaging follow. Use when the data source is no longer streaming.
     pub fn disable_follow_permanently(&mut self) {
         self.config.follow_enabled = false;
         self.follow_mode = false;
@@ -365,22 +355,18 @@ impl ListPaneState {
         }
     }
 
-    /// Invalidate the layout cache, forcing a full rebuild on the next `prepare_layout` call.
-    ///
-    /// Use this when the item content has changed without changing the item count.
-    /// For example, streaming updates replace existing items with different content and heights.
+    /// Invalidate the layout cache, forcing a full rebuild on the next `prepare_layout` call. Use this
+    /// when the item content has changed without changing the item count. For example, streaming
+    /// updates replace existing items with different content and heights.
     pub fn invalidate_layout(&mut self) {
         self.last_stamp = None;
         self.height_cache.clear();
         self.height_cache_width = 0;
     }
 
-    /// Copy the selected item(s) content to the clipboard.
-    ///
-    /// Single selection: copies the plain text of `content()`.
-    /// Visual selection: copies all items in the range, joined by `\n`.
-    /// No-op in follow mode (no selection) or when `copy_enabled` is false.
-    /// Returns `true` if something was copied.
+    /// Copy the selected item(s) content to the clipboard. Single selection: copies the plain text of
+    /// `content()`. Visual selection: copies all items in the range, joined by `\n`. No-op in follow
+    /// mode (no selection) or when `copy_enabled` is false. Returns `true` if something was copied.
     pub fn copy_selected<T: ListItem>(&mut self, items: &[T]) -> bool {
         if !self.config.copy_enabled {
             return false;
@@ -423,11 +409,8 @@ impl ListPaneState {
     // Scrollbar interaction
     // =======================================================================
 
-    /// Set scroll offset to a specific value and select the nearest item at viewport center.
-    ///
-    /// Used by scrollbar click/drag.
-    /// The caller computes the offset with [`crate::render::scrollbar::scrollbar_click_to_offset`], which shares the renderer's `ScrollMetrics`.
-    /// The thumb therefore lands exactly where the user clicked.
+    /// Set scroll offset to a specific value and select the nearest item at viewport center. The thumb
+    /// therefore lands exactly where the user clicked.
     pub fn set_scroll_offset_and_center<T: ListItem>(&mut self, offset: usize, items: &[T]) {
         let total = self.layout.total_height();
         let vp = self.viewport_height as usize;
@@ -447,9 +430,7 @@ impl ListPaneState {
         }
     }
 
-    /// Scroll by a percentage of total content height.
-    ///
-    /// Positive scrolls down, negative scrolls up.
+    /// Scroll by a percentage of total content height. Positive scrolls down, negative scrolls up.
     /// Selects the nearest item at viewport center afterward.
     pub fn scroll_percent<T: ListItem>(&mut self, percent: f64, items: &[T]) {
         let total = self.layout.total_height() as f64;
@@ -457,10 +438,9 @@ impl ListPaneState {
         self.scroll_and_center(delta, items);
     }
 
-    /// Scroll by the given number of lines (positive scrolls down), then select the nearest item at viewport center.
-    ///
-    /// Unlike [`scroll_lines`], which pins selection at the same screen-y, this serves scrollbar interactions.
-    /// There the user expects proportional navigation rather than cursor-locked scrolling.
+    /// Scroll by the given number of lines (positive scrolls down), then select the nearest item at
+    /// viewport center. There the user expects proportional navigation rather than cursor-locked
+    /// scrolling.
     pub fn scroll_and_center<T: ListItem>(&mut self, delta: i32, items: &[T]) {
         if delta == 0 {
             return;
@@ -529,11 +509,9 @@ impl ListPaneState {
     // Match navigation (n/N)
     // =======================================================================
 
-    /// Jump to the next match after the current selection.
-    ///
-    /// In Filter mode, moves to the next filtered item.
-    /// In Search mode, moves to the next matching item (all items visible).
-    /// Wraps around at the end.
+    /// Jump to the next match after the current selection. In Filter mode, moves to the next filtered
+    /// item. In Search mode, moves to the next matching item (all items visible). Wraps around at the
+    /// end.
     pub fn next_match<T: ListItem>(&mut self, items: &[T]) {
         let current_pi = self.selected_index.map(|vi| self.to_physical(vi));
         let Some(m) = self.matcher.as_mut() else {
@@ -596,21 +574,9 @@ impl ListPaneState {
     // prepare_layout: the ONE generic entry point
     // =======================================================================
 
-    /// Recompute layout, resolve the stable-ID selection to indices, and clamp scroll.
-    ///
-    /// Call this once per frame before rendering.
-    /// `items` is the full (unfiltered) slice from the model.
-    /// `width` is the content width available for item rendering. `viewport_height` is the pane height in terminal rows.
-    ///
-    /// # Performance
-    ///
-    /// Uses dirty tracking to avoid redundant work:
-    /// - **No change**: width, wrap mode, filter, and item count unchanged. Skips the rebuild entirely; still resolves selection and clamps scroll.
-    /// - **Append only** (same width, no filter change, count grew, Wrap mode): only *new* items get `desired_height`, growing the prefix-sum cache.
-    /// - **Full rebuild**: width/mode/filter changed, or items were removed.
-    ///
-    // Terminal resize triggers a full rebuild (new width)
-    // Resize events are debounced at the event-loop level so only the final size rebuilds
+    /// Recompute layout, resolve the stable-ID selection to indices, and clamp scroll. Uses dirty
+    /// tracking to avoid redundant work. Append only (same width, no filter change, count grew, Wrap
+    /// mode): only new items get `desired_height`, growing the prefix-sum cache.
     pub fn prepare_layout<T: ListItem>(&mut self, items: &[T], width: u16, viewport_height: u16) {
         // Reserve 1 row for the bottom bar when the input bar is open or a matcher is accepted (showing status)
         self.viewport_height = if self.input_mode.is_some() || self.matcher.is_some() {
@@ -662,17 +628,9 @@ impl ListPaneState {
             }
         };
 
-        // -- SCROLLBAR WIDTH FIX: Determine effective width for layout ---------
-        //
-        // In Wrap mode, the scrollbar takes SCROLLBAR_TOTAL_COLS (2) columns.
-        // If heights are computed at full width but rendered at the narrower scrollbar width, items may need MORE lines and truncate
-        //
-        // Two-phase approach:
-        // 1. If vis_count > viewport, the scrollbar is definitely needed, so use width - 2.
-        // 2. Otherwise, compute at full width, check the total, and recompute if wrong.
-        //
-        // Phase 2 only triggers when the guess is wrong (rare: few items that wrap heavily enough to exceed the viewport)
-        // This avoids constant re-computation
+        // SCROLLBAR WIDTH FIX: Determine effective width for layout. Otherwise, compute at full width,
+        // check the total, and recompute if wrong. Phase 2 only triggers when the guess is wrong (rare:
+        // few items that wrap heavily enough to exceed the viewport).
         let definitely_needs_scrollbar =
             self.wrap_mode == WrapMode::Wrap && vis_count > self.viewport_height as usize;
         let mut effective_width = if definitely_needs_scrollbar {
@@ -681,15 +639,8 @@ impl ListPaneState {
             width
         };
 
-        // -- Maintain per-physical-item height cache (ALL modes) ----------------
-        //
-        // The height cache stores `desired_height(effective_width)` for every physical item, regardless of the current wrap mode. It is:
-        //   - Fully rebuilt when `effective_width` changes.
-        //   - Extended when new items are appended (same width).
-        //   - Looked up (not recomputed) when only the filter changes.
-        //
-        // By caching eagerly even in NoWrap mode, toggling to Wrap is nearly free; all heights are already computed
-        // The per-item cost on append is microseconds (one `desired_height` call per new item)
+        // Maintain per-physical-item height cache (ALL modes). Looked up (not recomputed) when only the
+        // filter changes.
         {
             let width_changed = self.height_cache_width != effective_width;
             let items_shrunk = items.len() < self.height_cache.len();
@@ -753,10 +704,9 @@ impl ListPaneState {
         }
         // else: count, width, mode, and filter unchanged, so the cache is still valid
 
-        // -- SCROLLBAR WIDTH FIX Phase 2: Check if we guessed wrong ------------
-        //
-        // If heights were computed at full width but total_height > viewport (the scrollbar will actually show), recompute at the narrower width
-        // This only happens with Wrap mode and few items that wrap a lot
+        // SCROLLBAR WIDTH FIX Phase 2: Check if we guessed wrong. If heights were computed at full width
+        // but total_height > viewport (the scrollbar will actually show), recompute at the narrower width.
+        // This only happens with Wrap mode and few items that wrap a lot.
         if self.wrap_mode == WrapMode::Wrap
             && !definitely_needs_scrollbar
             && self.layout.total_height() > self.viewport_height as usize
@@ -868,10 +818,9 @@ impl ListPaneState {
     // Scroll
     // =======================================================================
 
-    /// Scroll down by `n` visual lines (viewport only, no follow logic).
-    ///
-    /// This is a low-level primitive.
-    /// Higher-level methods (`half_page_down`, `scroll_lines`, etc.) call this and then handle follow-mode transitions.
+    /// Scroll down by `n` visual lines (viewport only, no follow logic). This is a low-level primitive.
+    /// Higher-level methods (`half_page_down`, `scroll_lines`, etc.) call this and then handle
+    /// follow-mode transitions.
     fn scroll_down_raw(&mut self, n: usize) {
         self.scroll_offset = self.scroll_offset.saturating_add(n);
         self.clamp_scroll();
@@ -895,20 +844,8 @@ impl ListPaneState {
         self.scroll_up_raw(n);
     }
 
-    /// Scroll the viewport by `delta` visual lines (positive scrolls down), keeping the selection at the same screen-y position.
-    ///
-    /// This is nvim's Ctrl-d/u behavior: both viewport and cursor move by the same amount, so the cursor stays at the same row on screen.
-    ///
-    /// **Edge case (nvim-correct):** when the viewport is clamped at the top or bottom, the cursor continues to move by the remaining amount.
-    /// Ctrl-d near the bottom stops the viewport at max scroll while the cursor keeps going down to the last selectable item.
-    ///
-    /// Uses [`scroll_screen_y`] to pin the screen-y across consecutive scrolls, preventing drift when crossing non-selectable items (separators).
-    ///
-    /// Behavior:
-    /// - FOLLOW, downward: exit follow, cursor at the last visible item, `at_content_edge = true` (already at bottom).
-    /// - FOLLOW, upward: exit follow, cursor at the last visible item, then scroll up.
-    /// - NAV, downward: scroll, then one-past logic if at bottom.
-    /// - NAV, upward: scroll, reset edge state.
+    /// Scroll the viewport by `delta` visual lines (positive scrolls down), keeping the selection at
+    /// the same screen-y position.
     fn scroll_keeping_screen_y<T: ListItem>(&mut self, delta: isize, items: &[T]) {
         let is_down = delta > 0;
 
@@ -1047,10 +984,9 @@ impl ListPaneState {
         self.scroll_keeping_screen_y(-page, items);
     }
 
-    /// Scroll by `lines` (positive scrolls down) from the mouse wheel.
-    /// Keeps selection at the same screen-y.
-    ///
-    /// Uses the overscroll counter for the NAV-to-FOLLOW transition instead of the one-past boolean used by keyboard scrolls.
+    /// Scroll by `lines` (positive scrolls down) from the mouse wheel. Keeps selection at the same
+    /// screen-y. Uses the overscroll counter for the NAV-to-FOLLOW transition instead of the one-past
+    /// boolean used by keyboard scrolls.
     pub fn scroll_lines<T: ListItem>(&mut self, lines: i32, items: &[T]) {
         let is_down = lines > 0;
 
@@ -1137,10 +1073,8 @@ impl ListPaneState {
         self.engage_follow();
     }
 
-    /// Center the viewport on the selected item.
-    ///
-    /// Like vim's `zz`: places the selected item vertically centered.
-    /// No-op in follow mode (no cursor to center).
+    /// Center the viewport on the selected item. Like vim's `zz`: places the selected item vertically
+    /// centered. No-op in follow mode (no cursor to center).
     pub fn center_selected(&mut self) {
         if self.follow_mode {
             return;
@@ -1235,11 +1169,9 @@ impl ListPaneState {
     // Selection
     // =======================================================================
 
-    /// Select the next selectable item (downward): `j`/`↓`.
-    ///
-    /// Behavior:
-    /// - In FOLLOW: **no-op** (already at the bottom, nowhere to go down).
-    /// - In NAV: move down. If it can't move (already at the last selectable), one-past logic applies (a second `j` at the end engages follow).
+    /// Select the next selectable item (downward): `j`/`↓`. In FOLLOW: no-op (already at the bottom,
+    /// nowhere to go down). In NAV: move down. If it can't move (already at the last selectable),
+    /// one-past logic applies (a second `j` at the end engages follow).
     pub fn select_next<T: ListItem>(&mut self, items: &[T]) {
         if self.follow_mode {
             return; // no-op: already at the bottom
@@ -1277,11 +1209,8 @@ impl ListPaneState {
         }
     }
 
-    /// Select the previous selectable item (upward): `k`/`↑`.
-    ///
-    /// Behavior:
-    /// - In FOLLOW: exit follow, cursor at last visible, then move up 1.
-    /// - In NAV: move up. Resets edge state.
+    /// Select the previous selectable item (upward): `k`/`↑`. In FOLLOW: exit follow, cursor at last
+    /// visible, then move up 1. In NAV: move up. Resets edge state.
     pub fn select_prev<T: ListItem>(&mut self, items: &[T]) {
         if items.is_empty() {
             return;
@@ -1309,11 +1238,8 @@ impl ListPaneState {
         }
     }
 
-    /// Select the first selectable item: `g`/`Home`.
-    ///
-    /// Behavior:
-    /// - In FOLLOW: exit follow, cursor at first selectable, scroll to top.
-    /// - In NAV: cursor to first selectable, scroll to top. Resets edge state.
+    /// Select the first selectable item: `g`/`Home`. In FOLLOW: exit follow, cursor at first
+    /// selectable, scroll to top. In NAV: cursor to first selectable, scroll to top. Resets edge state.
     pub fn select_first<T: ListItem>(&mut self, items: &[T]) {
         if self.follow_mode {
             self.follow_mode = false;
@@ -1334,12 +1260,6 @@ impl ListPaneState {
     }
 
     /// Select the last selectable item: `G`/`End`.
-    ///
-    /// When follow is enabled and NOT in visual mode:
-    /// - In FOLLOW: no-op (already following).
-    /// - In NAV: engage follow immediately.
-    ///
-    /// When follow is disabled or in visual mode: selects the last selectable item normally (visual mode needs the cursor to stay visible).
     pub fn select_last<T: ListItem>(&mut self, items: &[T]) {
         if self.config.follow_enabled && !self.visual_mode {
             if self.follow_mode {
@@ -1365,10 +1285,8 @@ impl ListPaneState {
         }
     }
 
-    /// Select item at visible index `vi`, if selectable.
-    ///
-    /// On click: exits follow, cursor on clicked item.
-    /// Clears visual mode (a click is a single select).
+    /// Select item at visible index `vi`, if selectable. On click: exits follow, cursor on clicked
+    /// item. Clears visual mode (a click is a single select).
     pub fn select_at<T: ListItem>(&mut self, target_vi: usize, items: &[T]) {
         let count = self.layout.item_count();
         if target_vi >= count {
@@ -1426,15 +1344,17 @@ impl ListPaneState {
         self.clamp_scroll();
     }
 
+    pub fn reveal_selection(&mut self) {
+        self.ensure_selected_visible();
+    }
+
     // =======================================================================
     // Visible range (for rendering)
     // =======================================================================
 
-    /// Return the range of visible-item indices that overlap the viewport.
-    ///
-    /// For `FixedHeight`, this is `scroll_offset .. scroll_offset + viewport_height` clamped to `0..item_count`.
-    ///
-    /// For `Variable`, uses `item_at_y` for the top and then walks forward.
+    /// Return the range of visible-item indices that overlap the viewport. For `FixedHeight`, this is
+    /// `scroll_offset .. scroll_offset + viewport_height` clamped to `0..item_count`. For `Variable`,
+    /// uses `item_at_y` for the top and then walks forward.
     pub fn visible_range(&self) -> Range<usize> {
         let count = self.layout.item_count();
         if count == 0 || self.viewport_height == 0 {
@@ -1496,14 +1416,7 @@ impl ListPaneState {
         true
     }
 
-    /// Handle a key event for navigation, search, and filter.
-    ///
-    /// Returns `true` if the key was consumed (state changed), `false` if the key is unrecognized and should be propagated to the caller.
-    ///
-    /// **Must be called after `prepare_layout`** (so the layout cache and vis_map are current).
-    ///
-    /// When the input bar is active, typing keys are routed to the textarea.
-    /// Navigation keys (j/k, Ctrl-d/u, arrows, PgDn/PgUp) still work while the input bar is open.
+    /// Must be called after `prepare_layout` (so the layout cache and vis_map are current).
     pub fn handle_key_event<T: ListItem>(
         &mut self,
         event: &crossterm::event::KeyEvent,
@@ -1901,10 +1814,9 @@ impl ListPaneState {
         }
     }
 
-    /// Apply live goto-line preview while the user types.
-    ///
-    /// Parses the current input as `N` or `N-M` and live-updates the selection and scroll position.
-    /// Uses 1-based line numbers mapped to `stable_id` (which for SourceLine is the line number).
+    /// Apply live goto-line preview while the user types. Parses the current input as `N` or `N-M` and
+    /// live-updates the selection and scroll position. Uses 1-based line numbers mapped to `stable_id`
+    /// (which for SourceLine is the line number).
     fn apply_goto_line_live<T: ListItem>(&mut self, items: &[T]) {
         let text = self.input_textarea.text().to_owned();
         if text.is_empty() {
@@ -2030,10 +1942,9 @@ impl ListPaneState {
         self.goto_line_had_visual = false;
     }
 
-    /// Close the input bar if it's open, but preserve any accepted matcher.
-    ///
-    /// Use when hiding a pane: the user's committed search/filter should persist across show/hide cycles.
-    /// Only the mid-typing input bar state is discarded.
+    /// Close the input bar if it's open, but preserve any accepted matcher. Use when hiding a pane: the
+    /// user's committed search/filter should persist across show/hide cycles. Only the mid-typing input
+    /// bar state is discarded.
     pub fn close_input_bar(&mut self) {
         if self.input_mode.is_some() {
             self.input_mode = None;
@@ -2102,13 +2013,9 @@ impl ListPaneState {
         }
     }
 
-    /// Toggle follow mode (explicit pause/resume).
-    ///
-    /// `F` key:
-    /// - In FOLLOW: exit to NAV, cursor at last visible (pause).
-    /// - In NAV: engage follow immediately (resume from anywhere).
-    ///
-    /// No-op when `follow_enabled` is false in config.
+    /// Toggle follow mode (explicit pause/resume). In FOLLOW: exit to NAV, cursor at last visible
+    /// (pause). In NAV: engage follow immediately (resume from anywhere). No-op when `follow_enabled`
+    /// is false in config.
     pub fn toggle_follow<T: ListItem>(&mut self, items: &[T]) {
         if !self.config.follow_enabled {
             return;
@@ -2120,11 +2027,9 @@ impl ListPaneState {
         }
     }
 
-    /// Select the item at virtual-y position `y`, if it's selectable.
-    ///
-    /// Used for mouse click-to-select. Returns `true` if an item was selected, `false` if the click hit a non-selectable item or empty space.
-    ///
-    /// On click: exits follow, cursor on clicked item.
+    /// Select the item at virtual-y position `y`, if it's selectable. Used for mouse click-to-select.
+    /// Returns `true` if an item was selected, `false` if the click hit a non-selectable item or empty
+    /// space. On click: exits follow, cursor on clicked item.
     pub fn select_at_y<T: ListItem>(&mut self, y: usize, items: &[T]) -> bool {
         let Some(vi) = self.layout.item_at_y(y) else {
             return false;
@@ -2148,11 +2053,9 @@ impl ListPaneState {
     // Mouse event handling
     // =======================================================================
 
-    /// Handle a mouse event within this pane's area.
-    ///
-    /// `pane_area` is the screen `Rect` where the pane was rendered (used to compute the relative row for item click-to-select).
-    ///
-    /// Returns `true` if the event was consumed.
+    /// Handle a mouse event within this pane's area. `pane_area` is the screen `Rect` where the pane
+    /// was rendered (used to compute the relative row for item click-to-select). Returns `true` if the
+    /// event was consumed.
     pub fn handle_mouse_event<T: ListItem>(
         &mut self,
         kind: crossterm::event::MouseEventKind,
@@ -2196,10 +2099,8 @@ impl ListPaneState {
         }
     }
 
-    /// Handle a scroll event within this pane's area.
-    ///
-    /// If the mouse is over the scrollbar, scrolls by percentage (fast).
-    /// Otherwise scrolls by line count (normal).
+    /// Handle a scroll event within this pane's area. If the mouse is over the scrollbar, scrolls by
+    /// percentage (fast). Otherwise scrolls by line count (normal).
     pub fn handle_scroll_event<T: ListItem>(
         &mut self,
         lines: i32,

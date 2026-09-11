@@ -1,10 +1,8 @@
 use super::*;
 
 /// Find the response anchor for a turn: the first AgentMessage of the trailing agent-message run within `range`.
-///
-/// Scans backward from the turn's end.
-/// Non-empty agent messages extend the run; work entries (tool call, thinking, subagent, bg task) end the scan.
-/// Everything else (session events, system messages, empty streaming placeholders) is skipped without breaking the run.
+/// Everything else (session events, system messages, empty streaming placeholders) is skipped without breaking the
+/// run.
 fn response_anchor_in_range(
     entries: &IndexMap<EntryId, ScrollbackEntry>,
     range: Range<usize>,
@@ -148,7 +146,6 @@ impl ScrollbackState {
     }
 
     /// Navigate to the next turn (l key).
-    ///
     /// If we're before the first turn (e.g., at system messages), jumps to the first turn.
     /// Otherwise jumps to the next turn.
     pub fn next_turn(&mut self) -> bool {
@@ -176,11 +173,9 @@ impl ScrollbackState {
         true
     }
 
-    /// Navigate to the previous turn (h key).
-    ///
-    /// If currently in a turn's response (not on the prompt), jumps to the current turn's prompt.
-    /// If already on a prompt, jumps to the previous turn's prompt.
-    /// If at first turn's prompt and pre-turn exists with selectable entries, jumps there.
+    /// Navigate to the previous turn (h key). If currently in a turn's response (not on the prompt), jumps to the
+    /// current turn's prompt. If already on a prompt, jumps to the previous turn's prompt. If at first turn's prompt
+    /// and pre-turn exists with selectable entries, jumps there.
     pub fn prev_turn(&mut self) -> bool {
         // If no turns exist, nothing to do
         if self.turns.is_empty() {
@@ -254,13 +249,8 @@ impl ScrollbackState {
         self.bump_generation();
     }
 
-    /// Snap the viewport up to the nearest response anchor above (K).
-    ///
-    /// Selection plays no role: the target is the anchor with the largest exact top offset strictly below the current scroll offset.
-    /// A press exactly at an anchor's top therefore walks to the previous turn's anchor, and the first anchor is a no-op.
-    /// Anchors are computed on demand; only plausible candidates are measured exactly.
-    /// In SingleTurn mode the visible range confines candidates to the current turn.
-    /// Returns `false` without a layout or when no anchor lies above.
+    /// Snap the viewport up to the nearest response anchor above. Anchors are computed on demand; only plausible
+    /// candidates are measured exactly. Returns `false` without a layout or when no anchor lies above.
     pub fn prev_response(&mut self) -> bool {
         if self.viewport_height == 0 || self.last_width == 0 {
             return false;
@@ -296,11 +286,8 @@ impl ScrollbackState {
         false
     }
 
-    /// Snap the viewport down to the nearest response anchor below (J).
-    ///
-    /// Mirror of `prev_response`: the anchor with the smallest exact top offset strictly above the current scroll offset.
-    /// A press exactly at an anchor's top moves on to the next turn's anchor, and the last is a no-op.
-    /// Returns `false` without a layout or when no anchor lies below.
+    /// Snap the viewport down to the nearest response anchor below. Returns `false` without a layout or when no
+    /// anchor lies below.
     pub fn next_response(&mut self) -> bool {
         if self.viewport_height == 0 || self.last_width == 0 {
             return false;
@@ -331,13 +318,9 @@ impl ScrollbackState {
         false
     }
 
-    /// Whether the response being read starts above the viewport top.
-    /// The active turn (the one owning the top row) has a response anchor whose first line is scrolled off screen.
-    /// Drives the ▲ jump-to-response-top indicator, whose click runs [`Self::prev_response`].
-    /// From inside an answer that anchor is the nearest one above, so the indicator only shows when the click has that answer's top to land on.
-    ///
-    /// Cache-only estimate (`&self`, headers ignored) so render can poll it every frame.
-    /// The estimate never undershoots the exact target, so a visible indicator always has a real jump behind it.
+    /// From inside an answer that anchor is the nearest one above, so the indicator only shows when the click has that
+    /// answer's top to land on. Cache-only estimate (`&self`, headers ignored) so render can poll it every frame. The
+    /// estimate never undershoots the exact target, so a visible indicator always has a real jump behind it.
     pub fn has_response_top_above(&self) -> bool {
         let Some(turn) = self
             .active_turn_for_viewport()
@@ -365,15 +348,11 @@ impl ScrollbackState {
     pub fn scroll_up(&mut self, rows: u16) {
         self.scroll_offset = self.scroll_offset.saturating_sub(rows as usize);
         self.follow_mode = false;
-        self.maybe_release_pin_reserve();
         self.bump_generation();
     }
 
-    /// Scroll down by n rows.
-    ///
-    /// Overscroll: a scroll-down that arrives already clamped at the bottom (zero rows moved) re-engages follow on that first event.
-    /// A scroll that lands at the bottom moved real rows and never engages, so a fast scroll-down ending there can't re-enter follow by accident.
-    /// The next (fully clamped) tick is the explicit overscroll gesture.
+    /// Scroll down by n rows. A scroll that lands at the bottom moved real rows and never engages, so a fast
+    /// scroll-down ending there can't re-enter follow by accident.
     pub fn scroll_down(&mut self, rows: u16) {
         let max_offset = self
             .total_height
@@ -385,20 +364,22 @@ impl ScrollbackState {
         if rows > 0
             && self.scroll_offset == before
             && self.scroll_offset >= max_offset
+            && self.pin_reserve_pad == 0
             && self.appearance.scrollback.scroll.follow_by_overscroll
         {
             self.follow_mode = true;
+            if self.follow_preserve_scroll && self.pin_reserve_after_turn {
+                self.follow_preserve_scroll = false;
+                self.release_pin_reserve();
+                self.scroll_offset = self.max_scroll_offset();
+            }
         }
         self.bump_generation();
     }
 
-    /// Rows to advance for a full-page scroll.
-    ///
-    /// A page is the *content* area (viewport minus any sticky prompt header pinned at the top) less a 2-row overlap for continuity.
-    /// Subtracting the header is what keeps a page-flip from skipping the lines that sit behind the pinned prompt.
-    /// Without it, a page moves `viewport_height - 2` rows but only `viewport_height - header` rows are actually on screen.
-    /// That silently jumps `header - 2` lines over the top border.
-    /// Always moves at least 1 row so paging never stalls on a tiny viewport.
+    /// Rows to advance for a full-page scroll. Without it, a page moves `viewport_height - 2` rows but only
+    /// `viewport_height - header` rows are actually on screen. Always moves at least 1 row so paging never stalls on a
+    /// tiny viewport.
     fn page_scroll_rows(&self) -> u16 {
         let header = self.current_header_screen_rows();
         self.viewport_height
@@ -497,7 +478,6 @@ impl ScrollbackState {
     pub fn goto_top(&mut self) {
         self.scroll_offset = 0;
         self.follow_mode = false;
-        self.maybe_release_pin_reserve();
         let range = self.visible_entry_range();
         if !range.is_empty() {
             self.selected = self.find_first_selectable_in_range(range);
@@ -547,38 +527,41 @@ impl ScrollbackState {
     }
 
     /// Enable follow mode, preserving the current scroll position for one frame.
-    ///
     /// Like `enable_follow`, but also sets `follow_preserve_scroll` so the first `handle_follow_mode` call doesn't override the scroll position.
     /// Use after `scroll_to_entry_top` to keep the entry at the viewport top until new content arrives.
     pub fn enable_follow_with_preserve(&mut self) {
         self.follow_mode = true;
         self.follow_preserve_scroll = true;
+        self.follow_preserve_content_generation = self.content_generation;
     }
 
-    /// Viewport policy for a turn this client just started.
-    ///
-    /// - `page_flip` with a prompt: pin at the viewport top and enable follow-with-preserve.
-    /// - `page_flip` without a prompt (bash/synthetic): enable follow-with-preserve only.
-    /// - No `page_flip`, with a prompt: leave scroll and follow unchanged.
-    /// - No `page_flip`, no prompt: still enable follow-with-preserve (there is no prompt to snap; pre-setting bash/adoption always engaged follow).
-    ///
-    /// Always selects `prompt_idx` when present.
+    /// Pin an entry at the viewport top with real trailing scroll extent.
+    pub(crate) fn page_flip_to_entry(&mut self, idx: usize) {
+        self.arm_pin_reserve();
+        self.scroll_to_entry_top(idx);
+        self.pin_reserve_target = Some(self.scroll_offset);
+        self.pin_reserve_prompt_id = self.entries.get_index(idx).map(|(id, _)| *id);
+        self.compute_total_height_from_cache();
+        self.enable_follow_with_preserve();
+    }
+
+    /// `page_flip` without a prompt (bash/synthetic): enable follow-with-preserve only. No `page_flip`, with a prompt:
+    /// leave scroll and follow unchanged. No `page_flip`, no prompt: still enable follow-with-preserve (there is no
+    /// prompt to snap. pre-setting bash/adoption always engaged follow). Always selects `prompt_idx` when present.
     pub fn follow_new_turn(&mut self, prompt_idx: Option<usize>, page_flip: bool) {
-        if page_flip {
-            if let Some(idx) = prompt_idx {
-                // Measurement runs release checks, so suppress release until the settled pose is captured after scrolling
-                self.arm_pin_reserve();
-                self.scroll_to_entry_top(idx);
-                self.pin_reserve_target = Some(self.scroll_offset);
-                self.pin_reserve_prompt_id = self.entries.get_index(idx).map(|(id, _)| *id);
-                self.compute_total_height_from_cache();
-            }
-            self.enable_follow_with_preserve();
-        } else if prompt_idx.is_none() {
-            self.enable_follow_with_preserve();
-        }
         if let Some(idx) = prompt_idx {
             self.set_selected(Some(idx));
+        }
+        if page_flip {
+            if let Some(idx) = prompt_idx {
+                self.page_flip_to_entry(idx);
+            } else {
+                self.release_pin_reserve();
+                self.enable_follow_with_preserve();
+            }
+        } else if prompt_idx.is_none() {
+            self.release_pin_reserve();
+            self.enable_follow_with_preserve();
         }
     }
 
@@ -597,20 +580,9 @@ impl ScrollbackState {
         self.total_height > self.viewport_height as usize && self.scroll_offset < max_offset
     }
 
-    /// Ensure the selected entry is visible in the viewport, using minimal scrolling.
-    ///
-    /// This accounts for sticky headers in both AllTurns and SingleTurn modes.
-    /// The logic is unified: both modes use compute_sticky_layout() with prompt descriptors relative to the visible entry range.
-    ///
-    /// Small entries that fit in the viewport get minimal scrolling; large entries that exceed it always show their top.
-    ///
-    /// Only scrolls if the entry is not fully visible. When scrolling is needed:
-    /// - If entry top is clipped: scroll up to show top at content area top
-    /// - If entry bottom is clipped: scroll down just enough to show bottom (or show top if entry is larger than viewport)
-    ///
-    /// Respects scroll config:
-    /// - `margin`: keeps N lines of context above/below (disabled at scroll edges)
-    /// - `min_page_fraction`: if the scroll is smaller than this fraction, use it instead (disabled for large entries and at edges)
+    /// Ensure the selected entry is visible in the viewport, using minimal scrolling. large entries that exceed it
+    /// always show their top. Only scrolls if the entry is not fully visible. `min_page_fraction`: if the scroll is
+    /// smaller than this fraction, use it instead (disabled for large entries and at edges).
     pub(super) fn ensure_selected_visible(&mut self, _direction: NavDirection) {
         let Some(selected_idx) = self.selected else {
             return;
@@ -731,11 +703,8 @@ impl ScrollbackState {
             self.follow_mode = false;
         }
 
-        // Apply minimum scroll: if we scrolled but less than min_scroll, use min_scroll.
-        // Only applies when:
-        // - Entry fits in viewport (large entries must show their top exactly)
-        // - Didn't start at scroll edge (user was at natural stopping point)
-        // - Won't end at scroll edge (would create empty space)
+        // Apply minimum scroll: if we scrolled but less than min_scroll, use min_scroll. Only applies when. Entry fits in
+        // viewport (large entries must show their top exactly). Won't end at scroll edge (would create empty space).
         let started_at_edge = at_top || at_bottom;
         let new_at_top = self.scroll_offset == 0;
         let new_at_bottom = self.scroll_offset >= max_scroll;
@@ -765,7 +734,6 @@ impl ScrollbackState {
     }
 
     /// Build prompt descriptors relative to a visible range.
-    ///
     /// Filters to only prompts in the range, adjusts y_virtual to be relative to the range start.
     /// This is needed because scroll_offset is relative to the visible range, not the full entry list.
     pub(super) fn build_relative_prompt_descriptors(
@@ -794,7 +762,6 @@ impl ScrollbackState {
     }
 
     /// Compute the current sticky header layout.
-    ///
     /// Uses the current scroll_offset and viewport_height.
     /// Requires a valid layout cache; the caller passes it in, which avoids `&mut self`.
     pub(super) fn current_sticky_layout(
@@ -806,10 +773,9 @@ impl ScrollbackState {
         compute_sticky_layout(self.scroll_offset, self.viewport_height, &relative_prompts)
     }
 
-    /// Scroll offset that puts `entry_y` (relative to the visible range's top) at the content-area top, below any sticky header.
-    /// The header height depends on the scroll position, so iterate to a fixed point.
-    /// The header shrinks monotonically as we scroll up, so three passes converge.
-    /// Shared by `entry_top_scroll_offset` and the pin reserve's `pin_reserve_prompt_scroll_target`, so the convergence math lives in one place.
+    /// Scroll offset that puts `entry_y` (relative to the visible range's top) at the content-area top, below any
+    /// sticky header. Shared by `entry_top_scroll_offset` and the pin reserve's `pin_reserve_prompt_scroll_target`, so
+    /// the convergence math lives in one place.
     pub(super) fn sticky_adjusted_entry_top(
         &self,
         cache: &LayoutCache,
@@ -855,7 +821,6 @@ impl ScrollbackState {
     }
 
     /// Scroll to put a specific entry at the top of the viewport.
-    ///
     /// Unlike ensure_selected_visible (which only scrolls if entry is outside viewport), this always scrolls to position the entry at the top.
     /// Used for 'l' (next turn) navigation where we want the prompt at the very top.
     pub fn scroll_to_entry_top(&mut self, entry_idx: usize) {
@@ -926,23 +891,16 @@ impl ScrollbackState {
     }
 
     /// Select entry `entry_idx` and reveal it: expand a fold and un-truncate its group so it is no longer hidden.
-    /// Then scroll its `line_in_entry`-th matched line toward the viewport center.
-    ///
-    /// `line_in_entry` is a logical (newline-delimited) index from the search index.
-    /// Word wrap can spread one logical line across several rendered rows.
-    /// It is mapped through the entry's wrapped output to the row actually painted.
     /// Wrapped or tall entries thus land the match on screen instead of scrolling it past the viewport.
-    /// The offset still clamps to the entry height, and the scroll math clamps to `max_offset`.
     pub fn reveal_entry_line(&mut self, entry_idx: usize, line_in_entry: usize) {
         if entry_idx >= self.entries.len() {
             return;
         }
         self.set_selected(Some(entry_idx));
 
-        // is_entry_hidden and group-truncation visibility are only meaningful once the layout cache exists
-        // On a cache miss build it first so the unhide below isn't silently skipped
-        // is_entry_hidden conservatively reports "visible" when the cache is absent
-        // That would leave a truncated target hidden after the rebuild gate
+        // is_entry_hidden and group-truncation visibility are only meaningful once the layout cache exists. On a cache
+        // miss build it first so the unhide below isn't silently skipped is_entry_hidden conservatively reports "visible"
+        // when the cache is absent. That would leave a truncated target hidden after the rebuild gate.
         if self.layout_cache.is_none() && self.last_width > 0 {
             self.rebuild_layout();
             self.dirty_heights.clear();
@@ -980,32 +938,21 @@ impl ScrollbackState {
             layout_changed = true;
         }
 
-        // Rebuild only when the reveal changed display state, the cache is gone, or heights are stale
-        // Holding n/N across already-visible matches only moves the selection
-        // That leaves cached heights untouched (they are selection-independent)
-        // The render path re-measures the viewport, so the common case skips the O(history) rebuild
-        // After a real rebuild drop dirty marks so the next frame's incremental path can't snap off the target
-        //
-        // `gaps_may_be_dirty` is deliberately not in the gate: rebuild_layout and fold_selected_impl leave it stickily true over a *fresh* cache
-        // Folding it into the gate would force a spurious O(history) rebuild on the very next n/N
-        // Every setter that raises it also nulls the cache or dirties a height, so the two checks below already catch real structural staleness
-        // prepare_layout Case 3 ignores it for the same reason
+        // Rebuild only when the reveal changed display state, the cache is gone, or heights are stale. Holding n/N across
+        // already-visible matches only moves the selection. After a real rebuild drop dirty marks so the next frame's
+        // incremental path can't snap off the target.
         if layout_changed || self.layout_cache.is_none() || !self.dirty_heights.is_empty() {
             self.rebuild_layout();
             self.dirty_heights.clear();
         } else {
-            // rebuild_layout would have refreshed total_height; do the cheap O(visible-range) sum here
-            // The max_offset clamp below then uses the current bound
-            // That covers turn-scoped totals after a SingleTurn current_turn change
-            // It also covers an intra-frame push then reveal that patched virtual_y but not the total
-            // Skips only rebuild_layout's per-entry re-estimation
+            // rebuild_layout would have refreshed total_height; do the cheap O(visible-range) sum here. Skips only
+            // rebuild_layout's per-entry re-estimation.
             self.compute_total_height_from_cache();
         }
 
-        // Center the entry, then nudge toward the matched line within it
-        // The logical line maps through the entry's wrapped output to its rendered-row offset, so a match below a wrapped line isn't left off screen
-        // That offset is clamped to the entry height and the result to max_offset, so the nudge can't park the view past the last entry
-        // A group-collapse-header entry has cached height 1, so max_row_offset is 0 and the nudge lands on the header row that replaces its content
+        // Center the entry, then nudge toward the matched line within it. The logical line maps through the entry's
+        // wrapped output to its rendered-row offset, so a match below a wrapped line isn't left off screen. That offset is
+        // clamped to the entry height and the result to max_offset, so the nudge can't park the view past the last entry.
         self.scroll_to_entry_center(entry_idx);
         let max_row_offset = self
             .get_cached_entry_height(entry_idx)
@@ -1049,14 +996,9 @@ impl ScrollbackState {
             .rendered_row_of_logical_line(entry_area_width, line_in_entry)
     }
 
-    /// Handle follow mode auto-scroll (call during rendering).
-    ///
-    /// When follow_mode is enabled and content exceeds viewport, scrolls to bottom and selects the last selectable entry (if nothing is selected).
-    ///
-    /// TODO(follow_mode): This should be smarter about when to auto-scroll:
-    /// - Only follow if current turn is "running" (no end-of-turn marker)
-    /// - In SingleTurn mode, only follow if viewing the running turn
-    /// - In AllTurns mode, only follow if at the bottom viewing running content
+    /// Handle follow mode auto-scroll (call during rendering). Only follow if current turn is "running" (no end-of-turn
+    /// marker). In SingleTurn mode, only follow if viewing the running turn. In AllTurns mode, only follow if at the
+    /// bottom viewing running content.
     pub fn handle_follow_mode(&mut self) {
         if !self.follow_mode {
             return;
@@ -1065,7 +1007,6 @@ impl ScrollbackState {
         self.follow_scroll_to_bottom();
 
         // Auto-select the last selectable entry when following.
-        //
         // With follow_auto_select: only move selection when it's already at the tail (tracking new content) or when nothing is selected
         // This prevents overriding the user's selection when they fold or unfold a block in the middle while follow mode is on
         let range = self.visible_entry_range();
@@ -1083,38 +1024,32 @@ impl ScrollbackState {
         }
     }
 
-    /// Re-pin the viewport to the bottom for follow mode without touching the selection.
-    /// This is the scroll half of `handle_follow_mode`, split out so `settle_visible_measurements` can re-anchor the bottom after measuring.
-    /// Auto-selecting the last entry there would overwrite the selection while folding, etc.
-    ///
-    /// Pins unconditionally; callers must only invoke it when `follow_mode` is set (both current callers gate on it).
+    /// Re-pin the viewport to the bottom for follow mode without touching the selection. Auto-selecting the last entry
+    /// there would overwrite the selection while folding, etc. Pins unconditionally; callers must only invoke it when
+    /// `follow_mode` is set (both current callers gate on it).
     pub(super) fn follow_scroll_to_bottom(&mut self) {
         debug_assert!(
             self.follow_mode,
             "follow_scroll_to_bottom called outside follow mode"
         );
-        // When follow_preserve_scroll is set, keep the current scroll position (e.g., prompt at top after dispatch_send_prompt)
-        // It holds until new content pushes past what fits on screen, a "page flip" where the prompt stays at the top and content fills in below
-        //
-        // The flag is consumed when max_offset grows past scroll_offset, meaning there's more content below than fits in the viewport
-        // No explicit invalidation is needed: any user interaction (scroll, fold, turn nav) sets follow_mode=false, making this unreachable
+        // When follow_preserve_scroll is set, keep the current scroll position. No explicit invalidation is needed: any
+        // user interaction (scroll, fold, turn nav) sets follow_mode=false, making this unreachable.
         if self.follow_preserve_scroll {
             // Overflow is measured against the unpadded transcript
             // The pad makes max_offset equal the pin pose, so comparing to the padded max would look like overflow on every frame and eat the pin
             let unpadded_total = self.total_height.saturating_sub(self.pin_reserve_pad);
             let unpadded_max = unpadded_total.saturating_sub(self.viewport_height as usize);
-            if unpadded_max > self.scroll_offset && !self.pin_reserve_after_turn {
+            let live_pin = if self.pin_reserve_active {
+                self.pin_reserve_prompt_scroll_target()
+                    .unwrap_or(self.scroll_offset)
+            } else {
+                self.scroll_offset
+            };
+            let content_changed = self.pin_reserve_active
+                || self.content_generation != self.follow_preserve_content_generation;
+            if content_changed && unpadded_max > live_pin && !self.pin_reserve_after_turn {
                 self.follow_preserve_scroll = false;
                 self.release_pin_reserve();
-                self.scroll_offset = self.max_scroll_offset();
-            } else if self.scroll_offset >= unpadded_total {
-                // Content shrank under the pin (e.g. a tall running tool demoted to a collapsed background task).
-                // That strands the pinned offset past the transcript end, where the live tail would freeze in empty rows
-                // Drop the reserve fully so max_offset becomes the real tail
-                self.follow_preserve_scroll = false;
-                self.clear_pin_reserve();
-                self.total_height = unpadded_total;
-                self.pin_reserve_pad = 0;
                 self.scroll_offset = self.max_scroll_offset();
             }
             // Otherwise: all new content still fits below the prompt. Stay put.
@@ -1187,6 +1122,50 @@ mod tests {
         assert!(state.is_follow_mode());
         assert!(state.is_follow_preserve_scroll());
         assert_eq!(state.scroll_offset(), reading);
+    }
+
+    #[test]
+    fn synthetic_turn_replaces_previous_page_flip_reserve() {
+        let mut state = ScrollbackState::new();
+        for i in 0..30 {
+            state.push_block(agent_block(&format!("history {i}")));
+        }
+        state.push_block(user_block("prompt"));
+        let prompt_idx = state.len() - 1;
+        state.prepare_layout(80, 8);
+        state.follow_new_turn(Some(prompt_idx), true);
+        state.note_pin_reserve_turn_finished();
+        assert!(state.is_pin_reserve_active());
+
+        state.follow_new_turn(None, false);
+
+        assert!(!state.is_pin_reserve_active());
+        assert!(state.is_follow_preserve_scroll());
+        state.push_block(tall_agent_block());
+        state.prepare_layout(80, 8);
+        assert!(!state.is_follow_preserve_scroll());
+        assert_eq!(state.scroll_offset(), state.max_scroll_offset());
+    }
+
+    #[test]
+    fn synthetic_preserve_releases_when_output_overflows_saved_viewport() {
+        let mut state = ScrollbackState::new();
+        for i in 0..30 {
+            state.push_block(agent_block(&format!("history {i}")));
+        }
+        state.prepare_layout(80, 8);
+        state.goto_bottom();
+        state.scroll_up(5);
+        let saved = state.scroll_offset();
+        state.follow_new_turn(None, false);
+        assert!(!state.is_pin_reserve_active());
+
+        state.push_block(tall_agent_block());
+        state.prepare_layout(80, 8);
+
+        assert!(!state.is_follow_preserve_scroll());
+        assert!(state.scroll_offset() > saved);
+        assert_eq!(state.scroll_offset(), state.max_scroll_offset());
     }
 
     #[test]
@@ -1263,11 +1242,11 @@ mod tests {
         state.push_block(tall_agent_block()); // 5
         state.prepare_layout(80, 6);
 
-        // J at the follow-mode bottom is a no-op (no anchor top below)
+        // next_response at the follow-mode bottom is a no-op (no anchor top below)
         assert!(state.is_follow_mode());
         assert!(!state.next_response());
 
-        // From the bottom: K snaps to the last response's top
+        // From the bottom: prev_response snaps to the last response's top
         let before = state.scroll_offset;
         assert!(state.prev_response());
         assert_eq!(state.selected(), Some(5));
@@ -1278,10 +1257,10 @@ mod tests {
         let landed = state.scroll_offset;
         assert!(landed > 0 && landed < state.entry_top_estimate(5).unwrap());
 
-        // From the snapped top, J still has nothing strictly below
+        // From the snapped top, next_response still has nothing strictly below
         assert!(!state.next_response());
 
-        // Exactly at that anchor's top: K walks past the tool-only turn
+        // Exactly at that anchor's top: prev_response walks past the tool-only turn
         assert!(state.prev_response());
         assert_eq!(state.selected(), Some(1));
         assert_eq!(state.current_turn(), Some(0));
@@ -1290,7 +1269,7 @@ mod tests {
         assert!(!state.prev_response());
         assert_eq!(state.selected(), Some(1));
 
-        // J walks back down to the last anchor's top, then has nothing below
+        // next_response walks back down to the last anchor's top, then has nothing below
         assert!(state.next_response());
         assert_eq!(state.selected(), Some(5));
         assert_eq!(state.scroll_offset, landed);
@@ -1308,7 +1287,7 @@ mod tests {
         state.prepare_layout(80, 6);
         state.scroll_to_entry_top(3);
 
-        // Mid work region: the response top is below the viewport top, so it is a J target, and there is nothing above for K
+        // Mid work region: the response top is below the viewport top, so it is a next_response target, and there is nothing above for prev_response
         assert!(!state.prev_response());
         let before = state.scroll_offset;
         assert!(state.next_response());
@@ -1351,7 +1330,7 @@ mod tests {
         state.view_mode = ViewMode::SingleTurn;
         state.prepare_layout(80, 6);
 
-        // Viewing the bottom of the current (last) turn: K snaps its response
+        // Viewing the bottom of the current (last) turn: prev_response snaps its response
         assert!(state.prev_response());
         assert_eq!(state.selected(), Some(3));
         assert_eq!(state.current_turn(), Some(1));
@@ -1391,10 +1370,8 @@ mod tests {
         assert!(!state.is_follow_mode());
     }
 
-    // The overscroll-to-follow contract, changed from the original double-hit shape
-    // A scroll-down that is already clamped at the bottom re-engages follow on the first event
-    // There is no intermediate tick that merely sets a flag
-    // A scroll-down that lands at the bottom (moved real rows) still never engages, preserving the fast-scroll landing protection
+    // The overscroll-to-follow contract, changed from the original double-hit shape. A scroll-down that lands at the
+    // bottom (moved real rows) still never engages, preserving the fast-scroll landing protection.
 
     #[test]
     fn clamped_scroll_down_at_bottom_engages_follow_on_first_event() {
@@ -1558,9 +1535,9 @@ mod tests {
         h.assert_at_bottom("finish shrink remains at the real tail");
     }
 
-    /// A height shrink above a pinned interjection must re-clamp the offset so later rows remain paintable without input.
+    /// A height shrink above a pinned interjection moves the prompt and its reachable bottom together.
     #[test]
-    fn page_flip_pin_reclamps_after_shrink_past_end() {
+    fn page_flip_pin_tracks_shrink_above_prompt() {
         let mut h = ScrollTestHarness::new(80, 10);
         for i in 0..20 {
             h.push_agent(&format!("history {i}"));
@@ -1594,15 +1571,23 @@ mod tests {
         h.frame();
         assert!(
             h.state.scroll_offset <= h.max_offset(),
-            "shrink under the pin must re-clamp the wedged offset ({} <= {})",
+            "shrink above the prompt must keep the moved pin reachable ({} <= {})",
             h.state.scroll_offset,
             h.max_offset(),
         );
+        assert!(h.is_preserve(), "the prompt referent still exists");
+        assert!(h.state.is_pin_reserve_active());
+
+        for i in 0..20 {
+            if !h.is_preserve() {
+                break;
+            }
+            h.push_agent(&format!("tail growth {i}"));
+        }
         assert!(
             !h.is_preserve(),
-            "the wedged pin's referent is gone — it must be consumed"
+            "output below the prompt consumes preserve"
         );
-
         h.push_agent("task completed");
         h.push_agent("final answer");
         let last_idx = h.state.len() - 1;
@@ -2309,11 +2294,9 @@ mod tests {
         );
     }
 
-    /// Regression: when sticky headers are disabled the renderer draws no header.
-    /// (`render_with_sticky_headers` falls back to a zero-height layout because `use_sticky` is false.)
-    /// The whole viewport is then content, so a page must advance `viewport - 2`.
-    /// `current_header_screen_rows()` used to measure the header unconditionally, so `page_scroll_rows()` subtracted a header never on screen.
-    /// PageUp and PageDown therefore advanced short of a full page; the header height must be gated on the same flag as the renderer.
+    /// (`render_with_sticky_headers` falls back to a zero-height layout because `use_sticky` is false.). The whole
+    /// viewport is then content, so a page must advance `viewport - 2`. the header height must be gated on the same
+    /// flag as the renderer.
     #[test]
     fn page_delta_ignores_header_when_sticky_headers_disabled() {
         let mut h = ScrollTestHarness::new(80, 20);
@@ -2395,7 +2378,7 @@ mod tests {
         assert!(state.is_follow_mode());
         assert!(state.has_response_top_above());
 
-        // Taking the jump (the indicator click, which is K) lands on the answer's top; from there there is nothing further up to jump to
+        // Taking the jump (the indicator click) lands on the answer's top; from there there is nothing further up to jump to
         assert!(state.prev_response());
         assert_eq!(state.selected(), Some(1));
         assert!(!state.has_response_top_above());

@@ -104,10 +104,6 @@ pub(crate) fn responses_event_may_have_output(event: &rs::ResponseStreamEvent) -
 }
 
 /// Copy everything the Doom-loop capture needs out of a frame.
-///
-/// This is the single observation point: it runs for every frame *before* the abort gate.
-/// The frame a confident signal aborts on is therefore observed exactly like any other.
-/// A completed item is the authoritative copy of what the deltas approximated.
 /// Any frame that names tool activity or compaction state vetoes the replay, since reasoning must never be retried without the item it is bound to.
 fn observe_for_recovery(capture: &FailedResponseCapture, event: &rs::ResponseStreamEvent) {
     use rs::ResponseStreamEvent as Event;
@@ -192,13 +188,6 @@ fn observe_for_recovery(capture: &FailedResponseCapture, event: &rs::ResponseStr
 }
 
 /// Transform a raw Responses API event stream into a stream of [`SamplingEvent`]s.
-///
-/// Yields exactly one terminal event ([`SamplingEvent::Completed`] or [`SamplingEvent::Failed`]) per request.
-/// Server-side `ResponseFailed` and `ResponseError` events are translated to `SamplingError::Api { status: 500, .. }`.
-/// The 500 status makes the actor's retry loop treat them as retryable.
-///
-/// `doom_loop` is the collector returned alongside `raw_stream` by `SamplingClient::conversation_stream_responses`.
-/// Any signals the SSE decoder recorded are drained onto the final `ConversationResponse`.
 /// `None` (check disabled) leaves the response untouched.
 pub fn stream_responses<'a>(
     raw_stream: BoxStream<'a, Result<rs::ResponseStreamEvent, SamplingError>>,
@@ -230,6 +219,13 @@ pub(crate) fn stream_responses_tracked<'a>(
     async_stream::stream! {
         use rs::{ResponseStreamEvent, Status};
 
+        let decode_region = crate::span_timing::Region::from_span(tracing::info_span!(
+            "sampling.stream_decode",
+            ttft_ms = tracing::field::Empty,
+            ttlb_ms = tracing::field::Empty,
+            output_tokens = tracing::field::Empty,
+            chunk_count = tracing::field::Empty,
+        ));
         let stream_start = Instant::now();
         let mut chunk_timestamps: Vec<Instant> = Vec::new();
 
@@ -507,9 +503,7 @@ pub(crate) fn stream_responses_tracked<'a>(
                 | ResponseStreamEvent::ResponseWebSearchCallSearching(_) => {}
 
                 // Code interpreter runs server-side, like web/x search
-                // It is emitted the same way x_search is: a generic backend tool call
-                // The shell renders that as a client `tool_use` and `user` `tool_result` split
-                // grok has no HostedTool::CodeInterpreter, so these events never arrive under the current hosted-tool set
+                // The shell renders that as a client `tool_use` and `user` `tool_result` split grok has no HostedTool::CodeInterpreter, so these events never arrive under the current hosted-tool set
                 // The started event fires on InProgress; the full payload (code and outputs) rides ResponseOutputItemDone(CodeInterpreterCall) below
                 ResponseStreamEvent::ResponseCodeInterpreterCallInProgress(ev) => {
                     yield SamplingEvent::BackendToolCallStarted {
@@ -619,12 +613,7 @@ pub(crate) fn stream_responses_tracked<'a>(
         };
 
         // Billing fields (`prompt_tokens`, `completion_tokens`, `cached_prompt_tokens`, `reasoning_tokens`) are the cumulative wire values
-        // They sum across every server-side turn of the agent loop and are what we bill on and log to telemetry
-        //
-        // `total_tokens` is the live context length
-        // It drives the CLI `/context` bar, the auto-compact threshold, and `meta.totalTokens` on persisted sessions
         // The SSE decoder (`deserialize_response_event`) has already rewritten `u.total_tokens` to `context_details.input + output`
-        // When the backend does not emit it (older deployments), the wire value passes through unchanged
         let usage = response.usage.as_ref().map(|u| TokenUsage {
             prompt_tokens: u.input_tokens,
             completion_tokens: u.output_tokens,
@@ -726,6 +715,22 @@ pub(crate) fn stream_responses_tracked<'a>(
         let stream_end = Instant::now();
         let metrics =
             InferenceLatencyStats::from_timestamps(stream_start, &chunk_timestamps, stream_end);
+
+        decode_region
+            .span()
+            .record("ttlb_ms", metrics.time_to_last_byte_ms as i64);
+        decode_region
+            .span()
+            .record("chunk_count", metrics.chunk_count as i64);
+        if let Some(ttft) = metrics.time_to_first_token_ms {
+            decode_region.span().record("ttft_ms", ttft as i64);
+        }
+        if let Some(u) = usage.as_ref() {
+            decode_region
+                .span()
+                .record("output_tokens", u.completion_tokens as i64);
+        }
+        drop(decode_region);
 
         // Warn-only for now: log the server-reported triggers once per request (raw labels only, ZDR-safe) and attach them for callers
         let doom_loop_signals = doom_loop

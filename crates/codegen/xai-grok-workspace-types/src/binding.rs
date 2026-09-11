@@ -131,10 +131,8 @@ pub enum BindingResolveError {
     DuplicateRemote(String),
 }
 
-/// Resolve a conversation's binding set into the provisionable repo set.
-///
-/// Each binding becomes a [`ResolvedRepoSource`] whose `session_branch` is `conv/<conversation_id>` and whose `base_ref` is the fork base.
-/// Layout: a single repo mounts at the workspace root (`mount_path: None`); multi-repo mounts at [`absolute_mount_path`] (`/workspace/apps/<name>`).
+/// Resolve a conversation's bindings into the provisionable repo set. Each becomes a [`ResolvedRepoSource`] on `conv/<conversation_id>` from the fork base.
+/// A single repo mounts at the workspace root; multi-repo mounts at [`absolute_mount_path`].
 pub fn resolve_repo_sources(
     conversation_id: &str,
     remotes: &[ProjectRemote],

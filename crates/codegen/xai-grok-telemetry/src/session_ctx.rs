@@ -173,10 +173,9 @@ pub fn log_session_event<T: TelemetryEvent>(data: T) {
     emit_event_with_origin(EmitterOrigin::Shell, T::NAME, data);
 }
 
-/// Session lifecycle event tagged with the emitting [`EmitterOrigin`].
-/// Fires in both `Enabled` and `SessionMetrics` modes; the origin selects the analytics event-name prefix (`grok-shell-*` vs `grok-workspace-*`).
-/// No external fan-out here: the external stream is Shell-origin only, and workspace-side callers invoke this directly.
-/// An `external = …` macro arm on a workspace-only event therefore has no effect (pinned by a test in `external::tests`).
+/// Session lifecycle event tagged with the emitting [`EmitterOrigin`]. No external fan-out here: the external stream is
+/// Shell-origin only, and workspace-side callers invoke this directly. An `external = …` macro arm on a workspace-only
+/// event therefore has no effect (pinned by a test in `external::tests`).
 pub fn log_session_event_with_origin<T: TelemetryEvent>(origin: EmitterOrigin, data: T) {
     if !client::is_session_metrics_enabled() {
         return;
@@ -244,6 +243,12 @@ pub async fn drain_at_process_exit() {
 /// Wait (up to `timeout`) for in-flight event posts to finish.
 /// Meant for commands that exit as soon as their work is done; the agent runs long enough that its events land on their own.
 pub async fn drain_pending(timeout: std::time::Duration) {
+    let drain_span = crate::region::Region::from_span(tracing::info_span!(
+        "teardown.telemetry_drain",
+        pending = PENDING_EVENTS.load(Ordering::Acquire) as i64,
+        elapsed_ms = tracing::field::Empty,
+    ));
+    let started = std::time::Instant::now();
     let deadline = std::time::Instant::now() + timeout;
     while PENDING_EVENTS.load(Ordering::Acquire) > 0 {
         if std::time::Instant::now() >= deadline {
@@ -251,10 +256,13 @@ pub async fn drain_pending(timeout: std::time::Duration) {
                 pending = PENDING_EVENTS.load(Ordering::Acquire),
                 "telemetry: gave up draining pending events"
             );
-            return;
+            break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
+    drain_span
+        .span()
+        .record("elapsed_ms", started.elapsed().as_millis() as i64);
 }
 
 type CtxSnapshot = Option<(String, Option<u32>)>;
@@ -310,6 +318,7 @@ async fn post_event<T: Serialize>(
         }
     }
 
+    crate::redact_common::redact_metadata(&mut metadata);
     client::track(&event_name, &request_id, &user_ctx, metadata).await;
 }
 
@@ -321,8 +330,9 @@ pub fn emit_event_with_origin<T: Serialize + Send + 'static>(
 ) {
     let (event_name, ctx_snapshot, activity, data) = take_emit_context(origin, event_suffix, data);
 
+    // `tokio::spawn` panics without a runtime. Skip before register so PENDING_EVENTS
+    // is not pinned above zero for the rest of the process.
     if tokio::runtime::Handle::try_current().is_err() {
-        // `spawn` below panics without a runtime; counting first would pin the gauge above zero for the rest of the process
         tracing::debug!(event = %event_name, "telemetry: no runtime, dropping event");
         return;
     }
@@ -432,6 +442,13 @@ mod tests {
         );
     }
 
+    /// `tokio::spawn` panics without a runtime; the session-metrics gate is process-global.
+    #[test]
+    fn emit_event_with_origin_is_noop_without_runtime() {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        emit_event_with_origin(EmitterOrigin::Shell, "regression-no-runtime", ());
+    }
+
     /// Event-name prefixes are wire contract: analytics queries match on them, so they must not drift.
     #[test]
     fn event_prefix_is_stable_per_origin() {
@@ -524,7 +541,7 @@ mod tests {
             .await;
     }
 
-    /// Wire-level: `TurnCompleted` has no `session_id` field, so it carries one only via the ambient ctx.
+    /// A `TurnCompleted` with no event-carried `session_id` carries one only via the ambient ctx.
     /// The id is present via the helper and absent from a bare child.
     #[tokio::test(flavor = "current_thread")]
     async fn spawn_local_in_session_ctx_puts_session_id_on_work_event() {
@@ -537,8 +554,12 @@ mod tests {
                 duration_ms: 10,
                 tool_call_count: 1,
                 model_id: "grok-4".into(),
+                // Left `None` so this exercises the task-local ctx fallback, not the event field.
+                session_id: None,
                 cancellation_category: None,
                 error_category: None,
+                error_code: None,
+                error_detail: None,
             }
         }
         fn session_id(stream: &TestStream) -> Option<String> {

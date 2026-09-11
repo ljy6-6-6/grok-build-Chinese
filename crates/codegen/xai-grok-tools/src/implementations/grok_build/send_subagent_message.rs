@@ -11,7 +11,7 @@ pub const SEND_SUBAGENT_MESSAGE_TOOL_NAME: &str = "send_subagent_message";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct SendSubagentMessageInput {
-    /// ID of the active subagent that should receive the message.
+    /// ID of the owned subagent that should receive the message.
     pub subagent_id: String,
     /// Text to send to the subagent.
     pub text: String,
@@ -149,7 +149,7 @@ impl crate::types::tool_metadata::ToolMetadata for SendSubagentMessageTool {
     }
 
     fn description_template(&self) -> &str {
-        "Send a follow-up message to an active subagent owned by this session. By default it steers the current turn at its next safe point; set queue to true to wait for a later turn."
+        "Send a follow-up message to a subagent owned by this session. An inactive subagent resumes with the same identity and receives the message as its next turn. For an active subagent, the default steers the current turn at its next safe point; set queue to true to wait for a later turn."
     }
 }
 

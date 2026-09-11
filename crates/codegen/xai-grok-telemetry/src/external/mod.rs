@@ -53,12 +53,9 @@ pub struct IdentityAttrs {
 }
 
 impl IdentityAttrs {
-    /// Copy principal ids from the snapshot. `user.id` follows whatever the
-    /// snapshot has (OIDC principal, or an API-key session that populated
-    /// `user_id`). Email is never taken from the snapshot — OAuth/gateway
-    /// only, filled by the shell after `from_snapshot`. Env-only API-key
-    /// (no `GrokAuth` session) has no principal; we do not invent a
-    /// per-install hash.
+    /// `user.id` follows whatever the snapshot has (OIDC principal, or an API-key session that populated `user_id`). Email is
+    /// never taken from the snapshot — OAuth/gateway only, filled by the shell after `from_snapshot`. Env-only API-key (no
+    /// `GrokAuth` session) has no principal; we do not invent a per-install hash.
     pub fn from_snapshot(snapshot: &xai_grok_auth::CredentialSnapshot) -> Self {
         Self {
             user_id: snapshot.user_id.clone(),
@@ -252,12 +249,8 @@ fn active_handle() -> Option<Arc<ExternalTelemetry>> {
     handle().filter(|ext| ext.active.load(Ordering::Relaxed))
 }
 
-/// Fail-closed OTEL gate.
-/// Defaults open; the leader closes it before init and re-opens it when settings resolve.
-///
-/// Opening is the synchronizing event: `OtelGate::apply_and_open` applies the remote force-disable (`active = false`) and then opens here.
-/// An emitter whose `Acquire` read observes the `Release` open also observes `active = false`, so the emit-path `active` load can stay `Relaxed`.
-/// The window-expiry open has no such pairing and relies on eventual visibility, acceptable because the policy is tighten-only.
+/// Defaults open; the leader closes it before init and re-opens it when settings resolve. The window-expiry open has no
+/// such pairing and relies on eventual visibility, acceptable because the policy is tighten-only.
 static SETTINGS_RESOLVED: AtomicBool = AtomicBool::new(true);
 
 const DEFAULT_SETTINGS_GATE_MAX_WAIT: Duration = Duration::from_secs(30);
@@ -439,7 +432,6 @@ pub(crate) fn flush_on(ext: &ExternalTelemetry) {
     }
 }
 
-/// Flush and shut down both providers with a 2-second watchdog.
 /// Reachable from every `shutdown_otel()` exit path (16 `OtelGuard` sites, the direct call, and the signal handler); subsequent calls are no-ops.
 pub fn shutdown() {
     let Some(ext) = handle() else {
@@ -449,24 +441,22 @@ pub fn shutdown() {
         ext.active.store(false, Ordering::Relaxed);
         let logger_provider = ext.logger_provider.clone();
         let meter_provider = ext.meter_provider.clone();
-        let (tx, rx) = std::sync::mpsc::channel::<()>();
-        // Detached thread and timed wait: a hung provider must not hang exit (`std::thread::scope` is unusable here; it joins unconditionally)
-        std::thread::spawn(move || {
-            if let Some(p) = logger_provider
-                && let Err(e) = p.shutdown()
-            {
-                tracing::debug!(error = %e, "external otel: logger shutdown failed");
-            }
-            if let Some(p) = meter_provider
-                && let Err(e) = p.shutdown()
-            {
-                tracing::debug!(error = %e, "external otel: meter shutdown failed");
-            }
-            let _ = tx.send(());
-        });
-        if rx.recv_timeout(std::time::Duration::from_secs(2)).is_err() {
-            tracing::debug!("external otel: shutdown watchdog expired; abandoning flush thread");
-        }
+        xai_grok_otel::timeout::run_with_timeout(
+            "external otel",
+            xai_grok_otel::timeout::OTEL_SHUTDOWN_TIMEOUT,
+            move || {
+                if let Some(p) = logger_provider
+                    && let Err(e) = p.shutdown()
+                {
+                    tracing::debug!(error = %e, "external otel: logger shutdown failed");
+                }
+                if let Some(p) = meter_provider
+                    && let Err(e) = p.shutdown()
+                {
+                    tracing::debug!(error = %e, "external otel: meter shutdown failed");
+                }
+            },
+        );
         // Runs after provider shutdown, which flushes pending batches
         // Short-lived CLI exits often only export on this path, so the health counters and the mTLS total-failure warn must run after it
         emit_export_health(&ext);

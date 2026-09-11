@@ -32,6 +32,18 @@ pub struct BashToolConfig {
 }
 
 impl BashToolConfig {
+    /// [`Self::to_bash_params_json`] with the fallbacks read from the remote settings snapshot.
+    /// The top-level session and subagent/workflow children both resolve through here so their bash limits cannot drift.
+    pub(crate) fn to_bash_params_json_with_remote(
+        &self,
+        remote: Option<&crate::util::config::RemoteSettings>,
+    ) -> serde_json::Map<String, serde_json::Value> {
+        self.to_bash_params_json(
+            remote.and_then(|r| r.auto_background_on_timeout),
+            remote.and_then(|r| r.allow_background_operator),
+        )
+    }
+
     /// `remote_auto_bg` is the remote settings fallback for `auto_background_on_timeout`.
     /// Resolution: local config.toml > remote fallback > `true`.
     pub(crate) fn to_bash_params_json(
@@ -69,11 +81,8 @@ impl BashToolConfig {
     }
 }
 
-/// User configurable settings for the ask_user_question tool (`[toolset.ask_user_question]`).
-///
-/// Consumed by `crate::util::config::resolve_ask_user_question_params_from_disk`, which reads the raw config layers directly.
-/// That keeps the documented precedence (requirements > env > user > managed > remote).
-/// This struct exists so the keys are recognized in `config.toml` and round-trip through `AgentConfig`.
+/// User configurable settings for the ask_user_question tool (`[toolset.ask_user_question]`). Consumed by `crate::util::config::resolve_ask_user_question_params_from_disk`, which reads the raw config layers directly.
+/// That keeps the documented precedence (requirements > env > user > managed > remote). This struct exists so the keys are recognized in `config.toml` and round-trip through `AgentConfig`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AskUserQuestionToolConfig {
@@ -103,7 +112,6 @@ pub struct WebFetchToolConfig {
 
 impl WebFetchToolConfig {
     /// Resolve `WebFetchParams` by merging TOML > env > remote settings layers.
-    ///
     /// `remote_proxy` and `remote_domains` are the remote settings fallback values from `RemoteSettings`.
     /// `context_window` comes from the session's SamplingConfig (model-provided).
     pub(crate) fn resolve_params(
@@ -189,6 +197,7 @@ impl ShellToolsetConfig {
         let default_base = SamplerConfig {
             api_key: None,
             base_url: "https://api.x.ai/v1".to_string(),
+            mtls_cert_dir: None,
             model: String::new(),
             max_completion_tokens: None,
             temperature: None,
@@ -204,11 +213,13 @@ impl ShellToolsetConfig {
             reasoning_effort: None,
             force_http1: false,
             max_retries: None,
+            rate_limit_retry_threshold: None,
             stream_tool_calls: false,
             idle_timeout_secs: None,
             client_identifier: None,
             deployment_id: None,
             user_id: None,
+            conversation_group_id: None,
             origin_client: None,
             // Leaving the callback `None` here is fine; this base is only the placeholder for the "no base provided" path
             // Production `SamplerConfig`s in agent/config.rs and acp_session.rs set the real attribution callback
@@ -256,15 +267,6 @@ impl ShellToolsetConfig {
 // ---------------------------------------------------------------------------
 
 /// Configurable in `config.toml` under `[toolset.hashline]`:
-/// ```toml
-/// [toolset]
-/// file_toolset = "hashline"
-///
-/// [toolset.hashline]
-/// scheme = "chunk"       # "chunk" (default) or "content_only"
-/// hash_len = 3           # anchor hash length (1-4, default 3)
-/// chunk_size = 8         # chunk size for chunk scheme (default 8)
-/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HashlineSchemeConfig {

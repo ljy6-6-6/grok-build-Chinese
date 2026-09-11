@@ -20,10 +20,8 @@ pub struct ConversationRequestTrace {
     pub(crate) artifact_tracker: Option<crate::upload::manifest::ArtifactTracker>,
 }
 
-/// Filters chat history copied into a fork.
-/// Drops synthetic user messages, then truncates at the last complete turn so the child never sees a partial one.
+/// Filters chat history copied into a fork. Drops synthetic user messages, then truncates at the last complete turn so the child never sees a partial one.
 /// A turn is complete when the Assistant's tool calls are all answered; Reasoning and BackendToolCall items are transparent to the scan.
-///
 /// Keep the "complete turn" definition in sync with `count_complete_turns` in `xai-grok-subagent-resolution/src/context.rs`.
 pub(crate) fn fork_filter_chat(items: &mut Vec<ConversationItem>) {
     items.retain(|item| match item {

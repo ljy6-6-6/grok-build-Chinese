@@ -8,7 +8,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use agent_client_protocol as acp;
-use xai_grok_workspace::permission::resolution::McpServerAllowlist;
+use xai_grok_workspace::permission::resolution::{ManagedSettings, McpSubject, McpVerdict};
 
 use crate::session::managed_mcp::{McpDiscoveryInputs, discover_mcp_definitions_ignoring_disable};
 
@@ -26,7 +26,7 @@ pub(crate) enum DisabledStubVerdict {
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct McpDefinitionIndex {
-    entries: HashMap<String, acp::McpServer>,
+    entries: HashMap<String, (acp::McpServer, McpSubject)>,
 }
 
 impl McpDefinitionIndex {
@@ -40,15 +40,15 @@ impl McpDefinitionIndex {
         &self,
         name: &str,
         in_catalog: bool,
-        allowlist: &McpServerAllowlist,
+        ms: &ManagedSettings,
     ) -> DisabledStubVerdict {
         if in_catalog {
             return DisabledStubVerdict::HideAlreadyInCatalog;
         }
-        let Some(server) = self.entries.get(name) else {
+        let Some((server, subject)) = self.entries.get(name) else {
             return DisabledStubVerdict::HideNoDefinition;
         };
-        if !allowlist.is_server_allowed(server) {
+        if let McpVerdict::Blocked(_) = ms.mcp_verdict(server, *subject) {
             return DisabledStubVerdict::HidePolicyBlocked;
         }
         DisabledStubVerdict::Show
@@ -59,11 +59,11 @@ impl McpDefinitionIndex {
         &self,
         disabled_names: &HashSet<String>,
         catalog_names: &HashSet<String>,
-        allowlist: &McpServerAllowlist,
+        ms: &ManagedSettings,
     ) -> BTreeSet<String> {
         let mut out = BTreeSet::new();
         for name in disabled_names {
-            let verdict = self.verdict(name, catalog_names.contains(name), allowlist);
+            let verdict = self.verdict(name, catalog_names.contains(name), ms);
             if matches!(verdict, DisabledStubVerdict::Show) {
                 out.insert(name.clone());
             } else {
@@ -77,9 +77,35 @@ impl McpDefinitionIndex {
         out
     }
 
+    /// The discovered definitions with their policy subjects — the one discovery pass shared between
+    /// stub filtering and the list's blocked-reason verdicts.
+    pub(crate) fn definitions(&self) -> impl Iterator<Item = (&str, &acp::McpServer, McpSubject)> {
+        self.entries
+            .iter()
+            .map(|(name, (server, subject))| (name.as_str(), server, *subject))
+    }
+
     #[cfg(test)]
     pub(crate) fn from_entries(entries: HashMap<String, acp::McpServer>) -> Self {
-        Self { entries }
+        use xai_grok_workspace::permission::resolution::PolicySubjectOrigin;
+        // Test entries default to foreign: every policy source binds.
+        Self {
+            entries: entries
+                .into_iter()
+                .map(|(name, server)| {
+                    (
+                        name,
+                        (
+                            server,
+                            McpSubject {
+                                origin: PolicySubjectOrigin::Foreign,
+                                project_scoped: false,
+                            },
+                        ),
+                    )
+                })
+                .collect(),
+        }
     }
 
     #[cfg(test)]
@@ -89,7 +115,7 @@ impl McpDefinitionIndex {
 
     #[cfg(test)]
     pub(crate) fn transport(&self, name: &str) -> Option<&acp::McpServer> {
-        self.entries.get(name)
+        self.entries.get(name).map(|(server, _)| server)
     }
 }
 
@@ -100,38 +126,37 @@ pub(crate) fn needs_definition_scan(
     disabled_names.iter().any(|n| !catalog_names.contains(n))
 }
 
-pub(crate) fn reenableable_disabled_stubs(
-    disabled_names: &HashSet<String>,
-    catalog_names: &HashSet<String>,
-    inputs: &McpDiscoveryInputs<'_>,
-) -> BTreeSet<String> {
-    if !needs_definition_scan(disabled_names, catalog_names) {
-        return BTreeSet::new();
-    }
-    let index = McpDefinitionIndex::build(inputs);
-    let settings = xai_grok_workspace::permission::resolution::managed_settings();
-    index.reenableable_for_list(disabled_names, catalog_names, &settings.mcp_allowlist)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::session::managed_mcp::mcp_server_name;
     use xai_grok_tools::types::compat::CompatConfig;
-    use xai_grok_workspace::permission::resolution::AllowedMcpServer;
+    use xai_grok_workspace::permission::resolution::{
+        AllowedMcpServer, McpServerAllowlist, McpServerPolicy,
+    };
 
-    fn unrestricted() -> McpServerAllowlist {
-        McpServerAllowlist::new(vec![], vec![], None)
+    fn settings_with_policy(policy: McpServerPolicy) -> ManagedSettings {
+        let mut ms = ManagedSettings::default();
+        ms.mcp_allowlist = policy;
+        ms
     }
 
-    fn deny_name(name: &str) -> McpServerAllowlist {
-        McpServerAllowlist::new(
+    fn unrestricted() -> ManagedSettings {
+        settings_with_policy(McpServerPolicy::single(McpServerAllowlist::new(
+            vec![],
+            vec![],
+            None,
+        )))
+    }
+
+    fn deny_name(name: &str) -> ManagedSettings {
+        settings_with_policy(McpServerPolicy::single(McpServerAllowlist::new(
             vec![],
             vec![AllowedMcpServer::Name {
                 name: name.to_string(),
             }],
             None,
-        )
+        )))
     }
 
     fn http(name: &str, url: &str) -> acp::McpServer {
@@ -184,7 +209,7 @@ mod tests {
         ]));
         let unrestricted = unrestricted();
         let deny_blocked = deny_name("blocked");
-        let cases: &[(&str, bool, &McpServerAllowlist, DisabledStubVerdict)] = &[
+        let cases: &[(&str, bool, &ManagedSettings, DisabledStubVerdict)] = &[
             (
                 "local",
                 true,

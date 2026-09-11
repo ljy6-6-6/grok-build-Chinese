@@ -149,8 +149,8 @@ async fn running_out_of_attempts_stops_the_waiting_and_names_that_cause() {
 
 #[test]
 fn budget_limit_cause_strings_are_stable() {
-    assert_eq!(BudgetLimit::Attempts.as_str(), "attempts_spent");
-    assert_eq!(BudgetLimit::TotalWait.as_str(), "deadline_spent");
+    assert_eq!(BudgetLimit::Attempts.as_ref(), "attempts_spent");
+    assert_eq!(BudgetLimit::TotalWait.as_ref(), "deadline_spent");
 }
 
 #[test]

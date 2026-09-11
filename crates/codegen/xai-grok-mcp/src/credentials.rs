@@ -15,10 +15,8 @@ use url::Url;
 use crate::rmcp;
 
 /// Ensure credential paths are owner-only (Unix `0o600`).
-///
 /// Local helper, not shell-base's: `xai-grok-mcp` sits below `config-types` in the dep graph.
 /// Shell-base pulls shared, then config-types, then mcp, so this crate linking shell-base would be a cycle.
-/// Windows ACL tightening stays on auth via shell-base; MCP is Unix-first here.
 fn ensure_owner_only_permissions(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -137,9 +135,7 @@ impl McpCredentialStore {
     }
 
     /// Locked insert ([`Self::locked_mutate_and_save`]) with a freshness guard.
-    /// The write is skipped when the disk entry is strictly newer by `token_received_at` (see [`disk_entry_is_newer`]).
     /// Otherwise a slow writer rolls the stored refresh token back to a rotated-out value (`invalid_grant` on its next use).
-    /// The canonical slow writer is a refresh suspended across system sleep that completes after wake.
     pub fn insert_and_save(
         &mut self,
         server_name: &str,

@@ -56,8 +56,6 @@ pub enum VersionOverrideError {
 impl VersionOverrideError {
     /// A log safe summary: entry index, field, and error category only.
     /// It never includes the raw user supplied value or the offending source line, either of which can carry a secret.
-    /// Prefer this over the `Display` impl (which echoes the value for local `Result` inspection) anywhere the message reaches logs.
-    /// Mirrors the redaction rule in [`crate::loader::toml_error_detail`].
     pub fn redacted(&self) -> String {
         match self {
             Self::Deserialize(_) => {

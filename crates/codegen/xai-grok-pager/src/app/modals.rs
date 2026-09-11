@@ -106,7 +106,6 @@ impl AgentView {
     }
 
     /// Handle a key press while a modal dialog is active.
-    ///
     /// Matches the pressed character against the modal's options and resolves the result.
     /// All non-matching keys are consumed (blocked).
     #[cfg(test)]
@@ -446,35 +445,8 @@ impl AgentView {
 
         // UsageInfo: chrome (Esc/close) first, then tabs / scroll / copy.
         if let ActiveModal::UsageInfo { state } = modal {
-            let chrome_cfg = mw::ModalWindowConfig {
-                title: "",
-                tabs: None,
-                shortcuts: &[],
-                sizing: mw::ModalSizing::default(),
-                fold_info: None,
-            };
-            match mw::handle_modal_key(&mut state.window, key, &chrome_cfg) {
-                ModalWindowOutcome::CloseRequested => {
-                    self.active_modal = None;
-                    return InputOutcome::Changed;
-                }
-                ModalWindowOutcome::Unhandled => {
-                    use crate::views::usage_modal::{self, UsageModalOutcome};
-                    return match usage_modal::handle_usage_modal_key(state, key) {
-                        UsageModalOutcome::CopySessionId => {
-                            self.copy_usage_modal_session_id();
-                            InputOutcome::Changed
-                        }
-                        UsageModalOutcome::CopyText(text) => {
-                            self.copy_usage_modal_text(&text);
-                            InputOutcome::Changed
-                        }
-                        UsageModalOutcome::Changed => InputOutcome::Changed,
-                        UsageModalOutcome::Unchanged => InputOutcome::Unchanged,
-                    };
-                }
-                _ => return InputOutcome::Changed,
-            }
+            let outcome = crate::views::usage_modal::route_usage_modal_key(state, key);
+            return self.apply_usage_modal_outcome(outcome);
         }
 
         // ResetSettingsConfirm: y/n routing
@@ -883,6 +855,16 @@ impl AgentView {
                                 self.active_modal = None;
                                 InputOutcome::Action(Action::OpenConfigAgentsModal(None))
                             }
+                            PaletteCommand::OpenFeedbackModal => {
+                                self.active_modal = None;
+                                InputOutcome::Action(Action::OpenFeedbackModal(Default::default()))
+                            }
+                            PaletteCommand::InsertFeedbackSlash => {
+                                self.active_modal = None;
+                                self.prompt.set_text("/feedback ");
+                                self.prompt.set_cursor(self.prompt.text().len());
+                                InputOutcome::Changed
+                            }
                             PaletteCommand::EditPromptExternal => {
                                 self.active_modal = None;
                                 InputOutcome::Action(Action::EditPromptExternal)
@@ -905,23 +887,8 @@ impl AgentView {
                                             state: state.clone(),
                                         })
                                     };
-                                    self.active_modal = Some(ActiveModal::SessionPicker {
-                                        state: crate::views::picker::PickerState::default(),
-                                        entries: None,
-                                        loading: true,
-                                        lanes: Default::default(),
-                                        previous_palette: prev,
-                                        window: crate::views::modal_window::ModalWindowState::new(),
-                                        content_results: None,
-                                        content_loading: false,
-                                        deep_search_seq: 0,
-                                        generation: 0,
-                                        detail_seq: 0,
-                                        entries_query: None,
-                                        source_filter:
-                                            crate::views::session_picker::SourceFilter::default(),
-                                        pending_delete: None,
-                                    });
+                                    self.active_modal =
+                                        Some(crate::views::modal::session_picker_modal(prev));
                                     return InputOutcome::Action(Action::FetchSessionList);
                                 }
 
@@ -1407,7 +1374,6 @@ impl AgentView {
         }
     }
     /// Handle mouse events while a modal is active.
-    ///
     /// Clicking a button acts like pressing that key.
     /// Hovering updates `modal_hovered_key` for highlight.
     pub(super) fn handle_modal_mouse_with_registry(
@@ -1623,83 +1589,13 @@ impl AgentView {
 
         // UsageInfo: chrome first (tabs / close / footer stay clickable), then drag / wheel.
         if let Some(ActiveModal::UsageInfo { state }) = &mut self.active_modal {
-            use crate::views::usage_modal::{
-                self, COPY_ALL_SESSION_INFO_SHORTCUT, COPY_SESSION_ID_SHORTCUT, UsageModalOutcome,
-            };
-            let outcome =
-                mw::handle_modal_mouse(&mut state.window, mouse.kind, mouse.column, mouse.row);
-            match outcome {
-                ModalWindowOutcome::CloseRequested => {
-                    self.active_modal = None;
-                    return InputOutcome::Changed;
-                }
-                ModalWindowOutcome::TabChanged(idx) => {
-                    state.set_tab(usage_modal::UsageInfoTab::from_index(idx));
-                    return InputOutcome::Changed;
-                }
-                ModalWindowOutcome::ShortcutActivated(id) => {
-                    // Footer click: drop gesture and hover
-                    state.clear_text_drag();
-                    if id == COPY_SESSION_ID_SHORTCUT {
-                        self.copy_usage_modal_session_id();
-                    } else if id == COPY_ALL_SESSION_INFO_SHORTCUT {
-                        let text = match self.active_modal.as_ref() {
-                            Some(ActiveModal::UsageInfo { state }) => state.session_info_copy_all(),
-                            _ => None,
-                        };
-                        if let Some(text) = text {
-                            self.copy_usage_modal_text(&text);
-                        }
-                    }
-                    return InputOutcome::Changed;
-                }
-                ModalWindowOutcome::Handled => {
-                    match mouse.kind {
-                        // Same rule as content: a bare Moved with an active drag is a lost Up
-                        // Pending press is left alone for click-to-copy
-                        MouseEventKind::Moved => {
-                            if state.has_active_drag() {
-                                return match state.finish_lost_drag() {
-                                    UsageModalOutcome::CopyText(text) => {
-                                        self.copy_usage_modal_text(&text);
-                                        InputOutcome::Changed
-                                    }
-                                    _ => {
-                                        state.hovered_copy_line = None;
-                                        InputOutcome::Changed
-                                    }
-                                };
-                            }
-                            state.hovered_copy_line = None;
-                        }
-                        // Same-tab click and other chrome Downs: drop gesture and hover
-                        _ => {
-                            state.clear_text_drag();
-                        }
-                    }
-                    return InputOutcome::Changed;
-                }
-                ModalWindowOutcome::Unhandled => {
-                    return match usage_modal::handle_usage_modal_mouse(
-                        state,
-                        mouse.kind,
-                        mouse.column,
-                        mouse.row,
-                    ) {
-                        UsageModalOutcome::CopySessionId => {
-                            self.copy_usage_modal_session_id();
-                            InputOutcome::Changed
-                        }
-                        UsageModalOutcome::CopyText(text) => {
-                            self.copy_usage_modal_text(&text);
-                            InputOutcome::Changed
-                        }
-                        UsageModalOutcome::Changed => InputOutcome::Changed,
-                        UsageModalOutcome::Unchanged => InputOutcome::Unchanged,
-                    };
-                }
-                _ => return InputOutcome::Changed,
-            }
+            let outcome = crate::views::usage_modal::route_usage_modal_mouse(
+                state,
+                mouse.kind,
+                mouse.column,
+                mouse.row,
+            );
+            return self.apply_usage_modal_outcome(outcome);
         }
 
         // ResetSettingsConfirm: route mouse events through the modal-window chrome
@@ -1766,6 +1662,30 @@ impl AgentView {
     }
 
     /// Copy the usage modal's session ID and toast the delivery outcome.
+    /// Map a usage-modal routing outcome onto this host: the agent's modal slot, clipboard, and toast.
+    fn apply_usage_modal_outcome(
+        &mut self,
+        outcome: crate::views::usage_modal::UsageModalOutcome,
+    ) -> InputOutcome {
+        use crate::views::usage_modal::UsageModalOutcome;
+        match outcome {
+            UsageModalOutcome::Close => {
+                self.active_modal = None;
+                InputOutcome::Changed
+            }
+            UsageModalOutcome::CopySessionId => {
+                self.copy_usage_modal_session_id();
+                InputOutcome::Changed
+            }
+            UsageModalOutcome::CopyText(text) => {
+                self.copy_usage_modal_text(&text);
+                InputOutcome::Changed
+            }
+            UsageModalOutcome::Changed => InputOutcome::Changed,
+            UsageModalOutcome::Unchanged => InputOutcome::Unchanged,
+        }
+    }
+
     fn copy_usage_modal_session_id(&mut self) {
         let Some(ActiveModal::UsageInfo { state }) = self.active_modal.as_ref() else {
             return;
@@ -1789,10 +1709,8 @@ impl AgentView {
     }
 
     /// Draw the active modal overlay: the per-`ActiveModal`-variant render dispatch, called from `draw` which early-returns afterwards.
-    ///
     /// `pub(crate)` so minimal mode's overlay host can reuse the exact same centered-popup rendering.
-    /// It hosts the command palette / shortcuts help / settings / pickers in its grown live viewport; see `crate::minimal::overlay::render_app_modal`.
-    // Allow inherited from `draw`: covers the nested picker render helpers.
+    /// Allow inherited from `draw`: covers the nested picker render helpers.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn draw_active_modal(
         &mut self,
@@ -3342,8 +3260,13 @@ mod command_palette_vim_input_tests {
             for x in search_bar.x..search_bar.x + search_bar.width {
                 if let Some(cell) = buf.cell((x, y)) {
                     text.push_str(cell.symbol());
-                    // The cursor is an inverse-video cell (bg == text_primary).
-                    if cell.bg == theme.text_primary {
+                    // Cursor cell: `bg == text_primary` on RGB themes, SGR
+                    // REVERSED where text_primary is Reset (which would
+                    // match every untinted cell).
+                    if cell.modifier.contains(ratatui::style::Modifier::REVERSED)
+                        || (theme.text_primary != ratatui::style::Color::Reset
+                            && cell.bg == theme.text_primary)
+                    {
                         has_cursor = true;
                     }
                 }

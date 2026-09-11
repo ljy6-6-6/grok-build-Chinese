@@ -29,10 +29,9 @@ pub struct PromptSuggestionController {
     generation: u64,
     /// Set when the user dismissed the current suggestion (Esc). Cleared by the next loaded suggestion.
     dismissed: bool,
-    /// Set once the `shown` telemetry impression for the current suggestion has been logged.
-    /// Visibility is derived per frame ([`Self::ghost_for`]), so a suggestion can become visible *after* load.
-    /// This latch makes the impression fire exactly once per installed suggestion, at first visibility (divergent draft cleared, gate re-opened).
-    /// Re-armed by [`Self::on_loaded`]; deliberately **not** re-armed by [`Self::dismiss`]/[`Self::clear`] (the suggestion is gone).
+    /// Set once the `shown` telemetry impression for the current suggestion has been logged. This latch
+    /// makes the impression fire exactly once per installed suggestion, at first visibility (divergent
+    /// draft cleared, gate re-opened).
     shown_logged: bool,
     /// Whether the feature is enabled. Resolved from `GROK_PROMPT_SUGGESTIONS`, falling back to the persisted `prompt_suggestions` setting.
     pub enabled: bool,
@@ -76,9 +75,6 @@ impl PromptSuggestionController {
     }
 
     /// The ghost text to render for the current prompt text, if any.
-    ///
-    /// Derived: the suggestion is visible iff the current text is a proper prefix of it (including the empty prompt).
-    /// Typing matching characters shrinks the ghost; typing it out fully (or diverging) hides it; clearing the input brings the full suggestion back.
     pub fn ghost_for(&self, text: &str) -> Option<&str> {
         if !self.enabled || self.dismissed || self.full_text.is_empty() {
             return None;
@@ -110,10 +106,9 @@ impl PromptSuggestionController {
         self.enabled && !self.dismissed && !self.full_text.is_empty()
     }
 
-    /// Latch the `shown` impression for the current suggestion: returns `true` exactly once per installed suggestion.
-    /// The caller logs the telemetry event on `true`.
-    /// Callers check actual visibility first.
-    /// This only guards against double-logging when visibility (re-derived per frame) recurs or is re-checked on a later path.
+    /// Latch the `shown` impression for the current suggestion: returns `true` exactly once per
+    /// installed suggestion. This only guards against double-logging when visibility (re-derived per
+    /// frame) recurs or is re-checked on a later path.
     pub fn mark_shown_logged(&mut self) -> bool {
         !std::mem::replace(&mut self.shown_logged, true)
     }

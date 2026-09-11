@@ -14,6 +14,8 @@
 pub mod campaigns;
 mod config_layers;
 pub mod config_override;
+pub mod deserialize;
+mod display_refresh;
 mod env_overlay;
 pub mod fs_atomic;
 pub mod global_hook_sources;
@@ -44,6 +46,7 @@ pub use config_layers::{
     CampaignsState, ConfigLayers, campaigns_application_disabled, campaigns_state_path,
     load_dismissed_ids_from_home, load_effective_config_disk_only,
 };
+pub use display_refresh::DisplayRefreshSettings;
 pub use env_overlay::{
     GROK_CONFIG_ENV, GROK_CONFIG_PATH_ENV, OverlaySource, ResolvedOverlay, resolved_env_overlay,
 };
@@ -81,13 +84,4 @@ pub use validation::{
 };
 pub use version_overrides::{VersionOverrideError, apply_version_overrides};
 
-/// Parse an env var as a boolean; returns `None` if unset or unrecognized.
-pub fn env_bool(name: &str) -> Option<bool> {
-    let value = std::env::var(name).ok()?;
-    match value.trim().to_ascii_lowercase().as_str() {
-        "" => None,
-        "1" | "true" | "yes" | "on" | "enabled" => Some(true),
-        "0" | "false" | "no" | "off" | "disabled" => Some(false),
-        _ => None,
-    }
-}
+pub use xai_grok_env::env_bool;

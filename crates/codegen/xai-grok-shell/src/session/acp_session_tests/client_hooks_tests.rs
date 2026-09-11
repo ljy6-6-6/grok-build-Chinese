@@ -517,7 +517,6 @@ async fn mcp_error_result_fires_only_failure_and_delivers_original_output() {
                     McpErrorResultTool,
                     Some(serde_json::json!({ "type": "object" })),
                 )
-                .await
                 .expect("stub tool registration must succeed");
 
             let mut client_hooks = crate::extensions::hooks::ClientHooks::new();
@@ -1465,6 +1464,58 @@ async fn a_gate_that_keeps_working_releases_the_report() {
                 actor.turn_report.claim_for_gate().is_some(),
                 "a gate that kept the agent working must leave the report slot free"
             );
+        })
+        .await;
+}
+
+/// A pre-tool batch's `HookRunStarted` and `HookExecution` carry the same identity, since both come from one `HookBatch`.
+#[tokio::test(flavor = "current_thread")]
+async fn pre_tool_batch_start_and_outcome_share_one_identity() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, gateway_rx, _persistence_rx) = test_actor().await;
+            let (_acp, xai_updates) = spawn_capturing_gateway_loop(gateway_rx);
+            let registry =
+                xai_grok_hooks::discovery::registry_from_specs_deduped(vec![pre_tool_use_spec(
+                    "test/pre",
+                    Some("read_file"),
+                    "true",
+                )]);
+            let envelope = actor.make_pre_tool_use_envelope(
+                "read_file",
+                "call_1",
+                &serde_json::json!({ "target_file": "a.rs" }),
+            );
+            let ctx = actor.hook_run_ctx();
+            let batch = actor.announce_hook_run(&registry, &envelope, &ctx);
+            let pre =
+                xai_grok_hooks::dispatcher::dispatch_pre_tool_use(&registry, &envelope, &ctx).await;
+            actor.send_hook_execution(&batch, &pre.results).await;
+            tokio::task::yield_now().await;
+
+            let updates = xai_updates.lock().unwrap().clone();
+            let identity = |kind: &str| {
+                let u = updates
+                    .iter()
+                    .find(|u| u["sessionUpdate"] == kind)
+                    .unwrap_or_else(|| panic!("no {kind} in {updates:?}"));
+                (
+                    u["event_name"].clone(),
+                    u["tool_name"].clone(),
+                    u["prompt_id"].clone(),
+                )
+            };
+            let started = identity("hook_run_started");
+            assert_eq!(
+                started,
+                (
+                    serde_json::json!("pre_tool_use"),
+                    serde_json::json!("read_file"),
+                    serde_json::Value::Null,
+                )
+            );
+            assert_eq!(identity("hook_execution"), started);
         })
         .await;
 }

@@ -15,10 +15,9 @@ use super::types::QuestionAnnotation;
 
 // ── Path D: Cancel ──────────────────────────────────────────────────────
 
-/// Tool result text when the user cancels / dismisses the question UI.
-///
-/// Cancel is a normal user decision, not a tool failure, so this is a
-/// purpose-built message rather than a generic permission-denial string.
+/// Tool result text when the user cancels / dismisses the question UI. Cancel is a normal user
+/// decision, not a tool failure, so this is a purpose-built message rather than a generic
+/// permission-denial string.
 pub const CANCEL_TEXT: &str = "User declined to answer the questions. Continue with the task using your best judgment, or ask different questions.";
 
 /// Tool result text for unanswered questionnaires in non-interactive sessions
@@ -37,23 +36,9 @@ pub fn unanswered_text(non_interactive: bool) -> &'static str {
 
 // ── Path A: Accepted ────────────────────────────────────────────────────
 
-/// Format the tool result for Path A (user accepted and submitted answers).
-///
-/// Produces the accepted-answers tool result:
-///
-/// ```text
-/// User has answered your questions: "<q>"="<label>" ..., "<q>"="<label>" .... You can now continue with the user's answers in mind.
-/// ```
-///
-/// Rules:
-/// - Only answered questions appear (unanswered are omitted by the caller).
-/// - Multi-select: each selected label is its own `Vec` element on the
-///   wire; this function joins them with `, ` at format time.
-/// - Freeform-only: a single-element vec containing `"Other"`, free text
-///   in `annotations[q].notes`.
-/// - Preview is appended only when present in annotations.
-/// - Notes are appended only when present in annotations.
-/// - Questions/labels are interpolated raw (no escaping).
+/// Format the tool result for Path A (user accepted and submitted answers). Only answered questions appear (unanswered are omitted by the
+/// caller). Multi-select: each selected label is its own `Vec` element on the wire; this function joins them with `, ` at format time.
+/// Freeform-only: a single-element vec containing `"Other"`, free text in `annotations[q].notes`.
 pub fn format_accepted_tool_result(
     answers: &IndexMap<String, Vec<String>>,
     annotations: &Option<HashMap<String, QuestionAnnotation>>,
@@ -87,39 +72,9 @@ pub fn format_accepted_tool_result(
 
 // ── Alternate id-keyed tool-result formatting ────
 
-/// Format the tool result in the alternate id-keyed shape (Path A).
-///
-/// Answers are keyed by **id**, one question per line, with no trailing
-/// sentence:
-///
-/// ```text
-/// User questions responses:
-/// Question <qid>: Selected option(s) <oid>(, <oid>)*
-/// Question <qid>: Selected option(s) <oid>(, <oid>)*
-/// ```
-///
-/// Examples:
-///
-/// - Single question, single-select:
-///   `User questions responses:\nQuestion demo_pick: Selected option(s) a`
-/// - Three questions, last with `allow_multiple: true` (one selection):
-///   `User questions responses:\nQuestion q1: Selected option(s) tea\nQuestion q2: Selected option(s) code\nQuestion q3: Selected option(s) tests`
-///
-/// Multi-select labels arrive as separate `Vec` elements; this function
-/// joins their resolved ids with `, ` (`Selected option(s) a, b, c`).
-/// The multi-select join shape is exercised by the test below.
-///
-/// `input_questions` carries both `id` and the option `label`/`id` map
-/// so we can resolve the answer values (which arrive label-keyed from
-/// the client) back to the option ids.
-///
-/// `annotations` carries per-question freeform notes (the text the user
-/// typed when picking the freeform "Other" path or dismissing). When no
-/// option labels resolve to ids and `notes` is non-empty, the result is
-/// `Question <qid>: <raw_text>` (no `Selected option(s)` prefix).
-///
-/// Question order follows `input_questions`. Unanswered questions are
-/// omitted -- only answered questions appear in the result.
+/// Format the tool result in the alternate id-keyed shape (Path A). The multi-select join shape is exercised by the test below.
+/// `input_questions` carries both `id` and the option `label`/`id` map so we can resolve the answer values (which arrive label-keyed from the
+/// client) back to the option ids. Unanswered questions are omitted -- only answered questions appear in the result.
 pub fn format_id_keyed_accepted_tool_result(
     input_questions: &[super::Question],
     answers: &IndexMap<String, Vec<String>>,
@@ -130,10 +85,9 @@ pub fn format_id_keyed_accepted_tool_result(
         .filter_map(|q| {
             let qid = q.id.as_ref()?;
             let labels = answers.get(&q.question)?;
-            // Each selected label is its own `Vec` element (the wire
-            // format no longer joins labels with `", "`), so we look each
-            // one up directly. No splitting, no ambiguity around labels
-            // that contain commas or share substrings with other labels.
+            // Each selected label is its own `Vec` element (the wire format no longer joins labels
+            // with `", "`), so we look each one up directly. No splitting, no ambiguity around
+            // labels that contain commas or share substrings with other labels.
             let oids: Vec<&str> = labels
                 .iter()
                 .filter_map(|label| {
@@ -175,15 +129,9 @@ pub fn format_id_keyed_accepted_tool_result(
 
 // ── Path B: Chat about this (plan mode) ─────────────────────────────────
 
-/// Format the tool result for Path B ("Chat about this" / respond-to-agent).
-///
-/// Iterates ALL original questions. Answered questions show their label;
-/// unanswered questions show "(No answer provided)".
-///
-/// Whitespace is intentional:
-/// - Lines 2-4 and "Questions asked:" have 4-space indentation.
-/// - Question bullets have no indentation.
-/// - Answer lines have 2-space indentation.
+/// Format the tool result for Path B ("Chat about this" / respond-to-agent). Iterates ALL original questions. Answered
+/// questions show their label; unanswered questions show "(No answer provided)". Lines 2-4 and "Questions asked:" have
+/// 4-space indentation. Question bullets have no indentation. Answer lines have 2-space indentation.
 pub fn format_chat_about_this(
     questions: &[Question],
     partial_answers: &HashMap<String, String>,
@@ -385,11 +333,9 @@ mod tests {
         assert!(!result.contains("Which framework?"));
     }
 
-    // ── Alternate id-keyed formatter tests ────────────────────
-    //
-    // Pin both result strings (single question and three questions) so any
-    // drift in the formatter trips a deterministic failure. Update the
-    // literal strings deliberately if the wire format ever changes.
+    // Alternate id-keyed formatter tests Pin both result strings (single question and three
+    // questions) so any drift in the formatter trips a deterministic failure. Update the literal
+    // strings deliberately if the wire format ever changes.
     fn id_keyed_q(qid: &str, prompt: &str, opts: &[(&str, &str)]) -> super::super::Question {
         super::super::Question {
             question: prompt.to_string(),
@@ -531,12 +477,9 @@ mod tests {
         assert_eq!(result, "User questions responses:");
     }
 
-    /// Freeform/dismiss:
-    /// when the user dismisses or types freeform text instead of picking
-    /// an option, the wire format emits the raw text directly after
-    /// `Question <qid>: ` with NO `Selected option(s)` prefix. The pager
-    /// sends `answers["..."] = ["Other"]` plus the typed text in
-    /// `annotations[q].notes`; the formatter falls through to the notes.
+    /// Freeform/dismiss: when the user dismisses or types freeform text instead of picking an option, the wire format emits
+    /// the raw text directly after `Question <qid>: ` with NO `Selected option(s)` prefix. The pager sends `answers["..."]
+    /// = ["Other"]` plus the typed text in `annotations[q].notes`; the formatter falls through to the notes.
     #[test]
     fn format_id_keyed_freeform_dismissal_uses_notes_without_selected_prefix() {
         let questions = vec![id_keyed_q(

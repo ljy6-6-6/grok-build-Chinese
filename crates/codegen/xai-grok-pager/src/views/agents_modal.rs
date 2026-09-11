@@ -344,10 +344,9 @@ pub enum PersonaConfirmAction {
 /// Modal state for the agents listing.
 pub struct AgentsModalState {
     pub window: ModalWindowState,
-    /// Currently active tab (source of truth).
-    ///
-    /// `window.active_tab` (a `usize` index) is derived from this in the render path via `AgentsTab::ALL.position()`.
-    /// Only this field should be mutated by input handlers; the window's copy is a rendering hint synced each frame.
+    /// Currently active tab (source of truth). `window.active_tab` (a `usize` index) is derived from
+    /// this in the render path via `AgentsTab::ALL.position()`. Only this field should be mutated by
+    /// input handlers; the window's copy is a rendering hint synced each frame.
     pub active_tab: AgentsTab,
     pub agents: Vec<AgentListEntry>,
     pub selected: usize,
@@ -1055,10 +1054,9 @@ fn word_wrap(text: &str, max_width: usize) -> Vec<String> {
     }
     lines
 }
-/// Build viewer content for a built-in agent's prompt extension.
-///
-/// Shows only the `prompt_body`, the custom instructions this agent adds on top of the base template.
-/// Template variables like `${{ tools.by_kind.read }}` are resolved to actual tool names using the agent's configured toolset.
+/// Build viewer content for a built-in agent's prompt extension. Shows only the `prompt_body`, the
+/// custom instructions this agent adds on top of the base template. Template variables like `${{
+/// tools.by_kind.read }}` are resolved to actual tool names using the agent's configured toolset.
 fn synthesize_agent_markdown(entry: &AgentListEntry) -> String {
     synthesize_agent_markdown_with_locale(entry, None)
 }
@@ -1480,7 +1478,7 @@ fn render_agents_search(
             .saturating_add(viewport.cursor_display_column as u16)
             .min(area.width - 1);
         if let Some(cell) = buf.cell_mut((area.x + cursor_offset, area.y)) {
-            cell.set_style(Style::default().fg(theme.bg_base).bg(theme.text_primary));
+            cell.set_style(theme.block_cursor_over(theme.bg_base));
         }
     }
 }
@@ -2115,7 +2113,7 @@ fn render_create_text_field(
         if cursor_x < content_area.x + content_area.width
             && let Some(cell) = buf.cell_mut((cursor_x, y))
         {
-            cell.set_style(Style::default().fg(theme.bg_base).bg(theme.text_primary));
+            cell.set_style(theme.block_cursor_over(theme.bg_base));
         }
     }
     y + 2
@@ -3365,10 +3363,6 @@ mod tests {
         );
     }
     /// Wiring check: both tab footers carry the shared `i search` hint under vim nav mode.
-    /// The Personas footer advertises `/ search`, symmetric with the Agents tab.
-    /// The gate is covered centrally by `modal_window`'s `vim_nav_search_hint_only_in_vim_nav_mode`.
-    /// The `set_vim_mode` pin (a thread-local that, once set, blocks disk-seeding) keeps this independent of the dev's on-disk `[ui].vim_mode`.
-    /// Reset afterward since libtest reuses worker threads.
     #[test]
     fn tab_footers_advertise_i_search_under_vim() {
         crate::appearance::cache::set_vim_mode(true);

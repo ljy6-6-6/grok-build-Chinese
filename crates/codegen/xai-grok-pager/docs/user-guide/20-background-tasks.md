@@ -81,7 +81,7 @@ The interval format supports:
 ### Behavior
 
 - The prompt fires immediately on creation, then repeats at the specified interval
-- Each firing creates a new agent turn
+- Each firing runs in a detached background subagent, not as a turn in your conversation. The fire cannot see the conversation, so the stored prompt must stand on its own; only its result comes back
 - Recurring tasks auto-expire after 7 days
 - Maximum 50 scheduled tasks can be active at once
 
@@ -156,6 +156,8 @@ Create a scheduled task:
 | `fire_immediately`| Fire on creation in addition to the interval (default: `false`) |
 | `recurring`      | Repeat (default: `true`) or fire once (`false`)          |
 | `durable`        | Persist across sessions (default: `false`)               |
+
+Every fire runs in a detached background subagent; there is no option to run one as a turn in the conversation.
 
 ### scheduler_list
 

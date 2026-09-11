@@ -22,27 +22,18 @@ pub enum InvariantStatus {
 }
 
 /// Cell-level verdict: the worst of its invariant rows (`Fail > XPass > XFail > Pass`; see `runner::classify`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, strum::AsRefStr, strum::IntoStaticStr)]
 #[serde(rename_all = "snake_case")]
 pub enum CellStatus {
+    #[strum(serialize = "PASS")]
     Pass,
+    #[strum(serialize = "FAIL")]
     Fail,
+    #[strum(serialize = "XFAIL")]
     XFail,
+    #[strum(serialize = "XPASS")]
     XPass,
 }
-
-impl CellStatus {
-    /// Fixed-width table label.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            CellStatus::Pass => "PASS",
-            CellStatus::Fail => "FAIL",
-            CellStatus::XFail => "XFAIL",
-            CellStatus::XPass => "XPASS",
-        }
-    }
-}
-
 /// One invariant row of a [`CellReport`].
 #[derive(Clone, Debug, Serialize)]
 pub struct InvariantReport {
@@ -135,7 +126,7 @@ pub fn summary_table(reports: &[CellReport]) -> String {
         rows.push([
             report.cell_id.clone(),
             report.tier.clone(),
-            report.status.as_str().to_owned(),
+            report.status.as_ref().to_owned(),
             report.streams.to_string(),
             format!("{}ms", report.duration_ms),
             detail,

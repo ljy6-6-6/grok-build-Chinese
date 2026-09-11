@@ -58,9 +58,29 @@ pub(crate) struct FeedbackRequestDismiss {
     pub request_id: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum FeedbackOutcome {
+    Submitted,
+    SubmittedCleanupFailed,
+    LocalOnly,
+    OutcomeUnknown,
+    /// Unknown wire variant from a newer shell. Treat like [`Self::OutcomeUnknown`]:
+    /// do not claim a definite failure or invite a resend.
+    #[serde(other)]
+    Other,
+}
+
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FeedbackResponse {
     pub success: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<FeedbackOutcome>,
+    /// Single-use capability returned only for a successful, explicitly consented modal report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_upload_token: Option<String>,
 }
 
 /// `turn_number` is optional from the client side.
@@ -75,11 +95,8 @@ pub struct ClientFeedbackInput {
     #[serde(default)]
     pub rating_type: Option<prod_mc_cli_chat_proxy_types::feedback_types::RatingType>,
 
-    /// Rating value (interpretation depends on rating_type):
-    /// - thumbs: -1 (down), 0 (neutral), 1 (up)
-    /// - stars: 1-5
-    /// - nps: 0-10
-    ///
+    /// Rating value (interpretation depends on rating_type).
+    /// thumbs: -1 (down), 0 (neutral), 1 (up).
     /// Values are clamped to valid ranges on the agent side.
     #[serde(default)]
     pub rating_value: Option<i32>,
@@ -114,6 +131,10 @@ pub struct ClientFeedbackInput {
 
     #[serde(default)]
     pub terminal_info: Option<prod_mc_cli_chat_proxy_types::feedback_types::FeedbackTerminalInfo>,
+
+    /// Requests a shell-issued one-shot trace capability after this feedback is accepted.
+    #[serde(default, alias = "requestTraceUploadToken")]
+    pub request_trace_upload_token: bool,
 }
 
 impl ClientFeedbackInput {
@@ -192,6 +213,47 @@ impl ClientFeedbackInput {
     pub fn request_id(&self) -> Option<&str> {
         self.request_id.as_deref()
     }
+}
+
+/// `x.ai/feedback/drafts/update` params, built by the pager and parsed by the shell. The full body
+/// is required so a partial update fails the parse instead of half-updating the draft.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FeedbackDraftUpdateRequest {
+    pub session_id: String,
+    pub draft_id: xai_grok_feedback::FeedbackDraftId,
+    #[serde(flatten)]
+    pub input: xai_grok_feedback::FeedbackDraftInput,
+}
+
+/// The `draft_id` variant of `x.ai/feedback` params, built by the pager and parsed by the shell.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FeedbackDraftSendRequest {
+    pub session_id: String,
+    pub draft_id: xai_grok_feedback::FeedbackDraftId,
+    #[serde(default)]
+    pub request_trace_upload_token: bool,
+    pub edited_body: FeedbackDraftEditedBody,
+}
+
+/// `edited_body` of [`FeedbackDraftSendRequest`]: the edited draft plus the pager's client context.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FeedbackDraftEditedBody {
+    #[serde(flatten)]
+    pub input: xai_grok_feedback::FeedbackDraftInput,
+    #[serde(default)]
+    pub images: Vec<prod_mc_cli_chat_proxy_types::feedback_types::FeedbackImage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_info: Option<prod_mc_cli_chat_proxy_types::feedback_types::FeedbackTerminalInfo>,
+}
+
+/// Pager attestation carried on the one-shot `x.ai/feedback/upload-trace` request. Deliberately no
+/// catch-all variant: an unknown intent fails the request instead of changing its gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FeedbackTraceUploadIntent {
+    SendThisSession,
 }
 
 // ── Rollout survey ──────────────────────────────────────────────────────
@@ -339,10 +401,8 @@ pub struct RewindPointInfo {
 // ── Session info ────────────────────────────────────────────────────────
 
 /// Itemized token usage for one context category, shown as an informational row in `/context`, e.g. the skills listing or the MCP server listing.
-///
 /// Token counts come from rendering the current state (the skill set, the connected servers), never from parsing conversation text.
 /// Once injected, these rows overlap [`ContextInfo::message_tokens`]; a fresh session can show rows before the reminders are injected.
-/// Neither estimate counts the `<system-reminder>` wrapper added on injection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct TokenUsageCategory {
@@ -559,24 +619,16 @@ pub struct StartupHints {
     /// The verbatim parent copy already holds the parent's System, and overwriting it would bust the cache prefix.
     #[serde(default)]
     pub preserve_inherited_system: bool,
-    /// Tool names (as the model sees them, e.g. `server__tool`) through which this session delivers user-visible output.
-    /// Declared by headless surfaces whose users never see the model's plain-text responses; output only reaches them via these tools.
-    /// Opt-in: when empty (the default), no behavior changes.
-    /// Currently steers the MCP connecting-reminder wording (`format_mcp_connecting_reminder`); intended to drive a turn-end delivery gate later.
+    /// Tool names the session delivers its reply through (e.g. a messaging MCP tool); listing any keeps the full MCP waits at the prefix and tool-definition gates instead of the short startup grace.
     #[serde(default)]
     pub delivery_tools: Vec<String>,
-    /// Client-declared answer for permission prompts, for headless surfaces with no client on agent-initiated turns (monitor wakes, scheduled tasks).
     /// Only `"alwaysAllow"` is honored: would-be prompts resolve as allow at the manager's dispatch gate.
-    /// That matches the allow-always answer an attended interactive client would give.
-    /// Clamped off by the managed always-approve pin; a configured `defaultMode` wins (see `apply_permission_mode_hint`).
-    ///
-    /// Applied when the manager is created, i.e. `session/new` and cold `session/load`.
-    /// A session stamped at creation keeps the policy for its resident lifetime, and a leader restart re-applies it on the next load.
+    /// Clamped off by the managed always-approve pin; a configured `defaultMode` wins.
     /// Unlike `yoloMode` / `autoMode`, a warm re-attach to an already-resident actor does NOT re-apply it.
-    /// So stamping a continue on a live `Ask` session is a no-op.
-    /// (Known gap: adopting an existing interactive session into unattended auto-allow needs a runtime prompt-policy update on the manager.)
     #[serde(default)]
     pub permission_mode: Option<String>,
+    #[serde(skip)]
+    pub startup_traceparent: std::cell::RefCell<Option<String>>,
 }
 
 impl StartupHints {
@@ -589,11 +641,46 @@ impl StartupHints {
             _ => McpInitStrategy::Progressive,
         }
     }
+
+    pub(crate) fn take_mcp_reroot_traceparent(&self) -> Option<String> {
+        if self.is_subagent {
+            return None;
+        }
+        self.startup_traceparent.borrow_mut().take()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn take_mcp_reroot_traceparent_one_shot_and_skips_subagent() {
+        let hints = StartupHints {
+            startup_traceparent: std::cell::RefCell::new(Some("tp".to_owned())),
+            ..Default::default()
+        };
+        assert_eq!(hints.take_mcp_reroot_traceparent().as_deref(), Some("tp"));
+        assert_eq!(hints.take_mcp_reroot_traceparent(), None);
+
+        let subagent = StartupHints {
+            is_subagent: true,
+            startup_traceparent: std::cell::RefCell::new(Some("tp".to_owned())),
+            ..Default::default()
+        };
+        assert_eq!(subagent.take_mcp_reroot_traceparent(), None);
+    }
+
+    #[test]
+    fn unknown_feedback_outcome_deserializes_as_unknown() {
+        let response: FeedbackResponse = serde_json::from_value(serde_json::json!({
+            "success": false,
+            "outcome": "submitted_after_retry",
+        }))
+        .expect("newer outcome should remain backward compatible");
+
+        assert_eq!(response.outcome, Some(FeedbackOutcome::Other));
+    }
 
     #[test]
     fn desktop_client_type_deserializes_and_round_trips() {

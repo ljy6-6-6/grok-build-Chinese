@@ -611,7 +611,7 @@ fn filter_delta_replay_drops_blank_acu_and_rewinds() {
 fn prepare_replay_reports_spawn_without_finish() {
     let spawn = |id: &str, child: &str| {
         format!(
-            r#"{{"method":"_x.ai/session/update","params":{{"sessionId":"s","update":{{"sessionUpdate":"subagent_spawned","subagent_id":"{id}","parent_session_id":"s","child_session_id":"{child}","subagent_type":"general-purpose","description":"task"}},"_meta":{{"eventId":"s-1"}}}}}}"#
+            r#"{{"method":"_x.ai/session/update","params":{{"sessionId":"s","update":{{"sessionUpdate":"subagent_spawned","subagent_id":"{id}","attempt_id":"attempt-{id}","parent_session_id":"s","child_session_id":"{child}","subagent_type":"general-purpose","description":"task"}},"_meta":{{"eventId":"s-1"}}}}}}"#
         )
     };
     let finish = |id: &str| {
@@ -629,7 +629,11 @@ fn prepare_replay_reports_spawn_without_finish() {
     let prepared = prepare_replay_lines(&raw, None);
     assert_eq!(
         prepared.unfinished_subagents,
-        vec![("b".to_string(), "cb".to_string())]
+        vec![super::replay::UnfinishedSubagent {
+            subagent_id: "b".to_string(),
+            attempt_id: Some("attempt-b".to_string()),
+            child_session_id: "cb".to_string(),
+        }]
     );
 }
 
@@ -644,7 +648,11 @@ fn collect_unfinished_subagents_handles_legacy_top_level_lines() {
     // `a` is paired (spawn and finish); `b` only spawned, so it is the orphan
     assert_eq!(
         collect_unfinished_subagents(&lines),
-        vec![("b".to_string(), "cb".to_string())]
+        vec![super::replay::UnfinishedSubagent {
+            subagent_id: "b".to_string(),
+            attempt_id: None,
+            child_session_id: "cb".to_string(),
+        }]
     );
 }
 
@@ -660,6 +668,7 @@ fn collect_pairs_a_reconcile_emitted_finish_with_its_spawn() {
     let finish = serde_json::to_string(&SessionNotification {
         session_id: acp::SessionId::new("s"),
         update: SessionUpdate::SubagentFinished {
+            attempt_id: None,
             subagent_id: "sa".into(),
             child_session_id: "ca".into(),
             status: "cancelled".into(),

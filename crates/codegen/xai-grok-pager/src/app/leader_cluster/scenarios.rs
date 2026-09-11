@@ -224,7 +224,6 @@ fn reattach_completion_roundtrips_durable_log() {
 
 /// Kill the leader and let the bridge reconnect (real `LeaderReconnector`, socket pinned).
 /// Then reload by hand (`begin_session_reload`, `session/load`, `finish_session_reload`): history renders exactly once and new turns work.
-/// The reload driver mirrors the event loop's reconnect arm.
 /// Its `plan_reconnect_load` is event_loop-private, so the cwd and meta derivation is replicated inline.
 #[test]
 #[ignore = "leader-cluster: needs single-process isolation (process-global env + grok_home OnceLock in the shared lib test binary); run: cargo test -p xai-grok-pager --lib -- app::leader_cluster --ignored --test-threads=1"]

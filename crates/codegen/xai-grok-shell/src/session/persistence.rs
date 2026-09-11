@@ -70,9 +70,7 @@ pub fn is_forbidden_title_char(c: char) -> bool {
 }
 
 /// Drop C0/C1 and bidi/format controls, then trim.
-/// The ext boundary, pull hydrate, and pager ingest share this.
 /// A title therefore cannot carry terminal escapes or RTL overrides into `display_name` / `summary.json`.
-///
 /// Already-clean input is borrowed (trim is a subslice); only a title that actually contains forbidden chars allocates.
 pub fn sanitize_rename_title(title: &str) -> Cow<'_, str> {
     if title.chars().any(is_forbidden_title_char) {
@@ -230,6 +228,8 @@ pub enum PersistenceMsg {
         messages: Vec<ConversationItem>,
         respond_to: tokio::sync::oneshot::Sender<io::Result<()>>,
     },
+    /// Push a just-minted logical agent into the writeback cache.
+    SetRemoteAgentId(String),
     CurrentModel {
         model_id: acp::ModelId,
         /// The active agent definition name (e.g. `"grok-build"`).
@@ -257,6 +257,20 @@ pub enum PersistenceMsg {
     NextTraceTurn {
         next_trace_turn: u64,
         request_id: Option<String>,
+    },
+    WakeStart {
+        start: WakeStart,
+        abort: tokio_util::sync::CancellationToken,
+        respond_to: tokio::sync::oneshot::Sender<io::Result<()>>,
+    },
+    WakeAbort {
+        prior: WakeSummaryState,
+        respond_to: tokio::sync::oneshot::Sender<io::Result<()>>,
+    },
+    #[cfg(test)]
+    HoldForTest {
+        entered: tokio::sync::oneshot::Sender<()>,
+        release: tokio::sync::oneshot::Receiver<()>,
     },
     Signals(SessionSignals),
     UsageTurn {
@@ -314,7 +328,7 @@ pub enum PersistenceMsg {
     LastTurnSummary(Option<(String, String)>),
     /// Enable remote writeback for a session created `Local` before remote settings resolved (non-blocking startup); backfills its local history.
     UpgradeToWriteback {
-        auth_manager: Arc<crate::auth::AuthManager>,
+        auth_manager: Arc<xai_grok_login::AuthManager>,
     },
     Flush,
     /// Flush all pending writes AND fsync the session files, then signal the caller.
@@ -343,9 +357,7 @@ fn storage_view(sessions_root: &Path) -> RelocationResult<RelocationView> {
 }
 
 /// Check if a session exists locally under the given cwd.
-///
-/// This is the correct check for the `-r` resume path.
-/// A session is only "already local" if it lives under the **same** cwd as the current invocation.
+/// A session is only "already local" if it lives under the same cwd as the current invocation.
 /// A session stored under a different cwd does NOT satisfy this check; the caller must still run the remote restore into the requested cwd.
 pub fn session_exists_for_cwd(session_id: &str, cwd: &str) -> bool {
     let sessions_root = crate::util::grok_home::grok_home().join("sessions");
@@ -367,28 +379,16 @@ fn session_exists_for_cwd_in_root(session_id: &str, cwd: &str, sessions_root: &P
 }
 
 /// Find the local child session id that was previously restored from `remote_session_id` in the given `cwd`.
-///
 /// When a remote session is restored, a new local child is created with `summary.parent_session_id == remote_session_id`.
 /// On a second `grok -r <remote_id>` in the same cwd, this function returns the already-restored child so no duplicate restore is performed.
-///
-/// If multiple children match (e.g., from older duplicate restores), the most recently used one is returned.
-/// Selection is fully deterministic:
-/// 1. Newest `updated_at` timestamp in `summary.json`
-/// 2. Newest session directory mtime as a tie-breaker (catches equal timestamps)
-/// 3. Lexicographically largest session id as the final stable tie-breaker
-///
-/// Returns `Some(local_child_id)` when at least one matching child is found.
 pub fn find_local_child_for_remote(remote_session_id: &str, cwd: &str) -> Option<String> {
     let sessions_root = crate::util::grok_home::grok_home().join("sessions");
     find_local_child_for_remote_in_root(remote_session_id, cwd, &sessions_root)
 }
 
 /// Resolve a session ID to one that is available locally under `cwd`.
-///
-/// Checks in order:
-///   1. `session_id` exists directly under `cwd`: returns it as-is.
-///   2. A previously restored child of `session_id` exists: returns the child ID.
-///   3. Neither found: returns `None` (caller should restore from remote).
+/// Checks in order: 1. `session_id` exists directly under `cwd`: returns it as-is.
+/// A previously restored child of `session_id` exists: returns the child ID.
 pub fn resolve_local_session(session_id: &str, cwd: &str) -> Option<String> {
     if session_exists_for_cwd(session_id, cwd) {
         return Some(session_id.to_string());
@@ -416,10 +416,7 @@ pub(crate) struct ResolvedLocalSession {
 }
 
 /// Resolve a session across multiple candidate cwds for worktree resume.
-///
 /// The first cwd in `candidate_cwds` should be the exact current cwd so it gets priority.
-/// For each candidate, checks both direct session existence and previously-restored children.
-///
 /// Returns `None` when no local match exists in any candidate.
 pub(crate) fn resolve_local_session_for_repo(
     session_id: &str,
@@ -519,20 +516,38 @@ fn find_local_child_for_remote_in_root(
     candidates.into_iter().next().map(|(_, _, id)| id)
 }
 
-/// Check if a session exists locally by session ID.
 /// Searches across ALL cwd directories under `~/.grok/sessions/`.
-///
-/// Use `session_exists_for_cwd` instead when the target cwd is known (e.g., the `-r` resume path) to avoid false-positive matches.
-/// Find a session by ID across **all** CWD directories under `~/.grok/sessions/`.
-///
+/// Use `session_exists_for_cwd` instead when the target cwd is known to avoid false-positive matches.
 /// Unlike [`resolve_local_session`] which only checks a single CWD, this scans every encoded-CWD subdirectory.
-/// Returns the decoded CWD path that contains the session, or `None` if not found anywhere.
-///
-/// The pager's `--resume` uses this to find sessions created in a different CWD (e.g., a worktree) than the one the user is currently in.
 pub fn resolve_local_session_any_cwd(session_id: &str) -> Option<String> {
     resolve_local_session_any_cwd_result(session_id)
         .ok()
         .flatten()
+}
+
+/// Resolve a batch of candidate IDs against one point-in-time storage view.
+/// Loading [`RelocationView`] walks the local session tree, so callers that need to classify a list must use this API rather than calling [`resolve_local_session_any_cwd`] once per entry.
+pub fn resolve_local_session_ids_any_cwd<S: AsRef<str>>(
+    session_ids: &[S],
+) -> io::Result<std::collections::HashSet<String>> {
+    resolve_local_session_ids_any_cwd_in_root(session_ids, &grok_home().join("sessions"))
+        .map_err(io::Error::other)
+}
+
+fn resolve_local_session_ids_any_cwd_in_root<S: AsRef<str>>(
+    session_ids: &[S],
+    sessions_root: &Path,
+) -> RelocationResult<std::collections::HashSet<String>> {
+    let view = storage_view(sessions_root)?;
+    Ok(session_ids
+        .iter()
+        .map(AsRef::as_ref)
+        .filter(|session_id| {
+            view.find_persisted_session_dir(session_id)
+                .is_ok_and(|path| path.is_some())
+        })
+        .map(str::to_owned)
+        .collect())
 }
 
 pub(crate) fn resolve_local_session_any_cwd_result(session_id: &str) -> io::Result<Option<String>> {
@@ -594,8 +609,23 @@ pub(crate) fn title_is_manual_in_dir(session_dir: &Path) -> bool {
         .is_some_and(|summary| summary.title_is_manual)
 }
 
+#[cfg(test)]
+thread_local! {
+    static FIND_SUMMARY_BY_SESSION_ID_FORBIDDEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_find_summary_by_session_id_forbidden(forbidden: bool) {
+    FIND_SUMMARY_BY_SESSION_ID_FORBIDDEN.set(forbidden);
+}
+
 /// Find and read a session summary given only its ID (scans all CWD directories).
 pub(crate) fn find_summary_by_session_id(session_id: &str) -> Option<Summary> {
+    #[cfg(test)]
+    assert!(
+        !FIND_SUMMARY_BY_SESSION_ID_FORBIDDEN.get(),
+        "sessions-index walk invoked from a forbidden path"
+    );
     find_summary_by_session_id_in_root(session_id, &grok_home().join("sessions"))
 }
 
@@ -620,6 +650,47 @@ fn read_summary_from_dir(session_dir: &Path) -> RelocationResult<Summary> {
         source: error,
     })?;
     serde_json::from_slice(&bytes).map_err(|source| RelocationError::Json { path, source })
+}
+
+#[derive(Clone, Debug)]
+pub struct WakeStart {
+    pub prior: WakeSummaryState,
+    pub attempt_id: String,
+    pub next_trace_turn: u64,
+    pub model_id: acp::ModelId,
+    pub agent_name: Option<String>,
+    pub reasoning_effort: Option<Option<ReasoningEffort>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WakeSummaryState {
+    pub(crate) attempt_id: Option<String>,
+    pub(crate) next_trace_turn: u64,
+    pub(crate) current_model_id: acp::ModelId,
+    pub(crate) agent_name: Option<String>,
+    pub(crate) reasoning_effort: Option<ReasoningEffort>,
+    pub(crate) summary_bytes: Vec<u8>,
+}
+
+pub(crate) async fn read_wake_summary_state_from_dir(
+    session_dir: PathBuf,
+) -> io::Result<WakeSummaryState> {
+    tokio::task::spawn_blocking(move || {
+        let path = session_dir.join("summary.json");
+        let bytes = std::fs::read(&path)?;
+        serde_json::from_slice::<Summary>(&bytes)
+            .map(|summary| WakeSummaryState {
+                attempt_id: summary.attempt_id,
+                next_trace_turn: summary.next_trace_turn,
+                current_model_id: summary.current_model_id,
+                agent_name: summary.agent_name,
+                reasoning_effort: summary.reasoning_effort,
+                summary_bytes: bytes,
+            })
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+    })
+    .await
+    .map_err(io::Error::other)?
 }
 
 /// Dir index plus on-demand summary reads.
@@ -705,7 +776,8 @@ fn most_recent_local_summary_for_cwd_in_view(
             }
             Err(error) => return Err(error),
         };
-        if summary.is_hidden() || !selection.admits(&summary) {
+        if summary.is_hidden() || summary.is_unused_optimistic_husk() || !selection.admits(&summary)
+        {
             continue;
         }
         if best.as_ref().is_none_or(|current| {
@@ -721,11 +793,8 @@ fn most_recent_local_summary_for_cwd_in_view(
 }
 
 /// Sync, local-only summaries for `cwd` under the caller's title-selection policy.
-/// Explicit-id lookup remains inclusive through [`find_summary_by_session_id`].
 /// For startup paths that must resolve a resume target before the irreversible OS sandbox is applied; async callers use [`list_summaries`].
-///
 /// Listing failures propagate so pre-sandbox callers can fail closed.
-/// Individual unreadable summaries are skipped, matching the async path's tolerance for a single corrupt file.
 pub fn local_summaries_for_cwd_sync(
     cwd: &str,
     selection: RecentSessionSelection,
@@ -747,16 +816,9 @@ fn local_summaries_for_cwd_sync_in_root(
         .collect())
 }
 
-/// Best-effort lookup of the sandbox profile persisted with a session that is about to be resumed.
 /// Used at startup to restore the session's profile before the (irreversible) OS sandbox is applied.
-///
-/// - `session_id`: the explicit id from `--resume <id>` / `--load <id>` / `-s <id>`.
-///   Resolved directly across all cwds, then (for a remote id that was restored into a local child) via that child's `parent_session_id`.
-/// - `cwd`: the current working directory.
-///   Used to resolve a remote id to its local child, and as the lookup key for `-c` / `--continue` and bare `--resume` (most-recent-for-cwd).
-///
+/// `session_id`: the explicit id from `--resume <id>` / `--load <id>` / `-s <id>`.
 /// Returns `None` when not resuming, the session isn't found locally, or it has no persisted profile (sessions created before this was tracked).
-/// Callers then fall back to the normal config/CLI resolution.
 pub fn resumed_session_sandbox_profile(
     session_id: Option<&str>,
     cwd: Option<&str>,
@@ -883,9 +945,98 @@ pub struct PendingCwdSwitchReminder {
     pub destination_project_instructions: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionIdentity {
+    pub(crate) agent_id: String,
+    pub(crate) attempt_id: String,
+}
+
+pub(crate) struct ExplicitSessionIdentity {
+    pub(crate) agent_id: xai_message_delivery_core::AgentId,
+    pub(crate) attempt_id: xai_message_delivery_core::AttemptId,
+}
+
+pub(crate) fn next_session_identity(
+    previous_agent_id: Option<&str>,
+    is_fork: bool,
+    entropy: (u128, u128),
+) -> SessionIdentity {
+    let previous_agent_id = previous_agent_id.and_then(xai_message_delivery_core::AgentId::parse);
+    let action = xai_message_delivery_core::next_identity(
+        previous_agent_id.as_ref(),
+        is_fork,
+        entropy.0,
+        entropy.1,
+    );
+    let (agent_id, attempt_id) = match action {
+        xai_message_delivery_core::IdentityAction::Start { agent, attempt }
+        | xai_message_delivery_core::IdentityAction::Resume { agent, attempt }
+        | xai_message_delivery_core::IdentityAction::Fork { agent, attempt } => (agent, attempt),
+    };
+    SessionIdentity {
+        agent_id: agent_id.to_string(),
+        attempt_id: attempt_id.to_string(),
+    }
+}
+
+/// Mint and persist a new attempt only after this process won cold actor creation.
+/// A non-empty on-disk agent id remains stable across activations.
+pub(crate) async fn persist_cold_spawn_identity(
+    info: &Info,
+    previous_agent_id: Option<&str>,
+) -> io::Result<SessionIdentity> {
+    let storage = JsonlStorageAdapter::with_root(grok_home());
+    stamp_session_identity(&storage, info, previous_agent_id).await
+}
+
+/// Parseable agent id currently on disk, without minting.
+/// For a loader whose insert displaced the cold-spawn winner: its writeback cache was seeded from a summary read that may predate the winner's stamp.
+pub(crate) async fn persisted_agent_id(info: &Info) -> io::Result<Option<String>> {
+    let storage = JsonlStorageAdapter::with_root(grok_home());
+    let summary = storage.load_summary(info).await?;
+    Ok(summary
+        .agent_id
+        .as_deref()
+        .and_then(xai_message_delivery_core::AgentId::parse)
+        .map(|id| id.as_str().to_owned()))
+}
+
+/// Mint a new attempt under the summary lock, keeping a parseable live agent id.
+/// `fallback_agent_id` is the caller's pre-lock snapshot; the on-disk value wins when both are present.
+async fn stamp_session_identity(
+    storage: &JsonlStorageAdapter,
+    info: &Info,
+    fallback_agent_id: Option<&str>,
+) -> io::Result<SessionIdentity> {
+    let fallback = fallback_agent_id.map(str::to_string);
+    storage
+        .stamp_session_identity_if_absent(info, None, move |live| {
+            mint_next_session_identity(live.or(fallback.as_deref()), false)
+        })
+        .await
+}
+
+pub(crate) fn mint_next_session_identity(
+    previous_agent_id: Option<&str>,
+    is_fork: bool,
+) -> SessionIdentity {
+    next_session_identity(
+        previous_agent_id,
+        is_fork,
+        (
+            uuid::Uuid::new_v4().as_u128(),
+            uuid::Uuid::new_v4().as_u128(),
+        ),
+    )
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Summary {
     pub info: Info,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
     /// Monotonic generation of the authoritative cwd in `info.cwd`.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub cwd_generation: u64,
@@ -923,7 +1074,6 @@ pub struct Summary {
     #[serde(default)]
     pub chat_format_version: u8,
     /// Stable display path for forked sessions.
-    ///
     /// When set, the system prompt's `Workspace Path` and prompt metadata paths show this value instead of the worktree/overlay path (`info.cwd`).
     /// Persisted so the override survives session restore/reload without the caller needing to resend it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -937,7 +1087,6 @@ pub struct Summary {
     /// The parent prompt/turn ID that triggered this fork.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork_parent_prompt_id: Option<String>,
-    /// Number of conversation items inherited from the parent session.
     /// During compaction, items below this index are preserved as-is (the "inherited prefix").
     /// Only items after this boundary are summarized.
     /// `None` means no inherited prefix (non-forked session).
@@ -985,7 +1134,6 @@ pub struct Summary {
     /// If the model is removed or its `agent_type` changes between sessions, the persisted value still restores the correct harness.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_name: Option<String>,
-    /// The OS sandbox profile this session ran under (e.g. "workspace", "strict", "off", or a custom name).
     /// Persisted so a resumed session is restored to the same profile instead of silently falling back to the config default.
     /// A fallback would break commands that worked before (a stricter profile denies filesystem/network the session relied on).
     /// `None` for sessions created before this field existed.
@@ -1000,7 +1148,6 @@ pub struct Summary {
     /// Prompt id of the turn `last_turn_summary` describes (provenance).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_turn_summary_prompt_id: Option<String>,
-    /// Bounded preview of the most recent session recap ("where was I").
     /// Persisted so session listings (`/resume`, `/session-info`) can show it whenever available.
     /// Distinct from `last_turn_summary` (a summary of the final turn only).
     /// Regenerated on demand by `/recap`; this holds the last committed value.
@@ -1031,6 +1178,8 @@ impl Summary {
             );
         let mut summary = Self {
             info: info.clone(),
+            agent_id: None,
+            attempt_id: None,
             cwd_generation: 0,
             previous_cwd: None,
             pending_cwd_switch_reminder: None,
@@ -1095,11 +1244,25 @@ impl Summary {
         )
     }
 
+    /// Unused TUI-open husk: untitled, 0 messages, and no fork provenance.
+    /// Worktree stamps do not exempt. `session_kind == "fork"` or
+    /// `parent_session_id` / `forked_at` do (worktree forks keep kind `worktree`).
+    pub fn is_unused_optimistic_husk(&self) -> bool {
+        if matches!(self.session_kind.as_deref(), Some("fork"))
+            || self
+                .parent_session_id
+                .as_deref()
+                .is_some_and(|id| !id.is_empty())
+            || self.forked_at.is_some()
+        {
+            return false;
+        }
+        self.num_messages == 0 && self.display_title().trim().is_empty()
+    }
+
     /// Whether this is a one-shot `grok -p` session.
     /// Deliberately not part of [`Self::is_hidden`]: headless sessions stay listable (the picker's Headless page, the search index).
-    /// They are only excluded from the default pages by `HeadlessPolicy`.
     /// Unstamped summaries (`session_kind` absent) are interactive, including pre-stamp one-shots and remote twins the registry has not classified.
-    /// They still fill default `/resume`.
     pub fn is_headless(&self) -> bool {
         self.session_kind.as_deref() == Some(crate::session::visibility::SESSION_KIND_HEADLESS)
     }
@@ -1122,7 +1285,6 @@ impl Summary {
     /// The manually-`/rename`d title (trimmed), `None` for auto-generated or blank titles.
     /// Binds to `generated_title` (the field `title_is_manual` describes), never the `session_summary` display fallback.
     /// A stale flag over a blank manual title therefore can't relabel an auto summary as manual.
-    /// When `Some`, it equals [`Self::display_title_opt`] (a non-blank `generated_title` wins the display chain).
     pub fn manual_title_opt(&self) -> Option<String> {
         self.title_is_manual
             .then_some(self.generated_title.as_deref())
@@ -1245,8 +1407,6 @@ impl PersistenceHandle {
         self.disk_full_rx.clone()
     }
 
-    /// Append after older buffered updates and wait for the durable barrier.
-    ///
     /// [`DurableAppendError::NotCommitted`] is safe to retry; [`DurableAppendError::Committed`] means the replay line landed.
     /// [`DurableAppendError::AcknowledgementLost`] has unknown status.
     /// No-op handles return `Unsupported`.
@@ -1303,9 +1463,8 @@ struct SessionPersistence {
     summary: crate::session::summary::SummaryGenerator,
     registry_title_sync: Option<RegistryGeneratedTitleSync>,
     /// Client gateway for `SessionSummaryGenerated` notifications.
-    /// Used to announce an auto-generated title only once it has actually been adopted (see the `GeneratedTitle` handler).
+    /// Used to announce an auto-generated title only once it has actually been adopted.
     /// A title rejected for racing a manual `/rename` thus never reaches the client.
-    /// `None` for the subagent variant, whose lifecycle notifications are handled by the coordinator.
     gateway: Option<GatewaySender>,
     /// Read every turn, not at construction, so a session opened before the decision landed still indexes.
     search_index: crate::session::storage::search::SharedSearchIndex,
@@ -1550,7 +1709,7 @@ impl SessionPersistence {
     /// Enable writeback for a session created `Local` before settings resolved.
     /// Build the sync and (for a fresh session) backfill its local-only history.
     /// No-op once syncing, so a repeat upgrade is harmless.
-    async fn upgrade_to_writeback(&mut self, auth_manager: Arc<crate::auth::AuthManager>) {
+    async fn upgrade_to_writeback(&mut self, auth_manager: Arc<xai_grok_login::AuthManager>) {
         if self.remote_sync.is_some() {
             return;
         }
@@ -1612,11 +1771,9 @@ impl SessionPersistence {
     /// Restore uncommitted failures; sync committed records before returning errors.
     async fn drain_pending(&mut self) -> Result<(), crate::session::storage::AppendUpdateError> {
         if let Some(notification) = self.pending_notification.take() {
-            // `write_update` latches NotCommitted
-            // This record is restored below for retry, so a latch from *this* miss is stale
-            // A fire-and-forget durable append (TurnCompleted drops its ack) would otherwise make the next FlushAndAck fail
-            // That failure would come after a successful redrain and prompt-byte sync
-            // A prior latch from a dropped buffered write is left in place
+            // `write_update` latches.
+            // NotCommitted.
+            // This record is restored below for retry, so a latch from *this* miss is stale A fire-and-forget durable append (TurnCompleted drops its ack) would otherwise make the next.
             let had_prior_latch = self.pending_write_error.is_some();
             let result = self
                 .write_update(&SessionUpdate::Acp(Box::new(notification.clone())))
@@ -1910,6 +2067,11 @@ impl SessionPersistence {
                     }
                     let _ = respond_to.send(result);
                 }
+                PersistenceMsg::SetRemoteAgentId(agent_id) => {
+                    if let Some(sync) = &self.remote_sync {
+                        sync.set_agent_id(agent_id);
+                    }
+                }
                 PersistenceMsg::CurrentModel {
                     model_id,
                     agent_name,
@@ -1932,10 +2094,9 @@ impl SessionPersistence {
                     }
                 }
                 PersistenceMsg::PlanState(state) => {
-                    // Atomic-rename: durable at write time, never on the dirty set
-                    // A failed plan write must not latch into `pending_write_error`
-                    // That latch is for buffered chat/update/rewind misses
-                    // Latching here would make the next FlushAndAck fail after it has already synced those bytes
+                    // Atomic-rename: durable at write time, never on the dirty set A failed plan write must not latch into `pending_write_error`.
+                    // Latching here would make the next.
+                    // FlushAndAck fail after it has already synced those bytes.
                     let result = self.storage.write_plan_state(&self.info, &state).await;
                     self.observe_io(&result);
                     if let Err(e) = result {
@@ -2120,6 +2281,39 @@ impl SessionPersistence {
                         tracing::warn!(?e, "failed to write next trace turn");
                     }
                 }
+                PersistenceMsg::WakeStart {
+                    start,
+                    abort,
+                    respond_to,
+                } => {
+                    let result = self
+                        .storage
+                        .update_wake_start(&self.info, start, abort)
+                        .await;
+                    let result = if result.is_ok() {
+                        self.flush_and_sync().await
+                    } else {
+                        result
+                    };
+                    let _ = respond_to.send(result);
+                }
+                PersistenceMsg::WakeAbort { prior, respond_to } => {
+                    let result = self.storage.restore_wake_summary(&self.info, prior).await;
+                    let result = if result.is_ok() {
+                        self.flush_and_sync().await
+                    } else {
+                        result
+                    };
+                    let _ = respond_to.send(result);
+                }
+                #[cfg(test)]
+                PersistenceMsg::HoldForTest {
+                    entered,
+                    mut release,
+                } => {
+                    let _ = entered.send(());
+                    let _ = (&mut release).await;
+                }
                 PersistenceMsg::Signals(signals) => {
                     if let Err(e) = self.storage.write_signals(&self.info, &signals).await {
                         tracing::warn!(?e, "failed to write session signals");
@@ -2277,6 +2471,16 @@ fn collect_mcp_stderr_logs(files: &mut Vec<CopiedSessionFile>) {
 /// Recursively collect all files from `dir` into `files`, using paths relative to `base`.
 /// This captures subdirectories like `prompts/` which contain large-prompt files referenced by truncated chat history entries.
 fn collect_session_files_recursive(base: &Path, dir: &Path, files: &mut Vec<CopiedSessionFile>) {
+    let artifacts = xai_grok_feedback::FeedbackDraftArtifactSet::for_session(base);
+    collect_session_files_recursive_with_artifacts(base, dir, files, &artifacts);
+}
+
+fn collect_session_files_recursive_with_artifacts(
+    base: &Path,
+    dir: &Path,
+    files: &mut Vec<CopiedSessionFile>,
+    artifacts: &xai_grok_feedback::FeedbackDraftArtifactSet,
+) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
@@ -2287,8 +2491,14 @@ fn collect_session_files_recursive(base: &Path, dir: &Path, files: &mut Vec<Copi
     };
 
     for entry in entries.flatten() {
+        if xai_grok_feedback::is_feedback_draft_artifact_name(&entry.file_name()) {
+            continue;
+        }
         let path = entry.path();
-        if path.is_file() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_file() {
             let rel_path = match path.strip_prefix(base) {
                 Ok(p) => p,
                 Err(_) => continue,
@@ -2296,19 +2506,20 @@ fn collect_session_files_recursive(base: &Path, dir: &Path, files: &mut Vec<Copi
             let Some(name) = rel_path.to_str() else {
                 continue;
             };
-            let data = match std::fs::read(&path) {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!(?e, "Failed to read session file during copy");
-                    continue;
-                }
+            let Ok(Some(mut file)) = artifacts.open_non_artifact(&path) else {
+                continue;
             };
+            let mut data = Vec::new();
+            if let Err(e) = std::io::Read::read_to_end(&mut file, &mut data) {
+                tracing::warn!(?e, "Failed to read session file during copy");
+                continue;
+            }
             files.push(CopiedSessionFile {
                 name: name.to_string(),
                 data,
             });
-        } else if path.is_dir() {
-            collect_session_files_recursive(base, &path, files);
+        } else if file_type.is_dir() {
+            collect_session_files_recursive_with_artifacts(base, &path, files, artifacts);
         }
     }
 }
@@ -2338,7 +2549,7 @@ fn backfill_updates_to_sync(
 fn init_remote_sync(
     summary: &Summary,
     storage_mode: StorageMode,
-    auth_manager: Option<Arc<crate::auth::AuthManager>>,
+    auth_manager: Option<Arc<xai_grok_login::AuthManager>>,
 ) -> io::Result<Option<RemoteSync>> {
     match storage_mode {
         StorageMode::Local => Ok(None),
@@ -2438,12 +2649,9 @@ pub(crate) fn io_error_to_acp(e: &io::Error) -> acp::Error {
             }
         }
     };
-    acp::Error::new(acp::ErrorCode::InternalError.into(), message.to_string()).data(Some(
-        serde_json::json!({
-            "code": code,
-            "detail": e.to_string(),
-        }),
-    ))
+    let mut data = serde_json::json!({ "detail": e.to_string() });
+    data[crate::sampling::error::ERROR_CODE_DATA_KEY] = serde_json::json!(code);
+    acp::Error::new(acp::ErrorCode::InternalError.into(), message.to_string()).data(Some(data))
 }
 
 #[cfg(test)]
@@ -2467,7 +2675,6 @@ const WORKTREE_TOUCH_INIT_TIMEOUT: std::time::Duration = std::time::Duration::fr
 /// Touch the worktree and wait (bounded) for the write to commit before the session open completes.
 /// A detached touch can land after gc's pre-removal re-check reads the row, letting gc delete a worktree that is actively being opened or resumed.
 /// Awaiting a blocking-pool task does not block the runtime.
-/// On timeout the task keeps running detached (the old fire-and-forget behavior) and init proceeds.
 async fn touch_worktree_for_session(info: &Info) {
     if tokio::time::timeout(WORKTREE_TOUCH_INIT_TIMEOUT, spawn_worktree_touch(info))
         .await
@@ -2487,7 +2694,7 @@ const WORKTREE_TOUCH_INTERVAL: std::time::Duration = std::time::Duration::from_s
 pub(crate) struct SessionDeps {
     pub(crate) sampling_client: OaiCompatClient,
     pub(crate) storage_mode: StorageMode,
-    pub(crate) auth_manager: Option<Arc<crate::auth::AuthManager>>,
+    pub(crate) auth_manager: Option<Arc<xai_grok_login::AuthManager>>,
     pub(crate) relay_sync: Option<crate::relay::RelaySync>,
     pub(crate) gateway: Option<GatewaySender>,
     pub(crate) session_summary_model: String,
@@ -2515,10 +2722,15 @@ pub(crate) async fn new(
         session_kind,
     } = deps;
     let root_dir = grok_home();
-    let storage: Box<dyn StorageAdapter> = Box::new(JsonlStorageAdapter::with_root(root_dir));
+    let storage = JsonlStorageAdapter::with_root(root_dir);
 
     let mut summary = storage.init_session(info, model_id.clone()).await?;
     touch_worktree_for_session(info).await;
+    // Mint under the summary lock against the live on-disk id, not the pre-lock snapshot:
+    // a concurrent cold-spawn stamp that already persisted a parseable agent must survive
+    let identity = stamp_session_identity(&storage, info, summary.agent_id.as_deref()).await?;
+    summary.agent_id = Some(identity.agent_id);
+    summary.attempt_id = Some(identity.attempt_id);
 
     // Stamp the claimed kind only on a summary that has none yet: a dir left by a crash keeps its persisted kind (init_session already loaded it)
     // Goes through the locked atomic summary writer so it cannot clobber a concurrent writer's fields or leave a torn summary.json
@@ -2539,7 +2751,7 @@ pub(crate) async fn new(
     let (handle, rx, summary_tx, disk_full_tx) = actor_channel();
 
     let info_clone = info.clone();
-    let storage: Arc<dyn StorageAdapter> = Arc::from(storage);
+    let storage: Arc<dyn StorageAdapter> = Arc::new(storage);
     let remote_sync = init_remote_sync(&summary, storage_mode, auth_manager)?;
     tokio::task::spawn(async move {
         let persistence = SessionPersistence {
@@ -2574,50 +2786,82 @@ pub(crate) async fn new(
     Ok(handle)
 }
 
-/// Create a persistence handle that writes to an explicit directory on disk.
+pub(crate) enum ExplicitSessionOpen {
+    New {
+        identity: Option<ExplicitSessionIdentity>,
+        next_trace_turn: Option<u64>,
+    },
+    Wake,
+}
+
 /// Used for subagent child sessions (top-level `sessions/<cwd>/<id>` dirs; only their metadata nests under the parent's session dir).
-///
-/// Unlike [`new()`], this:
-/// - Uses `JsonlStorageAdapter::with_explicit_session_dir()` to bypass the standard `{root}/sessions/{cwd}/{id}/` path computation.
-/// - Skips remote sync (subagent sessions are not synced to cloud).
-/// - Skips relay sync (subagent sessions are not shared).
-/// - Skips gateway (lifecycle notifications are handled by the coordinator).
+/// Skips remote and relay sync; lifecycle notifications are handled by the coordinator.
 pub(crate) async fn new_with_explicit_dir(
     info: &Info,
     target_dir: PathBuf,
     model_id: acp::ModelId,
     sampling_client: OaiCompatClient,
     session_summary_model: String,
+    open: ExplicitSessionOpen,
 ) -> io::Result<PersistenceHandle> {
-    let summary_path = target_dir.join("summary.json");
-    let storage: Box<dyn StorageAdapter> =
-        Box::new(JsonlStorageAdapter::with_explicit_session_dir(target_dir));
+    let storage = JsonlStorageAdapter::with_explicit_session_dir(target_dir);
 
-    let mut summary = storage.init_session(info, model_id.clone()).await?;
+    let is_wake = matches!(open, ExplicitSessionOpen::Wake);
+    let (identity, next_trace_turn) = match open {
+        ExplicitSessionOpen::New {
+            identity,
+            next_trace_turn,
+        } => (identity, next_trace_turn),
+        ExplicitSessionOpen::Wake => (None, None),
+    };
+    let mut summary = if is_wake {
+        storage.load_summary(info).await?
+    } else {
+        storage.init_session(info, model_id.clone()).await?
+    };
     touch_worktree_for_session(info).await;
-    // A worktree cwd pre-stamps `"worktree"` in `Summary::new`
-    // Without the override here the subagent would appear in user session listings (`is_hidden` only hides `subagent*` kinds)
-    if summary
-        .session_kind
-        .as_deref()
-        .is_none_or(|kind| kind == WORKTREE_SESSION_KIND)
-    {
-        summary.session_kind = Some("subagent".to_string());
-        summary.source_workspace_dir = None;
+    if !is_wake {
+        if summary
+            .session_kind
+            .as_deref()
+            .is_none_or(|kind| kind == WORKTREE_SESSION_KIND)
+        {
+            summary.session_kind = Some("subagent".to_string());
+            summary.source_workspace_dir = None;
+        }
+        storage.write_summary_sync(info, &summary)?;
     }
-    let summary_json = serde_json::to_vec_pretty(&summary)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    std::fs::write(&summary_path, summary_json)?;
 
-    if summary.current_model_id != model_id {
+    if let Some(identity) = identity {
+        let required_agent_id = identity.agent_id.to_string();
+        let identity = SessionIdentity {
+            agent_id: required_agent_id.clone(),
+            attempt_id: identity.attempt_id.to_string(),
+        };
+        let identity = storage
+            .stamp_session_identity_if_absent(info, Some(required_agent_id), move |_| identity)
+            .await?;
+        summary.agent_id = Some(identity.agent_id);
+        summary.attempt_id = Some(identity.attempt_id);
+    }
+
+    if !is_wake && summary.current_model_id != model_id {
         storage.update_current_model(info, &model_id).await?;
         summary.current_model_id = model_id;
+    }
+    if let Some(next_trace_turn) = next_trace_turn
+        && next_trace_turn > summary.next_trace_turn
+    {
+        storage
+            .update_next_trace_turn(info, next_trace_turn, None)
+            .await?;
+        summary.next_trace_turn = next_trace_turn;
     }
 
     let (handle, rx, summary_tx, disk_full_tx) = actor_channel();
 
     let info_clone = info.clone();
-    let storage: Arc<dyn StorageAdapter> = Arc::from(storage);
+    let storage: Arc<dyn StorageAdapter> = Arc::new(storage);
     tokio::task::spawn(async move {
         let persistence = SessionPersistence {
             info: info_clone,
@@ -2687,9 +2931,11 @@ async fn pull_on_miss(
 
 /// Load a session without reading updates into memory.
 /// Instead, provides the path to the updates file for streaming reads.
+/// `starts_attempt` is false unless the caller already won cold actor creation.
 pub(crate) async fn load_light(
     info: &Info,
     backend: Option<&crate::remote::BackendClient>,
+    starts_attempt: bool,
     deps: SessionDeps,
 ) -> io::Result<(PersistedInfo, PersistenceHandle)> {
     let SessionDeps {
@@ -2704,10 +2950,9 @@ pub(crate) async fn load_light(
         session_kind: _,
     } = deps;
     let root_dir = grok_home();
-    let storage: Box<dyn StorageAdapter> =
-        Box::new(JsonlStorageAdapter::with_root(root_dir.clone()));
+    let storage = JsonlStorageAdapter::with_root(root_dir.clone());
 
-    let (persisted, loaded_info) = match storage.load_session_without_updates(info).await {
+    let (mut persisted, loaded_info) = match storage.load_session_without_updates(info).await {
         Ok(p) => (p, info.clone()),
         Err(e) => match backend {
             Some(client) => {
@@ -2720,6 +2965,16 @@ pub(crate) async fn load_light(
     };
     // Touch on load too: resuming must reset the worktree's gc expiry clock.
     touch_worktree_for_session(&loaded_info).await;
+    if starts_attempt {
+        let identity = stamp_session_identity(
+            &storage,
+            &loaded_info,
+            persisted.summary.agent_id.as_deref(),
+        )
+        .await?;
+        persisted.summary.agent_id = Some(identity.agent_id);
+        persisted.summary.attempt_id = Some(identity.attempt_id);
+    }
 
     let updates_file_path = storage.updates_file_path(&loaded_info);
     let rewind_points_file_path = storage.rewind_points_file_path(&loaded_info);
@@ -2739,7 +2994,7 @@ pub(crate) async fn load_light(
 
     let (handle, rx, summary_tx, disk_full_tx) = actor_channel();
 
-    let storage: Arc<dyn StorageAdapter> = Arc::from(storage);
+    let storage: Arc<dyn StorageAdapter> = Arc::new(storage);
     let remote_sync = init_remote_sync(&persisted_info.summary, storage_mode, auth_manager)?;
 
     let has_title = !persisted_info.summary.display_title().is_empty();
@@ -2789,7 +3044,6 @@ pub async fn list_summaries(cwd: Option<&str>) -> io::Result<Vec<Summary>> {
 }
 
 /// Failure modes of [`delete_session_history`].
-///
 /// Kept distinct so callers can report a precise message.
 /// A remote failure is reported separately from a local-disk failure: the remote delete runs first and aborts the whole operation.
 #[derive(Debug, thiserror::Error)]
@@ -2806,7 +3060,6 @@ pub enum DeleteSessionError {
 }
 
 /// Where a session copy was actually removed by [`delete_session_history`].
-///
 /// Both fields are `false` when nothing existed to delete (still a success).
 /// Callers use [`Self::any_removed`] to decide between a "deleted" and a "not found" message without conflating a remote-only delete with a no-op.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -2824,21 +3077,14 @@ impl SessionDeletion {
     }
 }
 
-/// Permanently delete a session's history.
-/// This removes the remote (writeback) copy when `needs_remote`, the local on-disk session directory, and the FTS search-index entry.
-///
-/// Idempotent: a session that is missing locally (e.g. remote-only) still succeeds.
+/// Idempotent: a session that is missing locally still succeeds.
 /// A remote `404` (copy already gone) is treated as success rather than an error.
 /// When `needs_remote` is set the remote delete runs *first* and is authoritative: only on its success (or a `404`) are the local bits removed.
-/// This ordering prevents a partial delete where the local copy is nuked but the remote copy lingers and re-appears on the next session list.
-///
-/// Returns a [`SessionDeletion`] recording which copies (local / remote) were actually removed.
-/// Both fields `false` means nothing existed (still `Ok`).
 pub async fn delete_session_history(
     session_id: &str,
     cwd: Option<&str>,
     needs_remote: bool,
-    auth_manager: Arc<crate::auth::AuthManager>,
+    auth_manager: Arc<xai_grok_login::AuthManager>,
     search_index: Option<&xai_grok_session_search::SearchIndexManager>,
 ) -> Result<SessionDeletion, DeleteSessionError> {
     let sid = acp::SessionId::new(Arc::from(session_id));
@@ -2945,9 +3191,6 @@ const DEFAULT_CLEANUP_TTL_DAYS: u32 = 30;
 /// Walk `~/.grok/sessions/` and delete files with mtime older than `ttl_days`.
 /// Removes empty session directories after file cleanup.
 /// Skips `skip_session_dir` if provided (current session).
-///
-/// This is a **synchronous** function intended to be called via `tokio::task::spawn_blocking`.
-/// It then runs on the thread pool and never competes with the agent's single-threaded `LocalSet`.
 #[tracing::instrument(skip_all)]
 pub(crate) fn cleanup_stale_sessions(skip_session_dir: Option<&Path>) {
     CLEANUP_SESSIONS_ONCE.call_once(|| {

@@ -82,10 +82,9 @@ struct Inner {
     pending: VecDeque<PendingChange>,
 }
 
-/// Live `workspace/didChangeWatchedFiles` registrations for one server.
-///
-/// Keyed by registration id so unregister is exact. Delivery consults the
-/// stored globs and `WatchKind`; we never turn a registration into an OS watch.
+/// Live `workspace/didChangeWatchedFiles` registrations for one server. Keyed by registration id so
+/// unregister is exact. Delivery consults the stored globs and `WatchKind`; we never turn a
+/// registration into an OS watch.
 #[derive(Clone)]
 pub(crate) struct WatchedFiles {
     workspace_root: Arc<PathBuf>,
@@ -259,10 +258,9 @@ fn send_watched(socket: &mut async_lsp::ServerSocket, path: &Path, typ: FileChan
     }
 }
 
-/// `client/registerCapability` as the router sees it.
-///
-/// Only `workspace/didChangeWatchedFiles` is implemented. Anything else is
-/// rejected so the server does not think an unimplemented capability is live.
+/// `client/registerCapability` as the router sees it. Only `workspace/didChangeWatchedFiles` is
+/// implemented. Anything else is rejected so the server does not think an unimplemented capability
+/// is live.
 pub(crate) fn accept_register_capability(
     watched: &WatchedFiles,
     params: lsp_types::RegistrationParams,

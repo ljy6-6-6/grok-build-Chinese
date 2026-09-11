@@ -656,8 +656,10 @@ async fn upload_with_retries(
 
 pub async fn resolve_upload_method(agent_config: &AgentConfig) -> Option<UploadMethod> {
     // On login failure, fall back to ambient creds rather than erroring.
-    let auth_token = xai_grok_shell::auth::ensure_authenticated_or_noninteractive(
+    let auth_token = xai_grok_login::ensure_authenticated_or_noninteractive(
         &agent_config.grok_com_config,
+        agent_config.login_device_flow,
+        agent_config.endpoints.proxy_url(),
         agent_config.endpoints.has_noninteractive_upload_auth(),
         Some("Authentication required for trace upload."),
     )

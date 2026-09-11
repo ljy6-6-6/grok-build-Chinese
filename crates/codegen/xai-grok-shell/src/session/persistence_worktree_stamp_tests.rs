@@ -2,7 +2,9 @@ use agent_client_protocol as acp;
 use serial_test::serial;
 use xai_grok_test_support::EnvGuard;
 
-use super::{OaiCompatClient, Summary, default_model_id, new_with_explicit_dir};
+use super::{
+    ExplicitSessionIdentity, OaiCompatClient, Summary, default_model_id, new_with_explicit_dir,
+};
 use crate::session::info::Info;
 
 fn worktree_cwd_under(home: &std::path::Path) -> String {
@@ -77,6 +79,10 @@ async fn new_with_explicit_dir_overrides_worktree_stamp_so_subagent_stays_hidden
         default_model_id(),
         sampling_client,
         "test-model".to_owned(),
+        crate::session::persistence::ExplicitSessionOpen::New {
+            identity: None,
+            next_trace_turn: None,
+        },
     )
     .await
     .unwrap();
@@ -84,6 +90,44 @@ async fn new_with_explicit_dir_overrides_worktree_stamp_so_subagent_stays_hidden
     let summary: Summary =
         serde_json::from_slice(&std::fs::read(target_dir.join("summary.json")).unwrap()).unwrap();
     assert_eq!(summary.session_kind.as_deref(), Some("subagent"));
+    assert!(summary.agent_id.is_none());
     assert!(summary.source_workspace_dir.is_none());
     assert!(summary.is_hidden());
+}
+
+#[tokio::test]
+#[serial]
+async fn new_with_explicit_dir_stores_requested_identity() {
+    let home = tempfile::TempDir::new().unwrap();
+    let _env = EnvGuard::set("GROK_HOME", home.path());
+    let target_dir = home.path().join("child-session");
+    let agent_id =
+        xai_message_delivery_core::AgentId::from_uuid_v7(uuid::Uuid::now_v7().to_string()).unwrap();
+    let attempt_id = xai_message_delivery_core::AttemptId::mint(0x11);
+    let persistence = new_with_explicit_dir(
+        &Info {
+            id: acp::SessionId::new(agent_id.to_string()),
+            cwd: home.path().to_string_lossy().into_owned(),
+        },
+        target_dir.clone(),
+        default_model_id(),
+        OaiCompatClient::new(xai_grok_sampler::SamplerConfig::default()).unwrap(),
+        "test-model".to_owned(),
+        crate::session::persistence::ExplicitSessionOpen::New {
+            identity: Some(ExplicitSessionIdentity {
+                agent_id: agent_id.clone(),
+                attempt_id: attempt_id.clone(),
+            }),
+            next_trace_turn: Some(3),
+        },
+    )
+    .await
+    .unwrap();
+    drop(persistence);
+
+    let summary: Summary =
+        serde_json::from_slice(&std::fs::read(target_dir.join("summary.json")).unwrap()).unwrap();
+    assert_eq!(summary.agent_id.as_deref(), Some(agent_id.as_str()));
+    assert_eq!(summary.attempt_id.as_deref(), Some(attempt_id.as_str()));
+    assert_eq!(summary.next_trace_turn, 3);
 }

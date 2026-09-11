@@ -533,7 +533,6 @@ fn send_prompt_keeps_ambient_small_screen_tip() {
 /// Ambient TTL burns only while the tip row can paint.
 /// While the row is not renderable the tick is a frozen no-op (and reports no animation demand).
 /// The TTL resumes with the remaining budget once the row can paint again.
-/// Edit-contextual tips keep burning regardless (pinned for contrast).
 #[test]
 fn ambient_tip_ttl_freezes_while_row_cannot_paint() {
     let mut app = test_app_with_agent();
@@ -984,7 +983,6 @@ fn send_prompt_clears_follow_up_chips() {
 fn chip_submit_while_enqueued_clears_follow_up_chips() {
     // A chip click submitted while a turn is RUNNING *and* the local queue is non-empty takes the ENQUEUE path, not immediate-server-send
     // `immediate_server_send_eligible` is false whenever `pending_prompts` is non-empty
-    // The clear runs for every `SubmitFollowUp` path
     // Clearing only on the immediate-send branch would leave this path with chips on screen after the user had already acted on one
     let mut app = test_app_with_agent();
     let id = AgentId(0);
@@ -1188,7 +1186,6 @@ fn send_prompt_with_images_while_running_and_steer_stays_local() {
 }
 
 /// Regression (queue reorder race): a mid-turn plain prompt must NOT jump the server queue past an older local drip-feed prompt.
-/// E.g. prompts queued during "Starting session…" before the turn began: the first drains to start the turn and the rest are stranded locally.
 /// An immediate-sent prompt would render/run AHEAD of the older local prompt (the merge is server-rows-first), so `[2, 3]` showed up as `[3, 2]`.
 /// The new prompt must instead join the local queue behind the older one, preserving FIFO.
 #[test]
@@ -1811,7 +1808,7 @@ fn prompt_response_context_overflow_suppresses_turn_failed_and_toast() {
     }
 
     // Control: with no ContextTooLarge block, PromptResponse still ends the turn with TurnFailed and a toast
-    // Overflow copy in the error string must not change that
+    // Overflow copy in the error string must not change that Only a prior ContextTooLarge banner (from RetryState `error_type=context_length`) suppresses the marker
     // Only a prior ContextTooLarge banner (from RetryState `error_type=context_length`) suppresses the marker
     let (failed_block, toast) = run_failed_turn(false);
     assert!(failed_block, "baseline: a failed turn pushes TurnFailed");
@@ -2170,7 +2167,6 @@ fn turn_complete_notification_suppressed_when_queue_non_empty() {
 /// Regression: cancelling while prompts are queued must hand the queue to the agent untouched.
 /// The FRONT queued prompt runs next (promoted server-side) and the rest stay queued in order.
 /// The authoritative `x.ai/queue/changed` rebroadcast (not client-side prediction) updates the mirror.
-/// Nothing resurrects or reorders.
 #[test]
 fn cancel_hands_queue_to_agent_without_reordering() {
     use crate::app::prompt_queue::{QueueChanged, QueueEntryWire};
@@ -2266,7 +2262,6 @@ fn cancel_hands_queue_to_agent_without_reordering() {
 /// Regression for the "queued message renders 2×" dup: a shell/proxy that re-keys the prompt must still reconcile the echo by kind+text.
 /// (Re-keyed: the broadcast row and later `running_prompt_id` carry a DIFFERENT id than the pager's optimistic echo.)
 /// Without the fallback the echo is pinned forever.
-/// The message shows as a stale queue row alongside the server's copy, and then alongside the running turn's user block.
 #[test]
 fn rekeyed_broadcast_reconciles_optimistic_echo_by_text() {
     use crate::app::prompt_queue::{QueueChanged, QueueEntryWire};
@@ -2788,7 +2783,13 @@ fn slash_compact_enqueues_command() {
     let effects = dispatch(Action::SendPrompt("/compact".into()), &mut app);
     // /compact enqueues as Command and drains immediately (agent was idle).
     assert_eq!(effects.len(), 1);
-    assert!(matches!(&effects[0], Effect::Compact { .. }));
+    assert!(matches!(
+        &effects[0],
+        Effect::Compact {
+            user_context: None,
+            ..
+        }
+    ));
     assert!(app.agents[&id].prompt.text().is_empty());
 }
 
@@ -2858,7 +2859,6 @@ fn palette_dispatch_preserves_prompt_draft() {
     // Regression for the bug where picking a SlashCommand entry from the Ctrl-P palette wiped whatever the user had typed
     // The palette routes through Action::SendSlashCommandPreservingDraft instead of Action::SendPrompt
     // That arm calls dispatch_send_prompt_inner with clear_prompt=false
-    // The slash command still resolves and emits its effect, but the textarea contents survive
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     // User has a draft typed in the prompt.
@@ -2895,7 +2895,13 @@ fn slash_compact_with_context_enqueues_command() {
         &mut app,
     );
     assert_eq!(effects.len(), 1);
-    assert!(matches!(&effects[0], Effect::Compact { .. }));
+    assert!(matches!(
+        &effects[0],
+        Effect::Compact {
+            user_context: Some(ctx),
+            ..
+        } if ctx == "focus on auth"
+    ));
 }
 
 #[test]
@@ -2925,12 +2931,8 @@ fn non_slash_prompt_still_works() {
 #[test]
 fn submit_question_answers_cancel_clears_local_modal_and_restores_prompt() {
     // Full-stack contract test: cancel through the public `submit_question_answers` entry point must
-    //   (a) take and drop the local question_view
-    //   (b) restore the stashed prompt text and cursor
-    //   (c) return InputOutcome::Changed (no Action)
-    // and silently drop the directive carried by LocalQuestionKind::Fork.
-    // This complements the inner `translate_local_submit_*` tests
-    // It exercises the prompt.restore and cleanup_question_state contract that lives in `submit_question_answers` itself
+    // (b) restore the stashed prompt text and cursor
+    // (c) return InputOutcome::Changed (no Action) and silently drop the directive carried by LocalQuestionKind::Fork.
     use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
     use xai_grok_tools::implementations::grok_build::ask_user_question::{
         Question, QuestionOption,
@@ -4035,8 +4037,6 @@ fn send_now_during_active_goal_does_not_arm_expectation() {
     );
 }
 
-/// An active-goal Send Now paints an optimistic user block.
-/// It relies on the interjection notification to claim it in place.
 /// The prompt's RPC resolves as removed-without-running (the expected outcome of routing the Send Now as an interjection).
 /// That takes the non-running `PromptResponse` path, but it must NOT retire the painted block before its interjection claim arrives.
 /// Otherwise the message is dropped and re-pushed at the scrollback end (flicker / reorder).
@@ -4776,6 +4776,52 @@ fn suggestion_debounce_routes_by_agent_id_not_active_view() {
             }
         )),
         "expiry must fetch for the arming agent even off-screen: {effects:?}"
+    );
+}
+
+/// Casual commenting parks its draft and keeps the composer live, the opposite of a permission.
+/// Closing a card over it therefore restores into the composer and leaves the parked draft alone.
+#[test]
+fn casual_commenting_keeps_its_parked_draft_when_a_card_closes() {
+    use crate::views::question_view::QuestionViewState;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use xai_grok_tools::implementations::grok_build::ask_user_question::Question;
+
+    let id = AgentId(0);
+    let mut app = test_app_with_agent();
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.active_pane = crate::app::agent_view::AgentPane::Prompt;
+    agent.prompt.set_text("pre-comment draft");
+    agent.casual_stashed_prompt = Some(agent.prompt.stash());
+    agent.prompt.set_text("the casual comment");
+
+    // A card open stashes the live comment and blanks the composer.
+    let stashed = agent.prompt.stash();
+    agent.question_view = Some(QuestionViewState::new(
+        "card-over-comment".into(),
+        vec![Question {
+            question: "busy?".into(),
+            options: vec![],
+            multi_select: Some(false),
+            id: None,
+        }],
+        stashed,
+    ));
+    agent.prompt.set_text("");
+    agent.handle_question_key_for_test(&KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+
+    assert_eq!(
+        agent.prompt.text(),
+        "the casual comment",
+        "the live comment comes back to the composer"
+    );
+    assert_eq!(
+        agent
+            .casual_stashed_prompt
+            .as_ref()
+            .map(|s| s.text.as_str()),
+        Some("pre-comment draft"),
+        "the parked pre-comment draft must survive"
     );
 }
 

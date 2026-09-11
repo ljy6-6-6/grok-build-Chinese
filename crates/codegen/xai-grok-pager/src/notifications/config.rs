@@ -97,28 +97,22 @@ pub enum TitleItem {
     ActionRequired,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::AsRefStr, strum::IntoStaticStr,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum NotificationEventKind {
+    #[strum(serialize = "Turn complete")]
     TurnComplete,
+    #[strum(serialize = "Approval required")]
     ApprovalRequired,
+    #[strum(serialize = "Session ready")]
     SessionReady,
+    #[strum(serialize = "Task complete")]
     TaskComplete,
+    #[strum(serialize = "Agent error")]
     AgentError,
 }
-
-impl NotificationEventKind {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::TurnComplete => "Turn complete",
-            Self::ApprovalRequired => "Approval required",
-            Self::SessionReady => "Session ready",
-            Self::TaskComplete => "Task complete",
-            Self::AgentError => "Agent error",
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct NotificationHook {
     pub command: String,
@@ -140,7 +134,6 @@ fn default_hook_timeout() -> u64 {
 
 impl NotificationConfig {
     /// Generate a commented TOML template for the `[ui.notifications]` section.
-    ///
     /// Mirrors `RawAppearanceConfig::to_toml_with_comments()` for `pager.toml`.
     /// The output is suitable for documentation or as a starter config snippet.
     pub fn to_toml_with_comments() -> String {

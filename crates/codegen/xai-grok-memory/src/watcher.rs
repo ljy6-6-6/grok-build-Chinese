@@ -16,7 +16,6 @@ use arc_swap::ArcSwap;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 /// Watches the memory directory for `.md` file changes.
-///
 /// The notify thread inserts dirty paths via `rcu` and the search path swaps them out, so neither side takes a lock.
 /// The separate `dirty` flag lets `is_dirty` answer with one atomic load and no allocation.
 pub struct MemoryFileWatcher {

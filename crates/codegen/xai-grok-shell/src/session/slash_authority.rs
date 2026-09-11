@@ -3,17 +3,13 @@
 
 use agent_client_protocol as acp;
 
-use super::InputAuthority;
 use super::slash_commands::{BuiltinAction, BuiltinCommand, ModelAuthoredEligibility};
 
+/// Model-authored slash parse only. Human catalogs use `resolve_human_intent`;
+/// inert slash never calls this.
 #[derive(Debug)]
 pub(super) enum AuthorityResolution<'a> {
     NotSlash,
-    Inert,
-    HumanIntent {
-        command_name: &'a str,
-        args: &'a str,
-    },
     ModelAuthoredSkillCandidate {
         command_name: &'a str,
         args: &'a str,
@@ -22,7 +18,6 @@ pub(super) enum AuthorityResolution<'a> {
 }
 
 pub(super) fn resolve<'a>(
-    authority: InputAuthority,
     prompt_blocks: &'a [acp::ContentBlock],
     builtins: &[BuiltinCommand],
 ) -> AuthorityResolution<'a> {
@@ -30,25 +25,21 @@ pub(super) fn resolve<'a>(
         return AuthorityResolution::NotSlash;
     };
 
-    match authority {
-        InputAuthority::HumanIntent => AuthorityResolution::HumanIntent { command_name, args },
-        InputAuthority::RuntimeControl => AuthorityResolution::Inert,
-        InputAuthority::ModelAuthoredUntrusted => builtins
-            .iter()
-            .find(|command| {
-                command.model_authored_eligibility == ModelAuthoredEligibility::ExactCanonical
-                    && command.name == command_name
-                    && command.gate == super::slash_commands::BuiltinGate::AlwaysOn
-            })
-            .map_or(
-                AuthorityResolution::ModelAuthoredSkillCandidate { command_name, args },
-                |command| AuthorityResolution::StaticBuiltin((command.resolve)(args)),
-            ),
-    }
+    builtins
+        .iter()
+        .find(|command| {
+            command.model_authored_eligibility == ModelAuthoredEligibility::ExactCanonical
+                && command.name == command_name
+                && command.gate == super::slash_commands::BuiltinGate::AlwaysOn
+        })
+        .map_or(
+            AuthorityResolution::ModelAuthoredSkillCandidate { command_name, args },
+            |command| AuthorityResolution::StaticBuiltin((command.resolve)(args)),
+        )
 }
 
 /// Extract `(name, args)` if the first text block starts with `/`.
-fn parse_slash_prefix(prompt_blocks: &[acp::ContentBlock]) -> Option<(&str, &str)> {
+pub(super) fn parse_slash_prefix(prompt_blocks: &[acp::ContentBlock]) -> Option<(&str, &str)> {
     let text = prompt_blocks.iter().find_map(|block| match block {
         acp::ContentBlock::Text(text) => Some(text.text.as_str()),
         _ => None,

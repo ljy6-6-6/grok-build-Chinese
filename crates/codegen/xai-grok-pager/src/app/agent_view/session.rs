@@ -9,6 +9,7 @@ use super::{
 use crate::app::agent::AgentSession;
 use crate::app::app_view::InputOutcome;
 use crate::app::cancel_latency::{CancelLatency, CancelOrigin, TurnEnd};
+use crate::app::prompt_ack::{AckSignal, PromptAckWatch};
 use crate::scrollback::state::ScrollbackState;
 use crate::scrollback::text_selection::ResolvedSelectionModel;
 use crate::views::prompt_widget::PromptWidget;
@@ -42,10 +43,8 @@ impl AgentView {
         self.session.session_id = Some(session_id);
     }
     /// Advance the reconnect cursor forward-only. Stores the raw id and its parsed sequence together so later compares need not re-parse the string.
-    ///
     /// A later lower-ID apply (out-of-order lifecycle) must not regress the cursor and re-deliver an already-applied tail on reconnect.
     /// When the incoming id has no parseable sequence the cursor still advances, matching the pre-existing "unknown seq always applies" rule.
-    /// The known highwater counter is retained so later numeric ids stay gated.
     pub(crate) fn advance_last_seen_event_id(&mut self, event_id: String, event_seq: Option<u64>) {
         let new_seq = event_seq.or_else(|| crate::acp::meta::event_id_counter(&event_id));
         let cur_seq = self.last_seen_event_seq.or_else(|| {
@@ -124,7 +123,7 @@ impl AgentView {
             last_applied_xai_event_seq: None,
             last_seen_event_id: None,
             last_seen_event_seq: None,
-            deferred_subagent_finishes: HashMap::new(),
+            deferred_subagent_finishes: Default::default(),
             session_reload: None,
             unexpected_replay_drops: 0,
             late_replay_until: None,
@@ -139,6 +138,13 @@ impl AgentView {
             dock_subagents_expanded: true,
             dock_tasks_expanded: true,
             dock_watchers_expanded: true,
+            dock_subagents_show_all: false,
+            dock_tasks_show_all: false,
+            dock_watchers_show_all: false,
+            dock_offsets: Default::default(),
+            dock_reveal_pending: false,
+            dock_hovered: None,
+            dock_stop_button: None,
             dock_queued_expanded: true,
             dock_on: false,
             dock_shown: false,
@@ -148,7 +154,6 @@ impl AgentView {
             vim_mode: crate::appearance::cache::load_vim_mode(),
             input_mode: InputMode::Vim,
             bash_turn: false,
-            cron_task_id: None,
             stashed_prompt: None,
             prompt_stash: None,
             draft_consumed: false,
@@ -176,7 +181,6 @@ impl AgentView {
             cleared_workflow_runs: std::collections::HashSet::new(),
             show_workflows: false,
             workflows_view: crate::views::workflows::WorkflowsViewState::default(),
-            pending_stop_hooks: None,
             last_cleared_goal_id: None,
             show_goal_detail: false,
             turn_start_ms: None,
@@ -285,6 +289,9 @@ impl AgentView {
             terminal_size_stale: false,
             inline_media_hits: InlineMediaHitAreas::default(),
             extensions_modal: None,
+            feedback_modal: None,
+            pending_feedback_trace_uploads: Default::default(),
+            parked_feedback_trace_consents: Default::default(),
             agents_modal: None,
             persona_detail: None,
             btw_state: None,
@@ -301,6 +308,7 @@ impl AgentView {
             session_banner_active: false,
             pinned_upgrade_cta_live: false,
             block_viewer: None,
+            block_viewer_resume: None,
             scrollback_search: None,
             hit_sb_copy: Default::default(),
             hit_sb_view: Default::default(),
@@ -319,8 +327,10 @@ impl AgentView {
             plan_mode_active: false,
             plan_mode_pending: None,
             deferred_session_mode: None,
+            deferred_permission_mode: None,
             pending_extensions_fetch: false,
             in_dashboard_overlay: false,
+            workspace_dashboard_enabled: false,
             overlay_can_cycle: false,
             mcp_init_progress: None,
             acp_synced_generation: 0,
@@ -359,12 +369,13 @@ impl AgentView {
             hook_annotations_visible: true,
             hit_subagent_frame_close: Default::default(),
             sharing_enabled: false,
-            scheduler_background_loops: None,
+            memory_mode: None,
             billing_surface_visible: false,
             usage_command_visible: true,
             input_log: crate::input_log::InputRingBuffer::new(),
             esc_pressed_at: None,
             rewind_suppress_deadline: None,
+            minimal_cancel_hint_turn: None,
             pending_first_prompt: None,
             pending_fork_banner: None,
             loading_placeholder_id: None,
@@ -379,6 +390,7 @@ impl AgentView {
             deferred_send: None,
             pending_turn_end_reconcile: None,
             pending_cancel_resend: None,
+            prompt_ack: None,
             cancel_latency: None,
             expect_send_now_cancel: None,
             front_message_committed: true,
@@ -464,9 +476,49 @@ impl AgentView {
         self.turn_start_ms = None;
         self.turn_start_ms_prompt = None;
         self.last_active_at = Some(now);
+        self.note_prompt_ack(AckSignal::TurnEnded, now);
         if let Some(event) = self.settle_cancel(end, now) {
             xai_grok_telemetry::session_ctx::log_event(event);
         }
+    }
+    /// Start the acknowledgment watch for a prompt this client just drained and sent.
+    /// Chat sessions never arm: the gateway bridge has no queue broadcast, so their first signal is the first delta.
+    pub(crate) fn arm_prompt_ack(&mut self, prompt_id: &str, now: Instant) {
+        if self.chat_kind {
+            return;
+        }
+        self.prompt_ack = Some(PromptAckWatch::new(prompt_id, now));
+    }
+    /// Disarm the watch when a signal names the awaited prompt; anything else (no id, another prompt) is ignored.
+    pub(crate) fn ack_prompt_if_named(
+        &mut self,
+        prompt_id: Option<&str>,
+        signal: AckSignal,
+        now: Instant,
+    ) {
+        if let Some(prompt_id) = prompt_id
+            && self
+                .prompt_ack
+                .as_ref()
+                .is_some_and(|watch| watch.prompt_id() == prompt_id)
+        {
+            self.note_prompt_ack(signal, now);
+        }
+    }
+    /// Disarm the watch: the shell proved it holds the prompt.
+    pub(crate) fn note_prompt_ack(&mut self, signal: AckSignal, now: Instant) {
+        let Some(watch) = self.prompt_ack.take() else {
+            return;
+        };
+        crate::unified_log::info(
+            "prompt.acked",
+            self.session.session_id.as_ref().map(|s| s.0.as_ref()),
+            Some(serde_json::json!({
+                "prompt_id": watch.prompt_id(),
+                "signal": signal,
+                "waited_ms": watch.waited(now).as_millis() as u64,
+            })),
+        );
     }
     /// Cancel the running work and set its latency anchor in one place, so the action and the `CancellationScope` it measures cannot drift apart.
     pub(crate) fn cancel_and_arm(&mut self, scope: CancellationScope, origin: CancelOrigin) {
@@ -538,7 +590,6 @@ impl AgentView {
         self.finished_wake_prompts.clear();
         self.pending_cancel_resend = None;
         self.cancel_latency = None;
-        self.pending_stop_hooks = None;
         self.clear_send_now_expectation();
         self.front_message_committed = true;
         self.optimistic_queue_ids.clear();
@@ -672,6 +723,7 @@ impl AgentView {
         }
         self.front_message_committed = false;
         self.pending_cancel_resend = None;
+        self.prompt_ack = None;
         self.cancel_latency = None;
         self.session.start_turn(&mut self.scrollback);
     }
@@ -688,8 +740,6 @@ impl AgentView {
         self.flush_pending_follow_ups(&prompt_id);
     }
     /// Finalize any open reload window as FAILED, regardless of generation.
-    ///
-    /// For a load that takes over the agent (fork/worktree/restore binding a new session), the stash belongs to the superseded pre-reconnect state.
     /// An open window would corrupt the incoming load's batch/replay bookkeeping and defer its results.
     /// The window's pending re-init completion later no-ops (generation gone).
     pub(crate) fn abort_session_reload(&mut self) {
@@ -700,7 +750,6 @@ impl AgentView {
         }
     }
     /// Finalize the reload window opened for `generation`.
-    ///
     /// Returns `false` (untouched state) when no window with that generation is open.
     /// Either the agent was never reloading, or a newer reconnect already superseded it.
     pub(crate) fn finish_session_reload(&mut self, generation: u64, success: bool) -> bool {
@@ -725,10 +774,7 @@ impl AgentView {
     }
     /// Whether a running prompt reported on a `session/load` (resume / reconnect) is adoptable by THIS agent.
     /// Requires the synthetic-turn guard ([`acp_handler::should_adopt_running_prompt`]) and that the turn did not already end in this load's replay.
-    /// A turn whose durable `TurnCompleted` already arrived in the replay (recorded in [`Self::replayed_terminal_prompts`]) has ended.
     /// Adopting it would re-strand the viewer on "Waiting…".
-    ///
-    /// [`acp_handler::should_adopt_running_prompt`]: crate::app::acp_handler::should_adopt_running_prompt
     pub(crate) fn should_adopt_running_prompt(&self, prompt_id: &str) -> bool {
         crate::app::acp_handler::should_adopt_running_prompt(prompt_id)
             && !self.replayed_terminal_prompts.contains(prompt_id)
@@ -745,6 +791,11 @@ impl AgentView {
                 .running_wake_turn
                 .as_ref()
                 .is_some_and(|wake| wake.cancel_sent)
+    }
+    /// Whether Send now can target a local turn or an idle-looking automatic wake.
+    pub(crate) fn can_send_now(&self) -> bool {
+        self.session.state.is_turn_running()
+            || (self.wake_turn_active() && !self.wake_turn_cancelling())
     }
     /// Single setter for [`RunningWakeTurn`]. No-op unless the pane is idle and not replaying; keeps an in-flight cancel marker for the same id.
     pub(crate) fn note_streaming_wake_turn(&mut self, prompt_id: &str) {
@@ -805,10 +856,8 @@ impl AgentView {
         })
     }
     /// Finalize a reconnect-reload window and, iff the running prompt is adoptable, adopt it. Returns whether the window finalized.
-    ///
     /// Adoption is gated by [`Self::should_adopt_running_prompt`] and ordered AFTER finalize.
     /// The finalize side effects (force-idle and window resolve) then run even when adoption is skipped for a non-adoptable running id.
-    /// The reconnect loop in `event_loop.rs` calls this per agent.
     pub(crate) fn finalize_reload_and_maybe_adopt(
         &mut self,
         generation: u64,
@@ -825,8 +874,6 @@ impl AgentView {
         finalized
     }
     /// Resolve a closed window per the three [`SessionReload`] outcomes.
-    ///
-    /// Returns whether a heavy transient dropped: the stashed pre-reload scrollback (success, full replay) or the staged partial replay (failure).
     /// The success-with-cursor branch *reuses* the stash and moves the tail entries into it: nothing multi-MB drops, so callers must NOT purge.
     /// (A full-arena purge there would madvise away warm pages on the most common reconnect outcome, once per open tab.)
     #[must_use = "purge retained memory iff a heavy transient dropped"]
@@ -973,6 +1020,13 @@ impl AgentView {
         if !matches!(self.session.state, AgentState::TurnRunning) {
             return None;
         }
+        if self
+            .prompt_ack
+            .as_ref()
+            .is_some_and(PromptAckWatch::is_soft_noticed)
+        {
+            return Some(TurnActivity::Waiting(WaitingReason::PromptAck));
+        }
         if self.bash_turn {
             return None;
         }
@@ -1009,10 +1063,8 @@ impl AgentView {
         }
     }
     /// Best user-facing name for the tasks being waited on.
-    ///
     /// Uses the first resolvable subject.
     /// Multi-id waits reflect the full `task_ids` length (`"first + N more"`, `N = task_ids.len()-1`) so partial resolution reads as multi-task.
-    /// Unknown ids yield `None` (the spinner falls back to the generic label).
     fn subject_for_wait_tasks(&self, task_ids: &[String]) -> Option<String> {
         use crate::acp::tracker::{MAX_ACTIVITY_SUBJECT_CHARS, clamp_activity_subject};
         if task_ids.is_empty() {
@@ -1045,7 +1097,6 @@ impl AgentView {
         }
     }
     /// Resolve one task id to a display subject (description preferred, else a *short* command / subagent description).
-    ///
     /// A long bare command is not used as a subject; the spinner falls back to the generic `"Waiting on task output…"` label.
     /// Descriptions are kept but clamped by the caller via [`clamp_activity_subject`].
     fn lookup_task_subject(&self, task_id: &str) -> Option<String> {
@@ -1097,16 +1148,16 @@ impl AgentView {
     fn running_foreground_subagents(
         &self,
     ) -> impl Iterator<Item = &crate::app::subagent::SubagentInfo> {
-        self.subagent_sessions
-            .values()
-            .filter(|s| s.is_running() && !s.is_background && s.workflow_run_id.is_none())
+        self.subagent_sessions.values().filter(|s| {
+            s.is_running() && !s.attempt.is_background && s.attempt.workflow_run_id.is_none()
+        })
     }
     /// Display subject for a foreground-subagent wait; `None` when no running child has a description.
     fn subagent_wait_subject(&self) -> Option<String> {
         use crate::acp::tracker::{MAX_ACTIVITY_SUBJECT_CHARS, clamp_activity_subject};
         let locale = self.scrollback.locale();
         let mut running: Vec<_> = self.running_foreground_subagents().collect();
-        running.sort_by_key(|info| info.started_at);
+        running.sort_by_key(|info| info.attempt.started_at);
         let description = running.iter().find_map(|info| {
             let (_, desc) = crate::app::subagent::parse_tag_prefix(info.description.trim());
             let desc = clamp_activity_subject(desc);
@@ -1124,7 +1175,7 @@ impl AgentView {
         }
         let activity = running
             .first()
-            .and_then(|info| info.activity_label.as_deref())
+            .and_then(|info| info.attempt.activity_label.as_deref())
             .map(|label| label.trim_end_matches('…').trim())
             .filter(|label| !label.is_empty());
         match activity {
@@ -1618,7 +1669,7 @@ mod resolve_turn_activity_tests {
         };
         assert_eq!(reason.label(), "Subagent: check lints…");
         let mut earlier = running_child("[explore] scan src/");
-        earlier.started_at = std::time::Instant::now() - std::time::Duration::from_secs(5);
+        earlier.attempt.started_at = std::time::Instant::now() - std::time::Duration::from_secs(5);
         view.subagent_sessions.insert("child-0".into(), earlier);
         let Some(TurnActivity::Waiting(reason)) = view.resolve_turn_activity() else {
             panic!("expected waiting activity");
@@ -1629,7 +1680,7 @@ mod resolve_turn_activity_tests {
     fn subagent_wait_composes_child_activity() {
         let mut view = running_view();
         let mut info = running_child("fix flaky test");
-        info.activity_label = Some("Writing subagent prompt…".into());
+        info.attempt.activity_label = Some("Writing subagent prompt…".into());
         view.subagent_sessions.insert("child-1".into(), info);
         let Some(TurnActivity::Waiting(reason)) = view.resolve_turn_activity() else {
             panic!("expected waiting activity");
@@ -1672,7 +1723,7 @@ mod resolve_turn_activity_tests {
     fn subagent_wait_long_description_keeps_activity_visible() {
         let mut view = running_view();
         let mut info = running_child("abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGH");
-        info.activity_label = Some("Running: cargo test".into());
+        info.attempt.activity_label = Some("Running: cargo test".into());
         view.subagent_sessions.insert("child-1".into(), info);
         let Some(TurnActivity::Waiting(reason)) = view.resolve_turn_activity() else {
             panic!("expected waiting activity");
@@ -1685,7 +1736,7 @@ mod resolve_turn_activity_tests {
     fn subagent_wait_long_desc_and_activity_gives_description_priority() {
         let mut view = running_view();
         let mut info = running_child("summarize scratchpad findings into notes");
-        info.activity_label = Some("Waiting for response…".into());
+        info.attempt.activity_label = Some("Waiting for response…".into());
         view.subagent_sessions.insert("child-1".into(), info);
         let Some(TurnActivity::Waiting(reason)) = view.resolve_turn_activity() else {
             panic!("expected waiting activity");
@@ -1698,7 +1749,7 @@ mod resolve_turn_activity_tests {
     fn subagent_wait_multi_child_truncated_description_gets_inner_ellipsis() {
         let mut view = running_view();
         let mut earlier = running_child("audit every dashboard panel for drift");
-        earlier.started_at = std::time::Instant::now() - std::time::Duration::from_secs(5);
+        earlier.attempt.started_at = std::time::Instant::now() - std::time::Duration::from_secs(5);
         view.subagent_sessions.insert("child-1".into(), earlier);
         view.subagent_sessions
             .insert("child-2".into(), running_child("fix tests"));
@@ -1711,7 +1762,7 @@ mod resolve_turn_activity_tests {
     fn subagent_wait_counts_parallel_children() {
         let mut view = running_view();
         let mut earlier = running_child("scan src/");
-        earlier.started_at = std::time::Instant::now() - std::time::Duration::from_secs(5);
+        earlier.attempt.started_at = std::time::Instant::now() - std::time::Duration::from_secs(5);
         view.subagent_sessions.insert("child-1".into(), earlier);
         view.subagent_sessions
             .insert("child-2".into(), running_child("fix tests"));
@@ -1763,10 +1814,10 @@ mod resolve_turn_activity_tests {
                     let mut view = running_view();
                     for i in 0..n {
                         let mut info = running_child(desc);
-                        info.started_at = std::time::Instant::now()
+                        info.attempt.started_at = std::time::Instant::now()
                             - std::time::Duration::from_secs((n - i) as u64);
                         if i == 0 {
-                            info.activity_label = activity.clone();
+                            info.attempt.activity_label = activity.clone();
                         }
                         view.subagent_sessions.insert(format!("child-{i}"), info);
                     }
@@ -2115,35 +2166,41 @@ mod resolve_turn_activity_tests {
                 child_session_id: Arc::from("child-session-xyz"),
                 description: Arc::from("explore the auth module"),
                 subagent_type: Arc::from("explore"),
-                persona: None,
-                role: None,
-                model: None,
-                context_source: None,
-                resumed_from: None,
-                capability_mode: None,
-                workflow_run_id: None,
-                context_normalized: false,
-                parent_prompt_id: None,
-                started_at: now,
-                last_progress_at: now,
-                finished: false,
-                status: None,
-                error: None,
-                duration_ms: None,
-                tool_calls: None,
-                turns: None,
-                turn_count: None,
-                tool_call_count: None,
-                tokens_used: None,
-                context_window_tokens: None,
-                context_usage_pct: None,
-                tools_used: vec![],
-                error_count: None,
-                activity_label: None,
-                is_background: true,
-                pending_kill: false,
-                kill_requested_at: None,
-                scrollback_entry_id: None,
+                attempt: crate::app::subagent::SubagentAttemptInfo {
+                    lifecycle:
+                        crate::app::subagent::SubagentLifecycleState::running_legacy_for_test(),
+                    persona: None,
+                    role: None,
+                    model: None,
+                    context_source: None,
+                    resumed_from: None,
+                    capability_mode: None,
+                    workflow_run_id: None,
+                    context_normalized: false,
+                    parent_prompt_id: None,
+                    started_at: now,
+                    last_progress_at: now,
+                    status: None,
+                    error: None,
+                    duration_ms: None,
+                    tool_calls: None,
+                    turns: None,
+                    turn_count: None,
+                    tool_call_count: None,
+                    tokens_used: None,
+                    context_window_tokens: None,
+                    context_usage_pct: None,
+                    tools_used: vec![],
+                    error_count: None,
+                    activity_label: None,
+                    is_background: true,
+                    pending_kill: false,
+                    kill_requested_at: None,
+                    scrollback_entry_id: None,
+                    terminal_entry_id: None,
+                },
+                completed_attempt_tokens: 0,
+                sealed_attempt_tokens: Default::default(),
                 prompt: None,
                 child_cwd: None,
                 worktree_path: None,
@@ -2260,7 +2317,7 @@ mod status_window_tests {
             attempts: 1,
             confirmed: false,
             cancel_subagents: true,
-            trigger: crate::app::actions::CancelTrigger::Esc,
+            trigger: crate::app::actions::CancelTrigger::DashboardStop,
         });
         agent.start_turn_boundary(None);
         assert!(agent.session.state.is_turn_running());

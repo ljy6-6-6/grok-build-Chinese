@@ -908,3 +908,169 @@ async fn get_task_running_fills_output_from_log() {
     assert!(!snap.completed);
     assert!(!snap.truncated);
 }
+
+/// Holds `terminal/output` replies so the RPC stays pending until dropped.
+fn output_hangs_gateway() -> GatewaySender {
+    use xai_acp_lib::AcpClientMessage;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Some(msg) = rx.recv().await {
+            match msg {
+                AcpClientMessage::TerminalOutput(args) => held.push(args.response_tx),
+                AcpClientMessage::ReleaseTerminal(args) => {
+                    let _ = args
+                        .response_tx
+                        .send(Ok(acp::ReleaseTerminalResponse::new()));
+                }
+                _ => {}
+            }
+        }
+        drop(held);
+    });
+    GatewaySender::new(tx)
+}
+
+#[tokio::test]
+async fn list_tasks_metadata_uses_local_state_without_terminal_output_rpc() {
+    let adapter = AcpTerminalAdapter::new(output_hangs_gateway(), acp::SessionId::new("s"));
+    insert_task(
+        &adapter,
+        "t-hang",
+        TrackedTask {
+            command: "sleep 10".into(),
+            cwd: "/tmp".into(),
+            ..Default::default()
+        },
+    );
+    insert_task(
+        &adapter,
+        "t-rest",
+        TrackedTask {
+            command: "sleep 20".into(),
+            cwd: "/tmp".into(),
+            completed: true,
+            exit_code: Some(0),
+            last_output: "done-out".into(),
+            ..Default::default()
+        },
+    );
+
+    // Snapshot path must not await hung `terminal/output` RPCs.
+    let snapshots = tokio::time::timeout(Duration::from_millis(50), adapter.list_tasks_metadata())
+        .await
+        .expect("list_tasks_metadata must not wait on live terminal/output");
+    let mut rows: Vec<_> = snapshots
+        .into_iter()
+        .map(|s| (s.task_id, s.completed, s.exit_code, s.output))
+        .collect();
+    rows.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(
+        rows,
+        [
+            ("t-hang".into(), false, None, String::new()),
+            ("t-rest".into(), true, Some(0), String::new()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn list_tasks_preserves_running_output_from_log() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("run.log");
+    tokio::fs::write(&log, "live streamed bytes").await.unwrap();
+
+    let adapter = AcpTerminalAdapter::new(output_unavailable_gateway(), acp::SessionId::new("s"));
+    insert_task(
+        &adapter,
+        "t-run",
+        TrackedTask {
+            output_file: log,
+            output_byte_limit: 1024,
+            ..Default::default()
+        },
+    );
+
+    let snapshots = adapter.list_tasks().await;
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].output, "live streamed bytes");
+    assert!(!snapshots[0].completed);
+}
+
+/// Hangs `terminal/output` only for `hang_id`; other ids get a quick live reply.
+fn output_hangs_for_id_gateway(hang_id: &'static str) -> GatewaySender {
+    use xai_acp_lib::AcpClientMessage;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Some(msg) = rx.recv().await {
+            match msg {
+                AcpClientMessage::TerminalOutput(args) => {
+                    if args.request.terminal_id.0.as_ref() == hang_id {
+                        held.push(args.response_tx);
+                    } else {
+                        let text = format!("live-{}", args.request.terminal_id.0);
+                        let _ = args
+                            .response_tx
+                            .send(Ok(acp::TerminalOutputResponse::new(text, false)));
+                    }
+                }
+                AcpClientMessage::ReleaseTerminal(args) => {
+                    let _ = args
+                        .response_tx
+                        .send(Ok(acp::ReleaseTerminalResponse::new()));
+                }
+                _ => {}
+            }
+        }
+        drop(held);
+    });
+    GatewaySender::new(tx)
+}
+
+#[tokio::test]
+async fn list_tasks_continues_live_after_per_task_timeout() {
+    let adapter = AcpTerminalAdapter::new(
+        output_hangs_for_id_gateway("t-hang"),
+        acp::SessionId::new("s"),
+    );
+    insert_task(
+        &adapter,
+        "t-hang",
+        TrackedTask {
+            command: "sleep 10".into(),
+            cwd: "/tmp".into(),
+            last_output: "stale-hang".into(),
+            ..Default::default()
+        },
+    );
+    insert_task(
+        &adapter,
+        "t-ok",
+        TrackedTask {
+            command: "echo ok".into(),
+            cwd: "/tmp".into(),
+            last_output: "stale-ok".into(),
+            ..Default::default()
+        },
+    );
+
+    let snapshots = tokio::time::timeout(Duration::from_secs(6), adapter.list_tasks())
+        .await
+        .expect("list_tasks must finish within two per-task budgets");
+    let mut by_id: std::collections::HashMap<_, _> = snapshots
+        .into_iter()
+        .map(|s| (s.task_id, s.output))
+        .collect();
+    assert_eq!(
+        by_id.remove("t-hang").as_deref(),
+        Some("stale-hang"),
+        "hung id falls back to local_snapshot only"
+    );
+    assert_eq!(
+        by_id.remove("t-ok").as_deref(),
+        Some("live-t-ok"),
+        "later ids still get a live terminal/output attempt after a prior timeout"
+    );
+    assert!(by_id.is_empty());
+}

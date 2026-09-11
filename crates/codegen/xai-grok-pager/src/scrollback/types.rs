@@ -19,7 +19,6 @@ pub enum WrapMode {
 }
 
 /// Accent/bullet color style for a block.
-///
 /// Used by both `accent()` and `bullet()` trait methods.
 /// When `animated` is true, the renderer uses a wave animation effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,7 +116,6 @@ impl BlockContext {
     }
 
     /// Effective content width after subtracting the bullet prefix (if enabled).
-    ///
     /// Blocks that render single-line collapsed content should use this instead of `self.width`.
     /// Otherwise they overflow past the bullet character that `RenderBlock::output()` prepends.
     pub fn content_width(&self) -> usize {
@@ -140,10 +138,7 @@ impl BlockContext {
 pub struct BlockLine {
     pub content: Line<'static>,
     pub background: Option<Color>,
-    /// Whether [`background`](Self::background) is a decorative "panel" band rather than semantic shading.
-    /// Panel bands are the tool result preview boxes (Read/Search/Execute); semantic shading is diff insert/delete rows and code-block fill.
-    /// Panel bands are suppressed when the entry renders with a flat background (minimal mode) so previews blend with the terminal's own background.
-    /// Semantic shading always paints.
+    /// Whether `background` is a decorative "panel" band rather than semantic shading. Semantic shading always paints.
     pub background_is_panel: bool,
     /// Column where the background starts: 0 paints full width, a positive value paints from that column.
     pub bg_start_col: u16,
@@ -154,16 +149,15 @@ pub struct BlockLine {
     pub selection_range: Option<u16>,
     /// Optional source-of-truth text for the selectable portion of this line.
     pub selection_text: Option<String>,
-    /// Soft-wrap joiner: how this line connects to the previous when copying.
-    ///
-    /// - `None` = hard break (new source line, join with `\n`)
-    /// - `Some("")` = mid-word break (no separator)
-    /// - `Some(" ")` = word break (join with space)
-    ///
-    /// The first line of a block should always have `None`.
+    /// Soft-wrap joiner: how this line connects to the previous when copying. The first line of a block should always
+    /// have `None`.
     pub joiner: Option<String>,
     /// Link target for rows whose painted text cannot recover it (tool headers).
     pub link_target: Option<crate::render::osc8::LinkTarget>,
+    /// Display width of the `subsequent_indent` prefix on wrapped continuation lines. This width is NOT part of the
+    /// logical pre-wrap content, so hyperlink column mapping must exclude it when rebuilding pre-wrap coordinates from
+    /// post-wrap segments.
+    pub indent_width: usize,
 }
 
 impl Default for BlockLine {
@@ -179,6 +173,7 @@ impl Default for BlockLine {
             selection_text: None,
             joiner: None,
             link_target: None,
+            indent_width: 0,
         }
     }
 }
@@ -226,12 +221,9 @@ impl BlockLine {
         self
     }
 
-    /// Set a decorative "panel" background (tool result preview boxes).
-    ///
-    /// Unlike [`with_background`](Self::with_background) (semantic shading:
-    /// diff insert/delete rows, markdown code-block fill), a panel background
-    /// is suppressed when the entry renders flat (minimal mode) so the preview
-    /// blends with the terminal's own background.
+    /// Set a decorative "panel" background (tool result preview boxes). Unlike `with_background` (semantic shading:
+    /// diff insert/delete rows, markdown code-block fill), a panel background is suppressed when the entry renders flat
+    /// (minimal mode) so the preview blends with the terminal's own background.
     pub fn with_panel_background(mut self, color: Color) -> Self {
         self.background = Some(color);
         self.background_is_panel = true;
@@ -315,12 +307,8 @@ pub fn derive_selection_text(line: &BlockLine) -> String {
     }
 }
 
-/// The exact text painted in `line`'s selectable columns, in logical order.
-///
-/// This is the slice of the full painted line (`line.content`) that `set_line_safe_bidi` reorders within the selectable region.
-/// Selection maps visual drag columns 1:1 against it.
-/// Unlike [`derive_selection_text`] it never trims trailing padding or substitutes a copy override; those affect copy text, not the painted cells.
-/// Snapping and slicing therefore share one coordinate space with the drawn cells.
+/// The exact text painted in `line`'s selectable columns, in logical order. Unlike [`derive_selection_text`] it
+/// never trims trailing padding or substitutes a copy override.
 pub fn painted_selectable_region(line: &BlockLine) -> String {
     match selectable_cols(&line.content, &line.selectable) {
         Some(cols) => slice_display_cols(&line_plain_text(&line.content), cols.start, cols.end),
@@ -420,10 +408,8 @@ fn grapheme_width(grapheme: &str) -> usize {
     UnicodeWidthStr::width(grapheme)
 }
 
-/// Terminal cells `s` occupies when painted: the sum of its grapheme widths.
-/// This can exceed `UnicodeWidthStr::width(s)` for ligature-forming sequences (Arabic lam-alef `لا`), which measure narrower than the drawn cells.
-/// The selection path uses this single width measure so hit-testing and slicing match the painted cells.
-/// Otherwise the last cell of such a line can't be selected or copied.
+/// Terminal cells `s` occupies when painted: the sum of its grapheme widths. Otherwise the last cell of such a line
+/// can't be selected or copied.
 pub(crate) fn str_display_cells(s: &str) -> usize {
     s.graphemes(true).map(grapheme_width).sum()
 }
@@ -605,12 +591,7 @@ impl BlockOutput {
     }
 }
 
-/// Pre-wrap (logical source) line index for each post-wrap output row.
-///
-/// A row whose `joiner` is `None` starts a new pre-wrap line; soft-wrap continuations (`Some(_)`) stay on the current one.
-/// The first row is always index 0.
-/// This is the single source of truth for mapping pre-wrap lines to post-wrap rows.
-/// Mermaid treatment-row insertion (the fallback caption and affordance rows) and the hyperlink overlay use it.
+/// Pre-wrap (logical source) line index for each post-wrap output row. The first row is always index 0.
 pub(crate) fn prewrap_index_per_row(lines: &[BlockLine]) -> Vec<usize> {
     let mut indices = Vec::with_capacity(lines.len());
     let mut prewrap = 0usize;
@@ -643,16 +624,8 @@ pub fn selectable_cols(line: &Line, selectable: &Selectable) -> Option<Range<u16
     Some(u16::try_from(cols.start).ok()?..u16::try_from(cols.end).ok()?)
 }
 
-/// The selectable region's **visual** column span in the painted (reordered) row, for hit-testing.
-///
-/// [`selectable_cols`] returns the region's *logical* columns, but `set_line_safe_bidi` reorders the whole line.
-/// Non-selectable content outside the region (e.g. a trailing truncation ellipsis) reorders too.
-/// Under an RTL base that can shift the region's painted position.
-/// Mapping the logical window through the full painted line keeps the on-screen columns matched to the drawn cells.
-///
-/// Returns the logical columns unchanged when reordering is off or the row isn't reordered.
-/// The region maps to one contiguous visual block, so the envelope of the mapped ranges is the region's span.
-/// Outside content is only the left-anchored chrome prefix and the trailing suffix, never interleaved between the region's own runs.
+/// Returns the logical columns unchanged when reordering is off or the row isn't reordered. Outside content is only
+/// the left-anchored chrome prefix and the trailing suffix, never interleaved between the region's own runs.
 /// Reordering preserves width, so only the start offset can change.
 pub fn visual_selectable_cols(line: &BlockLine) -> Option<Range<u16>> {
     let logical = selectable_cols(&line.content, &line.selectable)?;
@@ -710,6 +683,7 @@ mod tests {
             selection_text: None,
             joiner: None,
             link_target: None,
+            indent_width: 0,
         };
     }
 

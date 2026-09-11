@@ -325,10 +325,8 @@ fn discovery_with_no_settings_files() {
 
 #[test]
 fn project_claude_absent_when_home_is_git_repo() {
-    // When $HOME is itself a git repo (dotfiles), the repo-root walk from a cwd under home must not treat `~/.claude` as project-tier
-    // Project-tier env is injected into every spawned subprocess
-    // Serialize and guard $HOME: find_repo_root reaches home via `.git`, and the guard reads xai_dirs::home_dir()
-    // Pin USERPROFILE too: home_dir() prefers it on Windows and ignores HOME
+    // When `$HOME` is a git repo, a cwd under home must not treat `~/.claude` as project-tier (that env is injected into every subprocess)
+    // Guard `$HOME` and `USERPROFILE`: `home_dir()` prefers the latter on Windows
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempfile::tempdir().unwrap();
     let _home_guard = EnvVarGuard::set("HOME", home.path());
@@ -567,10 +565,8 @@ fn load_claude_env_empty_when_no_settings() {
 
 #[test]
 fn load_claude_env_with_project_drops_repo_env_when_untrusted() {
-    // The repo-tree `.claude/settings.json` env is injected into every spawned subprocess (BASH_ENV / GIT_SSH_COMMAND / …)
-    // An untrusted folder must drop it
-    // Isolate GROK_HOME so the claude-import marker reads clean (an imported dev machine would otherwise early-return an empty map)
-    // The unique key keeps it independent of the host's real `~/.claude`
+    // Repo-tree `.claude` env is injected into every subprocess, so an untrusted folder must drop it
+    // Isolate `GROK_HOME` so the import marker is clean and the unique key stays independent of the host `~/.claude`
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempfile::tempdir().unwrap();
     let _home_guard = EnvVarGuard::set("GROK_HOME", home.path());
@@ -1013,12 +1009,8 @@ fn untrusted_project_claude_permissions_are_not_honored() {
     );
 }
 
-/// Untrusted clone must not contribute project `.grok/config.toml` [permission].
-///
-/// The test is sync and uses `block_on` so `ENV_LOCK` is not held across `.await` (clippy `await_holding_lock`).
-/// It does not assert exact global rule counts: `xai_grok_config::grok_home()` is a process-wide `OnceLock`.
-/// Under single-process `cargo test` an earlier test may have already pinned `GROK_HOME`.
-/// Project-rule filtering is independent of that; global survival is checked only when our temp home is the live `user_grok_home()`.
+/// Untrusted clone must not contribute project `.grok/config.toml` `[permission]`.
+/// Sync `block_on` so `ENV_LOCK` is not held across `.await`. Global counts are not exact: `grok_home()` is a process-wide `OnceLock`.
 #[test]
 fn untrusted_project_config_toml_permissions_are_not_honored() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -2578,11 +2570,8 @@ fn permission_mode_hint_apply_matrix() {
     assert_eq!(ask.as_ref().unwrap().prompt_policy, PromptPolicy::Allow);
 }
 
-/// The resolver stamps `default_mode_configured` for an explicit user-tier `defaultMode` even when it projects to `Ask` (e.g. `"default"`).
-/// The alwaysAllow hint then cannot override an explicit operator choice.
-/// That includes the rule-less mode-only case: it must survive the outer resolver's empty-config drop, since a `None` there reads as unconfigured.
-///
-/// The test is sync and uses `block_on` so `ENV_LOCK` is not held across `.await` (clippy `await_holding_lock`), like the untrusted-project tests.
+/// An explicit user-tier `defaultMode` stamps `default_mode_configured` even when it projects to `Ask`, so the alwaysAllow hint cannot override it.
+/// The rule-less case must survive the empty-config drop. Sync `block_on` so `ENV_LOCK` is not held across `.await`.
 #[test]
 fn explicit_default_mode_blocks_permission_mode_hint() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());

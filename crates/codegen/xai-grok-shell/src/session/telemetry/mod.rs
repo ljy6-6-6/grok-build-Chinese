@@ -114,7 +114,7 @@ impl HookRegInfo {
         Self {
             name: format_hook_name(spec),
             event: spec.event.to_string(),
-            hook_type: spec.handler_type.as_str().to_string(),
+            hook_type: spec.handler_type.as_ref().to_string(),
             source: format_hook_source(spec),
         }
     }
@@ -146,7 +146,7 @@ impl SessionHarnessMetrics {
         // One `plugin.loaded` span per enabled plugin at session start.
         if let Some(registry) = self.plugin_registry.as_deref() {
             for plugin in registry.enabled_plugins() {
-                tracing::info_span!(
+                xai_grok_telemetry::event_span!(
                     "plugin.loaded",
                     plugin_name = %plugin.name,
                     plugin_version = %plugin.version.as_deref().unwrap_or(""),
@@ -156,27 +156,26 @@ impl SessionHarnessMetrics {
                     skill_count = plugin.skill_count as i64,
                     agent_count = plugin.agent_count as i64,
                     command_path_count = plugin.command_dirs.len() as i64,
-                )
-                .in_scope(|| {});
+                );
             }
         }
 
         // One `hook.registered` span per configured hook at session start.
         for h in &hooks {
-            tracing::info_span!(
+            xai_grok_telemetry::event_span!(
                 "hook.registered",
                 hook_name = %h.name,
                 hook_event = %h.event,
                 hook_type = %h.hook_type,
                 hook_source = %h.source,
-            )
-            .in_scope(|| {});
+            );
         }
         let hook_names: Vec<String> = hooks.into_iter().map(|h| h.name).collect();
 
         let agents_md_dir_names = xai_grok_agent::prompt::agents_md::read_agents_config_with_paths(
             &self.cwd,
             self.compat,
+            crate::agent::folder_trust::project_scope_allowed(std::path::Path::new(&self.cwd)),
         )
         .await
         .iter()

@@ -26,11 +26,8 @@ pub struct ToolOutputChunk {
     pub at: DateTime<Utc>,
 }
 
-/// Lifecycle / progress event emitted by a tool.
-///
-/// Holds an `f32` `fraction` field on the `Percent` variant, so the enum cannot derive `Eq` (only `PartialEq`).
-/// Adjacent tagging (`tag = "type", content = "data"`) matches every other wire enum; see "# Wire format" in the crate doc for why.
-/// `ToolProgress` nests inside `ToolChunk::Progress`, so the uniform shape avoids mixing tagging styles in one document.
+/// Lifecycle / progress event emitted by a tool. No `Eq`: `Percent` carries an `f32`.
+/// Adjacent tagging matches every other wire enum; this nests inside `ToolChunk::Progress`, so the shape must stay uniform.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum ToolProgress {

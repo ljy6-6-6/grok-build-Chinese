@@ -15,7 +15,6 @@ use super::doom_loop_telemetry::merge_tightest_trigger;
 use super::inference_metrics::{InferenceLatencyStats, compute_percentiles};
 
 /// Sample the process resident-set high-water mark in bytes.
-///
 /// Uses `getrusage(RUSAGE_SELF)` on Unix; returns 0 if sampling fails or on non-Unix targets.
 /// Cheap enough to call once per turn.
 pub(crate) fn sample_rss_bytes() -> u64 {
@@ -59,7 +58,6 @@ pub struct ToolOutcome {
 }
 
 /// Per-tool execution duration for a single invocation.
-///
 /// Written into `turn_result.json` via `SessionSignalsDelta.tool_durations_this_turn`.
 /// Downstream analytics join wall time to a specific tool call through it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -123,6 +121,9 @@ pub struct TurnDeltaSnapshot {
     /// Per-turn summed cached input tokens. See `turn_input_tokens`.
     #[serde(skip)]
     pub turn_cached_input_tokens: u64,
+    /// Last served model fingerprint (upstream `system_fingerprint`). See `turn_input_tokens`.
+    #[serde(skip)]
+    pub model_fingerprint: Option<String>,
 }
 
 /// Per-turn delta of counter fields.
@@ -200,9 +201,7 @@ pub struct SessionSignalsDelta {
 }
 
 /// Session signals that inform feedback request heuristics.
-///
 /// These signals are tracked locally in the agent and periodically synced to the backend for analytics / telemetry persistence.
-///
 /// Field names are aligned with the backend analytics schema for session signals.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default, rename_all = "camelCase")]
@@ -501,6 +500,8 @@ pub enum SignalEvent {
     // === Model Events ===
     RecordModelUsage(String),
     SetPrimaryModel(String),
+    /// Served checkpoint of the current turn's latest model response.
+    RecordModelFingerprint(String),
 
     // === Latency Events ===
     RecordLatency {
@@ -529,10 +530,13 @@ pub enum SignalEvent {
         lines_removed_reverted: i64,
     },
 
-    // === Turn Delta Events ===
-    /// Take a turn-end snapshot and compute delta from previous turn end.
-    /// Returns the delta snapshot for sending to the backend.
-    TakeTurnEndSnapshot(oneshot::Sender<TurnDeltaSnapshot>),
+    // === Turn Delta Events === Take a turn-end snapshot and compute delta from previous turn end.
+    // Returns the delta snapshot for sending to the backend.
+    // `completed`: the turn finished, so its tool outcomes become the ones feedback attaches (`GetLastTurnToolOutcomes`); a cancelled or failed turn's partial outcomes must not replace them.
+    TakeTurnEndSnapshot {
+        respond_to: oneshot::Sender<TurnDeltaSnapshot>,
+        completed: bool,
+    },
     /// Get tool outcomes from the last completed turn (for feedback notifications).
     GetLastTurnToolOutcomes(oneshot::Sender<Vec<ToolOutcome>>),
 
@@ -565,7 +569,6 @@ pub enum SignalEvent {
 }
 
 /// Handle for sending signals to the tracker actor.
-///
 /// This is cheap to clone and can be passed around freely.
 /// All operations are non-blocking sends to a channel.
 #[derive(Clone)]
@@ -716,7 +719,6 @@ impl SessionSignalsHandle {
     }
 
     /// Set-once tracing config fields at session construction.
-    ///
     /// Records the configured thresholds so dashboards can filter/group by config.
     /// Preserved on the backend when unset; subsequent syncs with None don't overwrite.
     pub(crate) fn set_tracing_config(&self, inference_idle_timeout_secs: u64) {
@@ -780,6 +782,14 @@ impl SessionSignalsHandle {
         let _ = self.tx.send(SignalEvent::RecordModelUsage(model_id.into()));
     }
 
+    /// Record the served fingerprint of the current turn's latest model response. Held here,
+    /// not in the turn task, so a cancelled or failed turn's snapshot still carries it.
+    pub(crate) fn record_model_fingerprint(&self, fingerprint: impl Into<String>) {
+        let _ = self
+            .tx
+            .send(SignalEvent::RecordModelFingerprint(fingerprint.into()));
+    }
+
     pub fn set_primary_model(&self, model_id: impl Into<String>) {
         let _ = self.tx.send(SignalEvent::SetPrimaryModel(model_id.into()));
     }
@@ -787,9 +797,7 @@ impl SessionSignalsHandle {
     // === Seeding Methods ===
 
     /// Seed initial counts from persisted conversation data.
-    ///
     /// Call this when resuming a session to restore accurate counters (message counts, tool call count, distinct tools/models used).
-    ///
     /// Prefer `restore_signals` when a full persisted snapshot is available.
     pub fn seed_counts(
         &self,
@@ -815,7 +823,6 @@ impl SessionSignalsHandle {
     }
 
     /// Restore full signals state from a persisted snapshot.
-    ///
     /// Preferred over `seed_counts` when a `signals.json` file exists.
     /// Restores all counters, including ones that survive compaction (turn_count, error_count, tool_failure_count, etc.).
     pub(crate) fn restore_signals(&self, signals: SessionSignals) {
@@ -827,9 +834,8 @@ impl SessionSignalsHandle {
     // === Latency Methods ===
 
     /// Record latency metrics for a response.
-    ///
-    /// - `time_to_first_token_ms`: Time from request start to first token received
-    /// - `total_response_time_ms`: Time from request start to response complete
+    /// `time_to_first_token_ms`: Time from request start to first token received.
+    /// `total_response_time_ms`: Time from request start to response complete.
     pub fn record_latency(&self, time_to_first_token_ms: u64, total_response_time_ms: u64) {
         let _ = self.tx.send(SignalEvent::RecordLatency {
             time_to_first_token_ms,
@@ -843,12 +849,8 @@ impl SessionSignalsHandle {
     }
 
     /// Record token usage from a model response.
-    ///
-    /// - `completion_tokens`: total output tokens (includes reasoning tokens)
-    /// - `reasoning_tokens`: thinking/reasoning tokens (subset of completion_tokens)
-    ///
-    /// Response tokens are completion_tokens - reasoning_tokens.
-    /// Multiple calls per turn are accumulated (e.g. multi-round tool use).
+    /// `completion_tokens`: total output tokens (includes reasoning tokens).
+    /// `reasoning_tokens`: thinking/reasoning tokens (subset of completion_tokens).
     #[tracing::instrument(skip_all, fields(completion_tokens, reasoning_tokens))]
     pub(crate) fn record_token_usage(&self, completion_tokens: u32, reasoning_tokens: u32) {
         let span = tracing::Span::current();
@@ -863,13 +865,26 @@ impl SessionSignalsHandle {
     // === Turn Delta Methods ===
 
     /// Take a turn-end snapshot and compute delta from previous turn end.
-    ///
-    /// Called once per completed user turn (after all tool-call rounds finish).
     /// The actor atomically stores the current state as the new baseline for the next delta computation.
     /// Returns `None` if the actor is shut down.
     pub(crate) async fn take_turn_end_snapshot(&self) -> Option<TurnDeltaSnapshot> {
-        let (tx, rx) = oneshot::channel();
-        self.tx.send(SignalEvent::TakeTurnEndSnapshot(tx)).ok()?;
+        self.take_turn_end_snapshot_inner(true).await
+    }
+
+    /// [`Self::take_turn_end_snapshot`] for a turn that was cancelled or failed, taken by its
+    /// terminal. Same delta and baseline advance; the partial tool outcomes stay out of feedback.
+    pub(crate) async fn take_unfinished_turn_snapshot(&self) -> Option<TurnDeltaSnapshot> {
+        self.take_turn_end_snapshot_inner(false).await
+    }
+
+    async fn take_turn_end_snapshot_inner(&self, completed: bool) -> Option<TurnDeltaSnapshot> {
+        let (respond_to, rx) = oneshot::channel();
+        self.tx
+            .send(SignalEvent::TakeTurnEndSnapshot {
+                respond_to,
+                completed,
+            })
+            .ok()?;
         rx.await.ok()
     }
 
@@ -964,6 +979,9 @@ pub struct SessionSignalsActor {
     /// Snapshot of signals at the previous turn end (for delta computation).
     /// `None` before the first turn-end snapshot is taken.
     previous_turn_snapshot: Option<SessionSignals>,
+    /// Served fingerprint of this turn's latest model response. Reset on `IncrementTurn` and
+    /// taken by `TakeTurnEndSnapshot`.
+    turn_model_fingerprint: Option<String>,
     /// Reset after each `TakeTurnEndSnapshot`.
     tools_this_turn: Vec<String>,
     /// Key: tool name, Value: (successes, failures).
@@ -1031,6 +1049,7 @@ impl SessionSignalsActor {
             long_pause_threshold: Duration::from_secs(60),
             // Turn delta state
             previous_turn_snapshot: None,
+            turn_model_fingerprint: None,
             tools_this_turn: Vec::new(),
             tool_outcomes_this_turn: HashMap::new(),
             error_types_this_turn: Vec::new(),
@@ -1066,6 +1085,7 @@ impl SessionSignalsActor {
 
                     self.signals.turn_count += 1;
                     self.signals.user_message_count += 1;
+                    self.turn_model_fingerprint = None;
                 }
                 SignalEvent::RecordAssistantMessage => {
                     self.signals.assistant_message_count += 1;
@@ -1219,6 +1239,9 @@ impl SessionSignalsActor {
                         self.signals.models_used.push(model_id);
                     }
                 }
+                SignalEvent::RecordModelFingerprint(fingerprint) => {
+                    self.turn_model_fingerprint = Some(fingerprint);
+                }
                 SignalEvent::SetPrimaryModel(model_id) => {
                     self.signals.primary_model_id = Some(model_id.clone());
                     // Also record as used
@@ -1305,7 +1328,10 @@ impl SessionSignalsActor {
                 }
 
                 // === Turn Delta Events ===
-                SignalEvent::TakeTurnEndSnapshot(respond_to) => {
+                SignalEvent::TakeTurnEndSnapshot {
+                    respond_to,
+                    completed,
+                } => {
                     // Reconcile PR-create attribution now that every event of the turn has been processed (same channel, FIFO)
                     // Parallel tool results can record a create before a sibling commit lands
                     if self.signals.git_commit_count > 0 {
@@ -1434,7 +1460,10 @@ impl SessionSignalsActor {
                             .collect();
                     outcomes.sort_by(|a, b| a.tool_name.cmp(&b.tool_name));
                     // Preserve a copy for feedback notifications (survives turn reset)
-                    self.last_completed_turn_tool_outcomes = outcomes.clone();
+                    // Feedback lands on a completed message, so a cancelled turn's partial outcomes must not replace them
+                    if completed {
+                        self.last_completed_turn_tool_outcomes = outcomes.clone();
+                    }
                     delta.tool_outcomes_this_turn = outcomes;
 
                     let snapshot = TurnDeltaSnapshot {
@@ -1442,10 +1471,11 @@ impl SessionSignalsActor {
                         delta,
                         start_prompt_mode: None,
                         end_prompt_mode: None,
-                        // Stamped from `TurnSpanTotals` post-snapshot (see turn.rs).
+                        // Stamped from `TurnSampling` post-snapshot (see turn.rs).
                         turn_input_tokens: 0,
                         turn_output_tokens: 0,
                         turn_cached_input_tokens: 0,
+                        model_fingerprint: self.turn_model_fingerprint.take(),
                     };
 
                     // Store current as baseline for next delta
@@ -1493,17 +1523,13 @@ impl SessionSignalsActor {
                     self.tools_set = restored.tools_used.iter().cloned().collect();
                     self.models_set = restored.models_used.iter().cloned().collect();
 
-                    // TDigest is not serializable, so it will be None after deserialization
-                    // We keep it None here; persisted itl_p50_ms/itl_p99_ms values are preserved
-                    // update_session_itl_percentiles() won't overwrite them while digest is None
-                    // Once new ITL data arrives, a fresh TDigest will be created and will gradually supersede the persisted percentiles
+                    // TDigest is not serializable, so it will be.
+                    // None after deserialization We keep it.
+                    // None here; persisted itl_p50_ms/itl_p99_ms values are preserved update_session_itl_percentiles() won't overwrite them while digest is None.
                     restored.itl_digest = None;
 
-                    // Back-compute ITL running sums from persisted mean and count
-                    // compute_and_merge_turn_itl() then produces correct cumulative means when new intervals arrive
-                    // itl_interval_count (number of individual inter-token intervals) is approximately total_chunk_count - itl_sample_count
-                    // Each of the itl_sample_count responses contributes (chunks - 1) intervals
-                    // NOTE: slightly lossy due to integer truncation.
+                    // Back-compute ITL running sums from persisted mean and count compute_and_merge_turn_itl() then produces correct cumulative means when new intervals arrive itl_interval_count (number of individual inter-token.
+                    // Each of the itl_sample_count responses contributes (chunks - 1) intervals NOTE: slightly lossy due to integer truncation.
                     let itl_n = restored
                         .total_chunk_count
                         .saturating_sub(restored.itl_sample_count as u64);
@@ -1684,10 +1710,8 @@ impl SessionSignalsActor {
     }
 
     /// Compute session-level ITL percentiles from TDigest.
-    ///
     /// Called when syncing session signals or taking a snapshot.
     /// When `itl_digest` is `None`, the existing `itl_p50_ms`/`itl_p99_ms` values are kept.
-    /// They may have been restored from a persisted snapshot; clearing them would silently discard historical ITL telemetry.
     fn update_session_itl_percentiles(&mut self) {
         if let Some(digest) = &self.signals.itl_digest {
             self.signals.itl_p50_ms = Some(digest.estimate_quantile(0.50) as u64);

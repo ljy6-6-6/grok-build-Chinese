@@ -25,7 +25,6 @@ pub(crate) const RECOVERY_REMINDER: &str = "<system_reminder>Your messages have 
 /// Hard caps on the bytes of one failed turn replayed into a retry.
 /// A detector can report only at the terminal frame, so the failed turn may be a full generation.
 /// Every recovery attempt appends another one, and without a cap the retry prompt would grow until it overflowed the context.
-/// The reasoning and the visible answer are budgeted separately so a turn that loops in its thinking still replays the answer it did produce.
 const MAX_RECOVERY_REASONING_BYTES: usize = 8 * 1024;
 const MAX_RECOVERY_TEXT_BYTES: usize = 4 * 1024;
 

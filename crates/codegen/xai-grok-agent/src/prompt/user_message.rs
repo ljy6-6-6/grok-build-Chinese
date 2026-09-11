@@ -111,10 +111,8 @@ pub fn append_rules_section(
     prefix.push_str(&block);
 }
 /// Trim, drop-if-empty, and cap a VCS status string for the `<git_status>` block.
-///
-/// Returns `None` when the trimmed status is empty, so the section is dropped and no empty code fence is emitted.
-/// Otherwise returns the status capped at [`GIT_STATUS_CHARACTER_LIMIT`] and snapped back to the last newline.
-/// The `... (git status truncated)` marker is appended.
+/// `None` when trimmed status is empty, so no empty code fence is emitted.
+/// Otherwise capped at [`GIT_STATUS_CHARACTER_LIMIT`], snapped to the last newline, with a truncation marker.
 pub fn normalize_git_status(status: &str) -> Option<String> {
     let status = status.trim();
     if status.is_empty() {
@@ -136,8 +134,7 @@ pub fn normalize_git_status(status: &str) -> Option<String> {
     Some(format!("{truncated}\n\n... (git status truncated)"))
 }
 /// Selects the first-user-message rendering strategy for an agent.
-///
-/// Built-in variants decrypt the underlying XOR-obfuscated template on demand (obfuscation, not security).
+/// Built-in variants decrypt the XOR-obfuscated template on demand (obfuscation, not security).
 /// Decrypted bytes are zeroed on drop via `Zeroizing`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -199,9 +196,7 @@ impl<'de> Deserialize<'de> for UserMessageTemplate {
     }
 }
 /// One discovered rule file (AGENTS.md / Claude.md / .grok/rules/*.md).
-///
-/// Wire-compatible with `AgentConfigFile`.
-/// This type exists so the `UserMessageContext` does not depend on the AGENTS-discovery internals beyond the path/content pair.
+/// Wire-compatible with `AgentConfigFile`. Exists so `UserMessageContext` does not depend on discovery internals.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuleEntry {
     /// Absolute path of the file (used as the rule `name` attribute).
@@ -225,9 +220,7 @@ pub struct McpServerEntry {
     /// Surfaced in the `serverUseInstructions` attribute.
     pub server_use_instructions: Option<String>,
     /// Absolute path to the per-server descriptor folder, surfaced in the `folderPath` attribute.
-    /// Compatible models read the descriptors before calling `CallMcpTool`/`FetchMcpResource`.
-    /// Tool schemas live at `<folder_path>/tools/<tool>.json`, resource descriptors at `<folder_path>/resources/<resource>.json`.
-    /// The session is responsible for writing the descriptor files at this path.
+    /// Compatible models read descriptors before calling MCP tools. The session writes the files at this path.
     pub folder_path: Option<String>,
 }
 /// All inputs the templated first user message needs.
@@ -238,10 +231,7 @@ pub struct UserMessageContext {
     /// Display path: the path the model sees as the workspace.
     pub workspace_path: PathBuf,
     /// OS identifier surfaced as the `<user_info>` `OS Version:` value.
-    ///
-    /// This is `"<kernel> <release>"` (e.g. `"darwin 24.6.0"`, `"linux 6.5.0-..."`), not the OS family (`std::env::consts::OS`, e.g. `"macos"`).
-    /// Producers that don't have a uname-style string available may pass `std::env::consts::OS` as a fallback.
-    /// Callers that need the full string should use `xai_grok_shell::util::uname::os_kernel_and_release` (or equivalent).
+    /// This is `"<kernel> <release>"`, not the OS family. Producers without uname may pass `std::env::consts::OS`.
     pub os_family: String,
     /// `$SHELL` env, basename only (e.g. "zsh", "bash").
     pub shell: String,
@@ -252,10 +242,8 @@ pub struct UserMessageContext {
     /// Local date captured at session start (or compaction).
     /// Formatted inside the renderer using [`USER_MESSAGE_DATE_FORMAT`] so the producer cannot accidentally drift the model-facing date shape.
     pub today_local: Option<NaiveDate>,
-    /// Per-workspace terminals folder, surfaced as `Terminals folder: <path>` in the `<user_info>` block.
-    /// The shell tool persists each background command's output to a file here (`<terminals_folder>/<numeric-shell-id>.txt`).
-    /// The model uses this path to read terminal state via the read tool.
-    /// Optional; when `None`, the line is omitted from the rendered preamble.
+    /// Per-workspace terminals folder, surfaced in the `<user_info>` block.
+    /// The shell tool persists each background command's output here. `None` omits the line.
     pub terminals_folder: Option<PathBuf>,
     /// Workspace-scoped rule files (cwd / repo root / optional workspace user dir).
     pub workspace_rules: Vec<RuleEntry>,
@@ -268,11 +256,9 @@ pub struct UserMessageContext {
     pub skill_listing_budget_chars: Option<usize>,
     /// Connected MCP servers (alphabetical).
     pub mcp_servers: Vec<McpServerEntry>,
-    /// Absolute path to the per-workspace MCP descriptor root
-    /// (`~/.grok/projects/<encoded-cwd>/mcps`). Surfaced in
-    /// the `<mcp_file_system>` instructions so the model knows where
-    /// to discover tool/resource schemas. Required when `mcp_servers` is
-    /// non-empty; ignored otherwise.
+    /// Absolute path to the per-workspace MCP descriptor root.
+    /// Surfaced so the model knows where to discover tool/resource schemas.
+    /// Required when `mcp_servers` is non-empty; ignored otherwise.
     pub mcps_root: Option<String>,
     /// Client-facing name of the read tool (resolved from `TemplateRenderer`).
     /// Used in the skill section's instructional text. Defaults to `"Read"`.
@@ -281,9 +267,8 @@ pub struct UserMessageContext {
 /// MiniJinja variable a `Custom` template renders the local date under (pinned to the serialized field by `placeholders_carry_today_local_key`).
 pub const TODAY_LOCAL_PLACEHOLDER: &str = "today_local";
 /// Typed placeholder bag handed to MiniJinja.
-///
-/// Field names here must match `${{ … }}` references in any caller-supplied `Custom` template.
-/// A typed struct keeps the placeholder set greppable and lets rename refactors fail at compile time instead of rendering empty strings.
+/// Field names must match `${{ … }}` references in any caller-supplied `Custom` template.
+/// A typed struct keeps the placeholder set greppable and lets renames fail at compile time.
 #[derive(Debug, Clone, Serialize)]
 struct UserMessagePlaceholders<'a> {
     workspace_path: String,
@@ -359,9 +344,8 @@ impl UserMessageContext {
         format_announcement_xml(&self.skills, &mut announced, None, None, mode)
     }
     /// Render the first user message.
-    ///
-    /// Returns `None` for `UserMessageTemplate::Default`; the caller is responsible for the legacy prefix path.
-    /// `Custom` dispatches through `ToolBridge::render_prompt` so MiniJinja `${{ tools.by_kind.* }}` references resolve correctly.
+    /// `None` for `UserMessageTemplate::Default`; the caller owns the legacy prefix path.
+    /// `Custom` dispatches through `ToolBridge::render_prompt` so MiniJinja tool refs resolve.
     pub async fn render(&self, bridge: &ToolBridge) -> Option<String> {
         let placeholders = serde_json::to_value(self.placeholders())
             .expect("UserMessagePlaceholders serializes infallibly");

@@ -56,13 +56,7 @@ fn ensure_local_pager_binary(binary: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-/// Resolve the pager binary path.
-///
-/// Resolution order:
-/// 1. `PAGER_BINARY` env var (for CI / explicit override)
-/// 2. `CARGO_BIN_EXE_grok-zh` (set by `cargo test`)
-/// 3. Build locally via `cargo build -p xai-grok-pager-bin` (the composition-
-///    root package that owns the `grok-zh` binary)
+/// `PAGER_BINARY`, then `CARGO_BIN_EXE_xai-grok-pager`, else build `xai-grok-pager-bin` (the package that owns the binary).
 pub fn pager_binary() -> Result<PathBuf> {
     if let Ok(path) = std::env::var("PAGER_BINARY") {
         let p = PathBuf::from(path);

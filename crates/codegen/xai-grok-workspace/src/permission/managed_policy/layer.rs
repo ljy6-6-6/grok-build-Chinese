@@ -3,15 +3,8 @@
 
 use std::path::{Path, PathBuf};
 
-/// Trust tier of a policy layer; lower = higher authority (matching the
-/// campaign precedence mdm > system > user, with the vendor Claude file last).
-/// Allow/deny accumulation is order-blind, but first-wins resolution — extras
-/// name dedupe and pin attribution — applies layers in this order so a
-/// user-writable layer or the advisory vendor file can never claim a
-/// marketplace name or a pin's attribution ahead of an admin layer.
-///
-/// A layer's [authority](Self::authority) and [ownership](Self::ownership)
-/// are derived from its tier — the tier is the single trust descriptor.
+/// Trust tier of a policy layer; lower = higher authority (mdm > system > user,
+/// vendor last); derives authority + ownership; first-wins applies in tier order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum PolicyLayerTier {
     Mdm,
@@ -55,15 +48,8 @@ pub(super) struct PolicyLayer {
     pub(super) value: toml::Value,
 }
 
-/// Whether a policy source binds every server or is advisory.
-///
-/// grok's own signed TOML layers (`managed_config.toml`, `requirements.toml`)
-/// are [`Native`](Self::Native) and bind everything. The vendor Claude
-/// `managed-settings.json` is [`Advisory`](Self::Advisory): hosts ship that
-/// file to configure Claude, not grok, so its restrictions bind
-/// only subjects grok did not natively define — foreign-sourced MCP servers
-/// and marketplaces. Grants are deliberately authority- AND ownership-blind
-/// (known limitation; admin-vs-user grant rules are a named follow-up).
+/// Whether a source binds everything (grok's own TOML layers, `Native`) or only
+/// foreign-defined subjects (the vendor Claude managed-settings.json, `Advisory`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PolicySourceAuthority {
     #[default]
@@ -79,6 +65,9 @@ pub enum PolicyPin {
     Unpinned,
     Disabled {
         source: PathBuf,
+        /// Who can write the pinning layer (see [`PolicyLayerOwnership`]);
+        /// carried in the pin so pin and grant rule can never desync.
+        ownership: PolicyLayerOwnership,
     },
 }
 
@@ -91,18 +80,23 @@ impl PolicyPin {
     pub fn source(&self) -> Option<&Path> {
         match self {
             Self::Unpinned => None,
-            Self::Disabled { source } => Some(source),
+            Self::Disabled { source, .. } => Some(source),
         }
     }
 }
 
-/// Who can write the layer a policy value came from: an administrator
-/// (MDM, root-owned system TOML, the root-owned Claude managed-settings.json)
-/// or the user (`~/.grok` layers). Privileges that carve exceptions out of a
-/// lockdown — e.g. a Local marketplace pin surviving a strict list — must
-/// require `Admin`, or a user-writable file re-opens the hole.
+/// Who can write the layer a policy value came from: `Admin` restrictions accept
+/// only admin-owned exception grants; `User` restrictions accept any. A user-writable
+/// grant that satisfied an admin lockdown would let the restricted user lift it themselves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PolicyLayerOwnership {
     Admin,
     User,
+}
+
+impl PolicyLayerOwnership {
+    /// Whether a restriction owned by `self` accepts an exception grant owned by `grant`.
+    pub fn accepts_grant_from(self, grant: PolicyLayerOwnership) -> bool {
+        self == PolicyLayerOwnership::User || grant == PolicyLayerOwnership::Admin
+    }
 }

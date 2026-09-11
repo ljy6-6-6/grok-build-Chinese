@@ -34,8 +34,8 @@ impl VoiceAuthProvider for AuthManagerVoiceAuth {
 /// Build the voice bearer provider from the connection's `AuthManager`.
 ///
 /// Works for every auth method: OAuth / grok.com / OIDC session tokens and `XAI_API_KEY` / per-model BYOK keys.
-pub fn build_voice_auth(auth_manager: Arc<xai_grok_shell::auth::AuthManager>) -> SharedVoiceAuth {
+pub fn build_voice_auth(auth_manager: Arc<xai_grok_login::AuthManager>) -> SharedVoiceAuth {
     Arc::new(AuthManagerVoiceAuth(
-        xai_grok_shell::auth::shared_api_key_provider(auth_manager),
+        xai_grok_login::shared_api_key_provider(auth_manager),
     ))
 }

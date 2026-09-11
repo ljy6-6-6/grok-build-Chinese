@@ -5,7 +5,7 @@
 //! Sorts by the same key the picker UI displays (`last_active_at` falling back to `updated_at`) descending.
 
 use std::cmp::Reverse;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
@@ -257,7 +257,6 @@ pub(crate) async fn fetch_lanes(
     }
 }
 
-/// Local entries are inserted first so remote entries win on collision (same session_id).
 /// Local results are optionally filtered by `query` (case-insensitive substring on summary, display title, and session ID).
 /// Remote results are filtered by normalized repo URL when `local_repo_urls` is non-empty.
 /// Results are sorted by [`effective_sort_time`] descending and truncated to `limit`.
@@ -394,28 +393,25 @@ fn effective_sort_time(s: &MergedSession) -> Option<chrono::DateTime<chrono::Fix
         .or_else(|| chrono::DateTime::parse_from_rfc3339(&s.updated_at).ok())
 }
 
-/// For each cwd, keep only the most recent session with 0 messages.
-/// Relies on the caller having already sorted newest-first (see `merge`).
+/// Drop unused optimistic-home husks (TUI open, never sent). Named empties
+/// (`/rename` before send) and explicit worktree/fork sessions stay visible.
 fn dedup_empty_sessions(sessions: &mut Vec<MergedSession>) {
-    let mut seen_empty_cwds: HashSet<String> = HashSet::new();
-    sessions.retain(|s| {
-        if s.num_messages == 0 {
-            let key = normalize_cwd(&s.cwd);
-            seen_empty_cwds.insert(key)
-        } else {
-            true
-        }
-    });
+    sessions.retain(|s| !is_unnamed_empty_session(s));
 }
 
-/// Normalize a cwd string for dedup comparison.
-fn normalize_cwd(cwd: &str) -> String {
-    let trimmed = cwd.trim_end_matches('/');
-    if trimmed.is_empty() {
-        "/".to_owned()
-    } else {
-        trimmed.replace("/./", "/")
+fn is_unnamed_empty_session(s: &MergedSession) -> bool {
+    // Remote-only rows can have stale zero counts; only drop local husks.
+    if s.source == "remote" || s.source == "both" {
+        return false;
     }
+    if matches!(s.session_kind.as_deref(), Some("worktree" | "fork"))
+        || s.worktree_label
+            .as_deref()
+            .is_some_and(|label| !label.is_empty())
+    {
+        return false;
+    }
+    s.num_messages == 0 && s.summary.trim().is_empty()
 }
 
 /// Convert a `MergedSession` to a `SessionRecord` for CLI display compatibility.
@@ -454,6 +450,8 @@ mod tests {
                 id: acp::SessionId::new(id),
                 cwd: "/test".into(),
             },
+            agent_id: None,
+            attempt_id: None,
             cwd_generation: 0,
             previous_cwd: None,
             pending_cwd_switch_reminder: None,
@@ -1360,37 +1358,59 @@ mod tests {
     }
 
     #[test]
-    fn dedup_empty_same_cwd_keeps_newest() {
+    fn dedup_empty_drops_unnamed_empty_sessions() {
         let mut sessions = vec![
             make_merged("newest", "/repo", "2026-04-01T00:00:00Z", 0),
             make_merged("middle", "/repo", "2026-03-01T00:00:00Z", 0),
             make_merged("oldest", "/repo", "2026-02-01T00:00:00Z", 0),
         ];
         dedup_empty_sessions(&mut sessions);
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].session_id, "newest");
+        assert!(sessions.is_empty());
     }
 
     #[test]
-    fn dedup_empty_preserves_nonempty_same_cwd() {
+    fn dedup_empty_preserves_nonempty_and_drops_unnamed_empty() {
         let mut sessions = vec![
             make_merged("nonempty", "/repo", "2026-04-01T00:00:00Z", 5),
             make_merged("empty", "/repo", "2026-03-01T00:00:00Z", 0),
         ];
         dedup_empty_sessions(&mut sessions);
-        assert_eq!(sessions.len(), 2);
-        assert!(sessions.iter().any(|s| s.session_id == "nonempty"));
-        assert!(sessions.iter().any(|s| s.session_id == "empty"));
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "nonempty");
     }
 
     #[test]
-    fn dedup_empty_different_cwds_keeps_both() {
+    fn dedup_empty_keeps_unnamed_empty_worktree() {
+        let mut wt = make_merged("wt", "/repo", "2026-04-01T00:00:00Z", 0);
+        wt.session_kind = Some("worktree".into());
+        wt.worktree_label = Some("fix-bug".into());
+        let mut sessions = vec![wt, make_merged("home", "/repo", "2026-03-01T00:00:00Z", 0)];
+        dedup_empty_sessions(&mut sessions);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "wt");
+    }
+
+    #[test]
+    fn dedup_empty_keeps_named_empty_session() {
+        let mut named = make_merged("renamed", "/repo", "2026-04-01T00:00:00Z", 0);
+        named.summary = "my title".into();
+        let mut sessions = vec![
+            named,
+            make_merged("blank", "/repo", "2026-03-01T00:00:00Z", 0),
+        ];
+        dedup_empty_sessions(&mut sessions);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "renamed");
+    }
+
+    #[test]
+    fn dedup_empty_different_cwds_drops_unnamed() {
         let mut sessions = vec![
             make_merged("e1", "/repo-a", "2026-04-01T00:00:00Z", 0),
             make_merged("e2", "/repo-b", "2026-03-01T00:00:00Z", 0),
         ];
         dedup_empty_sessions(&mut sessions);
-        assert_eq!(sessions.len(), 2);
+        assert!(sessions.is_empty());
     }
 
     #[test]
@@ -1401,29 +1421,24 @@ mod tests {
     }
 
     #[test]
-    fn dedup_empty_multi_cwd_mixed() {
-        // 2 cwds, each with 2 empty and 1 non-empty session
+    fn dedup_empty_multi_cwd_keeps_only_nonempty() {
         let mut sessions = vec![
-            // /repo-a: non-empty (newest), empty, empty
             make_merged("a-nonempty", "/repo-a", "2026-04-03T00:00:00Z", 3),
             make_merged("a-empty1", "/repo-a", "2026-04-02T00:00:00Z", 0),
             make_merged("a-empty2", "/repo-a", "2026-04-01T00:00:00Z", 0),
-            // /repo-b: empty (newest), non-empty, empty
             make_merged("b-empty1", "/repo-b", "2026-03-03T00:00:00Z", 0),
             make_merged("b-nonempty", "/repo-b", "2026-03-02T00:00:00Z", 7),
             make_merged("b-empty2", "/repo-b", "2026-03-01T00:00:00Z", 0),
         ];
         dedup_empty_sessions(&mut sessions);
-        // Non-empty sessions always survive.
         assert!(sessions.iter().any(|s| s.session_id == "a-nonempty"));
         assert!(sessions.iter().any(|s| s.session_id == "b-nonempty"));
-        // Exactly 1 empty per cwd survives (the first/newest one).
-        assert!(sessions.iter().any(|s| s.session_id == "a-empty1"));
-        assert!(sessions.iter().any(|s| s.session_id == "b-empty1"));
-        // The older duplicate empties are removed.
-        assert!(!sessions.iter().any(|s| s.session_id == "a-empty2"));
-        assert!(!sessions.iter().any(|s| s.session_id == "b-empty2"));
-        assert_eq!(sessions.len(), 4);
+        assert!(
+            !sessions
+                .iter()
+                .any(|s| s.session_id.ends_with("empty1") || s.session_id.ends_with("empty2"))
+        );
+        assert_eq!(sessions.len(), 2);
     }
 
     // ── limit applied after merge tests ─────────────────────────────────

@@ -193,10 +193,7 @@ async fn run() -> Result<()> {
     Ok(())
 }
 
-/// Type `command` (a `! `-prefixed shell command) and submit it.
-///
-/// The bash-mode label is the synchronization point at both ends: it proves the leading `!` put the composer in shell mode.
-/// Its disappearance proves the send consumed the composer.
+/// The bash-mode label proves the leading `!` entered shell mode; its disappearance proves the send consumed the composer.
 fn send_shell_command(pager: &mut PtyHarness, command: &str) -> Result<()> {
     pager
         .inject_keys(command.as_bytes())

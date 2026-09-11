@@ -59,6 +59,7 @@ impl Drop for KillOnDrop {
     }
 }
 
-#[cfg(test)]
+// The fixtures spawn `sleep` and probe `/proc`.
+#[cfg(all(test, unix))]
 #[path = "kill_on_drop_tests.rs"]
 mod tests;

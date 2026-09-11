@@ -71,10 +71,6 @@ pub(crate) fn queries_meeting_session_end_threshold(
 }
 
 /// Run the session end hook: save a structured metadata summary to memory.
-///
-/// This is called from the `SessionCommand::Shutdown` handler and the channel-closed path.
-/// It is best-effort: errors are logged but do not prevent shutdown.
-///
 /// Returns the path written (if any) for logging purposes.
 pub fn on_session_end(
     storage: &MemoryStorage,
@@ -530,7 +526,6 @@ mod tests {
 
     /// The *actual* AUTO_CONTINUE_PROMPT text pushed into the conversation after auto-compaction must not be counted as a real user message.
     /// It must not appear in session-end topics either.
-    ///
     /// The gate matches the real stored text, not just the `"__auto_continue__"` request-id sentinel.
     #[test]
     fn test_actual_auto_continue_prompt_excluded() {

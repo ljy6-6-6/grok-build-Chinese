@@ -14,11 +14,8 @@ use serde::{Deserialize, Serialize};
 // Enums
 // ---------------------------------------------------------------------------
 
-/// Plugin scope.
-///
-/// Maps from `PluginScope` in `xai-grok-agent`. Variant renames:
-/// - source `CliOverride` -> DTO `Cli` (matches Display output "cli")
-/// - source `ConfigPath` -> DTO `Config` (matches Display output "config")
+/// Maps from `PluginScope` in `xai-grok-agent`. Variant renames: source `CliOverride` -> DTO `Cli` (matches Display
+/// output "cli"); source `ConfigPath` -> DTO `Config` (matches Display output "config").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginScope {
@@ -28,10 +25,8 @@ pub enum PluginScope {
     Config,
 }
 
-/// The concrete discovery source a plugin came from.
-///
-/// Maps from `PluginOrigin` in `xai-grok-agent`. Optional on [`PluginInfo`]
-/// so older shells (which don't send it) deserialize to `None`.
+/// The concrete discovery source a plugin came from. Maps from `PluginOrigin` in `xai-grok-agent`. Optional on
+/// [`PluginInfo`] so older shells (which don't send it) deserialize to `None`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PluginOrigin {
@@ -74,11 +69,8 @@ pub enum PluginOrigin {
     Unknown,
 }
 
-/// Hook event type.
-///
-/// Maps from `HookEventName` in `xai-grok-hooks`. The source type's
-/// `SubagentEnd` variant (backward-compat alias) is collapsed into
-/// `SubagentStop` during conversion.
+/// Maps from `HookEventName` in `xai-grok-hooks`. The source type's `SubagentEnd` variant (backward-compat alias) is
+/// collapsed into `SubagentStop` during conversion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HookEvent {
@@ -249,11 +241,9 @@ pub struct HookInfo {
     /// state up front rather than let a refusal be the first signal.
     #[serde(default)]
     pub pinned: bool,
-    /// Whether `HooksAction::Remove` can succeed for this hook's source:
-    /// true only for user-registered hook directories without a
-    /// managed-policy member (removal targets the whole `source_dir`, and a
-    /// pinned member makes it refused), so surfaces don't offer removal
-    /// elsewhere.
+    /// Whether `HooksAction::Remove` can succeed for this hook's source: true only for user-registered hook directories
+    /// without a managed-policy member (removal targets the whole `source_dir`, and a pinned member makes it refused), so
+    /// surfaces don't offer removal elsewhere.
     #[serde(default)]
     pub removable: bool,
 }
@@ -454,12 +444,9 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
     }
 }
 
-/// Full inventory of a plugin's components, sourced from a marketplace
-/// catalog (`plugin-index.json`).
-///
-/// Serde deserialization bypasses [`ComponentItem::new`], so values are not
-/// sanitized by construction: every consumer that renders catalog-derived
-/// data to a terminal must call [`Self::sanitize`] at its ingestion point.
+/// Full inventory of a plugin's components, sourced from a marketplace catalog (`plugin-index.json`). Serde
+/// deserialization bypasses [`ComponentItem::new`], so values are not sanitized by construction: every consumer that
+/// renders catalog-derived data to a terminal must call [`Self::sanitize`] at its ingestion point.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginComponents {

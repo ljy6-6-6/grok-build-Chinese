@@ -257,10 +257,9 @@ impl super::LspBackend for LspBackendAdapter {
             }
         }
 
-        // Wait briefly after opening files. This is the native-LSP analogue of
-        // the IDE wait between TrackModel and the second diagnostics call:
-        // opening/tracking a file starts analysis, while diagnostics arrive
-        // later through publishDiagnostics.
+        // Wait briefly after opening files. This is the native-LSP analogue of the IDE wait between
+        // TrackModel and the second diagnostics call: opening/tracking a file starts analysis,
+        // while diagnostics arrive later through publishDiagnostics.
         let notify = {
             let mgr = self.lsp_manager.lock().await;
             mgr.diagnostics_ready.clone()

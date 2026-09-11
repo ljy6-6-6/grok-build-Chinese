@@ -9,6 +9,13 @@ use crate::app::dispatch::task_result::unregister_session_effect;
 use crate::scrollback::block::RenderBlock;
 /// Removes the agent and clears `forked_from` pointers to it on surviving agents.
 pub(in crate::app::dispatch) fn remove_agent_and_cleanup(app: &mut AppView, agent_id: AgentId) {
+    let identity_rebind = super::super::dashboard::WorkspaceIdentityRebind::capture(app);
+    if let Some(dashboard) = app.dashboard.as_mut() {
+        dashboard.prepare_agent_unbind(
+            &std::collections::HashSet::from([agent_id]),
+            &mut app.agents,
+        );
+    }
     let removed = app.agents.shift_remove(&agent_id);
     for agent in app.agents.values_mut() {
         if agent.session.forked_from == Some(agent_id) {
@@ -19,17 +26,11 @@ pub(in crate::app::dispatch) fn remove_agent_and_cleanup(app: &mut AppView, agen
         drop(removed);
         crate::memory_release::release_retained_memory("agent-close");
     }
+    identity_rebind.apply(app);
 }
 /// Close (drop from this pager's in-memory list) the given agent.
-///
-/// Order matters:
-/// 1. Refuse to close the only alive agent (toast "Cannot close the only session -- use /home to exit").
-///    The user has nothing to fall back to inside the agent shell.
-/// 2. If the closed agent is currently active, switch first to a surviving peer using `SwitchCause::Picker`.
-///    The peer is the parent via `forked_from` if alive, else the first surviving entry.
-///    If no peer survives, fall back to Welcome; case 1 already prevents that, so this is a safety net.
-/// 3. Drop the agent from `app.agents`; `shift_remove` preserves insertion order on every other entry.
-///    Clear `forked_from` references on surviving agents so dangling parent pointers cannot resurface.
+/// Refuse to close the only alive agent (toast "Cannot close the only session -- use /home to exit").
+/// Clear `forked_from` references on surviving agents so dangling parent pointers cannot resurface.
 pub(in crate::app::dispatch) fn dispatch_sessions_confirm_close(
     app: &mut AppView,
     closed_id: AgentId,
@@ -67,7 +68,6 @@ pub(in crate::app::dispatch) fn dispatch_sessions_confirm_close(
     effects
 }
 /// Rename the current session via x.ai/session/rename.
-///
 /// Produces Effect::RenameSession which spawns an async ACP ext request.
 /// On completion, TaskResult::RenameSessionComplete shows the result.
 pub(in crate::app::dispatch) fn dispatch_rename_session(

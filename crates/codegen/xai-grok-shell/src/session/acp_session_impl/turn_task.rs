@@ -67,6 +67,7 @@ pub(crate) struct TurnInputRequest {
     pub(crate) persist_ack: Option<oneshot::Sender<()>>,
     pub(crate) parsed_prompt_tx: Option<oneshot::Sender<ParsedPromptInfo>>,
     pub(crate) traceparent: Option<String>,
+    pub(crate) start_gate: Option<oneshot::Receiver<()>>,
 }
 
 /// Pointer-identity token minted per task spawn: `Rc::ptr_eq` tells spawns
@@ -382,6 +383,12 @@ impl AgentTask {
         completion_tx: mpsc::UnboundedSender<TurnCompletionMsg>,
     ) -> Self {
         let started_at = std::time::Instant::now();
+        // Open the turn here, not in the spawned future: a cancel that wins the finalization
+        // lease before the future first runs must still snapshot this turn's number and this
+        // request's mode (the future resolves the final mode once it runs).
+        session.signals_handle().increment_turn();
+        *session.turn_start_prompt_mode.lock() = request.prompt_mode;
+        *session.turn_prompt_mode.lock() = request.prompt_mode;
         let identity = TaskIdentity::new(());
         Self {
             prompt_id: request.prompt_id.clone(),
@@ -442,6 +449,36 @@ impl<T> TaskSlot<T> {
     }
 }
 
+/// The background prefix build plus the wait it was started with, so the consumer sizes its budget from what the task is actually doing.
+pub(crate) struct DeferredPrefix {
+    task: TaskSlot<String>,
+    full_mcp_wait: std::cell::Cell<bool>,
+}
+
+impl DeferredPrefix {
+    pub(crate) fn new() -> Self {
+        Self {
+            task: TaskSlot::new(),
+            full_mcp_wait: std::cell::Cell::new(false),
+        }
+    }
+
+    pub(crate) fn arm(&self, handle: tokio::task::JoinHandle<String>, full_mcp_wait: bool) {
+        self.full_mcp_wait.set(full_mcp_wait);
+        self.task.arm(handle);
+    }
+
+    /// The pending build and whether it holds the full MCP wait.
+    pub(crate) fn take(&self) -> Option<(tokio::task::JoinHandle<String>, bool)> {
+        let handle = self.task.take()?;
+        Some((handle, self.full_mcp_wait.get()))
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.task.cancel();
+    }
+}
+
 async fn run_task(
     session: Arc<SessionActor>,
     request: TurnInputRequest,
@@ -450,8 +487,23 @@ async fn run_task(
     completion_tx: mpsc::UnboundedSender<TurnCompletionMsg>,
     started_at: std::time::Instant,
 ) {
+    let mut request = request;
     let prompt_id = request.prompt_id.clone();
-    let result = session.handle_turn_input(request).await;
+    let result = if let Some(start_gate) = request.start_gate.take()
+        && start_gate.await.is_err()
+    {
+        Ok(PromptTurnOk {
+            stop_reason: acp::StopReason::Cancelled,
+            total_tokens: 0,
+            turn_snapshot: None,
+            completion_kind: PromptCompletionKind::RemovedFromQueue,
+            structured_output: None,
+            usage: None,
+            tool_overrides: None,
+        })
+    } else {
+        session.handle_turn_input(request).await
+    };
     let elapsed_ms = elapsed_ms_saturating(started_at, std::time::Instant::now());
     let _ = completion_tx.send(TurnCompletionMsg {
         prompt_id,
@@ -462,6 +514,96 @@ async fn run_task(
         #[cfg(test)]
         processed: None,
     });
+}
+
+#[cfg(test)]
+mod start_gate_tests {
+    use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn closed_start_gate_leaves_prior_transcript_byte_identical() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let transcript = tempfile::NamedTempFile::new().expect("transcript");
+                std::fs::write(transcript.path(), b"prior transcript\n").expect("seed transcript");
+                let prior = std::fs::read(transcript.path()).expect("read prior transcript");
+                let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (persistence_tx, mut persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (actor, _) = super::super::support::create_test_actor_with_chat_persistence(
+                    0,
+                    256_000,
+                    85,
+                    gateway_tx,
+                    persistence_tx.clone(),
+                    Box::new(
+                        crate::session::chat_persistence::ChannelChatPersistence::new(
+                            persistence_tx,
+                        ),
+                    ),
+                )
+                .await;
+                let transcript_path = transcript.path().to_path_buf();
+                let persistence_drain = tokio::task::spawn_local(async move {
+                    while let Some(message) = persistence_rx.recv().await {
+                        if let PersistenceMsg::Chat(item) = message {
+                            use std::io::Write as _;
+                            let mut file = std::fs::OpenOptions::new()
+                                .append(true)
+                                .open(&transcript_path)
+                                .expect("open transcript");
+                            serde_json::to_writer(&mut file, &item).expect("serialize chat item");
+                            file.write_all(b"\n").expect("append chat item");
+                        }
+                    }
+                });
+                let (start_release, start_gate) = oneshot::channel();
+                drop(start_release);
+                let (completion_tx, mut completion_rx) = mpsc::unbounded_channel();
+                run_task(
+                    Arc::new(actor),
+                    TurnInputRequest {
+                        prompt_id: "rejected-wake".to_owned(),
+                        input_origin: InputOrigin::new(PromptOrigin::User),
+                        prompt_blocks: vec![ContentBlock::Text(acp::TextContent::new(
+                            "must not persist",
+                        ))],
+                        prompt_mode: PromptMode::Agent,
+                        trace_gcs_config: None,
+                        artifact_tracker: None,
+                        client_identifier: None,
+                        screen_mode: None,
+                        verbatim: true,
+                        send_now: false,
+                        json_schema: None,
+                        persist_ack: None,
+                        parsed_prompt_tx: None,
+                        traceparent: None,
+                        start_gate: Some(start_gate),
+                    },
+                    TurnEpoch::default(),
+                    TaskIdentity::new(()),
+                    completion_tx,
+                    std::time::Instant::now(),
+                )
+                .await;
+                let completion = completion_rx.recv().await.expect("turn completion");
+                assert!(matches!(
+                    completion.result,
+                    Ok(PromptTurnOk {
+                        completion_kind: PromptCompletionKind::RemovedFromQueue,
+                        ..
+                    })
+                ));
+                tokio::task::yield_now().await;
+                assert_eq!(
+                    std::fs::read(transcript.path()).expect("read transcript after rejection"),
+                    prior
+                );
+                persistence_drain.abort();
+            })
+            .await;
+    }
 }
 
 #[cfg(test)]

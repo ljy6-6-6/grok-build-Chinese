@@ -63,6 +63,7 @@ pub(super) fn session_load_agent_id(result: &TaskResult) -> Option<AgentId> {
     match result {
         TaskResult::SessionLoaded { agent_id, .. }
         | TaskResult::SessionLoadFailed { agent_id, .. } => Some(*agent_id),
+        TaskResult::WithPinnedMemoryMode { result, .. } => session_load_agent_id(result),
         _ => None,
     }
 }
@@ -71,6 +72,7 @@ fn session_load_session_id(result: &TaskResult) -> Option<&acp::SessionId> {
     match result {
         TaskResult::SessionLoaded { session_id, .. }
         | TaskResult::SessionLoadFailed { session_id, .. } => Some(session_id),
+        TaskResult::WithPinnedMemoryMode { result, .. } => session_load_session_id(result),
         _ => None,
     }
 }
@@ -322,7 +324,14 @@ mod tests {
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
-            scheduler_background_loops: None,
+        }
+    }
+
+    fn loaded_with_memory_mode(id: usize, session: &str) -> TaskResult {
+        TaskResult::WithPinnedMemoryMode {
+            agent_id: AgentId(id),
+            memory_mode: Some(xai_grok_shell::config::MemoryMode::V2),
+            result: Box::new(loaded(id, session)),
         }
     }
 
@@ -548,6 +557,22 @@ mod tests {
         );
         let ready = barrier.take_ready(|_| true, draining(None, now));
         assert_eq!(ready.len(), 1);
+    }
+
+    #[test]
+    fn pinned_memory_metadata_preserves_the_session_load_barrier() {
+        let result = loaded_with_memory_mode(1, "s");
+        let replay = session_notif("s", true);
+
+        assert_eq!(session_load_agent_id(&result), Some(AgentId(1)));
+        assert!(result.ends_startup());
+        let backlog = backlog_for_result(&result, Some(&replay));
+        assert_eq!(backlog, AcpLoadBacklog::ReplayHead);
+        assert!(should_defer_session_load(
+            &result,
+            true,
+            defer_state(backlog, AcpDrainArm::CanDrain, Duration::ZERO),
+        ));
     }
 
     #[test]

@@ -74,13 +74,9 @@ fn register_local_install(registry: &mut InstallRegistry, source: &Path) -> Inst
     repo
 }
 
-/// Library-level e2e in a sandboxed tmp dir (always runs, no external binary).
-///
-/// Proves the reported symptom is fixed: an agent added to the live source after install shows up in discovery without a reinstall.
-/// The test drives the real session-spawn path, `refresh_and_build_for_cwd`, which refreshes before building.
-/// The `/agents` dashboard reads the same `all_subagents_with_plugins` list.
-/// RAII: set an env var, restore the prior value (or unset) on drop, so a test never leaves process-global env pointing at a dropped tempdir.
-/// This is a local copy: each test holds two guards at once, and the canonical lock-holding guard deadlocks when nested.
+/// Library-level e2e in a sandboxed tmp dir (always runs, no external binary). Proves the reported symptom is fixed: an agent added to the live source after install shows up in discovery without a reinstall.
+/// The test drives the real session-spawn path, `refresh_and_build_for_cwd`, which refreshes before building. The `/agents` dashboard reads the same `all_subagents_with_plugins` list.
+/// RAII: set an env var, restore the prior value (or unset) on drop, so a test never leaves process-global env pointing at a dropped tempdir. This is a local copy: each test holds two guards at once, and the canonical lock-holding guard deadlocks when nested.
 struct EnvVarGuard {
     key: &'static str,
     prev: Option<std::ffi::OsString>,

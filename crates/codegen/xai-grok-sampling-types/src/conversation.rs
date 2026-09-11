@@ -74,19 +74,11 @@ pub enum ConversationItem {
     Assistant(AssistantItem),
     /// Tool/function result
     ToolResult(ToolResultItem),
-    /// A tool call executed server-side by the backend agentic sampler (e.g. web search, X search, code interpreter).
+    /// A tool call executed server-side by the backend agentic sampler.
     /// The client does not execute these; the server already ran them and fed results into the model's context.
-    /// Stored so they can be:
-    /// 1. Persisted to chat_history.jsonl for session replay/fork
-    /// 2. Sent back to the Responses API as input items for context continuity
-    /// 3. Rendered by the pager (search queries, sources, etc.)
+    /// Persisted to chat_history.jsonl for session replay/fork; Sent back to the Responses API as input items for context continuity; Rendered by the pager (search queries, sources, etc.).
     BackendToolCall(BackendToolCallItem),
-    /// A reasoning item from the Responses API, stored as a sibling of the assistant message so that:
-    ///
-    /// 1. N parallel `tco_*` reasoning items (one per backend tool call) round-trip losslessly without last-write-wins clobbering.
-    /// 2. The interleaved order of `[reasoning, tool_call, reasoning, ..., message]` produced by the model stays byte-stable across turns.
-    ///    That stability is what lets the server-side prefix KV-cache hit.
-    ///
+    /// A reasoning item from the Responses API, stored as a sibling of the assistant message so that: N parallel `tco_*` reasoning items (one per backend tool call) round-trip losslessly without last-write-wins clobbering; The interleaved order of `[reasoning, tool_call, reasoning, ..., message]` produced by the model stays byte-stable across turns. That stability is what lets the server-side prefix KV-cache hit.
     /// Wraps `rs::ReasoningItem` directly so no field is dropped on the way through.
     Reasoning(rs::ReasoningItem),
 }
@@ -99,9 +91,6 @@ pub struct SystemItem {
 
 /// Reason why a `UserItem` was synthesized by the runtime rather than typed by a real user.
 /// Stored so downstream code (pruning, replay, analytics) can tell synthetic injections from real input without parsing message text.
-///
-/// Serialized as a lowercase string (e.g. `"auto_continue"`).
-/// Unknown variants (from future clients or removed historical tags such as `"doom_loop_warning"`) deserialize as [`SyntheticReason::Unknown`].
 /// Old clients can then still read sessions written by newer versions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -159,12 +148,6 @@ pub enum SyntheticReason {
 impl SyntheticReason {
     /// Whether a user item with this reason **starts a prompt turn**, meaning the turn pipeline pushed it while consuming a `prompt_index` slot.
     /// That covers auto-wake and other server-initiated turns, as opposed to a mid-turn injection that never incremented the index.
-    ///
-    /// Used by [`conversation_truncate_for_prompt`]'s counting fallback for items persisted before [`UserItem::prompt_index`] existed.
-    /// The match is exhaustive so adding a variant forces an explicit decision here.
-    ///
-    /// `GoalSummary` is deliberately `false`.
-    /// The same reason tags both the legacy goal-continuation *turn* (index-consuming) and the in-turn goal directive (mid-turn).
     /// Unknown future reasons fail safe as boundaries so older readers cannot merge a newer conversational origin into a prior turn.
     pub fn starts_prompt_turn(&self) -> bool {
         match self {
@@ -191,15 +174,7 @@ impl SyntheticReason {
 
 /// How the user *fatally* interrupted (cancelled) the turn immediately preceding this *real* user message.
 /// Set only on genuine user messages (`synthetic_reason == None`) that directly follow a cancelled turn.
-/// Downstream code (replay, analytics, the model itself) can then see that the user redirected after stopping work without parsing message text.
-///
-/// Reserved for the *fatal* user-interrupt causes that end the turn: `mid_turn_abort` (ESC / Ctrl+C), `permission_rejected`, `permission_cancelled`.
-/// A mid-turn *interjection* is deliberately not represented here; it does not cancel the turn.
-/// It is captured on its own message via [`SyntheticReason::Interjection`] (and the `interjected` telemetry event).
 /// Automatic terminations (hook-denied, max-turns) are not user interrupts and never set this.
-///
-/// Serialized as a lowercase string.
-/// Unknown variants from future writers deserialize as [`PriorTurnInterrupt::Unknown`] for forward compatibility.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PriorTurnInterrupt {
@@ -220,7 +195,6 @@ pub struct UserItem {
     pub content: Vec<ContentPart>,
     /// Set when this item was synthesized by the runtime rather than typed by a real user.
     /// `None` for all genuine user messages.
-    ///
     /// Uses `skip_serializing_if` so old JSONL sessions that lack this field deserialize correctly (`serde(default)` fills in `None`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub synthetic_reason: Option<SyntheticReason>,
@@ -234,26 +208,14 @@ pub struct UserItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prior_turn_interrupt: Option<PriorTurnInterrupt>,
     /// Prompt-turn index this user item started, recorded at push time.
-    /// Same coordinate space as the session's `prompt_index` / rewind targets and the `promptIndex` meta on `UserMessageChunk` updates.
-    /// Every `handle_prompt` turn counts, synthetic-origin turns included.
-    ///
     /// `None` for items that do not start a turn and for items persisted before this field existed.
-    /// That covers the `<user_info>` preamble, mid-turn synthetic injections, and freshly rebuilt compaction messages.
-    /// Tail messages cloned into a compacted history keep their markers.
-    /// Rewind truncation prefers a present value over counting ([`conversation_truncate_for_prompt`]).
-    ///
-    /// Caveat: session resume recounts `prompt_index` from `updates.jsonl`.
     /// The recount can drift from this coordinate (interjection echoes, image-only prompts).
-    /// Markers stamped before and after a restart may disagree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_index: Option<usize>,
 }
 
 /// Assistant response with tool calls.
-///
 /// Reasoning items, when present, sit beside this item as `ConversationItem::Reasoning(_)` siblings preceding the assistant turn, not bundled here.
-/// That keeps N parallel reasoning items (`tco_*` blobs from parallel backend tool calls) lossless.
-/// It also preserves the interleaved order the model emits.
 /// Old sessions on disk may still carry a `reasoning` field; serde silently ignores it on read (no `deny_unknown_fields`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssistantItem {
@@ -549,8 +511,7 @@ impl From<ToolDefinition> for ToolSpec {
 // ============================================================================
 
 /// What the sampler does with a completed response whose stop reason is `Length` (max_tokens truncation).
-///
-/// `Length` can arrive far below any client budget (e.g. an engine-side window clamp after a runaway generation).
+/// `Length` can arrive far below any client budget.
 /// Callers that can use partial text opt into `CompletePartial`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum LengthPolicy {
@@ -558,7 +519,6 @@ pub enum LengthPolicy {
     Fail,
     /// Complete a response whose tool calls all carry complete arguments; text-only and empty `Length` still fail.
     /// `Length` is usually context exhaustion (the output budget is the window minus the prompt), so retrying cannot succeed.
-    /// Executing the calls advances the turn toward compaction.
     /// The default: a caller that does not choose gets its tool calls run and its text-only truncation failed.
     #[default]
     CompleteToolCalls,
@@ -581,14 +541,7 @@ pub enum LengthVerdict {
 
 impl LengthPolicy {
     /// The fail-vs-salvage decision for a completed response, including the `Length` stop-reason check.
-    /// Pure; the sampler's `apply_length_policy` wraps it with the error mapping and salvage breadcrumb.
-    /// That keeps the actor path (`drive_l2`) and the direct-collect path from diverging.
-    ///
-    /// Tool calls salvage under every policy except `Fail`, but only with complete arguments.
     /// The xAI server never emits a completed `tool_calls` entry for a truncated call.
-    /// The JSON check guards providers that close a block they cut mid-arguments.
-    /// Empty Length fails regardless of policy (the outcome is deterministic under a fixed cap; the Empty resample family would retry endlessly).
-    /// In practice the tool-call arm guards the Messages backend only.
     /// ChatCompletions and Responses rewrite Length-with-tools to `ToolCalls` at the stream layer, so those never reach it.
     pub fn verdict(self, response: &ConversationResponse) -> LengthVerdict {
         if response.stop_reason != Some(StopReason::Length) {
@@ -672,11 +625,7 @@ impl ConversationRequest {
 }
 
 /// Strip only `urls`.
-/// Unlisted images (compaction, newer turns) stay.
-/// Returns the number of stripped occurrences (one per replaced part, so a URL stored twice counts twice).
-///
 /// Invariant: replaces parts in place, never adds or removes a `ConversationItem` (the `&mut [_]` signature cannot resize).
-/// Chat-state relies on this to skip turn-capture rebasing.
 pub fn strip_images_by_url(items: &mut [ConversationItem], urls: &[Arc<str>]) -> usize {
     strip_images_where(items, |url| urls.iter().any(|u| u.as_ref() == url)).len()
 }
@@ -746,8 +695,11 @@ pub enum ConversationToolChoice {
 // ============================================================================
 
 /// Why the model stopped generating.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::AsRefStr, strum::IntoStaticStr,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum StopReason {
     /// Model finished naturally
     Stop,
@@ -758,19 +710,6 @@ pub enum StopReason {
     /// Content was filtered
     ContentFilter,
 }
-
-impl StopReason {
-    /// Stable lowercase string matching the `#[serde(rename_all = "snake_case")]` output.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            StopReason::Stop => "stop",
-            StopReason::Length => "length",
-            StopReason::ToolCalls => "tool_calls",
-            StopReason::ContentFilter => "content_filter",
-        }
-    }
-}
-
 impl From<FinishReason> for StopReason {
     fn from(fr: FinishReason) -> Self {
         match fr {
@@ -831,10 +770,6 @@ impl From<Usage> for TokenUsage {
 }
 
 /// Response from a conversation turn.
-///
-/// `items` is a flat ordered list mirroring the Responses API's `output: Vec<OutputItem>`.
-/// It interleaves `Reasoning`, `BackendToolCall`, and a single trailing `Assistant` item.
-/// The Assistant item carries the assistant text and any client-executable `FunctionCall`s as `tool_calls`.
 /// Helpers (`assistant()`, `empty_reason()`, etc.) treat the trailing Assistant as "the response message" for backwards-compatible call sites.
 #[derive(Debug, Clone)]
 pub struct ConversationResponse {
@@ -851,8 +786,7 @@ pub struct ConversationResponse {
     pub cost_usd_ticks: Option<i64>,
     /// Number of `AgentMessageChunk` (text-only) streaming events emitted during this response.
     /// Reasoning/thought chunks are **not** counted.
-    /// When this is zero but the response contains text, the streaming events were lost (e.g. after an empty-response retry).
-    /// The caller should then emit a fallback `AgentMessageChunk` so downstream consumers (e.g. the TUI) see the turn as complete.
+    /// The caller should then emit a fallback `AgentMessageChunk` so downstream consumers see the turn as complete.
     pub message_chunks_emitted: u64,
     /// Server-reported doom-loop triggers for this response (Responses API only, opt-in via the `x-grok-doom-loop-check` header).
     /// Empty when the check is disabled or nothing was reported; deduplicated by raw label.
@@ -864,11 +798,8 @@ pub struct ConversationResponse {
     pub stop_message: Option<String>,
     /// Provider message id (Messages `message.id`); `None` on backends that do not carry one (OAI Chat Completions / Responses).
     pub message_id: Option<String>,
-    /// Wire stop reason before it collapses into [`StopReason`]: verbatim on the Messages backend (e.g. `end_turn`, `tool_use`, `pause_turn`).
+    /// Wire stop reason before it collapses into [`StopReason`]: verbatim on the Messages backend.
     /// On the Responses backend only length cuts on tool-less turns are carried.
-    /// Those map from `incomplete_details.reason` to `max_tokens` (output cap) or `model_context_window_exceeded` (context window).
-    /// The Messages strings are reused for one client vocabulary, not backend parity.
-    /// The xAI Messages API reports a context cut as `max_tokens`, while the Responses mapping distinguishes it.
     /// `None` when unreported.
     pub raw_stop_reason: Option<String>,
     /// The provider's matched stop sequence (Messages API `message_delta.stop_sequence`).
@@ -878,7 +809,6 @@ pub struct ConversationResponse {
 }
 
 /// Normalize a wire cost-ticks value at capture.
-///
 /// The REST layer backfills `0` for unreported cost, and negative ticks are never valid, so both become `None` ("unreported", never "free").
 /// Every ingestion path must route through this before storing [`ConversationResponse::cost_usd_ticks`].
 pub fn reported_cost_ticks(raw: Option<i64>) -> Option<i64> {
@@ -992,7 +922,6 @@ impl ConversationItem {
     }
 
     /// Create a user message with text content.
-    ///
     /// `synthetic_reason` is `None`; this represents real user input.
     /// For synthetic injections, use a dedicated constructor such as [`ConversationItem::user_meta`] or [`ConversationItem::system_reminder`].
     pub fn user(content: impl Into<String>) -> Self {
@@ -1021,7 +950,6 @@ impl ConversationItem {
     }
 
     /// Create a synthetic user message for metadata injection.
-    ///
     /// Used by the compaction pipeline to inject file contents as plain-text user messages.
     /// Tagged with [`SyntheticReason::CompactionMeta`] so downstream code (pruning, compaction helpers) skips it.
     pub fn user_meta(content: impl Into<String>) -> Self {
@@ -1037,7 +965,6 @@ impl ConversationItem {
     }
 
     /// Create a synthetic user message for a runtime system reminder.
-    ///
     /// Used for injected `<system-reminder>` content such as skill discovery updates and plan-mode reminders.
     /// Tagged with [`SyntheticReason::SystemReminder`] so downstream code can skip it when counting real user prompts.
     pub fn system_reminder(content: impl Into<String>) -> Self {
@@ -1120,7 +1047,6 @@ impl ConversationItem {
     }
 
     /// Create a synthetic user message for an auto-continue prompt.
-    ///
     /// Used after compaction to tell the agent to keep working.
     /// Tagged with [`SyntheticReason::AutoContinue`] so it is not counted as a real user prompt by truncation / rewind logic.
     pub fn auto_continue(content: impl Into<String>) -> Self {
@@ -1136,7 +1062,6 @@ impl ConversationItem {
     }
 
     /// Create a synthetic user message for an auto-recovery retry prompt.
-    ///
     /// Used by the auto-recovery loop after a transient tool failure.
     /// Tagged with [`SyntheticReason::AutoRecovery`] so it is not counted as a real user prompt by truncation / rewind logic.
     pub fn auto_recovery(content: impl Into<String>) -> Self {
@@ -1152,9 +1077,6 @@ impl ConversationItem {
     }
 
     /// Create a synthetic user message for a mid-turn interjection.
-    ///
-    /// Used when the user sends text via Ctrl+Enter while the model is running.
-    /// Tagged with [`SyntheticReason::Interjection`].
     /// Compaction, replay, and analytics can then distinguish it from real prompts and other synthetic injections.
     pub fn interjection(content: impl Into<String>) -> Self {
         Self::User(UserItem {
@@ -1273,7 +1195,6 @@ impl ConversationItem {
     }
 
     /// Create an assistant message with a model ID.
-    ///
     /// Reasoning, when present, lives as a separate sibling `ConversationItem::Reasoning(_)` placed before this item.
     /// Callers should push that item to the conversation list separately.
     pub fn assistant_with_model(content: impl Into<String>, model_id: impl Into<String>) -> Self {
@@ -1364,19 +1285,8 @@ impl ConversationItem {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Shared-compaction L1 bridge: `CompactionItem` / `CompactionItemFactory`
-// for `ConversationItem`
-// ---------------------------------------------------------------------------
-//
 // Lets the shared engine in `crates/common/xai-grok-compaction` operate over grok-build's `ConversationItem` without depending on this crate
-// The orphan rule forces the impls to live here, next to the type
-// Mirrors the harness's `impl CompactionItem` for its own turn type
-//
-// `CompactionItem` is the read half (role/text/tool classification)
-// `CompactionItemFactory` is the write half
-// The full-replace assembler (`apply_full_replace_compaction` / `assemble_compacted_history`) uses it to rebuild the compacted history
-// Each factory constructor maps to the matching `ConversationItem` constructor
 // That preserves the `SyntheticReason` tags the replay / spawn-time idempotence guards rely on
 impl xai_grok_compaction::CompactionItem for ConversationItem {
     fn role(&self) -> xai_grok_compaction::CompactionRole {
@@ -1402,7 +1312,6 @@ impl xai_grok_compaction::CompactionItem for ConversationItem {
 
     fn is_compaction_summary(&self) -> bool {
         // grok-build has no structural marker that uniquely identifies a prior compaction summary
-        // The carrier is a `user_meta` item whose `SyntheticReason::CompactionMeta` is also used for re-injected file contents
         // Returning `false` is safe for the full-replace path, which does not consult this (it summarizes the whole conversation)
         // Revisit (add a dedicated marker) before routing grok-build history through the shared `history`/`inter` filter
         false
@@ -1435,12 +1344,7 @@ impl xai_grok_compaction::CompactionItemFactory for ConversationItem {
 }
 
 /// Extract human-readable text from a Responses-API reasoning item by joining its `summary` parts (in order) followed by its `content` blocks.
-/// Both fields are optional.
-/// Encrypted-only reasoning items (e.g. `tco_*` backend-tool blobs) return an empty string since their text is not user-visible.
-///
-/// Ordering contract: summary parts come first, then content blocks.
-/// Streaming consumers and the Anthropic `Thinking` emitter rely on
-/// this ordering to round-trip display text consistently.
+/// Encrypted-only reasoning items return an empty string since their text is not user-visible.
 pub fn reasoning_item_text(r: &rs::ReasoningItem) -> String {
     let mut parts: Vec<String> = Vec::new();
     for sp in &r.summary {
@@ -1457,12 +1361,8 @@ pub fn reasoning_item_text(r: &rs::ReasoningItem) -> String {
 }
 
 /// Construct an `rs::ReasoningItem` carrying a single `SummaryText` part.
-/// Every non-Responses-API streaming consumer (`stream/chat_completions`, `stream/messages`, `stream/responses` fallback) synthesizes this shape.
-/// They use it when adapting a non-typed reasoning string to the sibling-`Reasoning` data model.
-///
 /// `id` is left empty because none of the synthesizing paths carry a stable upstream id.
 /// `encrypted_content` is `None` because its only source is the Responses API itself.
-/// The Responses API hits the typed-`OutputItem::Reasoning` path, not this helper.
 pub fn synthesized_reasoning_item(text: impl Into<String>) -> rs::ReasoningItem {
     rs::ReasoningItem {
         id: String::new(),
@@ -1476,14 +1376,7 @@ pub fn synthesized_reasoning_item(text: impl Into<String>) -> rs::ReasoningItem 
 }
 
 /// Splice a streaming-fallback reasoning text into a `Vec<ConversationItem>` produced by `response_to_conversation_items`.
-///
-/// Called by `stream_responses` when reasoning deltas were observed mid-stream.
-/// The final non-streaming `Response` arrived without `content` / `summary` populated.
-/// Behavior:
-///
-/// - If any existing `Reasoning` sibling already carries text, leave `items` untouched (the deltas are redundant).
-/// - Otherwise, if there is a `Reasoning` sibling with no text, append a `SummaryText` part to it (avoids introducing a phantom sibling).
-/// - Otherwise, insert a new `Reasoning(synthesized_reasoning_item(text))` immediately before the trailing `Assistant`.
+/// If any existing `Reasoning` sibling already carries text, leave `items` untouched (the deltas are redundant); Otherwise, if there is a `Reasoning` sibling with no text, append a `SummaryText` part to it (avoids introducing a phantom sibling); Otherwise, insert a new `Reasoning(synthesized_reasoning_item(text))` immediately before the trailing `Assistant`.
 pub fn inject_streaming_reasoning_fallback(items: &mut Vec<ConversationItem>, text: String) {
     if text.is_empty() {
         return;
@@ -1520,38 +1413,8 @@ pub fn inject_streaming_reasoning_fallback(items: &mut Vec<ConversationItem>, te
 }
 
 /// Reconstruct sibling `Reasoning` and `BackendToolCall` items from a legacy chat-history row's raw JSON.
-///
-/// Legacy sessions stored reasoning inline on the assistant item (`AssistantItem.reasoning: Option<ReasoningContent>`).
-/// Earlier backend-search sessions stored it in `AssistantItem.raw_output: Option<Vec<serde_json::Value>>` instead.
-/// That is the full ordered Responses-API output list including N parallel `tco_*` blobs.
-/// In the current format those fields no longer exist on `AssistantItem`, so serde silently drops them on deserialize.
-/// This function recovers them as sibling `ConversationItem::Reasoning(_)` / `BackendToolCall(_)` items.
-/// Insert them immediately *before* the resulting assistant in the loaded conversation.
-/// That matches the order `response_to_conversation_items` would emit if the new binary had captured the original response.
-///
-/// Returns an empty `Vec` for non-assistant rows, already-current-format rows, and rows with no recoverable reasoning data.
-///
-/// ## Dedup with sibling `BackendToolCall` rows
-///
-/// `BackendToolCall` was already a sibling variant in legacy rows.
-/// The same web-search / x-search / code-interpreter call can appear *both* as a sibling line *and* inside the following assistant's `raw_output`.
-/// The caller threads `sibling_btc_ids_seen` across calls (updating it when it sees a `BackendToolCall` row in the JSONL stream).
-/// That prevents double-emitting.
 /// We also write any newly-emitted ids back into the set so subsequent assistants don't re-emit.
-///
-/// ## Lossless fields preserved
-///
-/// `raw_output` path: the entry is the literal `rs::OutputItem` JSON, so we round-trip it through `serde_json::from_value::<rs::OutputItem>`.
-/// `id`, `summary`, `content`, `encrypted_content`, `status` all survive.
-///
-/// Singular `reasoning` path: builds a synthetic `rs::ReasoningItem`
-/// from the legacy `ReasoningContent { text, encrypted, id }`. `id` is
-/// preserved when present; Anthropic Thinking blocks never carried one
-/// ([stream/messages.rs:340](crates/codegen/xai-grok-sampler/src/stream/messages.rs))
-/// so the synthesized id is the empty string in that case.
-///
-/// v0 `ChatRequestMessage` path: top-level `reasoning_content: String` becomes a single `SummaryText`-only sibling.
-/// It carries no id and no encrypted content.
+/// Singular `reasoning` path: builds a synthetic `rs::ReasoningItem` from the legacy `ReasoningContent { text, encrypted, id }`. `id` is preserved when present; some thinking blocks never carried one
 pub fn upgrade_legacy_reasoning(
     raw: &serde_json::Value,
     sibling_btc_ids_seen: &mut std::collections::HashSet<String>,
@@ -1790,17 +1653,7 @@ impl ConversationRequest {
 }
 
 /// Calculate how many conversation items to keep so that everything from prompt-turn `target_prompt_index` onward is dropped.
-/// The cut lands on the user item that **started** that turn.
-///
-/// Counting is progressive:
-/// - **Before the first** [`UserItem::prompt_index`]: legacy rules apply.
-///   The first marker-less non-synthetic is the `<user_info>` preamble.
-///   Later non-synthetics and [`SyntheticReason::starts_prompt_turn`] synthetics are turns.
-/// - **From the first marker onward**: only marked rows open turns; unmarked mid-turn phantoms (bash / permission followup) never open a cut.
-///
-/// Exception: when the first marker's absolute index is **not** contiguous with the unmarked prefix turn count, fall back to pure marker mode.
-/// That happens on post-compaction rebuilds with high absolute indices.
-/// Pure marker mode keeps structural unmarked rows in the rebuild prefix from being treated as historic turns.
+/// **Before the first** [`UserItem::prompt_index`]: legacy rules apply. The first marker-less non-synthetic is the `<user_info>` preamble. Later non-synthetics and [`SyntheticReason::starts_prompt_turn`] synthetics are turns; **From the first marker onward**: only marked rows open turns; unmarked mid-turn phantoms (bash / permission followup) never open a cut.
 pub fn conversation_truncate_for_prompt(
     conversation: &[ConversationItem],
     target_prompt_index: usize,
@@ -1967,11 +1820,8 @@ pub fn transform_conversation_cwd(
                     a.content = Arc::<str>::from(a.content.replace(source_cwd, target_cwd));
                 }
                 // Tool call arguments contain file paths that must also be rewritten.
-                // The arguments field is a JSON-encoded string
-                // source_cwd appears as a literal substring (serde_json does not escape `/`), so str::replace is safe
-                // This is needed in both directions:
-                //   Forward (root to worktree): so the fork session's history uses worktree paths
-                //   Reverse (worktree to root): so the synced-back session doesn't reference a deleted worktree directory on the next turn
+                // The arguments field is a JSON-encoded string source_cwd appears as a literal substring (serde_json does not escape `/`), so str::replace is safe
+                // Reverse (worktree to root): so the synced-back session doesn't reference a deleted worktree directory on the next turn
                 for tc in &mut a.tool_calls {
                     if tc.arguments.contains(source_cwd) {
                         tc.arguments =
@@ -2013,14 +1863,8 @@ pub fn transform_conversation_cwd(
 // Conversation Repair
 // ============================================================================
 
-/// Why a tool call ended up dangling; controls the synthetic-result wording.
-///
 /// Each variant maps to a distinct synthetic `ToolResult` body produced by [`repair_dangling_tool_calls`].
-/// The wording tells the model whether to retry, switch strategy, or treat the failure as terminal.
-///
 /// An earlier revision had a `PostProcessingFailed` variant; it is intentionally absent now.
-/// No path returns `Err` between `tool_completed` and `push_tool_result`; every error mode is degraded inline.
-/// If such an error path is added, add a fresh variant here so [`synthetic_dangling_result_text`]'s exhaustive match flags every renderer.
 #[derive(Debug, Clone, Copy)]
 pub enum DanglingToolCallReason {
     /// User pressed Ctrl+C / aborted, or the cause cannot be determined.
@@ -2028,25 +1872,13 @@ pub enum DanglingToolCallReason {
     /// Default fallback when no more specific reason is plumbed through.
     UserCancelled,
     /// Harness halted the turn (internal error, policy guard, etc.).
-    ///
     /// `class` is a stable taxonomy tag used by metrics and the synthetic message.
     /// It is `&'static str` because every call site is known at compile time.
     HarnessHalted { class: &'static str },
 }
 
 /// Insert synthetic `ToolResult` items for any tool calls that lack a result.
-///
-/// When a turn is cancelled mid-tool-execution, the conversation can have an assistant message with `tool_calls` but no matching `ToolResult`.
 /// The API rejects this with "No tool output found for function call …".
-///
-/// Scans the entire conversation front-to-back.
-/// For every assistant message that has `tool_calls`, it checks which calls are answered by the immediately following `ToolResult` items.
-/// It inserts synthetic results for any that are missing, preserving the original call order.
-/// `reason` controls the wording of those synthetic results.
-///
-/// Old sessions and sessions that switched API providers may have dangling tool calls anywhere in the history, not just at the tail.
-///
-/// Returns the number of synthetic tool results inserted.
 pub fn repair_dangling_tool_calls(
     conversation: &mut Vec<ConversationItem>,
     reason: DanglingToolCallReason,
@@ -2110,11 +1942,7 @@ pub fn repair_dangling_tool_calls(
 }
 
 /// Read-only counterpart to [`repair_dangling_tool_calls`].
-/// Returns `true` if any assistant message has a tool call that is not answered by a `ToolResult` in the immediately-following run of results.
-///
 /// Lets callers decide whether the repair *would* fire (and therefore already signal a cancellation to the model) without mutating the conversation.
-/// Uses the same forward-scan / immediately-following-results logic as [`repair_dangling_tool_calls`].
-/// Short-circuits on the first unanswered call.
 pub fn has_dangling_tool_calls(conversation: &[ConversationItem]) -> bool {
     let mut i = 0;
     while i < conversation.len() {
@@ -2159,15 +1987,8 @@ fn synthetic_dangling_result_text(name: &str, reason: DanglingToolCallReason) ->
 }
 
 /// Remove duplicate `ToolResult` entries for the same `tool_call_id`.
-///
-/// A tool call can be cancelled (e.g. Ctrl-C or crash) and its real result can still arrive later.
-/// The conversation then has two `ToolResult` entries sharing the same `tool_call_id`.
 /// The LLM API rejects this with "each tool_use must have a single result".
-///
-/// This function scans the `ToolResult` items immediately following each assistant message.
 /// If a `tool_call_id` appears more than once, only the **last** occurrence is kept (the real result), and earlier duplicates are removed.
-///
-/// Returns the number of duplicate entries removed.
 pub fn dedup_duplicate_tool_results(conversation: &mut Vec<ConversationItem>) -> usize {
     let mut total_removed = 0;
     let mut i = 0;
@@ -3746,20 +3567,7 @@ mod tests {
         );
         // The 10 original items plus the 3 synthetic results
         assert_eq!(conv.len(), 13);
-        // After repair the conversation should be:
-        //  0: user("hello")
-        //  1: assistant([c1])
-        //  2: tool_result(c1)  ← synthetic
-        //  3: user("no, the repo is already cloned")
-        //  4: assistant([c2])
-        //  5: tool_result(c2)
-        //  6: assistant("here's what I found")
-        //  7: user("now do something else")
-        //  8: assistant([c3])
-        //  9: tool_result(c3)  ← synthetic
-        // 10: user("actually never mind")
-        // 11: assistant([c4])
-        // 12: tool_result(c4)  ← synthetic
+        // After repair, each unanswered tool call has a synthetic result in place.
         assert_matches!(&conv[2], ConversationItem::ToolResult(tr) => {
             assert_eq!(tr.tool_call_id, "c1");
             assert!(tr.content.contains("cancelled"));
@@ -4395,29 +4203,13 @@ mod tests {
 
     #[test]
     fn stop_reason_as_str_matches_serde() {
-        assert_eq!(StopReason::Stop.as_str(), "stop");
-        assert_eq!(StopReason::Length.as_str(), "length");
-        assert_eq!(StopReason::ToolCalls.as_str(), "tool_calls");
-        assert_eq!(StopReason::ContentFilter.as_str(), "content_filter");
+        assert_eq!(StopReason::Stop.as_ref(), "stop");
+        assert_eq!(StopReason::Length.as_ref(), "length");
+        assert_eq!(StopReason::ToolCalls.as_ref(), "tool_calls");
+        assert_eq!(StopReason::ContentFilter.as_ref(), "content_filter");
     }
 
-    // ============================================================================
-    // Reasoning-as-sibling regression tests
-    //
-    // These pin the invariants of the sibling-reasoning data model:
-    //
-    // 1. `tco_*` reasoning items from parallel backend tool calls round-trip losslessly as N sibling `Reasoning` items.
-    //    (A prior data-loss bug: `AssistantItem.reasoning` was last-write-wins.)
-    //
-    // 2. Multi-turn conversations preserve emission order `[Sys, U1, R, BTC*, A1, U2, R, BTC*, A2, ...]` rather than `[Sys, U1, ..., UN, R*, A*]`.
-    //    (A prior ordering bug defeated the server-side prefix cache.)
-    //
-    // 3. `conversation_to_chat_messages` folds preceding Reasoning siblings into the next assistant's `reasoning_content`.
-    //    This is the chat-completions wire path
-    //
-    // 4. `patch_reasoning_text_types` injects the `type: "reasoning_text"` discriminator on nested `content[]` items.
-    //    async-openai's derived Serialize omits it
-    // ============================================================================
+    // `tco_*` reasoning items from parallel backend tool calls round-trip losslessly as N sibling `Reasoning` items. (A prior data-loss bug: `AssistantItem.reasoning` was last-write-wins.); Multi-turn conversations preserve emission order `[Sys, U1, R, BTC*, A1, U2, R, BTC*, A2, ...]` rather than `[Sys, U1, ..., UN, R*, A*]`. (A prior ordering bug defeated the server-side prefix cache.); `conversation_to_chat_messages` folds preceding Reasoning siblings into the next assistant's `reasoning_content`. This is the chat-completions wire path; `patch_reasoning_text_types` injects the `type: "reasoning_text"` discriminator on nested `content[]` items. async-openai's derived Serialize omits it.
 
     #[test]
     fn multi_tco_reasoning_items_round_trip_as_siblings() {
@@ -4594,10 +4386,8 @@ mod tests {
 
     #[test]
     fn conversation_to_chat_messages_folds_reasoning_across_backend_tool_call() {
-        // The canonical post-tool-call ordering is `[..., Reasoning, BackendToolCall, Assistant]` (e.g. a web_search turn).
+        // The canonical post-tool-call ordering is `[..., Reasoning, BackendToolCall, Assistant]`.
         // The BackendToolCall is emitted as its own synthetic assistant message, but it must NOT drop the pending reasoning
-        // The reasoning belongs to the same turn and folds onto the following assistant's `reasoning_content`
-        // That matches the Responses API path (`build_responses_input_preserves_multi_turn_ordering`)
         let items = vec![
             ConversationItem::user("hi"),
             reasoning_sibling("r1", "thinking before search", None),
@@ -4666,16 +4456,8 @@ mod tests {
         assert_eq!(msg.reasoning_content.as_deref(), None);
     }
 
-    // ========================================================================
     // upgrade_legacy_reasoning: legacy in-memory reconstruction
-    // ========================================================================
-    //
-    // Three legacy on-disk shapes that the on-read upgrader must lift to sibling Reasoning / BackendToolCall items:
-    //
-    //   1. v1 assistant with `raw_output: Vec<OutputItem>` (backend-search era)
-    //   2. v1 assistant with singular `reasoning: ReasoningContent` (earlier grok-build / chat-completions written as v1)
-    //   3. v0 `ChatRequestMessage` with top-level `reasoning_content`
-    //
+    // Three legacy on-disk shapes that the on-read upgrader must lift to sibling Reasoning / BackendToolCall items: v1 assistant with `raw_output: Vec<OutputItem>` (backend-search era); v1 assistant with singular `reasoning: ReasoningContent` (earlier grok-build / chat-completions written as v1); v0 `ChatRequestMessage` with top-level `reasoning_content`.
     // Idempotent (current-format rows produce zero siblings); verified by `upgrade_is_idempotent_on_post_pr_rows`
 
     #[test]
@@ -4892,8 +4674,6 @@ mod tests {
     }
 
     /// Canary for `serde_json`'s `preserve_order` feature.
-    ///
-    /// With `preserve_order` (Cargo.toml), `serde_json::Map` is backed by `IndexMap` which preserves insertion (struct-declaration) order.
     /// Without it, `BTreeMap` is used which alphabetizes keys.
     /// This test serializes once and verifies that a known field ordering matches the struct declaration order (not alphabetical).
     #[test]

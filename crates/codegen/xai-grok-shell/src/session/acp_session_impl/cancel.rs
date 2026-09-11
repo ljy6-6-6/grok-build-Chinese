@@ -119,9 +119,8 @@ impl SessionActor {
         }
     }
 
-    /// Releases the gate's claim here rather than at the aborted task's drop, which runs too late for the cancel to report.
-    /// Callers read `epoch` under the lock they take the task from.
     fn abort_turn_task(&self, task: &AgentTask, epoch: super::turn_report_slot::TurnEpoch) {
+        self.turn_phases.emit_pending_latency();
         task.abort();
         self.turn_report.release_aborted(epoch);
     }
@@ -188,7 +187,7 @@ impl SessionActor {
         );
     }
 
-    /// One line per rewind-requested cancel: `rewound | legacy_rewound | stale_prompt_id | window_closed | non_user_front`.
+    /// One line per rewind-requested cancel: `rewound | legacy_rewound | queued_row_removed | stale_prompt_id | window_closed | non_user_front`.
     fn log_rewind_decision(
         &self,
         requested_prompt_id: Option<&str>,
@@ -285,11 +284,29 @@ impl SessionActor {
             let mut state = self.state.lock().await;
             let front_prompt_id = state.pending_inputs.front().map(|f| f.prompt_id.clone());
             if front_prompt_id.as_deref() != Some(requested) {
+                // The client gave up on a prompt that landed behind the running turn: drop the row now,
+                // regardless of the rewind window, or it runs later against a client that shows Idle
+                let queued_behind_front = if Self::is_running_prompt(&state, requested) {
+                    None
+                } else {
+                    state
+                        .pending_inputs
+                        .iter()
+                        .position(|item| item.prompt_id == requested)
+                };
+                let rewind_disposition = match queued_behind_front {
+                    Some(pos) => {
+                        Self::remove_pending_row(&mut state, pos);
+                        self.broadcast_queue_changed(&state);
+                        "queued_row_removed"
+                    }
+                    None => "stale_prompt_id",
+                };
                 drop(state);
                 self.log_rewind_decision(
                     Some(requested),
                     front_prompt_id.as_deref(),
-                    "stale_prompt_id",
+                    rewind_disposition,
                 );
                 return CancelOutcome::noop();
             }
@@ -396,11 +413,9 @@ impl SessionActor {
             self.arm_wake_barrier(trigger.as_ref());
         }
 
-        // This unified-log marker is the counterpart of `shell.cancel.received` in `MvpAgent::cancel`
-        // It records which prompt the cancel lands on, so a stuck "Cancelling…" can be attributed to delivery vs. processing.
-        // The pin is only a snapshot: the authoritative cancel identity is `running_task.prompt_id`, captured under the state lock below
-        // `current_prompt_id` is cleared early (turn scope guard drop / `handle_completion`) while the finished front and its task slot are still queued
-        // Keying the durable `TurnCompleted` on the pin alone would lose the terminal (and its `cancelTrigger`) in that window
+        // This unified-log marker is the counterpart of `shell.cancel.received` in `MvpAgent::cancel`.
+        // The pin is only a snapshot: the authoritative cancel identity is `running_task.prompt_id`, captured under the state lock below `current_prompt_id` is cleared early (turn scope guard drop / `handle_completion`) while.
+        // Keying the durable `TurnCompleted` on the pin alone would lose the terminal (and its `cancelTrigger`) in that window.
         let pinned_prompt_id = self
             .current_prompt_id
             .lock()
@@ -451,20 +466,12 @@ impl SessionActor {
             None
         };
 
-        // A rewind is not a cancel either: the turn is being replaced, not stopped.
-        if user_initiated && !rewind_requested {
-            self.signals_handle().record_cancellation();
-        }
-
         // A send-now redirect is the user continuing, not stopping, so it never kills an in-flight command.
         let send_now = matches!(trigger, Some(crate::session::CancelTrigger::SendNow));
 
-        // Kill all running foreground terminal processes before aborting the task. Send-now skips this and backgrounds them after the abort.
-        // Each TerminalBackend implementation knows how to kill its own processes.
-        // Background tasks are left alive for interactive sessions but killed during subagent teardown (kill_background_tasks = true)
-        //
-        // A narrow race exists: the running task could spawn a new terminal between this call and the abort() below
-        // In practice this is negligible; abort() drops the future and any child handle it owns
+        // Kill all running foreground terminal processes before aborting the task.
+        // Send-now skips this and backgrounds them after the abort.
+        // A narrow race exists: the running task could spawn a new terminal between this call and the abort() below In practice this is negligible; abort() drops the future and any child handle it owns.
         if !send_now {
             self.kill_foreground_commands_for_cancel().await;
         }
@@ -628,26 +635,9 @@ impl SessionActor {
                 return CancelOutcome::noop();
             }
 
-            // Decide which queued inputs get resolved with `Cancelled` now vs. preserved for the post-cancel drain:
-            //
-            // * rewind: the front was already popped above; respond to nothing.
-            // * hard teardown (`kill_background_tasks`, the subagent-shutdown path that sends `Shutdown` next): drain the WHOLE queue
-            //   There is no point starting the next prompt, and draining resolves every queued input's `respond_to` cleanly
-            // * normal cancel: remove the running turn
-            //   Only an interactive stop (Ctrl+C / Esc / [stop]) also removes queued task/workflow completion wakes
-            //   Preserve real user prompts and unrelated synthetic entries so `maybe_start_running_task` can promote the next genuine user turn
-            //   The cancelling client does not pull any prompt back into its input; the server queue is the single source of truth for what runs next
-            //   Previously every cancel did `std::mem::take`, discarding the whole queue server-side
-            //   Because no broadcast followed, clients kept a stale mirror and the queue only visibly vanished on the next prompt's (now-empty) broadcast
-            //
-            // The in-flight turn is always `pending_inputs.front()`
-            // `maybe_start_running_task` promotes the front WITHOUT popping it; `handle_completion` pops it at turn end
-            // So index 0 is the slot whose `respond_to` the client is awaiting and whose spinner is showing
-            // We ALWAYS resolve it with `Cancelled`, regardless of whether `running_task` is currently `Some`
-            // In narrow windows the front has no live task: a completion was just dequeued and the next prompt is not yet promoted
-            // A cancel can also race ahead of `maybe_start_running_task`
-            // Gating on `running_task` there would drop the front's `respond_to` and hang the client's `session/prompt` forever
-            // The TUI spinner would never return to idle
+            // Only an interactive stop (Ctrl+C / Esc / [stop]) also removes queued task/workflow completion wakes.
+            // Preserve real user prompts and unrelated synthetic entries so `maybe_start_running_task` can promote the next genuine user turn.
+            // The cancelling client does not pull any prompt back into its input; the server queue is the single source of truth for what runs next.
             let message_cause = if kill_background_tasks {
                 xai_message_delivery_core::TerminalCause::HardTeardown
             } else if rewound_input.is_some() {
@@ -701,10 +691,9 @@ impl SessionActor {
             if had_message_fallbacks {
                 self.broadcast_queue_changed(&state);
             }
-            // Whether a user prompt remains queued behind the just-cancelled turn
-            // It distinguishes the next turn's redirect kind for telemetry
-            // `queued_after_cancel` means a queued prompt is promoted; `cancel_then_send` means the user types a fresh prompt
-            // Synthetic inputs (auto-wake / nudges) are not user redirects
+            // Whether a user prompt remains queued behind the just-cancelled turn.
+            // It distinguishes the next turn's redirect kind for telemetry `queued_after_cancel` means a queued prompt is promoted; `cancel_then_send` means the user types a fresh prompt.
+            // Synthetic inputs (auto-wake / nudges) are not user redirects.
             let had_queued_user_prompt = state
                 .pending_inputs
                 .iter()
@@ -802,10 +791,8 @@ impl SessionActor {
             if let Some(is_turn_active) = &self.tool_context.is_turn_active {
                 is_turn_active.store(false, std::sync::atomic::Ordering::Relaxed);
             }
-            // The aborted turn's `BlockingWaitGuard`s drop asynchronously (they
-            // live in tool futures owned by the drainer task / subagent spawn
-            // task). Until they do, `queue_input` would read a stale depth > 0
-            // and auto-send-now the next prompt against a turn already gone.
+            // The aborted turn's `BlockingWaitGuard`s drop asynchronously (they live in tool futures owned by the drainer task / subagent spawn task).
+            // Until they do, `queue_input` would read a stale depth > 0 and auto-send-now the next prompt against a turn already gone.
             self.tool_context.blocking_wait_depth.reset();
             self.flush_pending_skill_reminders().await;
         }
@@ -841,10 +828,8 @@ impl SessionActor {
         {
             self.clear_exact_turn_resources(prompt_id).await;
         }
-        // A no-task cancel of a pinned front (turn started / pin set, task not yet
-        // or no longer in the slot) still needs a durable terminal so resume can
-        // tell unknown duration from a 0ms turn. A queued front that never
-        // started has no pin and must not emit.
+        // A no-task cancel of a pinned front (turn started / pin set, task not yet or no longer in the slot) still needs a durable terminal so resume can tell unknown duration from a 0ms turn.
+        // A queued front that never started has no pin and must not emit.
         let no_task_pinned_prompt_id = match &finalization {
             CancelFinalization::Keep(lease) => match &lease.binding {
                 FinalizationBinding::NoTask(Some(id)) if pinned_prompt_id.as_ref() == Some(id) => {
@@ -857,6 +842,11 @@ impl SessionActor {
         if rewound_input.is_none()
             && let Some(prompt_id) = cancelled_prompt_id.or(no_task_pinned_prompt_id)
         {
+            // Only a cancel that ends a turn counts, and before the terminal's snapshot so it lands
+            // on this turn's row. An idle Esc has no turn; a rewind replaces the turn, not stops it.
+            if user_initiated && !rewind_requested {
+                self.signals_handle().record_cancellation();
+            }
             // `cancelTrigger` lets clients tell a send-now cancel from a Ctrl+C/Esc one
             // `MidTurnAbort` matches what the prompt's RPC resolves with below, so the event and the RPC agree
             self.emit_turn_completed(
@@ -872,6 +862,7 @@ impl SessionActor {
                 }),
                 None,
                 cancel_elapsed_ms,
+                None,
             )
             .await;
         }

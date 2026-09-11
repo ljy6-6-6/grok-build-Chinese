@@ -255,6 +255,16 @@
       "sha": "ab3c753312678069bdfd24078c8bebe18eee7cc3",
       "source_subject": "Merge pull request #4 from JoyElliot/codex/community-release-auto-update",
       "title_zh": "添加社区 Release 自动更新支持"
+    },
+    {
+      "sha": "75810042ca2762aa0b0fa17864f3f68823ccbea5",
+      "source_subject": "Synced from monorepo",
+      "title_zh": "同步上游启动、目录信任、反馈和子智能体重构"
+    },
+    {
+      "sha": "37949780c144e37df692e3d669051a21fec24f20",
+      "source_subject": "Synced from monorepo",
+      "title_zh": "同步上游记忆隔离、会话守护进程与交互修复"
     }
   ]
 }

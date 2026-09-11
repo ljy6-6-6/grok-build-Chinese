@@ -206,13 +206,8 @@ fn load_requirements_permissions() -> Vec<Sourced<PermissionRule>> {
         .collect()
 }
 
-/// Load `[permission]` rules from native Grok TOML config files:
-///
-///   * `~/.grok/config.toml` (lowest priority)
-///   * Each `.grok/config.toml` from the git repo root down to `cwd` (highest priority last).
-///     The walk matches folder-trust's [`crate::project_config::find_project_configs`], so detector and loader agree on which project configs exist.
-///
-/// Returns the rules tagged with `RequirementSource::Config`, or empty if no config file contains a `[permission]` section.
+/// Load `[permission]` rules from `~/.grok/config.toml` (lowest) then each `.grok/config.toml` from repo root to `cwd`.
+/// The walk matches [`crate::project_config::find_project_configs`] so detector and loader agree. Empty if no `[permission]` section.
 fn load_config_toml_permissions(cwd: &Path, project_trusted: bool) -> Vec<Sourced<PermissionRule>> {
     let mut rules = Vec::new();
 
@@ -268,14 +263,8 @@ fn managed_config_permissions(
 // Fallback Resolver
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// Resolve permission config, merging native Grok and Claude sources.
-/// Evaluation is order-independent (deny > ask > allow); merge order affects provenance display only.
-///
-/// `defaultMode: "acceptEdits"` in Claude settings generates a synthetic `Allow Edit` rule appended to the Claude rules.
-///
-/// `project_trusted` gates project-tier `.claude/settings.json` and `.grok/config.toml` permission rules (mirrors [`load_claude_env_with_project`]).
-/// Global/user/admin tiers always load.
-/// Callers pass the folder-trust bridge verdict for local sessions; hub/cloud defaults trusted.
+/// Resolve permission config, merging native Grok and Claude sources. Evaluation is deny > ask > allow; merge order is provenance only.
+/// Claude `acceptEdits` appends a synthetic `Allow Edit`. `project_trusted` gates project-tier rules; global/user/admin always load. Hub/cloud defaults trusted.
 pub async fn resolve_permission_config_with_fallback(
     cwd: &Path,
     project_trusted: bool,
@@ -302,24 +291,13 @@ pub async fn resolve_permission_config_with_fallback_pinned(
     .map(|r| r.config)
 }
 
-/// Wire value a client sets in `startupHints.permissionMode` to pre-declare an allow answer for permission prompts.
-/// Meant for headless sessions where no client is attached on agent-initiated turns.
-///
-/// **Trust model:** any authenticated client that can create or cold-load the session can stamp this; there is no separate trusted-stamper tier.
-/// Per ACP, `session/request_permission` answers are the client's to give and clients MAY auto-allow.
-/// Stamping grants nothing a client could not get by staying connected and answering allow to every prompt.
-/// The hint adds one thing: agent-initiated turns keep resolving after the client hangs up.
-/// It never weakens rule enforcement: deny rules and pre-prompt rejections are decided before the prompt gate.
-/// The always-approve pin (`[ui] disable_bypass_permissions_mode`) kills it fleet-wide, and an explicitly configured `defaultMode` outranks it.
+/// Client `startupHints.permissionMode` pre-declares an allow for headless agent-initiated turns after the client hangs up.
+/// Any session-creating client may stamp it; it grants nothing a connected allow-all client could not, and never weakens deny or pre-prompt rejection.
+/// The always-approve pin kills it fleet-wide, and an explicit `defaultMode` outranks it.
 pub const PERMISSION_MODE_ALWAYS_ALLOW: &str = "alwaysAllow";
 
-/// Apply a client-requested `startupHints.permissionMode` to the resolved session permission config.
-/// Only [`PERMISSION_MODE_ALWAYS_ALLOW`] is honored (see its trust-model note).
-/// It applies only when always-approve is not pinned off by managed policy (`policy_block`).
-/// It also requires that no settings layer explicitly configured `permissions.defaultMode`.
-/// That check keys on [`PermissionConfig::default_mode_configured`], not on `prompt_policy`.
-/// Explicit `default` / `plan` / `acceptEdits` and invalid fail-safe modes all project to `Ask` and must not be upgraded.
-/// Returns whether the hint was applied.
+/// Apply `startupHints.permissionMode`. Only [`PERMISSION_MODE_ALWAYS_ALLOW`] is honored, and only if bypass is not pinned off.
+/// Requires no explicit `permissions.defaultMode` ([`PermissionConfig::default_mode_configured`], not `prompt_policy`): modes that project to `Ask` must not be upgraded.
 pub fn apply_permission_mode_hint(
     config: &mut Option<PermissionConfig>,
     requested: Option<&str>,
@@ -350,11 +328,8 @@ pub fn apply_permission_mode_hint(
     true
 }
 
-/// Patterns of `Deny` rules that forbid *reading* a path: those on `Read`, `Grep`, or `Any` (the tools that return file contents).
-/// Write-only denies (`Edit`/`Write`/`Bash`) and non-deny actions are excluded.
-///
-/// Public so a caller holding the manager's *effective* config (managed, claude fallback, CLI `--deny`) can derive Grep's ripgrep excludes from it.
-/// Re-resolving would see managed-only rules and miss CLI read denies.
+/// `Deny` patterns that forbid reading a path (`Read`, `Grep`, or `Any`). Write-only denies and non-deny actions are excluded.
+/// Public so Grep excludes come from the manager's effective config; re-resolving would miss CLI read denies.
 pub fn deny_read_globs_from_config(config: &PermissionConfig) -> Vec<String> {
     config
         .rules
@@ -482,8 +457,7 @@ impl ResolveInputs<'static> {
     fn live(project_trusted: bool, yolo_lock: Option<YoloPolicyLock>) -> Self {
         Self {
             yolo_lock,
-            // The engine view, not the compat shim shadowing `resolution::`.
-            managed: super::managed_policy::managed_settings(),
+            managed: managed_settings(),
             managed_config_rules: managed_config_permissions(
                 &xai_grok_config::managed_config_layers(),
             ),
@@ -492,26 +466,9 @@ impl ResolveInputs<'static> {
     }
 }
 
-/// Collect permission rules from every source, keeping each rule's origin.
-/// Sources: requirements.toml, managed-settings.json, managed_config.toml, config.toml, and .claude/settings.json.
-/// A deny always wins over an ask, and an ask over an allow, no matter which file a rule comes from.
-/// The source order above only affects how origins are displayed.
-///
-/// Rules are read when a session starts.
-/// Changes take effect in the next session.
-///
-/// `permissions.defaultMode` from **managed-settings** outranks user/project/local for the *mode* scalar (managed scope wins).
-/// User-tier defaultMode is applied only when managed does not set one.
-///
-/// **Always-approve (yolo) is independent of defaultMode.**
-/// Session always-approve still auto-approves before [`PromptPolicy::Deny`] (`dontAsk`) is consulted, so it outranks `defaultMode`.
-/// The exception: bypass pinned off via grok `requirements.toml` (`[ui] disable_bypass_permissions_mode = true`).
-/// Pair managed `dontAsk` with that pin when org policy must not be bypassable by `--always-approve`.
-///
-/// `project_trusted` gates project-tier Claude settings and `.grok/config.toml` permission rules just as [`load_claude_env_with_project`] gates env.
-/// An untrusted clone could otherwise ship `defaultMode: bypassPermissions` or broad allow rules and disable approval prompts.
-///
-/// The outcome always carries the pin read the resolution used ([`ProvenanceResolution::yolo_lock`]), even when nothing resolves.
+/// Collect rules from every source with origin. Deny beats ask beats allow regardless of file; source order is display only. Read at session start.
+/// Managed `defaultMode` outranks user/project/local. Always-approve is independent and outranks `dontAsk` unless `requirements.toml` pins bypass off.
+/// `project_trusted` gates project-tier rules so an untrusted clone cannot disable prompts. The outcome always carries the pin used.
 pub async fn resolve_permissions_with_provenance(
     cwd: &Path,
     project_trusted: bool,
@@ -607,9 +564,7 @@ async fn resolve_permissions_with_provenance_inner(
     let all_rules = drop_untrusted_catchall_allows(all_rules, policy_block, &mut skipped);
 
     // Keep skip-only resolutions alive so the drop reaches `grok inspect`
-    // Zero rules with Ask is a no-op for the evaluator, identical to the `None` arm
-    // A rule-less explicit defaultMode (`default` / `plan`) must also survive
-    // Dropping it to `None` would erase `default_mode_configured` and let the alwaysAllow startup hint upgrade an explicitly configured mode
+    // A rule-less explicit defaultMode must survive: dropping it to `None` erases `default_mode_configured` and lets the alwaysAllow hint upgrade it
     if all_rules.is_empty()
         && prompt_policy == PromptPolicy::Ask
         && skipped.is_empty()
@@ -635,24 +590,9 @@ async fn resolve_permissions_with_provenance_inner(
     })
 }
 
-/// Resolve permissions from Claude settings, merging allow/deny/ask across all settings scopes.
-/// Broad global grants therefore survive when a project file also exists.
-/// `defaultMode` is not merged: the most-specific file that sets it wins.
-/// An unrecognized value still claims the slot, as the fail-safe `default`.
-///
-/// `defaultMode` handling:
-///   - `bypassPermissions`: catch-all `Allow Any`, but ignored (recorded as a [`SkippedPermission`]) when [`yolo_disabled_by_policy`] pins bypass off
-///   - `acceptEdits`: synthetic `Allow Edit`
-///   - `default` / `plan`: no synthetic rules
-///   - `dontAsk`: [`PromptPolicy::Deny`] (unapproved tools auto-denied)
-///   - `auto`: [`PromptPolicy::Auto`] (classifier; seeded on the manager)
-///
-/// When [`UserDefaultModeLoad::SkipManagedOwns`], only allow/deny/ask rules are loaded from user/project/local files.
-///
-/// Synthetic rules are appended last as fallbacks (explicit deny still wins).
-/// `policy_block` is threaded for testability; prod passes the live pin.
-/// When `project_trusted` is false, only global `~/.claude` settings load.
-/// Project-tree rules and `defaultMode` are dropped (same gate as env injection).
+/// Merge Claude allow/deny/ask across scopes so global grants survive a project file. `defaultMode` is most-specific-wins; an unrecognized value still claims the slot.
+/// `bypassPermissions` is catch-all allow unless the yolo pin skips it; `acceptEdits`/`dontAsk`/`auto` map to synthetic allow, deny, and classifier. Synthetics are fallbacks.
+/// Untrusted folders load only global `~/.claude`; project rules and `defaultMode` are dropped.
 fn resolve_claude_settings_inner(
     cwd: &Path,
     project_trusted: bool,
@@ -787,16 +727,11 @@ fn resolve_claude_settings_inner(
 // [`super::managed_policy`]; re-exported here so existing
 // `permission::resolution::` paths keep working.
 pub use super::managed_policy::{
-    MANAGED_POLICY_CONFIG_KEYS, ManagedMarketplace, ManagedMarketplaceKind, ManagedSettings,
-    ManagedSettingsFeatures, MarketplacePolicy, McpBlockReason, McpServerPolicy, McpSubject,
-    McpVerdict, PolicyLayerOwnership, PolicyPin, PolicySourceAuthority, PolicySubjectOrigin,
+    AllowedMcpServer, MANAGED_POLICY_CONFIG_KEYS, ManagedMarketplace, ManagedMarketplaceKind,
+    ManagedSettings, ManagedSettingsFeatures, MarketplaceAllowlist, MarketplacePolicy,
+    McpBlockReason, McpServerAllowlist, McpServerPolicy, McpSubject, McpVerdict,
+    PolicyLayerOwnership, PolicyPin, PolicySourceAuthority, PolicySubjectOrigin, managed_settings,
     normalize_git_url,
-};
-// Transitional shims (deleted in the stacked enforcement PR): shadow these
-// four engine names on `resolution::` paths only; `managed_policy::` keeps
-// the engine surface.
-pub use super::managed_policy::compat::{
-    AllowedMcpServer, MarketplaceAllowlist, McpServerAllowlist, managed_settings,
 };
 
 /// The non-policy managed-settings surface: features, permission rules, and
@@ -900,12 +835,8 @@ fn parse_disable_bypass_permissions(json: &serde_json::Value) -> Option<bool> {
     Some(val.as_str() == Some("disable"))
 }
 
-/// Whether a loaded vendor `managed-settings.json` requests Claude's bypass
-/// lock (`permissions.disableBypassPermissionsMode`). The request is advisory
-/// for grok: the rule resolver deliberately ignores this field — grok must not
-/// inherit a host-wide Claude lockdown (see [`yolo_disabled_by_policy`]) — so
-/// it must only ever be rendered as an advisory (`grok inspect`'s
-/// `claudeBypassLockAdvisory`), never as an enforced policy.
+/// Whether vendor `managed-settings.json` requests Claude's bypass lock. Advisory only: the resolver ignores it so grok does not inherit a host-wide lockdown.
+/// Render as `claudeBypassLockAdvisory`, never as enforced policy.
 pub fn claude_bypass_lock_request(features: &ManagedSettingsFeatures) -> bool {
     features.source_path.is_some() && features.disable_yolo == Some(true)
 }
@@ -943,16 +874,8 @@ pub struct YoloPolicyLock {
     pub reason: YoloPinReason,
 }
 
-/// Hard-lock predicate (client gates, permission manager, vendor bypass gate).
-/// Returns `Some(reason)` iff a requirements layer sets `[ui] disable_bypass_permissions_mode = true` (or legacy `[ui] yolo = false`).
-/// Vendor `managed-settings.json` `disableBypassPermissionsMode` is deliberately not consulted.
-/// grok must not inherit a host-wide always-approve lockdown from that file.
-/// grok still honors that file's permission rules and MCP / marketplace allowlists.
-/// The user's own `--yolo` / `[ui] permission_mode` / runtime toggle drive always-approve.
-/// To disable it in grok, use a root-owned `requirements.toml`.
-/// Fails open on user-writable layers.
-///
-/// Returns the pin as its display message; callers needing the typed reason or the pinning layer use [`yolo_policy_lock`].
+/// Hard-lock predicate. `Some(reason)` iff a requirements layer sets `[ui] disable_bypass_permissions_mode` (or legacy `[ui] yolo = false`).
+/// Vendor `disableBypassPermissionsMode` is not consulted, so grok does not inherit a host-wide lockdown; use root-owned `requirements.toml`. Fails open on user-writable layers.
 pub fn yolo_disabled_by_policy() -> Option<&'static str> {
     yolo_policy_lock().map(|lock| lock.reason.message())
 }

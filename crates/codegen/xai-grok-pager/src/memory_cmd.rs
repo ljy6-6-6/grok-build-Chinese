@@ -51,8 +51,16 @@ fn workspace_target(storage: &MemoryStorage) -> ClearTarget {
 fn global_target(storage: &MemoryStorage) -> ClearTarget {
     ClearTarget {
         label_key: "memory.cli.global_label",
-        label: "global MEMORY.md",
-        path: storage.global_memory_file(),
+        label: if storage.mode().is_v2() {
+            "global memory"
+        } else {
+            "global MEMORY.md"
+        },
+        path: if storage.mode().is_v2() {
+            storage.global_dir().to_path_buf()
+        } else {
+            storage.global_memory_file()
+        },
         clear: |s| s.clear_global(),
     }
 }
@@ -67,7 +75,8 @@ pub fn run_with_locale(args: MemoryArgs, locale: &LocaleContext) -> Result<()> {
             global, all, yes, ..
         } => {
             let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
-            let storage = MemoryStorage::new(&cwd, None);
+            let mode = xai_grok_shell::config::load_memory_mode()?;
+            let storage = MemoryStorage::new_for_mode(&cwd, None, mode);
 
             let targets = if all {
                 vec![workspace_target(&storage), global_target(&storage)]

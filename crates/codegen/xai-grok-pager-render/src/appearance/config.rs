@@ -110,10 +110,7 @@ pub struct ScrollbackDisplayConfig {
     /// Blend factor for dimmed accents on collapsed groupable blocks (0.0-1.0).
     /// 0.0 is invisible (fully background), 1.0 is the full accent color. Default: 0.5.
     pub dim_accent: f32,
-    /// When `true` (Mode B / "split"): selection box wraps only the contiguous collapsed sub-group around the selected entry.
-    /// Expanded blocks within a group get their own individual selection box.
-    /// When `false` (Mode A / "always"): selection box wraps the entire group regardless of expanded blocks.
-    /// Default: `true` (Mode B).
+    /// `true`: selection wraps only the collapsed sub-group; expanded blocks get their own box. `false`: the whole group.
     pub group_selection_split: bool,
     /// When true, the active-block highlight within a group extends over the selection box border columns (│).
     /// When false (default), the highlight is inset by 1 column on each side so the borders remain uncolored.
@@ -483,6 +480,10 @@ pub struct ThinkingConfig {
     /// Append a dim "(ctrl+e to expand)" hint to the *collapsed* header when it fits on the same row (never adds a row).
     /// **Not a TOML key**: minimal mode sets it, the only mode where a folded block cannot be unfolded in place.
     pub collapsed_expand_hint: bool,
+    /// Draw the reasoning rail inside the body lines (a `┃ ` prefix directly below the header's bullet) instead of painting the reserved accent column.
+    /// The rail then sits under the diamond rather than beside it.
+    /// **Not a TOML key**: minimal mode sets it so every block's bullet stays flush at column 0.
+    pub rail_under_bullet: bool,
 }
 
 impl Default for ThinkingConfig {
@@ -497,6 +498,7 @@ impl Default for ThinkingConfig {
             header_bright: false,
             body_dim_italic: false,
             collapsed_expand_hint: false,
+            rail_under_bullet: false,
         }
     }
 }
@@ -513,9 +515,7 @@ pub struct ToolConfig {
     pub dim_details: bool,
     /// Bullet/icon character rendered before tool call headers.
     pub bullet: ToolBullet,
-    // bullet_accent and bullet_color are gone: BlockContent::bullet() now decides bullet color
-    // Each block type picks its own based on state (accent color, error, default)
-    // Dimming for collapsed groupable blocks is handled by EntryRenderer
+    // Bullet color is decided by BlockContent::bullet(), not config. Collapsed dimming is EntryRenderer.
     // TODO(dim_muted): add a dim factor for collapsed text styling (not just bullet/accent).
 }
 
@@ -529,10 +529,7 @@ impl Default for ToolConfig {
     }
 }
 
-/// Bullet/icon style for tool call headers.
-///
-/// Rendered before the tool title, e.g. `⊙ Read src/main.rs`.
-/// Respects `muted_collapsed`: when the tool is collapsed and muting is enabled, the bullet color blends with the muted palette.
+/// Header icon. When collapsed and `muted_collapsed` is on, the color blends with the muted palette.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ToolBullet {
     /// No bullet (default).
@@ -623,25 +620,8 @@ impl Default for ExecuteConfig {
     }
 }
 
-// ============================================================================
-// Raw Config (for TOML serde)
-// ============================================================================
-//
-// ╔═══════════════════════════════════════════════════════════════════════════╗
-// ║ MAINTAINER NOTE: When adding/changing fields or sections:                 ║
-// ║                                                                           ║
-// ║ 1. Add doc comments (///) to ALL fields in Raw* structs - they become    ║
-// ║    TOML comments via the `DocumentedFields` derive macro.                 ║
-// ║                                                                           ║
-// ║ 2. If adding a new section (e.g., RawNewBlockConfig):                     ║
-// ║    - Add it to RawBlocksConfig (or appropriate parent)                    ║
-// ║    - Add corresponding runtime config (NewBlockConfig)                    ║
-// ║    - Add From<RawNewBlockConfig> for NewBlockConfig conversion            ║
-// ║    - Add annotate_table call in to_toml_with_comments() below!            ║
-// ║                                                                           ║
-// ║ 3. The to_toml_with_comments() method generates the default config file   ║
-// ║    with comments. Update it when adding new sections.                     ║
-// ╚═══════════════════════════════════════════════════════════════════════════╝
+// Raw TOML structs: field docs become generated comments via DocumentedFields.
+// A new section also needs a runtime twin, a From conversion, and an annotate_table call in to_toml_with_comments().
 
 /// Root appearance configuration (TOML format).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Documented, DocumentedFields)]
@@ -664,18 +644,11 @@ pub struct RawAppearanceConfig {
     pub show_plan_chip: bool,
 }
 
-/// Terminal behavior configuration (TOML format).
-///
-/// Controls fullscreen (alternate screen) policy and related terminal
-/// interaction settings.
+/// Fullscreen (alternate screen) policy and related terminal settings.
 #[derive(Debug, Clone, Serialize, Deserialize, Documented, DocumentedFields)]
 #[serde(default)]
 pub struct RawTerminalConfig {
-    /// Alt-screen (fullscreen) policy.
-    /// "auto" — fullscreen in plain terminals and normal tmux, inline in
-    ///          tmux control mode and Zellij. (default)
-    /// "always" — always enter fullscreen, even in control mode / Zellij.
-    /// "never" — never enter fullscreen; run inline in main scrollback.
+    /// "auto" (default): fullscreen except tmux control mode and Zellij. "always" / "never" force the choice.
     pub alt_screen: RawAltScreenMode,
     /// Experimental scrollback-native rendering mode. Finalized blocks are
     /// printed into the terminal's native scrollback. Default false.
@@ -684,11 +657,7 @@ pub struct RawTerminalConfig {
     pub minimal_live_rows: Option<u16>,
     /// Maximum rows for a single committed block in minimal mode. Default 2000.
     pub minimal_max_commit_rows: Option<u16>,
-    /// Commit reasoning ("Thought for Xs") to native scrollback COLLAPSED to
-    /// its one-line header instead of in full. Default false — minimal
-    /// deliberately keeps the whole reasoning body in the transcript (K9); this
-    /// is the opt-out for a terser scrollback. The body stays reachable with
-    /// `Ctrl+E` / `/expand` and `/transcript`.
+    /// Opt out of minimal's full reasoning body (K9). Collapsed header only; body stays reachable via expand/transcript.
     pub minimal_collapse_thinking: bool,
 }
 
@@ -725,10 +694,7 @@ impl From<RawAltScreenMode> for crate::terminal::AltScreenMode {
         }
     }
 }
-/// Prompt input view configuration (TOML format).
-///
-/// This configures the prompt editor widget at the bottom of the screen,
-/// NOT the user prompt block rendered inside the scrollback.
+/// Prompt editor widget, not the user prompt block in scrollback.
 #[derive(Debug, Clone, Serialize, Deserialize, Documented, DocumentedFields)]
 #[serde(default)]
 pub struct RawPromptViewConfig {
@@ -1009,10 +975,7 @@ pub struct RawEditBlockConfig {
     pub bg: RawBlockBackground,
     /// Whether to show background behind accent.
     pub accent_bg: bool,
-    /// Accent color for vertical line.
-    /// Use "none" to disable, or a color value.
-    /// Formats: [r, g, b], "#rrggbb", "#rgb", or named color.
-    /// Named: BLUE, CYAN, GREEN, YELLOW, ORANGE, RED, MAGENTA, COMMENT, etc.
+    /// Vertical-line accent. "none" disables. Accepts RGB, hex, or a named color.
     pub accent: OptionalColor,
     /// Whether diff line background extends to include gutter (line numbers).
     pub gutter_bg: bool,
@@ -1023,10 +986,7 @@ pub struct RawEditBlockConfig {
     /// Commented out (unset), it follows the `[ui] collapsed_edit_blocks`
     /// flag in config.toml; uncomment to pin either way.
     pub line_summary: Option<bool>,
-    /// Start Edit blocks expanded (showing the diff) instead of as a
-    /// collapsed one-line summary. Commented out (unset), it follows the
-    /// `[ui] collapsed_edit_blocks` flag in config.toml (flag on =
-    /// collapsed); uncomment to pin either way.
+    /// Unset follows `[ui] collapsed_edit_blocks`. Set to pin expanded or collapsed.
     pub expanded_by_default: Option<bool>,
     /// Separator between diff hunks. Options: "…" (default), "───", "⋯", "" (none).
     pub hunk_separator: Option<String>,
@@ -1053,10 +1013,7 @@ impl Default for RawEditBlockConfig {
     }
 }
 
-/// Configuration for user prompt block rendering (TOML format).
-///
-/// This configures how user prompts appear inside the scrollback,
-/// NOT the prompt editor widget (see [prompt] section).
+/// User prompt block in scrollback, not the prompt editor widget.
 #[derive(Debug, Clone, Serialize, Deserialize, Documented, DocumentedFields)]
 #[serde(default)]
 pub struct RawPromptConfig {
@@ -1484,6 +1441,7 @@ impl From<RawThinkingConfig> for ThinkingConfig {
             header_bright: raw.header_bright,
             body_dim_italic: false,
             collapsed_expand_hint: false,
+            rail_under_bullet: false,
         }
     }
 }
@@ -2356,9 +2314,11 @@ gutter_bg = true
         let cfg = AppearanceConfig::default();
         assert!(!cfg.scrollback.blocks.thinking.body_dim_italic);
         assert!(!cfg.scrollback.blocks.thinking.collapsed_expand_hint);
+        assert!(!cfg.scrollback.blocks.thinking.rail_under_bullet);
 
         let template = RawAppearanceConfig::to_toml_with_comments();
         assert!(!template.contains("body_dim_italic"));
         assert!(!template.contains("collapsed_expand_hint"));
+        assert!(!template.contains("rail_under_bullet"));
     }
 }

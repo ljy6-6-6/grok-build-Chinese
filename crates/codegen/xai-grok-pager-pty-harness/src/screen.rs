@@ -28,10 +28,7 @@ impl ScreenTracker {
         self.terminal.feed(bytes);
     }
 
-    /// Drain the replies the emulator queued while parsing fed input (e.g. cursor-position reports answering `ESC[6n`), concatenated in order.
-    /// These MUST be written back to the PTY or programs that probe the terminal hang or time out; a real terminal answers automatically.
-    /// The harness forwards them in [`crate::PtyHarness::update`] when response forwarding is enabled.
-    /// The probe that matters here is the inline viewport's startup cursor-position query: a timeout downgrades `--minimal` to full-screen inline.
+    /// Must be written back or terminal probes hang. A missed startup cursor-position query downgrades `--minimal` to full-screen inline.
     pub fn drain_responses(&mut self) -> Vec<u8> {
         let mut out = Vec::new();
         while let Ok(bytes) = self.pty_write_rx.try_recv() {

@@ -96,17 +96,9 @@ fn wrapper_prefix_mid_text_returns_false() {
     );
 }
 
-/// Pin the contract of the spawn-time insert (Site A).
 /// When the helper returns false, Site A's branch must insert exactly one tagged project-instructions item and bump `inherited_prefix_len`.
 /// When the helper returns true on the resulting conversation, Site A must skip both the insert and the bump.
-///
-/// This is NOT an integration test of `spawn_session_actor`'s async setup.
-/// That setup needs `SessionInfo`, `ChatStateHandle`, `Agent`, `ToolBridge`, persistence dirs, and gateway senders.
-/// Building one is a multi-hundred-line fixture.
 /// Instead, it mimics Site A's inner branch against a `(conversation, reminder, inherited_prefix_len)` tuple.
-/// Any drift in the guard's shape fails this test immediately.
-/// That covers an inverted check, a dropped `inherited_prefix_len` bump, or `ConversationItem::user` in place of `project_instructions`.
-/// That the production site matches this mimic is checked by `grep` at edit time and by review.
 #[test]
 fn site_a_skips_when_helper_returns_true_and_bumps_len_when_inserting() {
     // Case 1: the helper returns false, so the insert happens and the tagged item lands at index 1
@@ -218,10 +210,7 @@ fn site_a_handles_none_inherited_prefix_len_without_panicking() {
 }
 
 /// A verbatim mirror-fork (`preserve_inherited_system = true`) must NOT insert AGENTS.md.
-/// That holds even when the inherited prefix lacks project-instructions and the agent has a reminder.
 /// Inserting would shift the inherited prefix off the parent's cached radix stream before the planner's first inference.
-/// It mirrors `spawn_session_actor`'s Site A branch with the fork-preservation gate.
-/// That the production branch matches is checked by grep and review (see the note above).
 #[test]
 fn site_a_skips_agents_md_insert_on_verbatim_mirror_fork() {
     let mut conv: Vec<ConversationItem> = vec![
@@ -308,7 +297,6 @@ fn site_a_still_inserts_agents_md_on_non_fork_spawn() {
 /// Second gate: `ensure_prefix_ready`'s AGENTS.md insert carries the same `preserve_inherited_system` guard.
 /// The guard is defensive; that insert does not fire for subagents today.
 /// With the flag set, the post-prefix insert must be skipped.
-/// It mirrors that branch; production equivalence is checked by grep and review.
 #[test]
 fn site_b_skips_agents_md_insert_on_verbatim_mirror_fork() {
     // `ensure_prefix_ready` shape: the user prefix sits at `insert_at`, and AGENTS.md would otherwise be inserted at `(insert_at + 1).min(len)`

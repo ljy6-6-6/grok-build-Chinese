@@ -95,10 +95,7 @@ pub(crate) struct ScrollLogEvent {
     pub config: Option<ScrollLogConfigEcho>,
 }
 
-/// One serialized JSONL line: [`ScrollLogEvent`] plus fields the recorder computes.
-/// `ts_ms` is monotonic ms since recorder start.
-/// `events_since_flush` counts arrivals since the last logged flush/finalize of this stream.
-/// `ms_since_prev_flush` is the spacing from the previous flush-bearing record, absent before the first.
+/// JSONL line: event plus recorder-computed timing. `ms_since_prev_flush` is global spacing, absent before the first flush.
 #[derive(Serialize)]
 struct ScrollLogRecord {
     ts_ms: f64,

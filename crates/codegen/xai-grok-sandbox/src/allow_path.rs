@@ -9,18 +9,9 @@ use std::path::PathBuf;
 
 use crate::deny::is_glob;
 
-/// Normalize a `read_only` / `read_write` config entry.
-///
-/// Allow paths are literal directory grants: missing ones are created with `create_dir_all`, then bound.
-/// A trailing recursive glob is a common config mistake that used to create a directory literally named `**` and grant access only to it.
-/// That left the intended tree inaccessible, so one trailing `/**`, `/**/`, `/**/*`, or `/*` is stripped to the parent directory.
-/// The root forms `/**`, `/**/`, `/**/*`, and `/*` grant `/`, their parent.
-///
-/// Everything else is taken byte-for-byte from the config, so entries with surrounding whitespace are rejected rather than silently rewritten.
-/// Trimming would turn `/tmp/* ` (skipped as a glob) into a grant of `/tmp`, and `/srv/cache ` into a different directory than the one named.
-/// Entries still glob-shaped after the single strip ([`is_glob`]) cannot be expressed as a directory grant.
-/// They are skipped with a warning rather than widened.
-/// `deny` entries are not affected; globs there are real kernel-enforced patterns.
+/// Allow paths are literal directory grants. One trailing `/**`, `/**/`, `/**/*`, or `/*` is stripped to the parent
+/// (root forms grant `/`); a literal `**` directory used to hide the intended tree. Whitespace is not trimmed, and any
+/// entry still glob-shaped after that strip is skipped rather than widened. `deny` globs are unchanged.
 pub(crate) fn normalize_allow_path(raw: &str) -> Option<PathBuf> {
     if raw.is_empty() {
         return None;

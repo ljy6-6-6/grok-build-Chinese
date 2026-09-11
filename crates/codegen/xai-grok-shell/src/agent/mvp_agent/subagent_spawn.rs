@@ -71,6 +71,43 @@ impl MvpAgent {
             cli_agent_names,
         }
     }
+    pub(crate) async fn send_human_subagent_message(
+        &self,
+        parent_session_id: &str,
+        agent_address: String,
+        text: String,
+        operation: xai_grok_tools::implementations::grok_build::task::types::ActiveAgentMessageOperation,
+    ) -> xai_grok_tools::implementations::grok_build::task::types::ActiveAgentMessageOutcome {
+        use xai_grok_tools::implementations::grok_build::task::backend::SubagentBackend;
+        if !self
+            .cfg
+            .borrow()
+            .is_feature_enabled(crate::agent::config::Feature::ActiveAgentMessages)
+        {
+            return xai_grok_tools::implementations::grok_build::task::types::ActiveAgentMessageOutcome::Unsupported;
+        }
+        if self
+            .session_handle_waiting_for_load(&acp::SessionId::new(parent_session_id))
+            .await
+            .is_none()
+        {
+            return xai_grok_tools::implementations::grok_build::task::types::ActiveAgentMessageOutcome::NotFoundOrNotOwned;
+        }
+        let request = match xai_grok_tools::implementations::grok_build::task::types::ActiveAgentMessageRequest::try_new_from_human(
+            agent_address,
+            text,
+            operation,
+        ) {
+            Ok(request) => request,
+            Err(outcome) => return outcome,
+        };
+        xai_grok_tools::implementations::grok_build::task::backend::ChannelBackend::for_coordinator_session(
+                self.subagent_event_tx.clone(),
+                parent_session_id,
+            )
+            .send_active_message(request)
+            .await
+    }
     /// Test-only infallible wrapper; production uses the fallible variant.
     #[cfg(test)]
     pub(super) fn build_subagent_spawn_context(
@@ -81,7 +118,6 @@ impl MvpAgent {
             .expect("parent session must exist when spawning subagents")
     }
     /// Build a `SubagentSpawnContext` from agent state and the parent's shared resources; `None` when the parent handle is gone.
-    ///
     /// The many short-lived `self.cfg.borrow()` calls below MUST stay separate.
     /// The `prepare_*` and `resolve_*` helpers borrow `self.cfg` internally, so hoisting them under one outer borrow panics with a double borrow.
     pub(crate) fn try_build_subagent_spawn_context(
@@ -215,6 +251,12 @@ impl MvpAgent {
             process_scope: parent_process_scope,
             client_hooks: Default::default(),
             sampling_config: self.sampling_config.borrow().clone(),
+            #[cfg(test)]
+            setup_failure: None,
+            #[cfg(test)]
+            run_shell_child_harness: None,
+            #[cfg(test)]
+            fail_start_metadata_write: false,
             managed_mcp_proxy_base_url: parent_managed_mcp_proxy_base_url
                 .unwrap_or_else(|| self.cli_chat_proxy_base_url()),
             alpha_test_key: self.alpha_test_key(),
@@ -250,6 +292,11 @@ impl MvpAgent {
             terminal,
             session_env,
             memory_config: self.memory_config.clone(),
+            memory_mode: self
+                .memory_config
+                .as_ref()
+                .map(|config| config.mode)
+                .unwrap_or_else(|| self.cfg.borrow().memory.mode.unwrap_or_default()),
             web_search_sampling_config: self.prepare_web_search_sampling_config(),
             web_fetch_config: self.prepare_web_fetch_config(),
             image_gen_config: self.prepare_image_gen_config(),
@@ -264,6 +311,7 @@ impl MvpAgent {
             ask_user_question_enabled: false,
             parent_non_interactive,
             parent_cmd_tx: parent_cmd_tx.clone(),
+            spawner_address_target: None,
             parent_session_info: parent_handle.as_ref().map(|h| crate::session::info::Info {
                 id: parent_sid.clone(),
                 cwd: h.info.cwd.clone(),
@@ -285,6 +333,17 @@ impl MvpAgent {
                 .is_feature_enabled(crate::agent::config::Feature::BackendTools),
             respect_gitignore: self.cfg.borrow().respect_gitignore,
             path_not_found_hints: self.cfg.borrow().path_not_found_hints,
+            tool_params_json: {
+                let cfg = self.cfg.borrow();
+                crate::session::agent_rebuild::ResolvedToolParamsJson {
+                    bash: Some(
+                        cfg.toolset
+                            .bash
+                            .to_bash_params_json_with_remote(cfg.remote_settings.as_ref()),
+                    ),
+                    ask_user_question: None,
+                }
+            },
             plugin_registry: self.plugin_registry_handle.snapshot(),
             models_manager: self.models_manager.clone(),
             file_tool_overrides: {
@@ -304,7 +363,7 @@ impl MvpAgent {
             hook_registry: parent_hook_registry,
             permission_handle: parent_handle.as_ref().map(|h| h.permission_handle.clone()),
             worktree_type: self.worktree_type,
-            api_key_provider: Some(Arc::new(crate::auth::manager::SharedAuthKeyProvider(
+            api_key_provider: Some(Arc::new(xai_grok_login::manager::SharedAuthKeyProvider(
                 am.clone(),
             ))),
             image_description_model: self.resolve_image_description_model(),
@@ -326,9 +385,6 @@ impl MvpAgent {
             parent_skills: None,
             parent_skills_config: self.cfg.borrow().skills.clone(),
             parent_compat: self.cfg.borrow().compat_resolved,
-            task_completion_reservations: parent_handle
-                .as_ref()
-                .and_then(|h| h.tool_context.task_completion_reservations.clone()),
             synthetic_trace_tx: parent_handle
                 .as_ref()
                 .and_then(|h| h.tool_context.synthetic_trace_tx.clone()),
@@ -341,6 +397,9 @@ impl MvpAgent {
             scheduler_delete_tool_name: parent_handle
                 .as_ref()
                 .and_then(|h| h.tool_context.scheduler_delete_tool_name.clone()),
+            scheduler_create_tool_name: parent_handle
+                .as_ref()
+                .and_then(|h| h.tool_context.scheduler_create_tool_name.clone()),
             auto_wake_enabled: self
                 .cfg
                 .borrow()

@@ -5,16 +5,12 @@ use super::*;
 use crate::session::repo_status_prefix::RepoStatusSnapshot;
 use xai_grok_telemetry::region;
 use xai_grok_telemetry::region::Parent;
-/// Normalize a free-form name (e.g. an MCP server identifier) into a single safe filesystem segment.
-///
 /// Replaces anything outside `[A-Za-z0-9._-]` with `_` so the result is a portable directory name on macOS/Linux.
 /// Whether `url` is an `http://` or `https://` URL, one the upstream API can fetch directly.
 /// `file://` and other local schemes are rejected by the API and must be inlined as a `data:` URL instead.
 pub(super) fn is_remote_image_url(url: &str) -> bool {
     url.starts_with("http://") || url.starts_with("https://")
 }
-/// Pick the URL value sent to the upstream API for a user-attached image.
-///
 /// The remote API accepts only a base64 `data:` URL or an HTTP(S) URL; `file://` and other local schemes return 400.
 /// Inline bytes win when present (the canonical payload); `uri` is forwarded directly only when it is a remote URL with no inline bytes.
 /// Extracted so production and the regression tests assert against the same selector, and a rule change cannot drift past the tests.
@@ -376,7 +372,7 @@ mod install_system_prompt_tests {
         );
     }
 }
-pub(super) const LARGE_PROMPT_THRESHOLD: usize = 25_000;
+pub(crate) const LARGE_PROMPT_THRESHOLD: usize = 25_000;
 pub(super) const TRUNCATED_PROMPT_PREFIX_SIZE: usize = 25_000;
 /// Percent of the bounded-prompt budget given to the query (capped; rest is context head).
 const LARGE_QUERY_BUDGET_PERCENT: usize = 80;
@@ -474,7 +470,6 @@ pub(super) fn build_truncated_prompt_message(
 pub(super) fn strip_offload_notice(message: &str, notice: &str) -> String {
     message.replacen(notice, OFFLOAD_FAILED_NOTICE, 1)
 }
-/// Write `full_message` via `writer`; return the bounded in-band `message` plus the file path when the write succeeds.
 /// On write failure the bounded message is still returned (never the oversized original that would re-overflow the context window).
 /// The failure path swaps the file-referencing notice for [`OFFLOAD_FAILED_NOTICE`], so the model isn't told to read a file that was never written.
 /// The injected `writer` makes this testable without touching the filesystem.
@@ -619,7 +614,6 @@ impl SessionActor {
         partition_rules_by_scope(files, &grok_home, &vendor_homes, &workspace_roots)
     }
     /// Build the custom-templated first user message.
-    ///
     /// Gathers session-scoped inputs: today's date, VCS status, AGENTS.md rules, skill registry, and MCP servers.
     /// Dispatches through `UserMessageContext::render`.
     async fn build_templated_user_message(
@@ -629,7 +623,7 @@ impl SessionActor {
         repo_status: Option<&RepoStatusSnapshot>,
     ) -> Option<String> {
         use xai_grok_agent::prompt::user_message::UserMessageContext;
-        self.wait_for_mcp_templated_prefix_ready(&template).await;
+        self.wait_for_mcp_startup_grace().await;
         let bridge = self.agent.borrow().tool_bridge().clone();
         let (vcs_root, vcs_status) = match repo_status {
             Some(snapshot) => (snapshot.root.clone(), snapshot.templated_status()),
@@ -736,11 +730,7 @@ impl SessionActor {
     fn workspace_mcps_root(_cwd: &std::path::Path) -> Option<std::path::PathBuf> {
         None
     }
-    /// Snapshot connected MCP servers (alphabetical) with their server instructions and per-server descriptor folder paths.
-    ///
-    /// Side-effect: materializes per-tool and per-resource JSON descriptor files under `<mcps_root>/<sanitized_server_name>/{tools,resources}/`.
     /// Only servers that expose tools or resources get files; models read these before issuing `CallMcpTool` or `FetchMcpResource` calls.
-    /// Errors during materialization are logged and tolerated: the user message still renders the server entry.
     /// The model then sees an empty descriptor directory rather than a missing one.
     /// No-op when the descriptor root is unavailable (`workspace_mcps_root` is `None`).
     async fn gather_mcp_servers(
@@ -764,9 +754,17 @@ impl SessionActor {
             );
             state
                 .all_clients()
+                .filter(|(n, _)| !state.has_failure_record(n))
                 .map(|(n, c)| (n.clone(), std::sync::Arc::clone(c)))
                 .collect()
         };
+        let mut ready_clients = Vec::with_capacity(clients.len());
+        for (name, client) in clients {
+            if client.is_ready().await {
+                ready_clients.push((name, client));
+            }
+        }
+        let clients = ready_clients;
         let mut entries: Vec<McpServerEntry> = Vec::with_capacity(clients.len());
         for (name, client) in &clients {
             let instructions = client.server_instructions().await;
@@ -846,7 +844,6 @@ impl SessionActor {
             .collect()
     }
     /// Build a `PathRewriter` for sanitizing overlay paths in model-facing text.
-    ///
     /// Returns `None` when `display_cwd` is unset (no rewriting needed).
     /// Tool-result handlers use it to rewrite prompt_text, error messages, and any other model-visible content that may embed the real worktree cwd.
     pub(super) fn path_rewriter(&self) -> Option<crate::session::acp_conversion::PathRewriter> {
@@ -857,11 +854,7 @@ impl SessionActor {
     }
     /// If the prompt exceeds LARGE_PROMPT_THRESHOLD, write the full content to a file.
     /// Return a truncated version with the local path embedded for the model to read.
-    ///
-    /// Takes context and query separately to prioritise the query: kept intact when it fits, else bounded head+tail (trailing question survives).
-    ///
     /// Returns `(assembled_message, Some(local_path))` when truncated, or `(assembled, None)`.
-    /// Includes skill information in the assembled prompt.
     pub(super) async fn maybe_truncate_large_prompt_with_skills(
         &self,
         context: String,

@@ -1,20 +1,8 @@
 use toml::Value as TomlValue;
 
 /// Resolve `mcp.liveness_watchers` for a session.
-///
 /// Thin wrapper around the canonical [`crate::agent::config::resolve_mcp_liveness_watchers`].
-///
-/// Pulls each layer from its appropriate TOML / runtime source:
-///
-/// | Layer        | Source                                                          |
-/// |--------------|-----------------------------------------------------------------|
-/// | requirement  | `[features] mcp_liveness_watchers` in `requirements.toml`       |
-/// | cli          | (none — no CLI flag)                                            |
-/// | env          | `GROK_MCP_LIVENESS_WATCHERS` (handled by `BoolFlag::env`)       |
-/// | config       | `[features] mcp_liveness_watchers` in `~/.grok/config.toml`     |
-/// | managed      | `[features] mcp_liveness_watchers` in `managed_config.toml`     |
-/// | feature_flag | (none yet — remote settings plumbing TBD)                            |
-/// | default      | `true`                                                          |
+/// Pulls each layer from its appropriate TOML / runtime source: | Layer | Source | |--------------|-----------------------------------------------------------------| | requirement | `[features] mcp_liveness_watchers` in `requirements.toml` | | cli | (none — no CLI flag) | | env | `GROK_MCP_LIVENESS_WATCHERS` (handled by `BoolFlag::env`) | | config | `[features] mcp_liveness_watchers` in `~/.grok/config.toml` | | managed | `[features] mcp_liveness_watchers` in `managed_config.toml` | | feature_flag | (none yet — remote settings plumbing TBD) | | default | `true` |
 pub(crate) fn resolve_mcp_liveness_watchers(
     requirements: Option<&TomlValue>,
     user: Option<&TomlValue>,
@@ -34,21 +22,8 @@ pub(crate) fn resolve_mcp_liveness_watchers(
 }
 
 /// Resolve `mcp.auto_restart` for a session.
-///
 /// Thin wrapper around the canonical [`crate::agent::config::resolve_mcp_auto_restart`].
 /// Mirrors [`resolve_mcp_liveness_watchers`].
-///
-/// Pulls each layer from its appropriate TOML / runtime source:
-///
-/// | Layer        | Source                                                          |
-/// |--------------|-----------------------------------------------------------------|
-/// | requirement  | `[features] mcp_auto_restart` in `requirements.toml`            |
-/// | cli          | (none — no CLI flag)                                            |
-/// | env          | `GROK_MCP_AUTO_RESTART` (handled by `BoolFlag::env`)            |
-/// | config       | `[features] mcp_auto_restart` in `~/.grok/config.toml`          |
-/// | managed      | `[features] mcp_auto_restart` in `managed_config.toml`          |
-/// | feature_flag | (none yet — remote settings plumbing TBD)                            |
-/// | default      | `true`                                                          |
 pub(crate) fn resolve_mcp_auto_restart(
     requirements: Option<&TomlValue>,
     user: Option<&TomlValue>,
@@ -68,20 +43,8 @@ pub(crate) fn resolve_mcp_auto_restart(
 }
 
 /// Resolve `mcp.push_server_status` for a session.
-///
 /// Thin wrapper around the canonical [`crate::agent::config::resolve_mcp_push_server_status`] that mirrors [`resolve_mcp_liveness_watchers`].
-///
-/// Pulls each layer from its TOML / runtime source:
-///
-/// | Layer        | Source                                                          |
-/// |--------------|-----------------------------------------------------------------|
-/// | requirement  | `[features] mcp_push_server_status` in `requirements.toml`      |
-/// | cli          | (none — no CLI flag)                                            |
-/// | env          | `GROK_MCP_PUSH_SERVER_STATUS` (handled by `BoolFlag::env`)      |
-/// | config       | `[features] mcp_push_server_status` in `~/.grok/config.toml`    |
-/// | managed      | `[features] mcp_push_server_status` in `managed_config.toml`    |
-/// | feature_flag | (none yet — remote settings plumbing TBD)                            |
-/// | default      | `true`                                                          |
+/// Pulls each layer from its TOML / runtime source: | Layer | Source | |--------------|-----------------------------------------------------------------| | requirement | `[features] mcp_push_server_status` in `requirements.toml` | | cli | (none — no CLI flag) | | env | `GROK_MCP_PUSH_SERVER_STATUS` (handled by `BoolFlag::env`) | | config | `[features] mcp_push_server_status` in `~/.grok/config.toml` | | managed | `[features] mcp_push_server_status` in `managed_config.toml` | | feature_flag | (none yet — remote settings plumbing TBD) | | default | `true` |
 pub fn resolve_mcp_push_server_status(
     requirements: Option<&TomlValue>,
     user: Option<&TomlValue>,
@@ -101,20 +64,8 @@ pub fn resolve_mcp_push_server_status(
 }
 
 /// Resolve `mcp.recursive_config_watch` for the leader's `ConfigFileWatcher` spawn path.
-///
 /// Thin wrapper around the canonical [`crate::agent::config::resolve_mcp_recursive_config_watch`].
-///
-/// Pulls each layer from its TOML / runtime source:
-///
-/// | Layer        | Source                                                              |
-/// |--------------|---------------------------------------------------------------------|
-/// | requirement  | `[features] mcp_recursive_config_watch` in `requirements.toml`      |
-/// | cli          | (none — no CLI flag)                                                |
-/// | env          | `GROK_MCP_RECURSIVE_CONFIG_WATCH` (handled by `BoolFlag::env`)      |
-/// | config       | `[features] mcp_recursive_config_watch` in `~/.grok/config.toml`    |
-/// | managed      | `[features] mcp_recursive_config_watch` in `managed_config.toml`    |
-/// | feature_flag | (none yet — remote settings plumbing TBD)                                |
-/// | default      | `true`                                                              |
+/// Pulls each layer from its TOML / runtime source: | Layer | Source | |--------------|---------------------------------------------------------------------| | requirement | `[features] mcp_recursive_config_watch` in `requirements.toml` | | cli | (none — no CLI flag) | | env | `GROK_MCP_RECURSIVE_CONFIG_WATCH` (handled by `BoolFlag::env`) | | config | `[features] mcp_recursive_config_watch` in `~/.grok/config.toml` | | managed | `[features] mcp_recursive_config_watch` in `managed_config.toml` | | feature_flag | (none yet — remote settings plumbing TBD) | | default | `true` |
 pub(crate) fn resolve_mcp_recursive_config_watch(
     requirements: Option<&TomlValue>,
     user: Option<&TomlValue>,
@@ -235,7 +186,6 @@ mod mcp_startup_timeout_tests {
 }
 
 // ── MCP max output bytes (inline tool-result cap) ───────────────────────────
-//
 // Full multi-tier resolve lives only here (shell can read config/requirements).
 // Tools holds a single effective atomic: we resolve once on apply and push it via `set_mcp_max_output_bytes` so free-function truncation sees it
 
@@ -258,13 +208,7 @@ fn max_mcp_output_bytes_from_toml(v: &toml::Value) -> Option<usize> {
 
 /// Resolve the MCP tool-result inline cap (bytes) on the **global / atomic path**.
 /// No cwd here, so no project tier; see [`resolve_max_mcp_output_bytes_for_cwd`].
-///
-/// Precedence (highest first):
-///   1. requirements.toml `[mcp] max_output_bytes`
-///   2. env `GROK_MAX_MCP_OUTPUT_BYTES` / `MAX_MCP_OUTPUT_BYTES` (Grok-native wins when both set)
-///   3. effective `config.toml [mcp] max_output_bytes`
-///   4. remote settings `RemoteSettings.max_mcp_output_bytes`
-///   5. [`DEFAULT_MAX_MCP_OUTPUT_BYTES`] (20_000)
+/// Precedence (highest first): requirements.toml `[mcp] max_output_bytes` env `GROK_MAX_MCP_OUTPUT_BYTES` / `MAX_MCP_OUTPUT_BYTES` (Grok-native wins when both set) effective `config.toml [mcp] max_output_bytes` remote settings `RemoteSettings.max_mcp_output_bytes` [`DEFAULT_MAX_MCP_OUTPUT_BYTES`] (20_000)
 pub(crate) fn resolve_max_mcp_output_bytes(remote: Option<u64>) -> usize {
     let remote_usize = remote
         .and_then(|n| usize::try_from(n).ok())
@@ -286,7 +230,6 @@ pub(crate) fn resolve_max_mcp_output_bytes(remote: Option<u64>) -> usize {
 }
 
 /// Project tier of the MCP output cap: `[mcp] max_output_bytes` from the `.grok/config.toml` chain (`cwd` up to the git root), deepest file wins.
-///
 /// Folder-trust-gated: an untrusted checkout must not raise or lower the cap (raising it would let the repo stuff context and drive up cost).
 /// Project plugin paths and repo env contributions are gated the same way.
 fn project_max_mcp_output_bytes(cwd: &std::path::Path) -> Option<usize> {
@@ -307,8 +250,7 @@ fn project_max_mcp_output_bytes(cwd: &std::path::Path) -> Option<usize> {
 
 /// Session-scoped MCP output cap: `Some(bytes)` **only when the project tier wins** the full precedence stack for `cwd`; `None` otherwise.
 /// The caller seeds `Some` values into the session's `TruncationCfg` resource (consulted by MCP truncation *before* the process-global atomic).
-/// Returning `None` when any higher- or lower-priority tier would win keeps the atomic authoritative for those, including remote settings refresh.
-/// The project tier only wins when requirements and env are absent (it sits above user config / remote settings / default).
+/// Returning `None` when any higher- or lower-priority tier would win keeps the atomic authoritative for those, including remote settings refresh. The project tier only wins when requirements and env are absent (it sits above user config / remote settings / default).
 pub(crate) fn resolve_max_mcp_output_bytes_for_cwd(cwd: &std::path::Path) -> Option<usize> {
     let requirements = crate::config::load_merged_requirements()
         .as_ref()

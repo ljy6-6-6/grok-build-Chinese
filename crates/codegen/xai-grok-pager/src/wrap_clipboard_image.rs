@@ -87,7 +87,6 @@ fn write_request_osc() -> std::io::Result<()> {
 }
 
 /// Decode wrap host-image paste content (`Event::Paste` payload).
-///
 /// `None` means not wrap magic (caller treats as normal text).
 /// Malformed wrap frames yield [`WrapImagePaste::NoImage`] so they never land as text.
 pub fn try_decode_wrap_host_image_paste(text: &str) -> Option<WrapImagePaste> {

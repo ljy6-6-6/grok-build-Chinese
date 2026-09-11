@@ -269,10 +269,9 @@ async fn build_session_info_used_reflects_recorded_response() {
             let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
 
-            // Push a small non-system fixture (user, assistant, and tool result)
-            // Without non-system items `message_tokens` would be 0 and the regression guard below would pass vacuously
-            // Bytes/4 of these strings is small but above zero
-            // The trailing `_and_ack` flushes the actor mailbox so the subsequent query sees the writes
+            // Push a small non-system fixture (user, assistant, and tool result).
+            // Without non-system items `message_tokens` would be 0 and the regression guard below would pass vacuously.
+            // Bytes/4 of these strings is small but above zero.
             actor
                 .chat_state_handle
                 .push_assistant_response(ConversationItem::assistant("hi there hi there hi there"));
@@ -312,7 +311,6 @@ async fn build_session_info_used_reflects_recorded_response() {
 }
 
 /// `build_session_info` must populate `SessionInfoData.show_model_fingerprint` from the catalog entry for the session's current model.
-/// The catalog map is keyed by the config key (`"custom-catalog-id"`), not by the routing slug (`"test"`, the harness sampling model).
 /// `build_session_info` reads the slug from the sampling config, so a direct `.get(slug)` would miss the entry and wrongly yield false.
 /// The flag is the sole control (the client keeps no built-in per-slug default), so this is the only thing that can turn checkpoint identity on.
 #[tokio::test(flavor = "current_thread")]
@@ -332,6 +330,7 @@ async fn build_session_info_sources_show_model_fingerprint_from_catalog() {
             let mut entry = ModelEntry {
                 bundled_catalog_entry: false,
                 info: ModelInfo::fallback("test"),
+                mtls_cert_dir: None,
                 api_key: None,
                 env_key: None,
                 auth_provider: None,

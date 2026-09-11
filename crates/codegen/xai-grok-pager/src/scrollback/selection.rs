@@ -21,14 +21,9 @@ mod border_chars {
     pub const VERTICAL_DASHED: char = '┆';
 }
 
-/// A selection box that can be drawn around a selected block.
-///
-/// The box consists of:
-/// - Side borders (│) on the left and right edges of `inner_area`
-/// - Top corners (┌┐) one row above `inner_area` (if `!top_clipped`)
-/// - Bottom corners (└┘) one row below `inner_area` (if `!bottom_clipped`)
-///
-/// This struct is returned by components (like ScrollbackPane) and rendered by the frame, allowing selection boxes to span component boundaries.
+/// A selection box that can be drawn around a selected block. Side borders (│) on the left and right edges of
+/// `inner_area`. Top corners (┌┐) one row above `inner_area` (if `!top_clipped`). Bottom corners (└┘) one row below
+/// `inner_area` (if `!bottom_clipped`).
 #[derive(Debug, Clone)]
 pub struct SelectionBox {
     /// The inner area surrounded by the selection border.
@@ -48,19 +43,8 @@ pub struct SelectionBox {
 }
 
 /// Output from render that needs post-processing.
-///
 /// Render returns this instead of mutating state, keeping render pure.
 /// The caller is responsible for rendering these elements after the main pass.
-///
-/// # Example
-/// ```ignore
-/// let output = pane.render_with_scratch(area, buf, &state, &mut scratch);
-///
-/// // Post-render pass
-/// if let Some(sel) = output.selection_box {
-///     sel.render(buf);
-/// }
-/// ```
 #[derive(Debug, Clone, Default)]
 pub struct RenderOutput {
     /// Selection box to render around the selected entry.
@@ -163,7 +147,6 @@ impl SelectionBox {
     }
 
     /// Hit-test rect for the close control, if it would be rendered.
-    ///
     /// Pure computation; it does not touch the buffer. Use for mouse hit-testing.
     /// Returns `None` if not closable, top is clipped, or no room.
     pub fn close_button_rect(&self) -> Option<Rect> {
@@ -185,14 +168,9 @@ impl SelectionBox {
         })
     }
 
-    /// Render the selection box to the buffer.
-    ///
-    /// Draws:
-    /// - Side borders (│) on left and right edges of inner_area
-    /// - Dashed borders (┆) on edge rows when clipped, to indicate continuation
-    /// - Top corners (┌┐) at inner_area.y - 1 if !top_clipped and y > 0
-    /// - Bottom corners (└┘) at inner_area.y + height if !bottom_clipped
-    /// - Close button (✗) left of ┐ if enabled
+    /// Render the selection box to the buffer. Side borders (│) on left and right edges of inner_area. Top corners (┌┐)
+    /// at inner_area.y - 1 if !top_clipped and y > 0. Bottom corners (└┘) at inner_area.y + height if !bottom_clipped.
+    /// Close button (✗) left of ┐ if enabled.
     pub fn render(&self, buf: &mut Buffer) {
         let area = self.inner_area;
         if area.width == 0 || area.height == 0 {

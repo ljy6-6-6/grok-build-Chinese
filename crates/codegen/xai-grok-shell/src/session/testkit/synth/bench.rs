@@ -34,9 +34,7 @@ fn turn_updates(info: &Info, turn: usize) -> Vec<SessionUpdate> {
 }
 
 /// Build a session dir under `root` whose `updates.jsonl` reaches *at least* `target_bytes`.
-/// Realistic mixed updates are appended through the real adapter.
 /// The file overshoots to the next 32-turn stat boundary, so the result is a floor, not an exact size.
-///
 /// Async callers await this directly; synchronous callers (Criterion benches, plain `#[test]`s) use [`make_session_with_size_blocking`].
 pub async fn make_session_with_size(root: &Path, target_bytes: u64) -> Info {
     let adapter = JsonlStorageAdapter::with_root(root.to_path_buf());

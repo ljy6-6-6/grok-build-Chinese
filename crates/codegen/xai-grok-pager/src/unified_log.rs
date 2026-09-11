@@ -15,11 +15,9 @@ use xai_grok_telemetry::unified_log::{
 static ACP_TX: OnceLock<AcpAgentTx> = OnceLock::new();
 static BUFFER: Mutex<Vec<ClientLogEntry>> = Mutex::new(Vec::new());
 
-/// Initialize the unified log forwarder with the ACP sender.
-///
-/// Must be called once after the ACP connection is established.
-/// Spawns a background task that flushes buffered entries every few seconds, so events are delivered promptly without manual flush calls.
-/// Entries buffered before this call will be picked up on the first tick.
+/// Initialize the unified log forwarder with the ACP sender. Must be called once after the ACP connection is
+/// established. Spawns a background task that flushes buffered entries every few seconds, so events are delivered
+/// promptly without manual flush calls.
 pub fn init(tx: AcpAgentTx) {
     let _ = ACP_TX.set(tx);
     tokio::spawn(async {
@@ -53,14 +51,21 @@ fn make_entry(
     }
 }
 
-/// Write an info entry straight to `unified.jsonl`, bypassing the ACP forwarder.
-/// The forwarder only gets a sender after a successful connect, and a flush during a failed startup destroys buffered entries.
-/// Entries logged before the connect that must survive a failed startup go through here.
-/// They get the same pager source and pid stamps as forwarded entries.
+/// Write an info entry straight to `unified.jsonl`, bypassing the ACP forwarder. The forwarder only gets a sender
+/// after a successful connect, and a flush during a failed startup destroys buffered entries. Entries logged before
+/// the connect that must survive a failed startup go through here.
 pub fn write_direct_info(msg: &str, ctx: Option<serde_json::Value>) {
     xai_grok_telemetry::unified_log::ingest_client_entries(
         LogSource::GrokPager,
         &[make_entry(LogLevel::Info, msg, None, ctx)],
+    );
+}
+
+/// [`write_direct_info`] at warn level, for failure reports that must land even when the ACP forwarder is wedged.
+pub fn write_direct_warn(msg: &str, sid: Option<&str>, ctx: Option<serde_json::Value>) {
+    xai_grok_telemetry::unified_log::ingest_client_entries(
+        LogSource::GrokPager,
+        &[make_entry(LogLevel::Warn, msg, sid, ctx)],
     );
 }
 

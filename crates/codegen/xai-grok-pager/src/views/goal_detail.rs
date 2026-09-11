@@ -39,10 +39,7 @@ const MAX_TODO_DISPLAY: usize = 15;
 /// Maximum per-model token rows displayed before a "+N more" summary row.
 const MAX_MODEL_DISPLAY: usize = 6;
 
-/// Rows the per-model breakdown contributes to the modal: the capped model rows plus an optional "+N more" overflow row.
-/// Returns 0 when the breakdown is suppressed (a single-model or all-inherit goal collapses to the single tokens line).
 /// The cap is applied BEFORE the `u16` cast so the height sum can never overflow.
-/// The height calc and the render loop both use this, so they stay in lockstep.
 fn per_model_row_count(models: &[(String, u64)]) -> u16 {
     if models.len() < 2 {
         return 0;
@@ -138,17 +135,8 @@ fn status_label_with_locale(
 // Wrapping helpers: pause-message reason block
 // ---------------------------------------------------------------------------
 
-/// Wrap a string into rows of at most `width` terminal columns.
-///
-/// Splits on whitespace first, then hard-splits any token wider than `width`.
-/// Explicit `\n` line breaks are preserved, so a multi-line block reason (the shell's `blocked_reason\nmessage` form) keeps its structure.
-///
-/// Width is measured in terminal columns via `UnicodeWidthStr` and `UnicodeWidthChar`, not Unicode code points.
-/// CJK and East-Asian Wide characters take 2 columns each, combining marks take 0, and emoji can take 2.
-/// Using `chars().count()` would let a model-emitted block reason with wide chars overflow into the right border.
-///
-/// `width` of zero or one returns a single un-split row to avoid divide-by-zero behaviour at degenerate modal widths.
-/// That case is unreachable in practice; the modal bails below width 20.
+/// Wrap a string into rows of at most `width` terminal columns. `width` of zero or one returns a
+/// single un-split row to avoid divide-by-zero behaviour at degenerate modal widths.
 fn wrap_pause_message_lines(text: &str, width: u16) -> Vec<String> {
     use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -246,10 +234,9 @@ pub(crate) fn truncate_to_width(text: &str, budget: usize) -> String {
     out
 }
 
-/// Replace control characters (tab, ESC, BEL, and so on) with spaces.
-/// The callers pass free-form model or wire text (objective title, event detail, timestamp, pause reason) that must not break a rendered row.
-/// Stripping here does not rely on ratatui's own filter, so a ratatui regression can't leak control bytes.
-/// `keep_newlines` preserves `\n` for the pause-reason wrapper (which splits on it before render); single-row callers pass `false`.
+/// Replace control characters (tab, ESC, BEL, and so on) with spaces. The callers pass free-form
+/// model or wire text (objective title, event detail, timestamp, pause reason) that must not break
+/// a rendered row.
 pub(crate) fn strip_control_chars(s: &str, keep_newlines: bool) -> String {
     s.chars()
         .map(|c| {
@@ -294,9 +281,6 @@ fn has_classifier_activity(goal: &GoalDisplayState) -> bool {
 }
 
 /// Display string for the classifier details-path row.
-/// Shows the path when it exists (existence resolved once on receipt and passed as `exists`).
-/// Shows `(unavailable)` when a path was reported but the file is missing (a fail-open run may not have written it).
-/// Shows a hyphen when no path was reported at all.
 fn classifier_details_display(path: Option<&str>, exists: bool) -> &str {
     match path {
         Some(p) if exists => p,
@@ -339,10 +323,9 @@ fn classifier_verdict_label_with_locale(
     }
 }
 
-/// Humanize a wire goal-event name (and optional detail) for the Recent History row.
-/// This is the single wire-to-display mapping, so machine vocabulary (`goal_paused`, snake_case detail) never reaches the user.
-/// Detail is folded into the label for the events that carry one (pause cause, premature-stop pattern).
-/// Unknown events fall back to a de-snake-cased form so a future shell event still renders readably.
+/// Humanize a wire goal-event name (and optional detail) for the Recent History row. This is the
+/// single wire-to-display mapping, so machine vocabulary (`goal_paused`, snake_case detail) never
+/// reaches the user.
 fn humanize_goal_event(event: &str, detail: Option<&str>) -> String {
     humanize_goal_event_with_locale(event, detail, None)
 }
@@ -475,30 +458,13 @@ pub fn goal_detail_area_with_locale(
         .clamp(60, 140)
         .min(screen.width.saturating_sub(4));
 
-    // Inner content width matches the render path
-    // `block.inner(area)` gives `w - 2` (the rounded border)
-    // The render indents 1 more column on each side (`x = inner.x + 1`, `w = inner.width - 2`), so the usable text width is `w - 4`
-    // Mirror that here so pause-message wrapping computes the same row count the renderer will produce
+    // Inner content width matches the render path `block.inner(area)` gives `w - 2` (the rounded
+    // border).
     let inner_w = w.saturating_sub(4);
 
-    // Compute content height based on what will actually be rendered
-    // Each optional section OWNS its leading blank separator (rendered only when the section renders)
-    // That keeps the height budget and the render path in lockstep
-    //   2  border (top + bottom)
-    //   1  status line
-    //   N  pause_message reason block (wrapped, when paused + Some)
-    //   1  pause hint line (only when any paused variant)
-    //   1  budget/tokens line
-    //   1  progress bar (only if budget set)
-    //   1  blank separator (unconditional, before the progress section)
-    //   1  progress header / "no progress items yet"
-    //   N  todo items (+ optional "+N more")
-    //   2-3 subagent block (if active): blank + role line + optional detail line
-    //   N  per-model token rows (only with an active subagent + ≥2 models,
-    //      capped at MAX_MODEL_DISPLAY + optional "+N more")
-    //   5  completion review (if classifier activity): blank + header + 3 lines
-    //   3  recent history (if last_event present): blank + header + event line
-    //   1  commands hint
+    // Compute content height based on what will actually be rendered. Each optional section OWNS its
+    // leading blank separator (rendered only when the section renders). That keeps the height budget
+    // and the render path in lockstep.
     let has_budget = goal.token_budget.is_some_and(|b| b > 0);
     let budget_bar = if has_budget { 1u16 } else { 0 };
     let recovery_hint = if goal.status.is_paused()
@@ -510,10 +476,9 @@ pub fn goal_detail_area_with_locale(
     } else {
         0
     };
-    // The Reason block renders as `Reason: <pause_message>` wrapped to the inner column width
-    // The prefix is part of the wrapped content, so continuation rows continue at column 0 without alignment tricks; matches the renderer's loop
-    // Gated on `is_paused()` to stay in sync with the renderer
-    // A future shell bug that leaks `pause_message` on a non-paused snapshot must not grow the modal box without also rendering content into it
+    // The Reason block renders as `Reason: <pause_message>` wrapped to the inner column width. The
+    // prefix is part of the wrapped content, so continuation rows continue at column 0 without
+    // alignment tricks; matches the renderer's loop.
     let reason_lines = if goal.status.is_paused()
         || matches!(
             goal.status,
@@ -591,16 +556,9 @@ pub fn goal_detail_area_with_locale(
     Rect::new(x, y, w, h)
 }
 
-/// Render the goal detail overlay into the buffer.
-///
-/// Draws a bordered popup with:
-/// - Title: objective
-/// - Status and phase
-/// - Token budget progress bar
-/// - Todo progress list
-/// - Active subagent metrics
-/// - Recent event history
-/// - Available commands hint
+/// Render the goal detail overlay into the buffer. Draws a bordered popup with. Title: objective.
+/// Status and phase. Token budget progress bar. Todo progress list. Active subagent metrics. Recent
+/// event history. Available commands hint.
 #[allow(clippy::too_many_arguments)]
 pub fn render_goal_detail(
     buf: &mut Buffer,
@@ -2106,10 +2064,9 @@ mod tests {
     #[test]
     fn wrap_pause_message_lines_uses_display_width_for_cjk() {
         use unicode_width::UnicodeWidthStr;
-        // Each Han ideograph occupies 2 terminal columns
-        // A 10-char CJK string is 20 columns wide and must NOT fit on a single width=10 row
-        // A chars().count() measure (10) would have mis-wrapped this and silently overflowed the modal border
-        // Use Han chars split into two words so wrapping isn't forced down the hard-split path
+        // Each Han ideograph occupies 2 terminal columns. A 10-char CJK string is 20 columns wide and must
+        // NOT fit on a single width=10 row. Use Han chars split into two words so wrapping isn't forced
+        // down the hard-split path.
         let text = "你好世界 再見天空";
         for line in wrap_pause_message_lines(text, 10) {
             assert!(

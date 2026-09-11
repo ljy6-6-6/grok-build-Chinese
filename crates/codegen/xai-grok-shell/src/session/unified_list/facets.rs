@@ -98,7 +98,7 @@ impl FacetProvider for KindFacet {
     }
     fn extract(&self, item: &NormalizedItem) -> Option<FacetValue> {
         Some(FacetValue::One(serde_json::Value::String(
-            item.kind.as_str().to_owned(),
+            item.kind.as_ref().to_owned(),
         )))
     }
 }

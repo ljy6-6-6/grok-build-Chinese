@@ -8,6 +8,7 @@
 use std::path::Path;
 
 use serde_json::Value;
+use tracing::Instrument as _;
 
 // Re-export AgentsMdTracker so consumers can reference it via the workspace crate without a direct xai-grok-tools dependency
 pub use xai_grok_tools::types::agents_md_tracker::AgentsMdTracker;
@@ -21,20 +22,29 @@ pub use xai_grok_agent::prompt::skills::SkillsConfig;
 // Skill discovery
 // ---------------------------------------------------------------------------
 
-/// Discover skills visible from the workspace root.
-///
-/// Delegates to [`xai_grok_agent::prompt::skills::list_skills`] with the workspace's `root_cwd` and the caller-supplied `SkillsConfig`.
-/// Returns each [`SkillInfo`] serialized to a `serde_json::Value`.
-/// `list_skills` stats and reads each SKILL.md but holds no async locks across `.await` points, so contention is not a concern.
-pub async fn discover_skills(root_cwd: &Path, config: &SkillsConfig) -> Vec<Value> {
+/// Discover skills visible from the workspace root via `list_skills`, each [`SkillInfo`] as JSON.
+/// That walk holds no async locks across `.await`, so contention is not a concern.
+/// `project_trusted` omits project-scope skills when false.
+pub async fn discover_skills(
+    root_cwd: &Path,
+    config: &SkillsConfig,
+    project_trusted: bool,
+) -> Vec<Value> {
+    let span = xai_grok_telemetry::region::Region::from_span(tracing::info_span!(
+        "workspace.discover_skills",
+        skill_count = tracing::field::Empty,
+    ));
     let cwd_str = root_cwd.to_string_lossy();
     // Workspace discovery does no per-vendor compat gating; pass the all-on default
     let skills = xai_grok_agent::prompt::skills::list_skills(
         Some(&cwd_str),
         config,
         xai_grok_agent::prompt::skills::CompatConfig::default(),
+        project_trusted,
     )
+    .instrument(span.span().clone())
     .await;
+    span.span().record("skill_count", skills.len() as i64);
 
     skills
         .into_iter()
@@ -57,12 +67,18 @@ pub async fn discover_skills(root_cwd: &Path, config: &SkillsConfig) -> Vec<Valu
 // ---------------------------------------------------------------------------
 
 /// Discover project-instruction files (AGENTS.md, Claude.md, rules) from the workspace root up to the git root.
-pub async fn discover_agents_md(root_cwd: &Path) -> Vec<Value> {
+/// `project_trusted` is the folder-trust verdict for `root_cwd`; when false, project-scope instructions are omitted.
+pub async fn discover_agents_md(root_cwd: &Path, project_trusted: bool) -> Vec<Value> {
+    let span = xai_grok_telemetry::region::Region::from_span(tracing::info_span!(
+        "workspace.discover_agents_md"
+    ));
     let cwd_str = root_cwd.to_string_lossy();
     let files = xai_grok_agent::prompt::agents_md::read_agents_config_with_paths(
         &cwd_str,
         xai_grok_tools::types::compat::CompatConfig::default(),
+        project_trusted,
     )
+    .instrument(span.span().clone())
     .await;
 
     files
@@ -85,23 +101,26 @@ pub async fn discover_agents_md(root_cwd: &Path) -> Vec<Value> {
 // Plugin discovery
 // ---------------------------------------------------------------------------
 
-/// Discover plugins visible from the workspace root.
-///
-/// Delegates to [`xai_grok_agent::plugins::discover_plugins`].
-/// [`DiscoveredPlugin`] does not derive `Serialize`, so each plugin is converted to a JSON object with the fields downstream consumers need.
-/// `project_trusted` is the folder-trust verdict for `root_cwd`, threaded into discovery to gate Project-scope plugins.
+/// Discover plugins visible from the workspace root. [`DiscoveredPlugin`] is not `Serialize`, so each is converted to the JSON fields consumers need.
+/// `project_trusted` gates Project-scope plugins.
 pub fn discover_plugins(
     root_cwd: &Path,
     config: &PluginDiscoveryConfig,
     trust_store: &PluginTrustStore,
     project_trusted: bool,
 ) -> Vec<Value> {
+    let _span = tracing::info_span!(
+        "workspace.discover_plugins",
+        plugin_count = tracing::field::Empty
+    )
+    .entered();
     let discovered = xai_grok_agent::plugins::discover_plugins(
         Some(root_cwd),
         config,
         trust_store,
         project_trusted,
     );
+    tracing::Span::current().record("plugin_count", discovered.len() as i64);
 
     discovered
         .into_iter()
@@ -129,10 +148,8 @@ pub fn discover_plugins(
 // Project config
 // ---------------------------------------------------------------------------
 
-/// Load the project config from `<root_cwd>/.grok/config.toml`.
-///
-/// Returns `Value::Null` if the file does not exist or cannot be parsed.
-/// Non-fatal errors are logged.
+/// Load project config from `<root_cwd>/.grok/config.toml`.
+/// Missing or unparseable files return `Value::Null`; non-fatal errors are logged.
 pub fn load_project_config(root_cwd: &Path) -> Value {
     let config_path = root_cwd.join(".grok").join("config.toml");
     match xai_grok_config::load_config_file(&config_path) {
@@ -176,14 +193,9 @@ fn toml_to_json(v: &toml::Value) -> Value {
 // Permissions
 // ---------------------------------------------------------------------------
 
-/// Load the effective permission configuration for the workspace.
-///
-/// Delegates to [`resolution::resolve_permissions_with_provenance`].
-/// It merges rules from requirements.toml, managed-settings.json, managed_config.toml, config.toml, and `.claude/settings.json`.
-/// `project_trusted` gates project-tier permission sources (same contract as env/hooks/plugins).
-/// Hub/cloud callers outside the local folder-trust model should pass `true`.
-/// Returns a JSON object with `sources`, `loaded` (rule count), and `skipped` (unrecognized rules).
-/// Returns `Value::Null` if no permission sources are configured.
+/// Effective permission configuration, merging the usual settings layers via [`resolution::resolve_permissions_with_provenance`].
+/// `project_trusted` gates project-tier sources (same contract as env/hooks/plugins); hub/cloud callers outside that model should pass `true`.
+/// Returns `sources`/`loaded`/`skipped`, or `Value::Null` if nothing is configured.
 pub async fn load_permissions(root_cwd: &Path, project_trusted: bool) -> Value {
     use crate::permission::resolution;
 
@@ -241,7 +253,12 @@ mod tests {
         )
         .unwrap();
 
-        let skills = discover_skills(tmp.path(), &SkillsConfig::default()).await;
+        let skills = discover_skills(
+            tmp.path(),
+            &SkillsConfig::default(),
+            /*project_trusted*/ true,
+        )
+        .await;
         let found = skills
             .iter()
             .find(|s| s["name"].as_str() == Some("my-skill"));
@@ -268,7 +285,7 @@ mod tests {
             server_skill_dirs: vec![],
             bundled_skill_dirs: vec![],
         };
-        let skills = discover_skills(tmp.path(), &config).await;
+        let skills = discover_skills(tmp.path(), &config, /*project_trusted*/ true).await;
         let found = skills.iter().any(|s| s["name"].as_str() == Some("ignored"));
         assert!(
             !found,
@@ -291,7 +308,12 @@ mod tests {
         )
         .unwrap();
 
-        let skills = discover_skills(tmp.path(), &SkillsConfig::default()).await;
+        let skills = discover_skills(
+            tmp.path(),
+            &SkillsConfig::default(),
+            /*project_trusted*/ true,
+        )
+        .await;
         let found = skills
             .iter()
             .find(|s| s["name"].as_str() == Some("serialized-check"))
@@ -338,7 +360,7 @@ mod tests {
         )
         .unwrap();
 
-        let files = discover_agents_md(tmp.path()).await;
+        let files = discover_agents_md(tmp.path(), /*project_trusted*/ true).await;
         let rule = files
             .iter()
             .find(|f| {
@@ -367,7 +389,7 @@ mod tests {
         )
         .unwrap();
 
-        let files = discover_agents_md(tmp.path()).await;
+        let files = discover_agents_md(tmp.path(), /*project_trusted*/ true).await;
         let agents = files
             .iter()
             .find(|f| {

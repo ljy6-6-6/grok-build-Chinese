@@ -136,15 +136,25 @@ fn load_candidates(sessions_root: &Path) -> Result<(SessionCandidates, SessionCa
         if !cwd_type.is_dir() || cwd_type.is_symlink() {
             continue;
         }
-        for session_entry in
-            fs::read_dir(&cwd_path).map_err(|error| io_error("read", &cwd_path, error))?
-        {
-            let session_entry =
-                session_entry.map_err(|error| io_error("read", &cwd_path, error))?;
+        // A sibling test (or another process on a shared $HOME) can unlink this
+        // cwd bucket after readdir(parent) and before we open it.
+        let session_entries = match fs::read_dir(&cwd_path) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(io_error("read", &cwd_path, error)),
+        };
+        for session_entry in session_entries {
+            let session_entry = match session_entry {
+                Ok(entry) => entry,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(io_error("read", &cwd_path, error)),
+            };
             let path = session_entry.path();
-            let file_type = session_entry
-                .file_type()
-                .map_err(|error| io_error("inspect", &path, error))?;
+            let file_type = match session_entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(io_error("inspect", &path, error)),
+            };
             let Some(id) = session_entry.file_name().to_str().map(str::to_owned) else {
                 continue;
             };
@@ -166,4 +176,41 @@ fn load_candidates(sessions_root: &Path) -> Result<(SessionCandidates, SessionCa
         }
     }
     Ok((all, persisted))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn load_skips_cwd_bucket_that_vanishes_during_scan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sessions = tmp.path().to_path_buf();
+        fs::create_dir_all(&sessions).unwrap();
+        for i in 0..32 {
+            let _ = fs::create_dir_all(sessions.join(format!("%2Fstable{i}")).join("sid"));
+        }
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer_root = sessions.clone();
+        let writer_stop = Arc::clone(&stop);
+        let writer = std::thread::spawn(move || {
+            let bucket = writer_root.join("%2Ftmp%2F.tmprace%2Frepo");
+            while !writer_stop.load(Ordering::Relaxed) {
+                let sid = bucket.join("sid");
+                let _ = fs::create_dir_all(&sid);
+                let _ = fs::write(sid.join("summary.json"), b"{}");
+                let _ = fs::remove_dir_all(&bucket);
+            }
+        });
+
+        for _ in 0..200 {
+            RelocationView::load_for_sessions_root(&sessions)
+                .expect("a cwd bucket deleted mid-scan must not fail listing");
+        }
+        stop.store(true, Ordering::Relaxed);
+        writer.join().expect("writer thread");
+    }
 }

@@ -84,11 +84,8 @@ pub struct RecoveryReport {
     pub reenqueue_failures: u32,
 }
 
-/// Scan `<workspace_home>/upload_queue/*.meta.json` and verify each sidecar against its temp file.
-/// Survivors are re-enqueued in place via [`UploadQueue::enqueue_recovered`], handing the original pair to the worker unmodified.
-/// That keeps `enqueued_at` anchored to the first spill, so repeated restarts cannot slide the max-age window.
-/// Corrupt, orphaned, and expired pairs are deleted with a labelled `lost`/`expired` metric.
-/// All errors are absorbed into the [`RecoveryReport`] rather than propagated: a partial recovery must never panic startup.
+/// Scan upload-queue sidecars and re-enqueue verified pairs in place so `enqueued_at` stays anchored to the first spill.
+/// Corrupt, orphaned, and expired pairs are deleted. Errors stay in [`RecoveryReport`]: a partial recovery must never panic startup.
 pub async fn run_startup_recovery(workspace_home: &Path, queue: &UploadQueue) -> RecoveryReport {
     let queue_dir = workspace_home.join("upload_queue");
     let mut report = RecoveryReport::default();
@@ -296,10 +293,8 @@ fn remove_if_present(path: &Path) -> bool {
     }
 }
 
-/// Reject manifest-derived fields that, fed back into `enqueue_bytes_blocking`, could escape the `upload_queue/` dir or the upload destination.
-/// `artifact_name` and `session_id` are interpolated into the temp filename (no separators, `..`, or NUL).
-/// `gcs_path` is the upload key (`/` allowed, `..` and NUL not).
-/// Returns `Err(reason)`, a stable metric label.
+/// Reject manifest fields that could escape `upload_queue/` or the upload destination when fed back into `enqueue_bytes_blocking`.
+/// `artifact_name` and `session_id` forbid separators, `..`, and NUL; `gcs_path` allows `/` but not `..` or NUL. `Err(reason)` is a stable metric label.
 fn validate_recovered_sidecar(sidecar: &QueueItemSidecar) -> Result<(), &'static str> {
     fn is_filename_safe(s: &str) -> bool {
         !s.is_empty()
@@ -358,13 +353,8 @@ pub fn purge_spilled_items(workspace_home: &Path) -> u32 {
 /// Default maximum age for a per-session state directory before the [`cleanup_stale_sessions`] janitor reclaims it.
 pub const DEFAULT_SESSION_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
-/// Remove per-session state directories under `<workspace_home>/sessions/` whose mtime is older than `max_age`.
-/// This bounds the growth a long-lived workspace (or reused sandbox) would otherwise accumulate.
-///
-/// A directory's mtime advances on every atomic-rename persistence write (the rename mutates the directory entry).
-/// That tracks last activity closely enough for a best-effort reclaim.
-/// All errors are swallowed: a startup janitor must never fail boot.
-/// Only directories with a resolvable, expired mtime are removed; stray files and future-mtime entries are left untouched.
+/// Remove `<workspace_home>/sessions/` dirs whose mtime is older than `max_age`, bounding growth of a long-lived workspace.
+/// Mtime advances on atomic-rename persistence, a close-enough last-activity signal. Errors are swallowed so the janitor never fails boot; stray files and future mtimes stay.
 pub async fn cleanup_stale_sessions(workspace_home: &Path, max_age: Duration) {
     let sessions_dir = workspace_home.join("sessions");
     let Ok(mut entries) = tokio::fs::read_dir(&sessions_dir).await else {

@@ -52,6 +52,7 @@
                     tools: Vec::new(),
                     enabled: true,
                     source: "local".into(),
+                    blocked_reason: None,
                     wire_source: crate::views::mcps_modal::McpWireSource::Local,
                     plugin_name: None,
                     is_managed_gateway: false,
@@ -506,6 +507,7 @@
                     tools: Vec::new(),
                     enabled: true,
                     source: "local".into(),
+                    blocked_reason: None,
                     wire_source: crate::views::mcps_modal::McpWireSource::Local,
                     plugin_name: None,
                     is_managed_gateway: false,
@@ -702,4 +704,3 @@
             "legacy fallback targets the foregrounded agent"
         );
     }
-

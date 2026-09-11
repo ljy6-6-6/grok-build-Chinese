@@ -21,7 +21,6 @@ use xai_grok_compaction::reminder::{
 };
 
 /// Resolved model-facing tool names for the MCP usage hint in compaction reminders.
-///
 /// Resolved at runtime via `TemplateRenderer` from `ToolKind::SearchTool` and `ToolKind::UseTool`.
 /// Never hard-code tool names; they can be renamed by the client.
 pub struct McpToolNames {
@@ -32,7 +31,6 @@ pub struct McpToolNames {
 }
 
 /// Resolved model-facing tool names for the subagent reminder section.
-///
 /// Both names are resolved at runtime via `TemplateRenderer` from `ToolKind::BackgroundTaskAction` and `ToolKind::KillTaskAction`.
 /// Never hard-code tool names; they can be renamed by the client.
 pub struct SubagentToolNames {
@@ -202,7 +200,6 @@ fn to_system_reminder_inner(
             prompt: &t.prompt,
             recurring: t.recurring,
             durable: t.durable,
-            foreground: t.foreground,
         })
         .collect();
     let workflows: Vec<_> = ctx
@@ -543,7 +540,6 @@ mod tests {
                 prompt: "monitor job".into(),
                 recurring: true,
                 durable: true,
-                foreground: false,
             }],
             workflows: vec![WorkflowRunSummary {
                 name: "review-changes".into(),

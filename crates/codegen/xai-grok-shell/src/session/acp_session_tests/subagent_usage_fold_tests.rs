@@ -83,11 +83,8 @@ async fn subagent_usage_fold_attribution_gate() {
         .await;
 }
 
-/// The exact command sequence a timed-out child leaves queued on `cmd_rx`:
-/// `RecordSubagentUsage` then `MarkSubagentUsageNotApplied` for the same
-/// prompt, serviced in order when the parent wakes. The usage must fold
-/// exactly once, both commands must ack, and the sticky mark must stain the
-/// ledgers on top of the applied fold (never re-open or re-attribute it).
+/// The exact command sequence a timed-out child leaves queued on `cmd_rx`: `RecordSubagentUsage` then `MarkSubagentUsageNotApplied` for the same prompt, serviced in order when the parent wakes.
+/// The usage must fold exactly once, both commands must ack, and the sticky mark must stain the ledgers on top of the applied fold (never re-open or re-attribute it).
 #[tokio::test(flavor = "current_thread")]
 async fn queued_fold_then_not_applied_mark_applies_once_and_stains() {
     tokio::task::LocalSet::new()

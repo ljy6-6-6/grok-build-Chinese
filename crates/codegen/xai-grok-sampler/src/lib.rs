@@ -54,3 +54,4 @@ pub use retry::{
 pub use sampling_log::AuthInfo;
 pub use stream::{collect_response, stream_chat_completions, stream_messages, stream_responses};
 pub use types::RequestId;
+pub use xai_grok_sampling_types::ConversationGroupId;

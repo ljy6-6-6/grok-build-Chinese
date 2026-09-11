@@ -22,10 +22,10 @@ fn write_session(
     fs::create_dir_all(&dir).unwrap();
     let mut summary = serde_json::json!({
         "info": { "id": session_id, "cwd": cwd },
-        "session_summary": "",
+        "session_summary": session_id,
         "created_at": "2026-01-01T00:00:00Z",
         "updated_at": updated_at,
-        "num_messages": 0,
+        "num_messages": 1,
         "current_model_id": "grok-3",
     });
     if let Some(la) = last_active_at {
@@ -92,10 +92,10 @@ fn explicit_remote_id_resolves_local_child_profile() {
     fs::create_dir_all(&dir).unwrap();
     let summary = serde_json::json!({
         "info": { "id": "local-child", "cwd": cwd },
-        "session_summary": "",
+        "session_summary": "local-child",
         "created_at": "2026-01-01T00:00:00Z",
         "updated_at": "2026-01-01T00:00:00Z",
-        "num_messages": 0,
+        "num_messages": 1,
         "current_model_id": "grok-3",
         "parent_session_id": "remote-xyz",
         "sandbox_profile": "workspace",

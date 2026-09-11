@@ -19,7 +19,6 @@ use crate::theme::{ThemeKind, cache as theme_cache, md_style};
 use xai_grok_markdown::StreamingMarkdownRenderer;
 
 /// Mutable rendering state behind a single `RefCell`.
-///
 /// Groups the renderer and wrap-cache together.
 /// `ensure_wrapped` (called from `&self` methods via the `BlockContent` trait) can then update the table-width setting and the cache in one borrow.
 #[derive(Debug, Clone)]
@@ -38,14 +37,8 @@ struct RenderState {
     frozen_wrapped_count: usize,
 }
 
-/// Shared markdown content with generation-tracked word-wrap cache.
-///
-/// Owns a [`StreamingMarkdownRenderer`] and provides:
-/// - Mutation via `push_chunk`, `finish`, `set_raw_mode`
-/// - Cached word-wrapping via `wrapped_lines` and `output`
-///
-/// Every mutation bumps an internal generation counter.
-/// The wrap cache is keyed on `(width, generation)`, so scrolling (which doesn't change content) returns the cached result instantly.
+/// Shared markdown content with generation-tracked word-wrap cache. The wrap cache is keyed on `(width,
+/// generation)`, so scrolling (which doesn't change content) returns the cached result instantly.
 #[derive(Debug, Clone)]
 pub struct MarkdownContent {
     state: RefCell<RenderState>,
@@ -68,7 +61,6 @@ impl MarkdownContent {
     }
 
     /// Create with initial text and an optional table width constraint.
-    ///
     /// When `max_table_width` is `Some(w)`, tables are constrained to fit within `w` display columns.
     /// Useful for pre-rendering markdown before the final display width is known (e.g., plan preview).
     pub fn new_with_table_width(text: impl Into<String>, max_table_width: Option<usize>) -> Self {
@@ -77,7 +69,6 @@ impl MarkdownContent {
 
     /// Create source-faithful content: CommonMark soft breaks are preserved as line breaks instead of collapsing to spaces.
     /// Each source line then maps 1:1 to a rendered line.
-    ///
     /// Used by the line-numbered plan preview, where rendered lines must map back to file lines (e.g. for commenting on a line range).
     pub fn new_source_faithful(text: impl Into<String>, max_table_width: Option<usize>) -> Self {
         Self::new_inner(text, max_table_width, false)
@@ -189,7 +180,6 @@ impl MarkdownContent {
     }
 
     /// Get the line source map (rendered line index to source line number).
-    ///
     /// Each entry maps a pre-wrap rendered line to the source line it came from.
     /// Used for cursor stability when toggling raw/pretty mode.
     pub fn line_source_map(&self) -> Vec<usize> {
@@ -197,7 +187,6 @@ impl MarkdownContent {
     }
 
     /// Get the pre-wrap rendered lines (before word wrapping).
-    ///
     /// Returns cloned lines from the markdown renderer's current output.
     /// These are styled `Line<'static>` objects at their natural width, suitable for feeding into a ListPane which handles its own wrapping.
     pub fn pre_wrap_lines(&self) -> Vec<Line<'static>> {
@@ -222,7 +211,6 @@ impl MarkdownContent {
     }
 
     /// Pre-wrap line ranges of the ` ```mermaid ` blocks in the current rendered output, reflecting the current render width.
-    ///
     /// Avoids allocation (no source rebuild) so the caption path can call it every frame.
     /// The detection skeleton with the diagram source lives in [`mermaid_content`](Self::mermaid_content).
     pub fn mermaid_block_ranges(&self) -> Vec<std::ops::Range<usize>> {
@@ -231,7 +219,6 @@ impl MarkdownContent {
     }
 
     /// Build the Mermaid detection skeleton from the current rendered output.
-    ///
     /// Call at construction/finish (never per streaming chunk) to capture the detected diagrams.
     /// Detection only; rendering is lazy, driven by the affordance row on click.
     pub fn mermaid_content(&self) -> super::mermaid_content::MermaidContent {
@@ -240,7 +227,6 @@ impl MarkdownContent {
     }
 
     /// Get the current generation counter.
-    ///
     /// Bumped on every content mutation (push_chunk, finish, set_raw_mode).
     /// Used by viewers to detect when items need rebuilding.
     pub fn generation(&self) -> u64 {
@@ -252,13 +238,7 @@ impl MarkdownContent {
         self.current_raw
     }
 
-    /// Drop the word-wrap cache (`cache_lines` / `cache_joiners`).
-    ///
-    /// The next `output()` / `wrapped_lines()` call rebuilds it from the renderer's pre-wrap output.
-    /// That is the exact path a width or theme change already takes.
-    /// Used by off-screen cache eviction.
-    /// For a long session the post-wrap copy of every styled line is one of the largest per-block allocations.
-    /// Only entries near the viewport need it hot.
+    /// Drop the word-wrap cache (`cache_lines` / `cache_joiners`). Only entries near the viewport need it hot.
     pub fn evict_wrap_cache(&self) {
         let mut state = self.state.borrow_mut();
         if state.cache_lines.is_empty() && state.cache_joiners.is_empty() {
@@ -285,11 +265,8 @@ impl MarkdownContent {
         }
     }
 
-    /// Ensure the wrap cache is populated for the given width.
-    ///
-    /// Uses incremental wrapping: only re-wraps lines after the renderer's frozen boundary.
-    /// Frozen (stable) lines are wrapped once and cached.
-    /// This turns streaming from O(N^2) total wrapping to ~O(N).
+    /// Ensure the wrap cache is populated for the given width. Uses incremental wrapping: only re-wraps lines after the
+    /// renderer's frozen boundary.
     fn ensure_wrapped(&self, width: usize) {
         let mut state = self.state.borrow_mut();
         let current_theme = theme_cache::current_kind();
@@ -322,16 +299,8 @@ impl MarkdownContent {
 
         let frozen_count = state.renderer.frozen_lines_count();
 
-        // --- Incremental wrapping ---
-        //
-        // The renderer guarantees that view().lines[0..frozen_count] are stable.
-        // Only two ranges need wrapping:
-        // 1. Newly frozen lines (frozen_pre_wrap_count..frozen_count)
-        // 2. Tail lines (frozen_count..total_lines)
-        //
-        // The cached frozen wrapped output (cache_lines[0..frozen_wrapped_count]) is preserved as-is
-        //
-        // We clone the line slices we need *before* mutating cache_lines, because view() borrows the renderer immutably
+        // --- Incremental wrapping ---. Only two ranges need wrapping. We clone the line slices we need *before* mutating
+        // cache_lines, because view() borrows the renderer immutably.
 
         // Step 1: Wrap any newly frozen lines
         let new_frozen_wrapped = if frozen_count > state.frozen_pre_wrap_count {
@@ -376,7 +345,6 @@ impl MarkdownContent {
     }
 
     /// Access cached wrapped lines + joiners for post-processing.
-    ///
     /// The closure receives a [`WrappedLines`] reference valid for the duration of the call.
     /// That avoids cloning when the caller only needs to inspect or slice the lines (e.g., ThinkingBlock truncation).
     pub fn with_wrapped_lines<R>(&self, width: usize, f: impl FnOnce(WrappedLines<'_>) -> R) -> R {
@@ -389,7 +357,6 @@ impl MarkdownContent {
     }
 
     /// Build a [`BlockOutput`] from the cached wrapped lines.
-    ///
     /// Each line is converted to a [`BlockLine`] with joiner and optional background color (from the line's style, e.g., for code blocks).
     /// This is the common path used by [`AgentMessageBlock`](super::AgentMessageBlock).
     pub fn output(&self, width: usize) -> BlockOutput {
@@ -409,10 +376,15 @@ impl MarkdownContent {
                         .map(|(line, joiner)| {
                             let mut content = line.clone();
                             let selectable = strip.selectable(&mut content);
+                            // For list/blockquote lines, even the first wrapped line includes the
+                            // "│ " prefix. Measure indent_width from the actual line content to
+                            // correctly exclude it from logical width calculations.
+                            let indent_width = compute_subsequent_indent_width(line);
                             let mut block_line = BlockLine::styled(content)
                                 .with_selection_range(Some(MARKDOWN_BODY_RANGE))
                                 .with_joiner(joiner.clone());
                             block_line.selectable = selectable;
+                            block_line.indent_width = indent_width;
                             if let Some(bg) = line.style.bg {
                                 block_line.with_background(bg)
                             } else {
@@ -424,6 +396,28 @@ impl MarkdownContent {
             }
         })
     }
+}
+
+/// Compute the display width of the `subsequent_indent` prefix on a wrapped continuation line. This width is NOT
+/// part of the logical pre-wrap content, so hyperlink column mapping must exclude it. Returns 0 for lines without
+/// recognizable indent prefixes.
+pub(super) fn compute_subsequent_indent_width(line: &Line<'_>) -> usize {
+    use unicode_width::UnicodeWidthStr;
+
+    // Flatten the line's spans into plain text
+    let flat: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+
+    // Blockquote/list lines start with one or more "│ " (U+2502 + space) prefixes
+    let mut width = 0;
+    let mut chars = flat.chars();
+    while let Some('\u{2502}') = chars.next() {
+        if chars.next() == Some(' ') {
+            width += UnicodeWidthStr::width("\u{2502} ");
+        } else {
+            break;
+        }
+    }
+    width
 }
 
 #[cfg(test)]

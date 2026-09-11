@@ -14,15 +14,36 @@ use super::attempt_runner::{
     run_one_turn_attempt, usage_is_incomplete,
 };
 use super::handle_request::{
-    CHILD_ACTOR_ACK_TIMEOUT, PARENT_ACK_TIMEOUT, child_actor_query,
-    mark_child_usage_not_applied_with_fallback, reparent_surviving_child_tasks,
-    resolve_child_model, take_child_streaming_partial, take_child_turn_messages,
+    CHILD_ACTOR_ACK_TIMEOUT, PARENT_ACK_TIMEOUT, agent_memory_scope_for_mode,
+    child_actor_query, mark_child_usage_not_applied_with_fallback,
+    reparent_surviving_child_tasks, resolve_child_model, take_child_streaming_partial,
+    take_child_turn_messages,
 };
 use crate::test_support::lsp_runtime::{ctx_with_toggle, test_gateway_with_receiver};
 use xai_grok_subagent_resolution::resolve_effective_overrides;
 use xai_grok_tools::implementations::grok_build::task::coordinator::{
     ChildCompletion, CompletionDisposition,
 };
+use xai_grok_tools::implementations::grok_build::task::terminal_snapshot;
+use xai_grok_tools::reminders::task_completion::INLINE_SUBAGENT_OUTPUT_BYTES;
+fn test_snapshot(
+    request: &SubagentRequest,
+    result: &SubagentResult,
+) -> SubagentSnapshot {
+    terminal_snapshot(request, result, None, None, 0)
+}
+#[test]
+fn v2_disables_legacy_agent_memory_scope() {
+    let scope = Some(xai_grok_agent::config::MemoryScope::Project);
+    assert_eq!(
+            agent_memory_scope_for_mode(scope, crate::config::MemoryMode::V2),
+            None
+        );
+    assert_eq!(
+            agent_memory_scope_for_mode(scope, crate::config::MemoryMode::Legacy),
+            scope
+        );
+}
 #[test]
 fn canonical_total_tokens_does_not_double_count_reasoning() {
     let totals = xai_chat_state::UsageTotals {
@@ -79,16 +100,22 @@ async fn usage_ack_precedes_terminal_presentation() {
     let (gateway, _gateway_rx) = test_gateway_with_receiver();
     let mut request = auto_wake_test_request("usage-order");
     request.run_in_background = false;
-    let mut completion_data = ShellCompletionData::from_context(&ctx);
-    completion_data.spawned_notification_emitted = true;
+    let completion_data = ShellCompletionData::from_context(
+        &ctx,
+        xai_message_delivery_core::AttemptId::mint(1),
+        None,
+    );
+    completion_data.mark_spawned_notification_emitted();
+    let result = SubagentResult {
+        success: true,
+        subagent_id: "usage-order".to_string(),
+        child_session_id: "usage-order".to_string(),
+        ..Default::default()
+    };
     let completion = ChildCompletion {
+        snapshot: test_snapshot(&request, &result),
         request,
-        result: SubagentResult {
-            success: true,
-            subagent_id: "usage-order".to_string(),
-            child_session_id: "usage-order".to_string(),
-            ..Default::default()
-        },
+        result,
         completion_data,
         disposition: CompletionDisposition {
             foreground_delivered: true,
@@ -110,10 +137,7 @@ async fn usage_ack_precedes_terminal_presentation() {
             })
         ));
 }
-/// Regression: reads of the child session's own actors (chat state,
-/// signals) must not park teardown when the child thread is synchronously
-/// blocked — the actors share its current-thread runtime — and must
-/// degrade to the cheap fallback in bounded time.
+/// Regression: reads of the child session's own actors (chat state, signals) must not park teardown when the child thread is synchronously blocked — the actors share its current-thread runtime — and must degrade to the cheap fallback in bounded time.
 #[tokio::test(start_paused = true)]
 async fn child_actor_query_is_bounded_when_the_actor_never_answers() {
     let tokens = tokio::time::timeout(
@@ -177,11 +201,7 @@ async fn turn_message_take_records_the_miss_when_the_actor_is_gone() {
             "a dropped responder must not pass for an empty turn"
         );
 }
-/// A real `SessionHandle` whose child-session actors never answer: the
-/// command channel is held open but unserviced and the signals actor is
-/// never run — the shape a tool synchronously blocking the child session
-/// thread leaves behind. The receiver and actor must stay alive so sends
-/// succeed but never get answered.
+/// A real `SessionHandle` whose child-session actors never answer: the command channel is held open but unserviced and the signals actor is never run — the shape a tool synchronously blocking the child session thread leaves behind. The receiver and actor must stay alive so sends succeed but never get answered.
 fn wedged_child_handle() -> (
     SessionHandle,
     mpsc::UnboundedReceiver<SessionCommand>,
@@ -201,6 +221,7 @@ fn wedged_child_handle() -> (
     let handle = SessionHandle {
         cmd_tx,
         persistence_tx,
+        registry_write_order: Default::default(),
         current_prompt_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
         active_work: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         pending_interactions: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -212,15 +233,16 @@ fn wedged_child_handle() -> (
         resolved_tool_overrides: std::sync::Arc::new(arc_swap::ArcSwapOption::empty()),
         spawn_snapshot: crate::session::SpawnSnapshot {
             applied_tool_overrides: None,
-            scheduler_background_loops: true,
+            memory_mode: None,
         },
         hunk_tracker_handle,
         chat_state_handle: xai_chat_state::ChatStateHandle::noop(),
         signals_handle,
         gateway_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
-        status_line_enabled: std::sync::Arc::new(
-            std::sync::atomic::AtomicBool::new(false),
+        emit_local_background_tasks: std::sync::Arc::new(
+            std::sync::atomic::AtomicBool::new(true),
         ),
+        client_caps: crate::session::notifications::SessionClientCaps::new(false, true),
         mcp_servers: vec![],
         initial_client_mcp_servers: vec![],
         display_cwd: None,
@@ -265,10 +287,7 @@ fn wedged_child_handle() -> (
     };
     (handle, cmd_rx, signals_actor)
 }
-/// Regression: a cancel that cannot read the child's signals (wedged
-/// actor) must fail closed — "no answer" is not "no work done" — so the
-/// usage fold marks the parent's bill incomplete instead of folding a
-/// clean ledger over the cancelled turn's in-flight sampling.
+/// Regression: a cancel that cannot read the child's signals (wedged actor) must fail closed — "no answer" is not "no work done" — so the usage fold marks the parent's bill incomplete instead of folding a clean ledger over the cancelled turn's in-flight sampling.
 #[tokio::test(start_paused = true)]
 async fn cancelled_attempt_fails_closed_when_the_signals_read_never_answers() {
     let (child_handle, _cmd_rx, _signals_actor) = wedged_child_handle();
@@ -282,12 +301,15 @@ async fn cancelled_attempt_fails_closed_when_the_signals_read_never_answers() {
                 request: &request,
                 worktree_path: None,
                 task_prompt_text: "task",
+                prompt_id: uuid::Uuid::now_v7().to_string(),
                 inherited_tool_overrides: None,
                 gcs_bucket_url: None,
                 gcs_upload_method: None,
+                turn_number: 0,
                 cancel_token,
                 child_run_started_at: std::time::Instant::now(),
                 prompt_admitted: tokio::sync::oneshot::channel().0,
+                initial_attempt_behavior: InitialAttemptBehavior::Normal,
             }),
         )
         .await
@@ -498,10 +520,7 @@ impl xai_grok_tools::computer::types::TerminalBackend for StarvedTerminal {
         std::future::pending().await
     }
 }
-/// Regression: the goal-task snapshot and the notification reparent must
-/// not park a completed child before Shutdown when the parent terminal
-/// actor never answers; a timed-out snapshot skips goal-turn tagging
-/// instead of sending a partial record.
+/// Regression: the goal-task snapshot and the notification reparent must not park a completed child before Shutdown when the parent terminal actor never answers; a timed-out snapshot skips goal-turn tagging instead of sending a partial record.
 #[tokio::test(start_paused = true)]
 async fn reparent_is_bounded_when_terminal_actor_never_answers() {
     let parent_tb: std::sync::Arc<
@@ -527,9 +546,7 @@ async fn reparent_is_bounded_when_terminal_actor_never_answers() {
             "a timed-out list_tasks must not record goal-turn task ids"
         );
 }
-/// Invariant: resolving a subagent applies the parent session's
-/// `--tools`/`--disallowed-tools`/`--permission-mode` — driven through
-/// `resolve_agent_definition` so the spawn path can't skip them.
+/// Invariant: resolving a subagent applies the parent session's `--tools`/`--disallowed-tools`/`--permission-mode` — driven through `resolve_agent_definition` so the spawn path can't skip them.
 /// Invariant: resolving a subagent applies the parent session's `--tools`/`--disallowed-tools`/`--permission-mode`.
 /// They flow through `resolve_agent_definition` so the spawn path can't skip them.
 #[tokio::test]
@@ -595,6 +612,7 @@ async fn emit_subagent_notification_stamps_one_event_id_on_both_paths() {
         &gateway,
         "parent-sess",
         SessionUpdate::SubagentFinished {
+            attempt_id: None,
             subagent_id: "sa-1".into(),
             child_session_id: "child-1".into(),
             status: "completed".into(),
@@ -721,7 +739,17 @@ fn auto_wake_test_request(id: &str) -> SubagentRequest {
         fork_context: false,
         owner: SubagentOwner::Task,
         cancel_token: CancellationToken::new(),
+        spawn_root: Default::default(),
     }
+}
+fn prompt_text(blocks: &[acp::ContentBlock]) -> String {
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            acp::ContentBlock::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        })
+        .collect()
 }
 #[test]
 fn completed_followup_wakes_parent_with_exactly_one_prompt() {
@@ -741,14 +769,15 @@ fn completed_followup_wakes_parent_with_exactly_one_prompt() {
     });
     assert!(folded.result.success);
     assert!(!folded.result.cancelled);
+    let request = auto_wake_test_request("sa-followup");
     let completion = ChildCompletion {
-        request: auto_wake_test_request("sa-followup"),
+        snapshot: test_snapshot(&request, &folded.result),
+        request,
         result: folded.result,
         completion_data: ShellCompletionData {
             auto_wake_enabled: true,
             parent_cmd_tx: Some(parent_cmd_tx),
             task_output_tool_name: "get_command_or_subagent_output".into(),
-            spawned_notification_emitted: true,
             ..Default::default()
         },
         disposition: CompletionDisposition {
@@ -790,26 +819,26 @@ fn completed_followup_wakes_parent_with_exactly_one_prompt() {
     assert_eq!((finish_count, prompt_count), (1, 1));
 }
 #[test]
-fn inject_subagent_completed_prompt_sends_prompt_and_marks_delivered() {
+fn inject_subagent_completed_prompt_sends_prompt() {
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
-    let reservations = xai_grok_tools::reminders::task_completion::TaskCompletionReservations::default();
     let mut request = auto_wake_test_request("sa-1");
     request.runtime_overrides.loop_task_id = Some("loop-123".into());
     let result = SubagentResult {
         success: true,
+        output: std::sync::Arc::from("PING"),
         subagent_id: "sa-1".into(),
         child_session_id: "sa-1".into(),
         ..Default::default()
     };
-    reservations.reserve("sa-1".into());
     inject_subagent_completed_prompt(InjectParams {
         subagent_id: "sa-1",
         result: &result,
         request: &request,
-        task_completion_reservations: &Some(reservations.clone()),
+        snapshot: &test_snapshot(&request, &result),
         parent_cmd_tx: Some(&cmd_tx),
         task_output_tool_name: "get_command_or_subagent_output",
         scheduler_delete_tool_name: Some("renamed_scheduler_delete"),
+        scheduler_create_tool_name: Some("renamed_scheduler_create"),
         synthetic_trace_tx: &None,
         goal_loop_active: &std::sync::atomic::AtomicBool::new(false),
     });
@@ -817,20 +846,69 @@ fn inject_subagent_completed_prompt_sends_prompt_and_marks_delivered() {
         SessionCommand::Prompt { prompt_id, prompt_blocks, verbatim, .. } => {
             assert!(prompt_id.starts_with("subagent-completed-"));
             assert!(verbatim);
-            let prompt = prompt_blocks
-                .iter()
-                .filter_map(|block| match block {
-                    acp::ContentBlock::Text(text) => Some(text.text.as_str()),
-                    _ => None,
-                })
-                .collect::<String>();
-            assert!(prompt.contains("renamed_scheduler_delete"));
-            assert!(prompt.contains("loop-123"));
-            assert!(prompt.contains("to stop the monitor"));
+            let prompt = prompt_text(&prompt_blocks);
+            let block = prompt
+                .find("\n=== Output ===\nPING\n\n<subagent_meta>")
+                .expect("inlined task output");
+            let cleanup = prompt
+                .find("If this schedule is no longer relevant")
+                .expect("cleanup hint");
+            assert!(block < cleanup, "task output precedes the hints: {prompt}");
+            assert!(prompt.contains(
+                    "Check the subagent output using get_command_or_subagent_output(\"sa-1\")"
+                ));
+            assert!(prompt.contains("renamed_scheduler_delete(\"loop-123\")"));
+            assert!(prompt.contains(
+                    "renamed_scheduler_create(new_prompt, interval, \"loop-123\")"
+                ));
+            assert!(!prompt.contains("update it with scheduler_create("));
         }
         _ => panic!("expected SessionCommand::Prompt"),
     }
-    assert_eq!(reservations.snapshot(), vec!["sa-1".to_string()]);
+}
+#[test]
+fn inject_subagent_completed_prompt_copies_capped_task_output() {
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
+    let output = "x".repeat(20_000);
+    let request = auto_wake_test_request("sa-1");
+    let result = SubagentResult {
+        success: true,
+        output: std::sync::Arc::from(output.as_str()),
+        subagent_id: "sa-1".into(),
+        child_session_id: "sa-1".into(),
+        ..Default::default()
+    };
+    inject_subagent_completed_prompt(InjectParams {
+        subagent_id: "sa-1",
+        result: &result,
+        request: &request,
+        snapshot: &test_snapshot(&request, &result),
+        parent_cmd_tx: Some(&cmd_tx),
+        task_output_tool_name: "get_command_or_subagent_output",
+        scheduler_delete_tool_name: None,
+        scheduler_create_tool_name: None,
+        synthetic_trace_tx: &None,
+        goal_loop_active: &std::sync::atomic::AtomicBool::new(false),
+    });
+    let SessionCommand::Prompt { prompt_blocks, .. } = cmd_rx
+        .try_recv()
+        .expect("expected synthetic Prompt") else {
+        panic!("expected SessionCommand::Prompt");
+    };
+    let prompt = prompt_text(&prompt_blocks);
+    assert!(prompt.contains("\n=== Task sa-1 ===\n"), "{prompt}");
+    assert!(
+            prompt.contains(&format!(
+                "\n[output truncated: {INLINE_SUBAGENT_OUTPUT_BYTES} of 20000 bytes shown]\n\
+                 Use get_command_or_subagent_output(\"sa-1\") to see the full output.\n\n\
+                 <subagent_meta>id=sa-1, "
+            )),
+            "{}",
+            &prompt[prompt.len() - 400..]
+        );
+    let len = prompt.len();
+    let threshold = crate::session::acp_session::LARGE_PROMPT_THRESHOLD;
+    assert!(len < threshold, "wake prompt was {len} bytes, threshold {threshold}");
 }
 #[test]
 fn inject_subagent_completed_prompt_omits_cleanup_without_loop_task() {
@@ -846,10 +924,11 @@ fn inject_subagent_completed_prompt_omits_cleanup_without_loop_task() {
         subagent_id: "sa-no-loop",
         result: &result,
         request: &request,
-        task_completion_reservations: &None,
+        snapshot: &test_snapshot(&request, &result),
         parent_cmd_tx: Some(&cmd_tx),
         task_output_tool_name: "get_command_or_subagent_output",
         scheduler_delete_tool_name: Some("scheduler_delete"),
+        scheduler_create_tool_name: Some("scheduler_create"),
         synthetic_trace_tx: &None,
         goal_loop_active: &std::sync::atomic::AtomicBool::new(false),
     });
@@ -858,71 +937,60 @@ fn inject_subagent_completed_prompt_omits_cleanup_without_loop_task() {
         .expect("expected synthetic Prompt") else {
         panic!("expected SessionCommand::Prompt");
     };
-    let prompt = prompt_blocks
-        .iter()
-        .filter_map(|block| match block {
-            acp::ContentBlock::Text(text) => Some(text.text.as_str()),
-            _ => None,
-        })
-        .collect::<String>();
+    let prompt = prompt_text(&prompt_blocks);
     assert!(!prompt.contains("scheduler_delete"));
-    assert!(!prompt.contains("to stop the monitor"));
+    assert!(!prompt.contains("no longer relevant"));
+    assert!(!prompt.contains("Check the subagent output"));
 }
 #[test]
 fn inject_subagent_completed_prompt_bails_when_goal_loop_activates_in_gap() {
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
-    let reservations = xai_grok_tools::reminders::task_completion::TaskCompletionReservations::default();
-    reservations.reserve("sa-goal".into());
+    let request = auto_wake_test_request("sa-goal");
+    let result = SubagentResult {
+        success: true,
+        subagent_id: "sa-goal".into(),
+        child_session_id: "sa-goal".into(),
+        ..Default::default()
+    };
     inject_subagent_completed_prompt(InjectParams {
         subagent_id: "sa-goal",
-        result: &SubagentResult {
-            success: true,
-            subagent_id: "sa-goal".into(),
-            child_session_id: "sa-goal".into(),
-            ..Default::default()
-        },
-        request: &auto_wake_test_request("sa-goal"),
-        task_completion_reservations: &Some(reservations.clone()),
+        result: &result,
+        request: &request,
+        snapshot: &test_snapshot(&request, &result),
         parent_cmd_tx: Some(&cmd_tx),
         task_output_tool_name: "get_command_or_subagent_output",
         scheduler_delete_tool_name: None,
+        scheduler_create_tool_name: None,
         synthetic_trace_tx: &None,
         goal_loop_active: &std::sync::atomic::AtomicBool::new(true),
     });
     assert!(cmd_rx.try_recv().is_err(), "no prompt when the goal loop owns the cadence");
-    assert!(!reservations.contains("sa-goal"), "this attempt's reservation must be released");
 }
 #[test]
-fn inject_subagent_completed_prompt_releases_reservation_when_parent_closed() {
+fn inject_subagent_completed_prompt_bails_when_parent_closed() {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
     drop(cmd_rx);
-    let reservations = xai_grok_tools::reminders::task_completion::TaskCompletionReservations::default();
-    reservations.reserve("sa-closed".into());
-    reservations.reserve("sa-closed".into());
     let (trace_tx, mut trace_rx) = mpsc::unbounded_channel();
+    let request = auto_wake_test_request("sa-closed");
+    let result = SubagentResult {
+        success: true,
+        subagent_id: "sa-closed".into(),
+        child_session_id: "sa-closed".into(),
+        ..Default::default()
+    };
     inject_subagent_completed_prompt(InjectParams {
         subagent_id: "sa-closed",
-        result: &SubagentResult {
-            success: true,
-            subagent_id: "sa-closed".into(),
-            child_session_id: "sa-closed".into(),
-            ..Default::default()
-        },
-        request: &auto_wake_test_request("sa-closed"),
-        task_completion_reservations: &Some(reservations.clone()),
+        result: &result,
+        request: &request,
+        snapshot: &test_snapshot(&request, &result),
         parent_cmd_tx: Some(&cmd_tx),
         task_output_tool_name: "get_command_or_subagent_output",
         scheduler_delete_tool_name: None,
+        scheduler_create_tool_name: None,
         synthetic_trace_tx: &Some(trace_tx),
         goal_loop_active: &std::sync::atomic::AtomicBool::new(false),
     });
-    assert!(
-            reservations.contains("sa-closed"),
-            "send failure must release only the reservation acquired by this attempt"
-        );
-    reservations.release("sa-closed");
-    assert!(!reservations.contains("sa-closed"));
-    assert!(trace_rx.try_recv().is_err());
+    assert!(trace_rx.try_recv().is_err(), "no prompt was sent, so no trace request follows");
 }
 #[test]
 fn persist_gate_only_persists_successful_nonempty_outputs() {
@@ -1567,6 +1635,62 @@ fn bootstrap_test_request(fork_context: bool) -> SubagentRequest {
         fork_context,
         owner: SubagentOwner::Task,
         cancel_token: CancellationToken::new(),
+        spawn_root: Default::default(),
+    }
+}
+#[tokio::test]
+async fn bootstrap_in_place_resume_reads_existing_transcript() {
+    use crate::session::storage::StorageAdapter;
+    use crate::session::storage::jsonl::JsonlStorageAdapter;
+    use xai_grok_sampling_types::conversation::ConversationItem;
+    let temp = tempfile::TempDir::new().unwrap();
+    let child = SessionInfo {
+        id: acp::SessionId::new("same-child"),
+        cwd: temp.path().to_string_lossy().into_owned(),
+    };
+    let child_dir = temp.path().join("child-session");
+    let storage = JsonlStorageAdapter::with_explicit_session_dir(child_dir.clone());
+    storage.init_session(&child, acp::ModelId::new("test-model")).await.unwrap();
+    storage
+        .append_chat_message(&child, &ConversationItem::system("system"))
+        .await
+        .unwrap();
+    storage
+        .append_chat_message(&child, &ConversationItem::user("previous work"))
+        .await
+        .unwrap();
+    let request = bootstrap_test_request(false);
+    let source = xai_grok_subagent_resolution::ResumeSourceData {
+        subagent_id: "same-child".to_owned(),
+        child_session_id: "same-child".to_owned(),
+        child_cwd: child.cwd.clone(),
+        worktree_path: None,
+        snapshot_ref: None,
+        subagent_type: "general-purpose".to_owned(),
+        persona: None,
+        model_id: Some("test-model".to_owned()),
+    };
+    let out = bootstrap_initial_context(
+            &request,
+            Some(&source),
+            &ctx_with_toggle(HashMap::new()),
+            &child,
+            &child_dir,
+            "test-model",
+            super::resume_window::ResumeWindowPolicy {
+                context_window: 128_000,
+                auto_compact_threshold_percent: 85,
+            },
+        )
+        .await;
+    match out {
+        BootstrapInitialContext::Ready(initial) => {
+            assert_eq!(initial.source, InitialContextSource::Resumed);
+            assert_eq!(initial.conversation.len(), 2);
+        }
+        BootstrapInitialContext::ResumeAbort(message) => {
+            panic!("unexpected abort: {message}")
+        }
     }
 }
 #[tokio::test]
@@ -1946,10 +2070,8 @@ fn describe_subagent_type_unknown_returns_sorted_available() {
         other => panic!("expected Unknown, got {other:?}"),
     }
 }
-/// Regression guard for the DEFAULT grok-build host, the primary `/goal` host.
-/// There the only `general-purpose` tool that edits files is `search_replace` (`ToolKind::Edit`).
-/// The `write` tool (`ToolKind::Write`) is only injected later, so the pre-injection describe probe never lists it.
-/// The planner gate must therefore key on the Edit capability.
+/// Regression guard for the DEFAULT grok-build host, the primary `/goal` host. There the only `general-purpose` tool that edits files is `search_replace` (`ToolKind::Edit`).
+/// The `write` tool (`ToolKind::Write`) is only injected later, so the pre-injection describe probe never lists it. The planner gate must therefore key on the Edit capability.
 #[test]
 fn describe_default_host_general_purpose_has_edit_not_write() {
     use xai_grok_tools::types::tool::ToolKind;
@@ -2042,6 +2164,7 @@ async fn cancel_pending_shell_child_presents_one_cancelled_finish() {
             &test_gcs_context(&ctx),
             UNPROMOTED_SESSION_THREAD_EXIT_TIMEOUT,
             UnpromotedChildDisposition::Cancelled,
+            true,
         )
         .await;
     assert!(matches!(child_cmd_rx.try_recv(), Ok(SessionCommand::Cancel(_))));
@@ -2051,9 +2174,14 @@ async fn cancel_pending_shell_child_presents_one_cancelled_finish() {
         ));
     assert!(result.cancelled);
     assert!(!result.success);
-    let mut completion_data = ShellCompletionData::from_context(&ctx);
-    completion_data.spawned_notification_emitted = true;
+    let completion_data = ShellCompletionData::from_context(
+        &ctx,
+        xai_message_delivery_core::AttemptId::mint(1),
+        None,
+    );
+    completion_data.mark_spawned_notification_emitted();
     let completion = ChildCompletion {
+        snapshot: test_snapshot(&request, &result),
         request,
         result,
         completion_data,
@@ -2114,6 +2242,7 @@ async fn run_promote_cancel_with_worktree(
             &test_gcs_context(&ctx),
             UNPROMOTED_SESSION_THREAD_EXIT_TIMEOUT,
             UnpromotedChildDisposition::Cancelled,
+            true,
         )
         .await;
     assert!(matches!(child_cmd_rx.try_recv(), Ok(SessionCommand::Cancel(_))));
@@ -2204,6 +2333,7 @@ async fn unproven_thread_exit_preserves_fresh_worktree() {
             &test_gcs_context(&ctx),
             std::time::Duration::ZERO,
             UnpromotedChildDisposition::Cancelled,
+            true,
         )
         .await;
     assert!(matches!(child_cmd_rx.try_recv(), Ok(SessionCommand::Cancel(_))));
@@ -2250,6 +2380,7 @@ async fn startup_admission_timeout_is_failed_not_cancelled() {
             &test_gcs_context(&ctx),
             UNPROMOTED_SESSION_THREAD_EXIT_TIMEOUT,
             UnpromotedChildDisposition::AdmissionTimedOut,
+            true,
         )
         .await;
     assert!(matches!(child_cmd_rx.try_recv(), Ok(SessionCommand::Cancel(_))));
@@ -2270,9 +2401,14 @@ async fn startup_admission_timeout_is_failed_not_cancelled() {
         )
         .expect("parse meta");
     assert_eq!(meta.status, "failed");
-    let mut completion_data = ShellCompletionData::from_context(&ctx);
-    completion_data.spawned_notification_emitted = true;
+    let completion_data = ShellCompletionData::from_context(
+        &ctx,
+        xai_message_delivery_core::AttemptId::mint(1),
+        None,
+    );
+    completion_data.mark_spawned_notification_emitted();
     let completion = ChildCompletion {
+        snapshot: test_snapshot(&request, &result),
         request,
         result,
         completion_data,
@@ -2339,6 +2475,7 @@ fn test_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
             agent_type: crate::agent::config::default_agent_type(),
             inference_idle_timeout_secs: None,
             max_retries: None,
+            rate_limit_retry_threshold: None,
             subagent_rate_limit_max_attempts: None,
             hidden: false,
             supported_in_api: true,
@@ -2353,6 +2490,7 @@ fn test_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
             laziness_detector: crate::agent::config::LazinessDetectorPerModelConfig::default(),
             variants: Vec::new(),
         },
+        mtls_cert_dir: None,
         api_key: None,
         env_key: None,
         auth_provider: None,
@@ -2361,7 +2499,8 @@ fn test_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
 }
 fn byok_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
     crate::agent::config::ModelEntry {
-        api_key: Some("byok-key".to_string()),
+        bundled_catalog_entry: false,
+api_key: Some("byok-key".to_string()),
         ..test_model_entry(model_id)
     }
 }
@@ -2565,12 +2704,16 @@ fn test_sampling_config(model_slug: &str) -> xai_grok_sampling_types::SamplingCo
     use std::num::NonZeroU64;
     xai_grok_sampling_types::SamplingConfig {
         base_url: "https://api.test/v1".to_string(),
+        mtls_cert_dir: None,
         model: model_slug.to_string(),
         max_completion_tokens: None,
         temperature: None,
         top_p: None,
+        max_retries: None,
+        rate_limit_retry_threshold: None,
         api_backend: Default::default(),
         extra_headers: Default::default(),
+        conversation_group_id: None,
         query_params: Default::default(),
         env_http_headers: Default::default(),
         context_window: NonZeroU64::new(256_000).expect("non-zero context window"),
@@ -2591,15 +2734,70 @@ fn spawn_test_parent_chat_state(model_slug: &str) -> xai_chat_state::ChatStateHa
     )
 }
 mod rest;
+mod wake;
 #[tokio::test]
-async fn join_worker_task_resumes_worker_panics() {
+async fn panicked_announced_foreground_child_emits_one_typed_finish() {
+    let (gateway, _gateway_rx) = test_gateway_with_receiver();
+    let (parent_cmd_tx, mut parent_cmd_rx) = mpsc::unbounded_channel();
+    let mut request = auto_wake_test_request("panic-after-spawn");
+    request.run_in_background = false;
+    let completion_data = ShellCompletionData {
+        parent_cmd_tx: Some(parent_cmd_tx),
+        attempt_id: Some(xai_message_delivery_core::AttemptId::mint(0xface)),
+        ..Default::default()
+    };
+    let worker_completion_data = completion_data.clone();
     let inner = super::worker_runtime()
         .expect("worker runtime")
-        .spawn(async { panic!("worker boom") });
-    let err = tokio::spawn(join_worker_task::<()>(inner))
-        .await
-        .expect_err("panic must propagate out of join_worker_task");
-    assert!(err.is_panic());
+        .spawn(async move {
+            worker_completion_data.mark_spawned_notification_emitted();
+            panic!("worker boom");
+        });
+    let output = join_worker_task(
+            inner,
+            ChildRunOutput {
+                result: SubagentResult {
+                    success: false,
+                    error: Some("Subagent runtime panicked".to_owned()),
+                    subagent_id: request.id.clone(),
+                    child_session_id: request.id.clone(),
+                    ..Default::default()
+                },
+                completion_data,
+                snapshot_ref: None,
+            },
+        )
+        .await;
+    let snapshot = test_snapshot(&request, &output.result);
+    present_child_completion(
+        ChildCompletion {
+            snapshot,
+            request,
+            result: output.result,
+            completion_data: output.completion_data,
+            disposition: CompletionDisposition {
+                foreground_delivered: true,
+                backgrounded: false,
+                waiter_delivered: false,
+                explicitly_killed: false,
+                should_surface: false,
+            },
+        },
+        &gateway,
+        false,
+    );
+    let finishes = std::iter::from_fn(|| parent_cmd_rx.try_recv().ok())
+        .filter_map(|command| match command {
+            SessionCommand::XaiSessionNotification {
+                notification: SessionNotification {
+                    update: SessionUpdate::SubagentFinished { attempt_id, .. },
+                    ..
+                },
+            } => Some(attempt_id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(finishes, vec![Some("at1.face".to_owned())]);
 }
 #[tokio::test]
 async fn join_worker_task_drop_aborts_worker() {
@@ -2621,7 +2819,7 @@ async fn join_worker_task_drop_aborts_worker() {
             std::future::pending::<()>().await;
         });
     started_rx.await.expect("worker started");
-    let mut fut = Box::pin(join_worker_task::<()>(inner));
+    let mut fut = Box::pin(join_worker_task(inner, ()));
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
     assert!(
             std::future::Future::poll(fut.as_mut(), &mut cx).is_pending(),

@@ -1,15 +1,11 @@
 use agent_client_protocol as acp;
 
 use crate::agent::config::ModelEntry;
-use crate::auth::PreferredAuthMethod;
+use xai_grok_login::PreferredAuthMethod;
 
-/// Shared, live handle to the agent's current ACP auth method id.
-///
-/// `Arc` so a clone can cross the per-session-thread boundary at spawn.
-/// The `ArcSwapOption` interior lets the agent's `authenticate` handler publish a new method without re-spawning sessions.
-/// Every running session's per-turn auth gate observes the new method on its next turn.
-/// `None` until the first `authenticate`.
-/// Auth is process-global (one user, one `AuthManager`), so all sessions sharing one cell is correct.
+/// Shared, live handle to the agent's current ACP auth method id. `Arc` so a clone can cross the per-session-thread boundary at spawn.
+/// The `ArcSwapOption` interior lets the agent's `authenticate` handler publish a new method without re-spawning sessions. Every running session's per-turn auth gate observes the new method on its next turn.
+/// `None` until the first `authenticate`. Auth is process-global (one user, one `AuthManager`), so all sessions sharing one cell is correct.
 pub(crate) type SharedAuthMethodId = std::sync::Arc<arc_swap::ArcSwapOption<acp::AuthMethodId>>;
 
 /// Construct a [`SharedAuthMethodId`]. `None` is the pre-`authenticate` state.
@@ -19,42 +15,16 @@ pub(crate) fn new_shared_auth_method_id(initial: Option<acp::AuthMethodId>) -> S
     ))
 }
 
-/// Env var that, when set, advertises `xai.api_key` as a viable auth method.
-///
-/// Kept as a constant so test code and the production check stay in sync.
-pub const XAI_API_KEY_ENV_VAR: &str = "XAI_API_KEY";
-
-/// Legacy env var name.
-/// Checked as a fallback when `XAI_API_KEY` is not set, so existing deployments that use the old name keep working.
-pub const LEGACY_XAI_API_KEY_ENV_VAR: &str = "GROK_CODE_XAI_API_KEY";
-
-/// Read the API key from the environment.
-///
-/// Checks `XAI_API_KEY` first, then falls back to the legacy `GROK_CODE_XAI_API_KEY` for backward compatibility.
-pub(crate) fn read_xai_api_key_env() -> Result<String, std::env::VarError> {
-    std::env::var(XAI_API_KEY_ENV_VAR).or_else(|_| std::env::var(LEGACY_XAI_API_KEY_ENV_VAR))
-}
-
-/// Returns `true` if either `XAI_API_KEY` or `GROK_CODE_XAI_API_KEY` is set.
-pub fn has_xai_api_key_env() -> bool {
-    read_xai_api_key_env().is_ok()
-}
+// The first-party env-key primitives live in the low `xai-grok-login` crate
+// (auth needs them without pulling in shell's `ModelEntry`); re-exported here so
+// `crate::agent::auth_method::{XAI_API_KEY_ENV_VAR, ..}` call sites keep resolving.
+pub use xai_grok_login::auth_method::{
+    LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR, has_xai_api_key_env, read_xai_api_key_env,
+};
 
 /// Whether `xai.api_key` should be advertised (and pushed FIRST) when building the `auth_methods` list at `initialize()` time.
-///
 /// Regression: `xai.api_key` must stay first when only per-model credentials exist (no global `XAI_API_KEY`).
-/// Deferring it made BYOK users hit the login screen because the pager uses `auth_methods.first()` for startup metadata.
-///
-/// [`build_auth_methods`] consumes this predicate and pins the ordering; its tests catch call-site and predicate regressions.
-///
-/// Probes `std::env` at call time and consults each `ModelEntry` for a resolvable api_key/env_key.
-/// Both inputs can change between calls, so the result is not cached.
-///
-/// `disable_api_key_auth` (`[grok_com_config] disable_api_key_auth` / `GROK_DISABLE_API_KEY_AUTH`) is the admin kill switch.
-/// When true the method is never advertised, regardless of available credentials, so `XAI_API_KEY` can't bypass a deployment's forced IdP login.
-///
-/// Presence-only for the first-party env key (treats it as usable).
-/// Login paths that have run the validity probe should call [`should_advertise_xai_api_key_with_env_ok`] with the probe result instead.
+/// Deferring it made BYOK users hit the login screen because the pager uses `auth_methods.first()` for startup metadata. Both inputs can change between calls, so the result is not cached. When true the method is never advertised, regardless of available credentials, so `XAI_API_KEY` can't bypass a deployment's forced IdP login. Presence-only for the first-party env key (treats it as usable).
 pub(crate) fn should_advertise_xai_api_key<'a, I>(disable_api_key_auth: bool, models: I) -> bool
 where
     I: IntoIterator<Item = &'a ModelEntry>,
@@ -79,16 +49,11 @@ where
     has_byok || (has_xai_api_key_env() && first_party_env_ok)
 }
 
-/// Inputs to [`build_auth_methods`].
-///
-/// The caller (`MvpAgent::initialize()`) computes the booleans.
-/// They depend on async side effects (token refresh) and shared mutable state (`AuthManager`).
+/// Inputs to [`build_auth_methods`]. The caller (`MvpAgent::initialize()`) computes the booleans. They depend on async side effects (token refresh) and shared mutable state (`AuthManager`).
 /// The list-construction logic itself is pure so it can be unit-tested without any of that machinery.
 pub struct AuthMethodsBuildInputs<'a> {
-    /// True if `xai.api_key` should be advertised AT ALL.
-    /// Login/initialize callers compute it via [`should_advertise_xai_api_key_with_env_ok`] after the validity probe.
-    /// Presence-only paths may use [`should_advertise_xai_api_key`].
-    /// When `preferred_method` is `Oidc`, this is ignored (API key is never advertised under that pin).
+    /// True if `xai.api_key` should be advertised AT ALL. Login/initialize callers compute it via [`should_advertise_xai_api_key_with_env_ok`] after the validity probe.
+    /// Presence-only paths may use [`should_advertise_xai_api_key`]. When `preferred_method` is `Oidc`, this is ignored (API key is never advertised under that pin).
     pub has_external_api_key: bool,
     /// True if a cached session token is available (either present at startup or recovered via silent refresh).
     pub has_cached_token: bool,
@@ -117,28 +82,9 @@ pub struct BuiltAuthMethods {
     pub default_auth_method_id: Option<acp::AuthMethodId>,
 }
 
-/// Build the `auth_methods` list and default `auth_method_id` from pre-computed inputs.
-///
 /// REGRESSION GUARD: when unpinned and `has_external_api_key` is true, the **first** entry MUST be `xai.api_key`.
-/// A prior change deferred it to the END for per-model credentials, which made the pager send per-model-key users to the login screen.
-/// Unit tests lock this.
-///
-/// Unpinned ordering (when each method is enabled):
-/// 1. `xai.api_key`     (if `has_external_api_key`)
-/// 2. `cached_token`    (if `has_cached_token`)
-/// 3. exactly one of:
-///    - `oidc`          (if `has_enterprise_oidc`)
-///    - `grok.com`      (otherwise)
-///
-/// Unpinned `default_auth_method_id`:
-/// - `cached_token` if `has_cached_token`
-/// - `xai.api_key`  else if `has_external_api_key`
-/// - `None`         otherwise
-///
-/// Pinned (`preferred_method`):
-/// - `ApiKey`: only `xai.api_key` if available; else an empty list and `None` (fail).
-/// - `Oidc`: `cached_token` (if any) then interactive login; never `xai.api_key`.
-///   Default is `cached_token` when present, else `None` (interactive).
+/// Unpinned ordering (when each method is enabled): `xai.api_key` (if `has_external_api_key`) `cached_token` (if `has_cached_token`) exactly one of: `oidc` (if `has_enterprise_oidc`) `grok.com` (otherwise)
+/// Unpinned `default_auth_method_id`: `cached_token` if `has_cached_token` `xai.api_key` else if `has_external_api_key` `None` otherwise Pinned (`preferred_method`): `ApiKey`: only `xai.api_key` if available; else an empty list and `None` (fail). `Oidc`: `cached_token` (if any) then interactive login; never `xai.api_key`.
 pub fn build_auth_methods(inputs: AuthMethodsBuildInputs<'_>) -> BuiltAuthMethods {
     let AuthMethodsBuildInputs {
         has_external_api_key,
@@ -326,7 +272,8 @@ pub(crate) fn is_session_based_method(method_id: &acp::AuthMethodId) -> bool {
 }
 
 /// Per-model BYOK status: whether the selected model carries its own `[model.*]` `api_key`/`env_key`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, strum::AsRefStr, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub(crate) enum ModelByok {
     /// Model has its own per-model key (not refreshable).
     Byok,
@@ -335,30 +282,9 @@ pub(crate) enum ModelByok {
     /// Config couldn't be loaded/parsed; BYOK status indeterminate.
     Unknown,
 }
-
-impl ModelByok {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Byok => "byok",
-            Self::NotByok => "not_byok",
-            Self::Unknown => "unknown",
-        }
-    }
-}
-
-/// Whether this session and model combination uses a refreshable session token.
-///
-/// Gates on stable inputs, not `Credentials.auth_type`.
-/// That field collapses to `ApiKey` when the session-token cache is momentarily empty and `XAI_API_KEY` is set.
-/// The collapse demoted live OIDC sessions to non-refreshable api-key mode and 401'd every prompt until restart.
-/// `model_byok` still excludes genuine per-model BYOK, whose keys are not refreshable.
-///
-/// `Unknown` means BYOK status is indeterminate: config currently unparseable, no sampling config yet, or the per-model memo was cleared.
-/// It must **not** demote a live session to non-refreshable api-key mode.
-/// That demotion re-sends the stale buffered token on every turn and 401s with `bad-credentials` until restart.
-/// Instead, `Unknown` refreshes only when `endpoint_is_first_party`.
-/// On a first-party host (cli-chat-proxy / first-party API) the session token cannot leak to a third-party BYOK endpoint.
-/// A definite `NotByok` always refreshes (it only ever routes to the session endpoint); a definite `Byok` never does.
+/// Whether this session and model combination uses a refreshable session token. Gates on stable inputs, not `Credentials.auth_type`. `model_byok` still excludes genuine per-model BYOK, whose keys are not refreshable.
+/// It must **not** demote a live session to non-refreshable api-key mode. Instead, `Unknown` refreshes only when `endpoint_is_first_party`.
+/// On a first-party host (cli-chat-proxy / first-party API) the session token cannot leak to a third-party BYOK endpoint. A definite `NotByok` always refreshes (it only ever routes to the session endpoint); a definite `Byok` never does.
 pub(crate) fn session_token_auth_gate(
     is_session_based_method: bool,
     model_byok: ModelByok,
@@ -378,10 +304,7 @@ pub const AUTH_ERROR_SESSION_EXPIRED: &str =
 pub const AUTH_ERROR_API_KEY: &str = "Authentication failed. Run `grok-zh login`, set XAI_API_KEY, or add api_key to ~/.grok/config.toml.";
 
 /// Next ACP method id when `cached_token` cannot proceed (missing / expired / legacy WebLogin), or `None` when fallthrough is forbidden.
-///
-/// Unpinned: prefer non-interactive `xai.api_key` when advertiseable, else interactive `grok.com`.
-///
-/// Pinned `oidc`: **no** fallthrough to api_key; return `None` so the caller fails auth.
+/// Unpinned: prefer non-interactive `xai.api_key` when advertiseable, else interactive `grok.com`. Pinned `oidc`: **no** fallthrough to api_key; return `None` so the caller fails auth.
 /// Pinned `api_key` should not reach this path (cached_token is not advertised).
 pub(crate) fn method_id_after_cached_token_unavailable(
     has_external_api_key: bool,
@@ -469,8 +392,7 @@ mod tests {
     use serial_test::serial;
 
     /// When API-key credentials are advertiseable, fall through from a dead `cached_token` to non-interactive `xai.api_key` (not browser OAuth).
-    /// Covers the both-advertised case: `has_cached_token` was true at initialize but the session later went missing/expired/legacy.
-    /// Advertise order still puts `xai.api_key` first while `default_auth_method_id` prefers session.
+    /// Covers the both-advertised case: `has_cached_token` was true at initialize but the session later went missing/expired/legacy. Advertise order still puts `xai.api_key` first while `default_auth_method_id` prefers session.
     /// After the session fails, this helper must still pick `xai.api_key`.
     #[test]
     fn after_cached_token_unavailable_prefers_api_key_when_advertiseable() {
@@ -724,13 +646,7 @@ mod tests {
 
     // ── End-to-end: enterprise TOML to resolved models to build_auth_methods ─
 
-    /// END-TO-END REGRESSION TEST: parses the literal enterprise-style
-    /// `~/.grok/config.toml` skeleton from the bug report, walks it through
-    /// the same predicate (`should_advertise_xai_api_key`) and the same
-    /// list-builder (`build_auth_methods`) that `MvpAgent::initialize()` uses
-    /// in production, and asserts that `auth_methods.first()` is `xai.api_key`
-    /// (which causes the pager to skip the login screen).
-    ///
+    /// END-TO-END REGRESSION TEST: parses the literal enterprise-style `~/.grok/config.toml` skeleton from the bug report, walks it through the same predicate (`should_advertise_xai_api_key`) and the same list-builder (`build_auth_methods`) that `MvpAgent::initialize()` uses in production, and asserts that `auth_methods.first()` is `xai.api_key` (which causes the pager to skip the login screen).
     /// This is the test that *would have caught* that regression.
     /// If the bug returns (xai.api_key pushed LAST when only per-model credentials exist), `first_kind` stops being `XaiApiKey` and this test fails.
     #[test]
@@ -742,7 +658,7 @@ mod tests {
         // Held until end-of-scope so we restore on panic too
         let _global = EnvGuard::unset(XAI_API_KEY_ENV_VAR);
 
-        let dm = crate::models::default_model();
+        let dm = xai_grok_models::default_model();
         let toml: toml::Value = toml::from_str(&format!(
             r#"
             [model."{dm}"]
@@ -901,7 +817,7 @@ mod tests {
         let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
         let _byok = EnvGuard::set(TEST_ENV_VAR, "enterprise-secret-token");
 
-        let dm = crate::models::default_model();
+        let dm = xai_grok_models::default_model();
         let toml: toml::Value = toml::from_str(&format!(
             r#"
             [model."{dm}"]
@@ -944,15 +860,9 @@ mod tests {
         assert_eq!(read_xai_api_key_env().unwrap(), "new-key");
     }
 
-    // -- grok login --legacy regression coverage ------------------------
-    //
-    // `grok login --legacy` produces a GrokAuth with `auth_mode: WebLogin`, `oidc_issuer: None`, and no `expires_at` (30-day hardcoded TTL)
+    // -- grok login --legacy regression coverage ------------------------ `grok login --legacy` produces a GrokAuth with `auth_mode: WebLogin`, `oidc_issuer: None`, and no `expires_at` (30-day hardcoded TTL)
     // When this token is in the `GROK_AUTH` env var (or the legacy scope fallback in auth.json), `AuthManager::new` returns it from `current()`
-    // That feeds `has_cached_token = true` into `build_auth_methods`, which puts `cached_token` first
-    // `startup_auth_metadata()` then returns `needs_login = false`: legacy users get frictionless auth, no login screen
-    //
-    // This test pins the env-var path (highest priority in AuthManager) end-to-end
-    // A regression in GROK_AUTH JSON parsing or in auth method ordering would send legacy-token users to the login screen
+    // That feeds `has_cached_token = true` into `build_auth_methods`, which puts `cached_token` first `startup_auth_metadata()` then returns `needs_login = false`: legacy users get frictionless auth, no login screen This test pins the env-var path (highest priority in AuthManager) end-to-end
 
     /// END-TO-END REGRESSION TEST for a legacy auth token (WebLogin, no expires_at) in the `GROK_AUTH` env var with no other auth available.
     /// `AuthManager` MUST load it and `build_auth_methods` must advertise `cached_token` first.
@@ -960,7 +870,7 @@ mod tests {
     #[test]
     #[serial]
     fn grok_login_legacy_token_does_not_require_login() {
-        use crate::auth::{AuthManager, AuthMode, GrokAuth, GrokComConfig};
+        use xai_grok_login::{AuthManager, AuthMode, GrokAuth, GrokComConfig};
 
         // Ensure clean slate for "no other auth available".
         let _g1 = EnvGuard::unset("GROK_AUTH_PATH");
@@ -1039,7 +949,7 @@ mod tests {
     #[test]
     #[serial]
     fn no_legacy_token_means_no_cached_token_advertised() {
-        use crate::auth::{AuthManager, GrokComConfig};
+        use xai_grok_login::{AuthManager, GrokComConfig};
 
         let _g1 = EnvGuard::unset("GROK_AUTH");
         let _g2 = EnvGuard::unset("GROK_AUTH_PATH");

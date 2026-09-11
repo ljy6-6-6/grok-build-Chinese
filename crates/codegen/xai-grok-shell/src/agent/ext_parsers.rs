@@ -4,9 +4,7 @@
 
 use crate::session::SessionCommand;
 
-/// Parse the params of a `x.ai/queue/{remove,reorder,clear,edit,interject,hold_edit,release_edit}` ext-notification.
-/// Yields the corresponding [`SessionCommand`].
-/// `owner` is the resolved attribution (params `owner`/`clientIdentifier`).
+/// Parse the params of a `x.ai/queue/{remove,reorder,clear,edit,interject,hold_edit,release_edit}` ext-notification. `owner` is the resolved attribution (params `owner`/`clientIdentifier`).
 /// It scopes remove/clear to the requesting client's own items, and is recorded as `last_editor` for in-place text edits.
 /// Returns `None` for unrecognized methods, for `edit` when `newText` is missing, or when a required `id` is missing.
 pub(super) fn parse_queue_edit_command(

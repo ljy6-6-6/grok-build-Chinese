@@ -33,11 +33,9 @@ use std::sync::OnceLock;
 // GROK_HOME isolation
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Returns a process-wide test `GROK_HOME`, initialized exactly once per test binary.
-/// Once initialized, `xai_grok_config::grok_home()` will resolve to this directory for the lifetime of the process.
-///
-/// Also clears env vars that the auto-update code consults so a parent shell's values can't pollute the baseline.
-/// For example, running tests from `npm run` would otherwise inherit `npm_config_user_agent` and `NPM_TOKEN`.
+/// Returns a process-wide test `GROK_HOME`, initialized exactly once per test binary. Once initialized,
+/// `xai_grok_config::grok_home()` will resolve to this directory for the lifetime of the process. Also clears env vars
+/// that the auto-update code consults so a parent shell's values can't pollute the baseline.
 pub fn test_home() -> &'static PathBuf {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
@@ -139,10 +137,9 @@ pub fn small_good_artifact() -> Vec<u8> {
     b"#!/bin/sh\nexit 0\n".to_vec()
 }
 
-/// Backdate every file in `GROK_HOME/downloads` by ~2 hours.
-///
-/// `cleanup_old_downloads` deliberately never deletes a freshly-written binary or temp file (it may belong to a concurrent in-flight install).
-/// Tests asserting the retention policy must therefore age their fixtures to look like real leftovers from previous releases.
+/// Backdate every file in `GROK_HOME/downloads` by ~2 hours. `cleanup_old_downloads` deliberately never deletes a
+/// freshly-written binary or temp file (it may belong to a concurrent in-flight install). Tests asserting the retention
+/// policy must therefore age their fixtures to look like real leftovers from previous releases.
 pub fn backdate_downloads() {
     let downloads = test_home().join("downloads");
     let Ok(entries) = std::fs::read_dir(&downloads) else {
@@ -163,10 +160,8 @@ pub fn backdate_downloads() {
 // PATH-override fake binary
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// RAII guard that places a sh-script with name `name` at the head of `PATH`.
-/// Restores `PATH` on drop.
-///
-/// All tests using this MUST be `#[serial]` because `PATH` is process-global.
+/// RAII guard that places a sh-script with name `name` at the head of `PATH`. Restores `PATH` on drop. All tests using
+/// this MUST be `#[serial]` because `PATH` is process-global.
 pub struct FakeBinGuard {
     pub tmp: tempfile::TempDir,
     pub name: String,
@@ -286,14 +281,9 @@ fn single_quote_for_sh(p: &Path) -> String {
     format!("'{escaped}'")
 }
 
-/// sh script body for a fake `npm`.
-/// Logs argv to `<dir>/npm-args.log` and dispatches stdout based on the first matching argv pattern:
-///
-/// - argv contains `@alpha`     → cat `<dir>/npm-alpha-stdout`
-/// - else                       → cat `<dir>/npm-stdout`
-///
-/// Always cats `<dir>/npm-stderr` to stderr (if exists).
-/// Exits with the integer in `<dir>/npm-exit` (default 0).
+/// sh script body for a fake `npm`. Logs argv to `<dir>/npm-args.log` and dispatches stdout based on the first matching
+/// argv pattern: argv contains `@alpha` → cat `<dir>/npm-alpha-stdout`; else → cat `<dir>/npm-stdout`. Always cats
+/// `<dir>/npm-stderr` to stderr (if exists). Exits with the integer in `<dir>/npm-exit` (default 0).
 pub fn fake_npm_script(dir: &Path) -> String {
     let dq = single_quote_for_sh(dir);
     format!(
@@ -312,14 +302,9 @@ exit "$exit_code"
     )
 }
 
-/// sh script body for a fake `gh`.
-/// Logs argv to `<dir>/gh-args.log` and dispatches stdout based on `release list` argv:
-///
-/// - argv contains `release list --exclude-pre-releases` → `<dir>/gh-stable-only-stdout`
-/// - argv contains `release list` (no exclude flag)      → `<dir>/gh-with-pre-stdout`
-/// - else                                                 → `<dir>/gh-stdout`
-///
-/// Exits with `<dir>/gh-exit` (default 0).
+/// sh script body for a fake `gh`. Logs argv to `<dir>/gh-args.log` and dispatches stdout based on `release list` argv:
+/// argv contains `release list --exclude-pre-releases` → `<dir>/gh-stable-only-stdout`; argv contains `release list` (no
+/// exclude flag) → `<dir>/gh-with-pre-stdout`; else → `<dir>/gh-stdout`. Exits with `<dir>/gh-exit` (default 0).
 pub fn fake_gh_script(dir: &Path) -> String {
     let dq = single_quote_for_sh(dir);
     format!(

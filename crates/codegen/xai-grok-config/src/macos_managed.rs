@@ -33,8 +33,6 @@ fn managed_requirements_from(read: impl FnOnce() -> Option<String>) -> Option<to
 /// Decode a base64 TOML payload into a non-empty table.
 /// The forced payload is used **verbatim**: `$VAR`/`${VAR}` are deliberately NOT expanded.
 /// Expanding from the local process environment would let the very user the forced check excludes influence the admin policy.
-/// The policy feeds yolo, permission, and minimum-version enforcement.
-/// FFI-free, so unit-tested on every platform; invalid base64/UTF-8/TOML or an empty table yields `None`.
 fn decode_managed_toml(encoded: &str) -> Option<toml::Value> {
     use base64::Engine as _;
 

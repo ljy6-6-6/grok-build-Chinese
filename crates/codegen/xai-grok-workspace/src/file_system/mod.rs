@@ -123,10 +123,7 @@ pub struct FuzzySearchData {
 }
 
 /// Result of one fuzzy-search poll tick (see [`WorkspaceHandle::fuzzy_poll`]).
-///
-/// Consumed in-process by the shell's notification driver, so it carries the (non-`Deserialize`) match results directly rather than going over RPC.
-///
-/// [`WorkspaceHandle::fuzzy_poll`]: crate::handle::WorkspaceHandle::fuzzy_poll
+/// Consumed in-process, so it carries non-`Deserialize` match results directly rather than over RPC.
 #[derive(Debug, Clone)]
 pub enum FuzzyPollOutcome {
     /// The query was superseded by a newer change; stop polling.

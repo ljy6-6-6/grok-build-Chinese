@@ -39,17 +39,7 @@ pub struct DiscoveredPlugin {
 }
 
 /// Parse an install source string into an `InstallSource`.
-///
-/// Supports:
-/// - `https://github.com/user/repo` — Git HTTPS
-/// - `https://github.com/user/repo@v1.0.0` — Git with ref
-/// - `https://github.com/user/repo#subdir` — Git with subdirectory
-/// - `git@github.com:user/repo.git` — Git SSH
-/// - `user/repo` — GitHub shorthand (expands to `https://github.com/user/repo`)
-/// - `user/repo@v1.0.0` — GitHub shorthand with ref
-/// - `user/repo#subdir` — GitHub shorthand with subdirectory
-/// - `/path/to/dir` or `./relative` or `~/dir` — Local
-/// - `/path/to/dir#subdir` — Local with subdirectory
+/// Git HTTPS/SSH, GitHub shorthand (`user/repo`), optional `@ref` and `#subdir`, or a local path.
 pub fn parse_install_source(input: &str, cwd: &Path) -> InstallSource {
     let (main, subdir) = match input.rsplit_once('#') {
         Some((m, s)) if !s.is_empty() => (m, Some(s.to_string())),
@@ -531,10 +521,8 @@ pub fn cleanup_plugin_data(repo: &InstalledRepo, scope: super::discovery::Plugin
     }
 }
 
-/// Discovery logic:
-/// 1. If `subdir` is specified, only look in that subdirectory
-/// 2. If root has plugin.json or convention components, it's a single plugin
-/// 3. Otherwise, scan immediate subdirectories for plugins
+/// Discovery: if `subdir` is set, only look there.
+/// If root has plugin.json or convention components, it is a single plugin; otherwise scan immediate subdirectories.
 pub(super) fn discover_plugins_in_dir(
     root: &Path,
     subdir: Option<&str>,
@@ -675,11 +663,8 @@ pub enum UpdateStatus {
     LiveLocal,
 }
 
-/// How each install kind updates:
-/// - Branch installs: `git fetch` and fast-forward to remote branch head
-/// - Tag installs: pinned, no-op
-/// - Commit installs: pinned, no-op
-/// - Local installs: no-op (explicit update); [`super::local_refresh`] re-copies on session spawn / reload
+/// Branch installs fetch and fast-forward; tag and commit installs are pinned no-ops.
+/// Local installs are a no-op here; [`super::local_refresh`] re-copies on session spawn / reload.
 pub fn update_repo(
     repo_key: &str,
     repo: &InstalledRepo,

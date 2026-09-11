@@ -38,13 +38,12 @@ use xai_acp_lib::{
 };
 
 use crate::agent::config::{Config as AgentConfig, ModelEntry};
-use crate::agent::models::{ModelFetchAuth, prefetch_models_blocking};
 use crate::agent::mvp_agent::MvpAgent;
+use crate::agent::remote_config::{ModelFetchAuth, prefetch_models_blocking};
 
 use indexmap::IndexMap;
 
 /// Swappable destination for the relay task.
-///
 /// Points at the current ACP connection's gateway sender.
 /// When no client is connected, the value is `None` and outbound messages are silently dropped.
 type RelayDest = Rc<RefCell<Option<mpsc::UnboundedSender<AcpClientMessage>>>>;
@@ -330,7 +329,6 @@ fn persistent_agent_thread(
 }
 
 /// Handle an authenticated WebSocket connection.
-///
 /// On first connection, spawns a persistent agent thread that owns the MvpAgent.
 /// On subsequent connections (reconnects), sends new WS channels to the existing agent thread so session actors keep streaming to the new client.
 async fn handle_connection(ws: WebSocket, state: Arc<ServerState>, peer_addr: SocketAddr) {
@@ -447,13 +445,11 @@ async fn handle_connection(ws: WebSocket, state: Arc<ServerState>, peer_addr: So
     info!("WebSocket connection ended for {}", peer_addr);
 }
 
-/// Run the persistent agent on a dedicated thread with LocalSet.
-///
-/// The MvpAgent is created **once** and reused across WebSocket reconnections.
+/// Run the persistent agent on a dedicated thread with LocalSet. The MvpAgent is created **once** and reused across WebSocket reconnections.
 /// Session actors hold cloned `GatewaySender` handles onto a persistent gateway channel, so they can always send notifications.
 /// A relay task forwards those messages to the *current* ACP connection's channel, so they reach whichever client is connected.
 async fn run_persistent_agent(
-    agent_config: AgentConfig,
+    mut agent_config: AgentConfig,
     mut connection_rx: mpsc::UnboundedReceiver<NewConnectionChannels>,
     prefetched_models: Option<IndexMap<String, ModelEntry>>,
 ) {
@@ -466,10 +462,30 @@ async fn run_persistent_agent(
     let _cancel_on_exit = agent_cancel.clone().drop_guard();
     auth_manager.start_proactive_refresh(agent_cancel.clone());
     crate::managed_config::ensure_managed_policy_present(&auth_manager).await;
+    // Current-thread boot: resolve settings before sync bootstrap.
+    let boot = match crate::agent::init::resolve_boot_startup_settings(
+        &mut agent_config,
+        &agent_cancel,
+        prefetched_models.is_none(),
+        auth_manager.current(),
+    )
+    .await
+    {
+        Ok(boot) => boot,
+        // A cancelled boot unwinds; only a real config error exits.
+        Err(crate::agent::init::BootstrapError::Cancelled) => return,
+        Err(err) => crate::agent::init::exit_on_config_error(err),
+    };
     crate::agent::app::apply_otel_config(&auth_manager, &agent_config.grok_com_config);
     let agent = Rc::new(
-        MvpAgent::new(gateway, &agent_config, auth_manager, prefetched_models)
-            .unwrap_or_else(crate::agent::init::exit_on_config_error),
+        MvpAgent::new(
+            gateway,
+            &agent_config,
+            auth_manager,
+            prefetched_models,
+            Some(boot),
+        )
+        .unwrap_or_else(crate::agent::init::exit_on_config_error),
     );
     agent.models_manager.spawn_background_refresh();
 
@@ -525,7 +541,7 @@ fn setup_acp_connection(
     });
     tokio::task::spawn_local(
         GatewayReceiver::new(conn_gw_rx, conn)
-            .with_on_meta(xai_file_utils::trace_context::span_from_meta_traceparent)
+            .with_on_meta(xai_grok_otel::span_from_meta_traceparent)
             .run(),
     );
 
@@ -582,22 +598,8 @@ fn setup_acp_connection(
 }
 
 /// Run the agent WebSocket server.
-///
 /// This starts a WebSocket server that accepts authenticated connections from remote TUI clients.
 /// A single agent instance is shared across all connections (persisted across reconnections) so in-flight session work survives client disconnects.
-///
-/// # Arguments
-/// * `config`: Server configuration (bind address and secret)
-/// * `agent_config`: Agent configuration to use for each connection
-///
-/// # Example
-/// ```ignore
-/// let server_config = ServerConfig {
-///     bind_addr: "0.0.0.0:9000".parse().unwrap(),
-///     secret: "my-secret-token".to_string(),
-/// };
-/// run_agent_server(server_config, agent_config).await?;
-/// ```
 pub async fn run_agent_server(
     config: ServerConfig,
     agent_config: AgentConfig,

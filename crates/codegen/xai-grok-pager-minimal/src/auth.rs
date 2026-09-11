@@ -33,7 +33,6 @@ pub(super) enum MinimalAuthHint {
 }
 
 /// Map the app's auth and trust state to what the no-agent live region should show.
-///
 /// Mirrors the welcome screen's gate order: trust is only offered after auth is `Done`, when the user has access and is not ZDR-blocked.
 /// Those gates already block sessions, and the input interceptor only answers trust under the same conditions.
 pub(super) fn minimal_auth_hint(

@@ -697,10 +697,7 @@ mod tests {
         assert!(!files[1].staged);
     }
 
-    // =========================================================================
-    // GetHunksResponse Serialization Tests
-    // =========================================================================
-    // These tests verify the ACP get-hunks response serializes the explicit status fields (baseline, current) alongside the legacy fields
+    // ========================================================================= GetHunksResponse Serialization Tests ========================================================================= These tests verify the ACP get-hunks response serializes the explicit status fields (baseline, current) alongside the legacy fields
 
     /// GetHunksResponse serializes Full status with all fields
     #[test]

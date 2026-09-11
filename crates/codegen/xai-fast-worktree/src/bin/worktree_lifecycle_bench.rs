@@ -1732,12 +1732,19 @@ fn dirty_repo_digest(
             }
         }
     }
-    Ok(format!("{:x}", digest.finalize()))
+    Ok(bytes_to_hex(digest.finalize()))
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::Digest;
-    format!("{:x}", sha2::Sha256::digest(bytes))
+    bytes_to_hex(sha2::Sha256::digest(bytes))
+}
+
+// sha2 0.10 digests are `GenericArray` (impls `LowerHex`), sha2 0.11 digests are
+// `hybrid_array::Array` (no `LowerHex`); Bazel's `@crates//:sha2` is 0.11 while
+// Cargo pins 0.10, so encode via `AsRef<[u8]>` which both implement.
+fn bytes_to_hex(bytes: impl AsRef<[u8]>) -> String {
+    bytes.as_ref().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn median(values: impl Iterator<Item = f64>) -> f64 {

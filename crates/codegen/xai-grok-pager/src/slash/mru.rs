@@ -260,17 +260,9 @@ impl MruSnapshot {
     }
 }
 
-/// Persist a snapshot off the UI thread.
-/// Writes are serialized through a long-lived background thread (created on first use), so concurrent accepts can never reorder or tear the file.
 /// The send is non-blocking; the `Rc<RefCell<SlashMru>>` never leaves the UI thread, only the `Send` snapshot does.
-///
-/// Returns `true` if the snapshot was handed to the writer thread or written synchronously.
-/// Returns `false` only when no write could be attempted, so the caller can keep the store dirty and retry on the next record.
-/// If the writer thread cannot be spawned, or its channel has hung up, this falls back to a best-effort synchronous write.
-///
-/// The off-thread write is best-effort: each snapshot is the full command map, so the next record re-persists everything after a disk failure.
-///
-/// The writer channel is the only process-global piece; it holds write-only I/O state and no ranking state, so tests with injected stores are unaffected.
+/// Returns `false` only when no write could be attempted, so the caller can keep the store dirty and retry on the
+/// next record.
 pub fn persist_async(snapshot: MruSnapshot) -> bool {
     static WRITER: OnceLock<Option<Sender<MruSnapshot>>> = OnceLock::new();
     let tx = WRITER.get_or_init(|| {

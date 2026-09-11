@@ -12,9 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 /// A single question in an `ask_user_question` invocation.
-///
-/// Wire-only data: pure strings and a bool.
-/// The runtime crate is responsible for any UI rendering or option-validation logic.
+/// Wire-only strings and a bool; the runtime crate owns UI and option validation.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserQuestion {
     /// The complete question text shown to the user.
@@ -41,9 +39,7 @@ pub struct UserQuestionOption {
 }
 
 /// The user's answer to a single [`UserQuestion`].
-///
-/// Tagged with `tag = "type", content = "data"` (adjacent tagging) to match every other wire enum in the crate.
-/// See `crate::lib` doc-comment "# Wire format" for the rationale.
+/// Adjacent tagging matches every other wire enum; see "# Wire format".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum UserAnswer {

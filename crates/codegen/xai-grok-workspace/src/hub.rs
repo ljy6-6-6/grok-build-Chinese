@@ -40,10 +40,8 @@ use xai_tool_runtime::{
     terminal_only,
 };
 use xai_tool_types::ToolDescription;
-/// Configuration for connecting to a server instance.
-///
-/// Passed via [`WorkspaceConfig::hub_config`](crate::config::WorkspaceConfig::hub_config).
-/// When `Some`, the workspace can connect after construction via [`WorkspaceHandle::connect_hub`](crate::handle::WorkspaceHandle::connect_hub).
+/// Configuration for connecting to a server instance, via [`WorkspaceConfig::hub_config`](crate::config::WorkspaceConfig::hub_config).
+/// When `Some`, connect after construction via [`WorkspaceHandle::connect_hub`](crate::handle::WorkspaceHandle::connect_hub).
 #[derive(Clone)]
 pub struct HubConfig {
     /// Server WebSocket URL (`ws://` or `wss://`).
@@ -74,9 +72,7 @@ impl std::fmt::Debug for HubConfig {
     }
 }
 /// Live handle to a server connection, tool server, and notification listener.
-///
-/// Stored on [`WorkspaceShared`](crate::session::WorkspaceShared) as `Option<HubHandle>`.
-/// Created by [`WorkspaceHandle::connect_hub`](crate::handle::WorkspaceHandle::connect_hub).
+/// Stored on [`WorkspaceShared`](crate::session::WorkspaceShared); created by [`WorkspaceHandle::connect_hub`](crate::handle::WorkspaceHandle::connect_hub).
 pub(crate) struct HubHandle {
     /// The tool server exposing workspace tools to the server (provider direction).
     /// Also used for subscribing to and sending notifications.
@@ -194,11 +190,8 @@ impl HubWsTiming {
     }
 }
 impl HubHandle {
-    /// Build server connection pool, tool server, and return a handle.
-    ///
-    /// The tool server starts with zero sessions; all sessions are bound dynamically via `session.bind` at runtime.
-    /// The tool server run loop and notification listener are NOT started here.
-    /// Call [`Self::set_server_task`] and [`Self::set_notification_task`] after spawning.
+    /// Build the connection pool and tool server and return a handle. Sessions are bound later via `session.bind`.
+    /// The run loop and notification listener are not started here; set those tasks after spawning.
     pub(crate) async fn connect(
         config: &HubConfig,
         ws: HubWsTiming,
@@ -310,12 +303,8 @@ impl HubHandle {
     pub(crate) fn set_tool_defs_forwarder_task(&mut self, task: JoinHandle<()>) {
         self.tool_defs_forwarder_task = Some(task);
     }
-    /// Cooperative shutdown with timeout.
-    ///
-    /// 1. Shuts down the tool server (unregisters tools + sessions).
-    /// 2. Aborts background tasks.
-    ///
-    /// The shutdown call is guarded by a 5-second timeout to prevent blocking indefinitely if the server is unreachable.
+    /// Cooperative shutdown: unregister tools and sessions, then abort background tasks.
+    /// Guarded by a 5-second timeout so an unreachable server cannot block indefinitely.
     pub(crate) async fn shutdown(self) {
         const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
         match tokio::time::timeout(SHUTDOWN_TIMEOUT, self.server.shutdown()).await {
@@ -361,14 +350,8 @@ impl HubHandle {
         }
     }
 }
-/// [`ToolServerHandler`] for an individual tool, dispatched to the workspace session matching the `session_id`.
-///
-/// One instance is created per tool discovered from the workspace's `default_tool_config`.
-/// The server sees individual tools (bash, read_file, etc.) and routes `tool_call_request` frames directly by `tool_id`.
-/// No meta-wrapper, no envelope: the server has full per-tool visibility for routing, listing, and per-session binding.
-///
-/// Sessions must be bound via `session.bind` before tool calls are accepted.
-/// There is no implicit default session.
+/// Per-tool handler dispatched to the session matching `session_id`. The server routes by `tool_id` with no meta-wrapper.
+/// Sessions must be bound via `session.bind` first; there is no implicit default session.
 pub(crate) struct SessionRoutedToolHandler {
     tool_id: ToolId,
     desc: ToolDescription,
@@ -399,12 +382,8 @@ impl SessionRoutedToolHandler {
         crate::permission::access_kind_for_hub_tool(self.semantic_kind, self.name(), args)
     }
 }
-/// RAII guard that brackets a tool call's activity-tracker accounting.
-///
-/// [`SessionRoutedToolHandler::handle_call`] moves this guard into the stream it returns.
-/// [`ActivityTracker::tool_call_started`](crate::activity::ActivityTracker::tool_call_started) fires at stream construction.
-/// The guard's [`Drop`] calls [`tool_call_completed`](crate::activity::ActivityTracker::tool_call_completed).
-/// Completion bookkeeping fires whether the stream reaches its terminal item *or* the consumer drops the stream early (e.g. harness disconnect).
+/// RAII guard for a tool call's activity accounting. Start fires at stream construction; [`Drop`] completes it.
+/// Completion runs whether the stream finishes or the consumer drops it early.
 struct CallCompletedGuard {
     tracker: Arc<crate::activity::ActivityTracker>,
     call_id: String,
@@ -596,16 +575,8 @@ impl ToolServerHandler for SessionRoutedToolHandler {
         })
     }
 }
-/// Each remote tool gets a `ToolConfig` with:
-/// - `id` prefixed with `hub:` to avoid collisions with baseline/MCP tools
-/// - `kind: None` (remote tools have unknown capability kind)
-/// - `name_override` set to the bare tool name
-///
-/// # Capability mode filtering
-///
-/// Remote-origin `kind: None` tools are dropped under non-`All` capability modes (e.g. `ReadWrite`, `ReadOnly` in subagent sessions).
-/// This matches MCP-origin tool behavior.
-/// They are only visible in the main session which uses `CapabilityMode::All`.
+/// Each remote tool gets a `hub:`-prefixed id (no collision with baseline/MCP), `kind: None`, and a bare `name_override`.
+/// Remote-origin `kind: None` tools are dropped under non-`All` modes, matching MCP; only the main session's `All` keeps them.
 pub(crate) fn hub_tool_ids_to_tool_configs(tool_ids: &[ToolId]) -> Vec<ToolConfig> {
     if !tool_ids.is_empty() {
         tracing::info!(

@@ -49,21 +49,8 @@ pub(crate) struct FrozenState {
 }
 
 /// Count trailing blank lines in text.
-///
 /// A trailing blank line is a line containing only whitespace followed by end-of-text, or consecutive newlines at the end.
-///
-/// For markdown block separators:
-/// - "\n\n" at the end = 1 blank line (one full blank line between blocks)
-/// - "\n\n\n" at the end = 2 blank lines
-/// - "text\n" at the end = 0 (just a line ending, no blank line)
-///
-/// Examples:
-/// - "" → 0
-/// - "hello" → 0
-/// - "hello\n" → 0 (just a line ending)
-/// - "hello\n\n" → 1
-/// - "hello\n\n\n" → 2
-/// - "hello\n  \n" → 1 (whitespace-only line counts as blank)
+/// "\n\n" at the end = 1 blank line (one full blank line between blocks); "\n\n\n" at the end = 2 blank lines; "text\n" at the end = 0 (just a line ending, no blank line).
 #[cfg(test)]
 fn count_trailing_blank_lines(text: &str) -> usize {
     if text.is_empty() {
@@ -143,15 +130,11 @@ pub struct StreamingMarkdownRenderer {
     collapse_soft_breaks: bool,
 
     /// Incremental highlighter for the trailing still-open fenced code block.
-    ///
-    /// Persists syntect's resumable per-line state across `rerender_tail` calls so a large open code block is highlighted in O(N) total, not O(N²).
-    /// Created lazily on the first render with syntect.
     /// Cleared (so it rebuilds) on any state reset that would change output: theme/style, pretty mode, table width, soft-break mode, or `clear()`.
     open_code: Option<OpenCodeHighlighter>,
 
     /// Streaming LaTeX delimiter normalizer.
     /// Rewrites `\(…\)` / `\[…\]` / `\begin{equation}` into the canonical `$` / `$$` forms before text is appended to `source`.
-    /// The math handlers then convert them uniformly, including inside table cells.
     /// Held-back ambiguous bytes (a partial delimiter at a chunk boundary) are flushed by `finish()`.
     normalizer: LatexDelimiterNormalizer,
 }
@@ -172,7 +155,6 @@ impl Clone for StreamingMarkdownRenderer {
     fn clone(&self) -> Self {
         // Create a fresh renderer and push all source text
         // This recreates the frozen state correctly.
-        //
         // We must propagate `max_table_width` BEFORE pushing/rendering so the clone produces identical output to the original
         let mut new = Self::new(self.style, self.pretty);
         new.set_max_table_width(self.max_table_width);
@@ -216,7 +198,6 @@ impl StreamingMarkdownRenderer {
     }
 
     /// Set the maximum width for rendered tables.
-    ///
     /// When set, column widths are shrunk proportionally so the table fits within the given number of display columns.
     /// If the width changes, frozen state is reset to ensure consistent rendering.
     pub fn set_max_table_width(&mut self, width: Option<usize>) {
@@ -230,9 +211,6 @@ impl StreamingMarkdownRenderer {
     }
 
     /// Set whether CommonMark soft breaks collapse to a space.
-    ///
-    /// Defaults to `true`.
-    /// Set `false` for source-faithful rendering (plan preview) where each source line keeps its own visual line and `line_source_map` entry.
     /// Resets frozen state when the mode changes.
     pub fn set_collapse_soft_breaks(&mut self, collapse: bool) {
         if self.collapse_soft_breaks != collapse {
@@ -244,9 +222,6 @@ impl StreamingMarkdownRenderer {
     }
 
     /// Push a new chunk of markdown text (no rendering).
-    ///
-    /// The chunk is run through the streaming LaTeX delimiter normalizer and the normalized result is appended to the internal buffer.
-    /// A bounded ambiguous suffix (a partial delimiter at the chunk boundary) may be held back until the next `push`; `finish()` flushes it.
     /// Call `render()` to process accumulated content, or use `push_and_render()` for convenience.
     pub fn push(&mut self, chunk: &str) {
         let normalized = self.normalizer.push(chunk);
@@ -261,21 +236,13 @@ impl StreamingMarkdownRenderer {
     }
 
     /// Render accumulated content.
-    ///
-    /// Processes the unfrozen tail and updates the output.
-    /// Call `view()` to get the rendered lines.
-    ///
     /// Pass `None` for syntect to disable syntax highlighting for code blocks.
-    ///
-    /// Theme stability: a still-open fenced code block is highlighted incrementally, caching the colors of the `syntect` theme seen so far.
     /// The `syntect` theme must stay stable between renders; switch themes via [`set_style`](Self::set_style), which clears that cache.
-    /// (Passing a different theme without a reset would leave already-committed lines in the old colors.)
     pub fn render(&mut self, syntect: Option<&Syntect>) {
         self.rerender_tail(syntect);
     }
 
     /// Push a chunk and render immediately (convenience method).
-    ///
     /// Equivalent to `push(chunk)` followed by `render(syntect)`.
     /// Use this for real-time streaming where you want to display after each chunk.
     pub fn push_and_render(&mut self, chunk: &str, syntect: Option<&Syntect>) {
@@ -367,16 +334,9 @@ impl StreamingMarkdownRenderer {
                 cb
             }));
 
-        // Detect plain URLs (e.g. the `(url)` suffix in pretty-mode markdown links, bare URLs in prose).
-        // We run this here, not only in `finish()`, for two reasons:
-        //   (a) Non-streaming callers (e.g. `AgentMessageBlock::new(text)` during session replay) never call `finish()`.
-        //       Without url_scan here their URLs would never become HyperlinkTargets
-        //   (b) State resets (`set_max_table_width`, `set_pretty`, `set_style`) rebuild the output from scratch via a subsequent `render()`
-        //       URL hyperlinks added by an earlier `finish()` would otherwise be silently dropped here
-        //
-        // We scan only the newly-rendered tail (`frozen_lines..end`); URLs already on frozen lines were kept by the `retain` filter above
-        // The offset-aware scan emits document-absolute line indices
-        // `detect_plain_urls_with_offset` dedups against existing hyperlinks per line, so it is idempotent
+        // Detect plain URLs` suffix in pretty-mode markdown links, bare URLs in prose).
+        // (a) Non-streaming callers` during session replay) never call `finish()`.
+        // Without url_scan here their URLs would never become HyperlinkTargets
         let tail_lines = &self.output.lines[frozen_lines..];
         let (extra_links, post_scan_next_id) = crate::url_scan::detect_plain_urls_with_offset(
             tail_lines,
@@ -405,7 +365,6 @@ impl StreamingMarkdownRenderer {
     }
 
     /// Get a view of the current rendered output.
-    ///
     /// This is cheap: it returns a reference to cached output.
     /// The output was computed during `render()` or `push_and_render()`.
     pub fn view(&self) -> MarkdownRenderView<'_> {
@@ -428,7 +387,6 @@ impl StreamingMarkdownRenderer {
     }
 
     /// Reset the renderer, clearing all accumulated content.
-    ///
     /// Also resets `max_table_width` to `None` for symmetry with the freshly-constructed state.
     /// Otherwise a later `set_max_table_width(Some(prev_width))` is silently a no-op (no state reset) because the equality check sees no change.
     pub fn clear(&mut self) {
@@ -466,15 +424,7 @@ impl StreamingMarkdownRenderer {
     }
 
     /// Finalize streaming with a full re-render.
-    ///
-    /// This does a complete non-streaming render of the accumulated source, replacing the incrementally-built output.
-    /// Use this when streaming is complete; it catches edge cases where streaming might have produced slightly different output.
-    ///
-    /// After the parser pass, this runs `url_scan::detect_plain_urls` and sorts the hyperlink list by `(line_index, column_range.start)`.
     /// `render()` also runs the URL detector and sort, so `finish()` adds nothing those calls didn't already produce.
-    /// Its distinguishing value is the unconditional full re-render, independent of frozen-state truncation.
-    ///
-    /// Returns a view of the finalized output.
     pub fn finish(&mut self, syntect: Option<&Syntect>) -> MarkdownRenderView<'_> {
         // Flush any bytes the normalizer held back at the last chunk boundary (e.g. a trailing partial delimiter).
         // The full re-render must see the complete, normalized source
@@ -2053,12 +2003,7 @@ The frozen lines are **never re-rendered**, making streaming O(N) instead of O(N
     }
 
     /// URL detection runs in BOTH `render()` and `finish()`.
-    /// This test pins:
-    ///   1. The URL surfaces as a HyperlinkTarget during streaming (every `push_and_render` call), not only after `finish()`.
-    ///   2. `finish()` does not duplicate the URL HyperlinkTarget that `render()` already added.
-    ///      The dedup in `detect_plain_urls` makes the second pass idempotent.
-    ///   3. The full `HyperlinkTarget` (URL + line_index + column_range) is identical before and after `finish()`.
-    ///      Ids may be reassigned by `finish()` (it restarts the parser counter at 0), but every other field must match.
+    /// The URL surfaces as a HyperlinkTarget during streaming (every `push_and_render` call), not only after `finish()`; `finish()` does not duplicate the URL HyperlinkTarget that `render()` already added. The dedup in `detect_plain_urls` makes the second pass idempotent; The full `HyperlinkTarget` (URL + line_index + column_range) is identical before and after `finish()`. Ids may be reassigned by `finish()` (it restarts the parser counter at 0), but every other field must match.
     #[test]
     fn streaming_byte_by_byte_url_appears_during_render_and_survives_finish() {
         let text = "See https://example.com for details.\n";
@@ -2187,11 +2132,6 @@ The frozen lines are **never re-rendered**, making streaming O(N) instead of O(N
 
     /// Across multiple streaming chunks every emitted hyperlink id must be unique.
     /// Catches a regression where url_scan reuses an id already assigned to a parser hyperlink (or vice versa).
-    /// A reused id silently merges OSC 8 hyperlinks for the terminal.
-    ///
-    /// The first assertion is the regression target: it runs on the streaming-path output (post-`rerender_tail`, pre-`finish()`).
-    /// A regression in the `post_scan_next_id` vs `tail_next_link_id` bookkeeping at the bottom of `rerender_tail` would surface here.
-    /// We keep a second post-`finish()` assertion because `finish()`'s full re-render is the recovery path users always see eventually.
     /// Both must produce unique ids.
     #[test]
     fn render_assigns_monotonic_ids_across_chunks() {
@@ -2233,11 +2173,7 @@ The frozen lines are **never re-rendered**, making streaming O(N) instead of O(N
 
     /// Pin: byte-by-byte streaming through a checkpoint advance with a URL straddling the freeze boundary must produce a single full-URL hyperlink.
     /// A stuck partial-URL hyperlink from when only the prefix was visible must not remain.
-    ///
-    /// The PRE-finish assertion is the regression target: the concern is a partial-URL hyperlink left in the streaming-path `view().hyperlinks`.
     /// `finish()` does a full re-render and would recover from any stuck state, masking the regression.
-    /// The streaming-path snapshot is therefore taken first and the assertion runs on it directly.
-    /// The post-finish assertion is retained as a secondary check.
     #[test]
     fn streaming_byte_by_byte_through_checkpoint_with_url_at_boundary() {
         let text = "# Header\n\nSee https://example.com/path here.\n\n";
@@ -2285,7 +2221,6 @@ The frozen lines are **never re-rendered**, making streaming O(N) instead of O(N
 
     /// After `finish`, a document with one markdown link `[a](url)` and one plain URL `https://b.example` has monotonic IDs.
     /// The markdown-link target gets `id = 0`; the plain-URL target gets a higher id (continuing from `frozen.next_link_id`).
-    ///
     /// In pretty mode, `[a](url)` renders as `a (url)`, so url_scan assigns id=1 to the pretty-mode suffix and the plain URL gets id=2.
     #[test]
     fn url_scan_ids_continue_from_frozen_counter() {

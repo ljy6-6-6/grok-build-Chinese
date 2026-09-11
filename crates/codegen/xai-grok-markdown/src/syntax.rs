@@ -21,14 +21,7 @@ pub struct Syntect {
 
 impl Syntect {
     /// Create a new Syntect instance from theme bytes.
-    ///
     /// The theme bytes should be a TextMate `.tmTheme` file.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let syntect = Syntect::new(include_bytes!("assets/tokyo-night.tmTheme"));
-    /// ```
     pub fn new(theme_bytes: &[u8]) -> Self {
         let mut cursor = Cursor::new(theme_bytes);
         let theme = ThemeSet::load_from_reader(&mut cursor).expect("Failed to load theme");
@@ -87,12 +80,8 @@ impl Syntect {
     }
 }
 
-/// ```text
-/// lineStart:lineEnd:path/to/file.ext
-/// ```
-///
 /// The path is the segment after the **second** colon; it is then parsed with [`Path::new`].
-/// Paths with extra colons in the first two segments (e.g. some Windows `C:...` forms) are not supported; use a repo-relative or forward-slash form.
+/// Paths with extra colons in the first two segments are not supported; use a repo-relative or forward-slash form.
 fn parse_line_citation_fence_info(info: &str) -> Option<(&str, &str, &str)> {
     let mut it = info.splitn(3, ':');
     let start = it.next()?;
@@ -111,7 +100,6 @@ fn parse_line_citation_fence_info(info: &str) -> Option<(&str, &str, &str)> {
 }
 
 /// Syntax highlight code, returning raw styled segments per line.
-///
 /// `fence_info` is the fenced code block *info* string (language tag or citation); see [`Syntect::highlight_lines_for_fence_info`].
 /// This function lives here (not in `parse`) so both the parser and the streaming highlighter caches depend one-way on `syntax`.
 pub(crate) fn syntax_highlight_raw(

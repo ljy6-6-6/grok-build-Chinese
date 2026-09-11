@@ -17,12 +17,8 @@ use crate::settings::{
 // Key handling
 // ---------------------------------------------------------------------------
 
-/// Handle a key event in the settings modal.
-///
-/// F2/Ctrl+,/Cmd+, always close regardless of mode.
-/// Esc depends on the mode: Browse leaves it to the shared `ModalWindow` handler.
-/// The sub-modes handle it locally: FilterFocused clears the query, PickingEnum reverts the preview, EditingValue cancels.
-/// Space/Enter Repeat events are suppressed to avoid per-tick disk writes.
+/// F2/Ctrl+,/Cmd+, always close regardless of mode. Space/Enter Repeat events are suppressed to
+/// avoid per-tick disk writes.
 pub fn handle_settings_key(state: &mut SettingsModalState, key: &KeyEvent) -> SettingsKeyOutcome {
     if key.kind == KeyEventKind::Release {
         return SettingsKeyOutcome::Unchanged;
@@ -120,12 +116,8 @@ fn handle_picking_enum(state: &mut SettingsModalState, key: &KeyEvent) -> Settin
             )
         }
         KeyCode::Enter => {
-            // Commit the focused choice; this is the only point in a picker's open-to-close cycle that fires `Effect::PersistSetting`
-            // The latest preview from Up/Down already changed the live visuals; the commit's setter is idempotent on that
-            //
-            // `SettingKind::DynamicEnum` settings (e.g. `default_model`, `fork_secondary_model`) commit through `action_for_string`, not `action_for_enum_commit`.
-            // Their canonical is a runtime string from the model catalog, which `action_for_string` resolves via `snapshot.resolve_model_name`
-            // It also treats an empty canonical as a `Clear*` sentinel
+            // Commit the focused choice; this is the only point in a picker's open-to-close cycle that fires
+            // `Effect::PersistSetting`.
             let close = std::mem::take(&mut state.close_on_picker_exit);
             if !close {
                 state.transition_to_browse();
@@ -257,6 +249,8 @@ pub(super) fn set_picker_idx(
         // The caller bounds-checks already; this re-check protects a future caller that does not
         return SettingsKeyOutcome::Unchanged;
     }
+    // Focus moves cancel a pending double-click.
+    state.picker_last_click = None;
     state.transition_to_picking_enum(setting_key, new_idx, original_value, supports_preview);
     // Preview dispatch for static Enums with preview support.
     if supports_preview
@@ -483,10 +477,8 @@ pub(super) fn picker_choices_len(state: &SettingsModalState, key: SettingKey) ->
         .unwrap_or(0)
 }
 
-/// Canonical value at index `idx` in the picker's choices, or `None` if the key isn't a registered Enum/DynamicEnum or `idx` is out of bounds.
-///
-/// Returns `Option<&'static str>` for static `SettingKind::Enum` settings.
-/// Zero allocation: each `EnumChoice.canonical` is itself `&'static str`.
+/// Canonical value at index `idx` in the picker's choices, or `None` if the key isn't a registered
+/// Enum/DynamicEnum or `idx` is out of bounds.
 pub(super) fn picker_choice_at(
     state: &SettingsModalState,
     key: SettingKey,
@@ -501,10 +493,8 @@ pub(super) fn picker_choice_at(
         .map(|c| c.canonical)
 }
 
-/// Owned-string variant of `picker_choice_at` for picker kinds whose canonicals are runtime-built (`SettingKind::DynamicEnum`).
-///
-/// Allocates one `String` per call; the picker calls it on commit, and per Up/Down only when `supports_preview` is true, so the cost is bounded.
-/// Static `SettingKind::Enum` also resolves here (the `&'static str` is cloned), so callers get one read path for both kinds.
+/// Allocates one `String` per call; the picker calls it on commit, and per Up/Down only when
+/// `supports_preview` is true, so the cost is bounded.
 fn picker_choice_at_owned(
     state: &SettingsModalState,
     key: SettingKey,
@@ -525,11 +515,8 @@ fn picker_choice_at_owned(
     }
 }
 
-/// F2 / Ctrl+, / Cmd+, are the modal-internal close keys.
-///
-/// Esc is deliberately not matched here.
-/// In Browse mode `handle_modal_key` (`views/modal_window.rs`) intercepts Esc and returns `ModalWindowOutcome::CloseRequested` first.
-/// `handle_filter_focused` has its own Esc arm that exits filter mode without closing.
+/// F2 / Ctrl+, / Cmd+, are the modal-internal close keys. `handle_filter_focused` has its own. EscEsc
+/// arm that exits filter mode without closing.
 fn is_close_key(key: &KeyEvent) -> bool {
     if key.code == KeyCode::F(2) {
         return true;
@@ -664,13 +651,9 @@ fn handle_browse(state: &mut SettingsModalState, key: &KeyEvent) -> SettingsKeyO
             SettingsKeyOutcome::Changed
         }
         KeyCode::Char('d') if key.modifiers.is_empty() => {
-            // Reset to default: resolve the focused row's setting key and dispatch `Action::OpenResetConfirm`
-            // The dispatch arm boxes the SettingsModalState into `ActiveModal::ResetSettingsConfirm`
-            // Cancel therefore returns to this exact modal state, with filter, scroll, and selection preserved
-            // Headers and unmapped rows are no-ops; `d` only acts on a focused setting row
-            //
-            // This is not gated on the value already being the default
-            // The dialog lets the user back out either way, and the dispatch arm shows an "Already at default" toast on an idempotent confirm
+            // Reset to default: resolve the focused row's setting key and dispatch `Action::OpenResetConfirm`.
+            // Cancel therefore returns to this exact modal state, with filter, scroll, and selection
+            // preserved. Headers and unmapped rows are no-ops; `d` only acts on a focused setting row.
             match state.focused_setting() {
                 // Group rows have no scalar default to reset.
                 Some((_, meta)) if matches!(meta.kind, SettingKind::Group { .. }) => {
@@ -782,14 +765,6 @@ fn apply_filter_edit(
 // ---------------------------------------------------------------------------
 
 /// Handle a mouse event in the modal content area.
-///
-/// Mirrors `memory_modal::handle_memory_mouse`:
-///  - Click on a row selects it; click on a Bool row toggles it.
-///  - Click on the `[-]` / `[+]` adornments of an open Int editor steps the value.
-///  - Scroll wheel scrolls the row list by 3 rows per tick.
-///
-/// When the modal is in `PickingEnum` mode, every mouse event is a no-op.
-/// `EditingValue` mode handles `[-]` / `[+]` clicks and treats everything else as a no-op.
 pub fn handle_settings_mouse(
     state: &mut SettingsModalState,
     kind: MouseEventKind,
@@ -895,27 +870,14 @@ pub fn handle_settings_mouse(
             if !matches!(state.rows[idx], RowEntry::Setting { .. }) {
                 return SettingsKeyOutcome::Unchanged;
             }
-            // Two-stage clicks:
-            //   - Click on a different row: only select, so the user can read the description first
-            //   - Click on the already-selected Bool row: toggle.
-            //   - Click on the already-selected Enum row: open the picker
-            //   - Click on the indicator cells of any Bool/Enum/String/Int row: select and activate in one click
-            //     The hit-rect spans 5 columns around the small glyph so it is easy to hit
-            //
-            // The per-kind dispatch collapses into a single `if` chain
-            // The helpers all return falsy for non-matching kinds, so per-kind predicates would be redundant
+            // Two-stage clicks. Click on a different row: only select, so the user can read the description
+            // first.
             let row_rect = state.row_rects[idx];
-            // Col 0 of the row is the `▸`/`▾` triangle glyph
-            // A click there toggles expansion without touching the value, matching the keyboard's Right/Left arrows
-            // The triangle sits at exactly column `row_rect.x` and is 1 cell wide
-            //
-            // Two-line rows have `row_rect.height = 2` with the triangle on line 1 only
-            // Clicks on line 2's col 0 (empty padding) must not toggle expansion; the y-check enforces that
+            // Col 0 of the row is the `▸`/`▾` triangle glyph. A click there toggles expansion without touching
+            // the value, matching the keyboard's Right/Left arrows. Two-line rows have `row_rect.height = 2`
+            // with the triangle on line 1 only.
             let on_triangle = column == row_rect.x && row == row_rect.y;
-            // The 5-col indicator hit-rect sits on the value column on the right, not the left edge
-            // Clicking the Bool's `on`/`off` text toggles it in one click
-            // Clicking an Enum/String/DynamicEnum/Int value opens the picker or editor in one click
-            // `render_setting_row` supplies the hit-rect via `state.value_hit_rects[idx]`
+            // The 5-col indicator hit-rect sits on the value column on the right, not the left edge.
             let value_rect = state.value_hit_rects.get(idx).copied().unwrap_or_default();
             let on_value = rect_contains(value_rect, column, row);
             let was_selected_already = state.selected == idx;
@@ -970,13 +932,6 @@ pub fn handle_settings_mouse(
 }
 
 /// Handle a mouse event while the modal is in `PickingEnum` mode.
-///
-/// Left-click on any line of a choice's multi-line hit-rect moves the picker focus to that choice.
-/// That also fires the matching preview dispatch, mirroring keyboard Up/Down.
-/// Clicks outside any choice rect are no-ops, as are scroll wheel events (the picker viewport is bounded; in-picker scrolling could surprise).
-///
-/// Continuation lines of a word-wrapped description share the choice's hit-rect.
-/// Clicking the second line of "Opt out" picks "Opt out", same as clicking its symbol.
 fn handle_picker_mouse(
     state: &mut SettingsModalState,
     kind: MouseEventKind,
@@ -1020,27 +975,39 @@ fn handle_picker_mouse(
         .iter()
         .position(|r| r.height > 0 && rect_contains(*r, column, row));
     let Some(target_idx) = clicked_idx else {
+        state.picker_last_click = None;
         return SettingsKeyOutcome::Unchanged;
     };
-    if target_idx == current_idx {
-        // Already focused: re-clicking the same choice is a no-op; commit fires on Enter, not on a re-click
-        return SettingsKeyOutcome::Unchanged;
+    // Do not move focus and then Enter-commit: that drops the preview Action
+    // and can persist a different radio than the one clicked.
+    if picker_click_is_double(state, target_idx) && target_idx == current_idx {
+        state.picker_last_click = None;
+        let synthetic = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        return handle_picking_enum(state, &synthetic);
     }
-    // Reuse the keyboard nav helper to update `choices_idx` and fire the matching preview Action (when the kind supports it)
-    set_picker_idx(
-        state,
-        setting_key,
-        target_idx,
-        original_value,
-        supports_preview,
-    )
+    let outcome = if target_idx == current_idx {
+        SettingsKeyOutcome::Unchanged
+    } else {
+        set_picker_idx(
+            state,
+            setting_key,
+            target_idx,
+            original_value,
+            supports_preview,
+        )
+    };
+    // Arm after `set_picker_idx`, which clears a pending double-click.
+    state.picker_last_click = Some((target_idx, std::time::Instant::now()));
+    outcome
+}
+
+fn picker_click_is_double(state: &SettingsModalState, idx: usize) -> bool {
+    state.picker_last_click.is_some_and(|(prev, at)| {
+        prev == idx && at.elapsed().as_millis() < crate::app::agent_view::MULTI_CLICK_TIMEOUT_MS
+    })
 }
 
 /// Handle a mouse event while the modal is in `PickingGroup` mode.
-///
-/// Hover tracks the child row under the cursor; a left-click moves focus to the clicked child and toggles it in one click.
-/// The toggle is immediate, unlike the enum picker's commit-on-Enter.
-/// The scroll wheel is a no-op (the sub-sheet is bounded).
 fn handle_group_mouse(
     state: &mut SettingsModalState,
     kind: MouseEventKind,

@@ -73,10 +73,7 @@ impl From<&str> for ToolCallId {
 }
 
 /// Unique hunk identifier produced by the hunk tracker.
-///
-/// TODO(workspace): align with `xai_hunk_tracker::HunkId` (currently
-/// `pub struct HunkId(pub Arc<str>)`) when the tracker's wire surface
-/// gets extracted into this crate.
+/// TODO: align with `xai_hunk_tracker::HunkId` when that wire surface moves here.
 #[derive(Debug, Clone, Default, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct HunkId(pub(crate) String);

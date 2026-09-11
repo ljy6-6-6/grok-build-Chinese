@@ -30,7 +30,6 @@ fn read_capped(path: &Path) -> Option<String> {
 /// First unchecked `- [ ]` (or `* [ ]` / `+ [ ]`) markdown checkbox in a plan file; `- [x]` / `- [X]` are skipped, `None` when none remain.
 /// Numbered `## Acceptance criteria` are not mined: they never get checked off, so criterion 1 would surface forever.
 /// When the plan has a `## Task checklist` section only its checkboxes are mined.
-/// Otherwise the whole file is scanned except `## Non-goals` and `## Deviations`.
 pub(crate) fn first_unchecked_plan_item(path: &Path) -> Option<String> {
     let body = read_capped(path)?;
     extract_first_unchecked(&body)

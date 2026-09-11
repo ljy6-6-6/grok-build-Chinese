@@ -86,12 +86,9 @@ fn test_gap_mixed_group_with_expanded() {
     state.push(non_groupable_entry("agent2"));
 
     let gaps = get_gap_after(&mut state);
-    // agent→read: not both groupable → 1
-    // read→edit: both groupable, edit expanded → 1
-    // edit→list: both groupable, edit expanded → 1
-    // list→run: both groupable and both collapsed → 0
-    // run→agent2: not both groupable → 1
-    // agent2: trailing → 1
+    // agent→read: not both groupable → 1 read→edit: both groupable, edit expanded → 1 edit→list: both groupable, edit
+    // expanded → 1 list→run: both groupable and both collapsed → 0 run→agent2: not both groupable → 1 agent2: trailing
+    // → 1.
     assert_eq!(gaps, vec![1, 1, 1, 0, 1, 1]);
 }
 
@@ -332,6 +329,73 @@ fn test_group_range_non_groupable_breaks_group() {
     assert_eq!(state.group_range_of(2, false), 2..3);
     assert_eq!(state.group_range_of(0, true), 0..1);
     assert_eq!(state.group_range_of(2, true), 2..3);
+}
+
+/// A collapsed turn marker is a dense-run break, matching the truncation pass.
+/// Selection, collapse, and expand-all therefore stay on one side of the turn.
+#[test]
+fn collapsed_turn_marker_breaks_dense_run_walks() {
+    use crate::scrollback::blocks::SessionEvent;
+    use std::time::Duration;
+
+    crate::appearance::cache::set_show_thinking_blocks(false);
+    let mut state = ScrollbackState::new();
+    let mut appearance = AppearanceConfig::default();
+    // Each side has 4 tools: 4 <= max_visible+1 so neither run truncates.
+    // A walk across the marker (9) would exceed it and expand_all_groups would insert a key.
+    appearance.scrollback.display.group_max_visible = 3;
+    state.set_appearance(appearance);
+
+    // Isolated collapsed thought so expand_all_thinking takes the expand leg.
+    push_thought(&mut state, "steer");
+    state.push(non_groupable_entry("break"));
+
+    let before: Vec<_> = (0..4)
+        .map(|i| state.push_block(tool_block(&format!("before {i}"))))
+        .collect();
+    let marker = state.push_block(RenderBlock::session_event(SessionEvent::TurnCompleted {
+        elapsed: Some(Duration::from_secs(3)),
+    }));
+    state
+        .get_by_id_mut(marker)
+        .unwrap()
+        .set_display_mode(DisplayMode::Collapsed);
+    let after: Vec<_> = (0..4)
+        .map(|i| state.push_block(tool_block(&format!("after {i}"))))
+        .collect();
+
+    state.prepare_layout(80, 40);
+    assert_eq!(
+        state.get_by_id(marker).unwrap().display_mode,
+        DisplayMode::Collapsed
+    );
+
+    let marker_idx = state.index_of_id(marker).unwrap();
+    let before_idx = state.index_of_id(before[0]).unwrap();
+    let after_idx = state.index_of_id(after[0]).unwrap();
+    assert_eq!(
+        state.group_range_of(marker_idx, true),
+        marker_idx..marker_idx + 1
+    );
+    assert_eq!(state.group_range_of(before_idx, true).end, marker_idx);
+    assert_eq!(state.group_range_of(after_idx, true).start, marker_idx + 1);
+
+    let tool_and_marker_heights = |state: &ScrollbackState| -> Vec<u16> {
+        (before_idx..=after_idx + 3)
+            .map(|i| cached_height_at(state, i))
+            .collect()
+    };
+    let heights_before = tool_and_marker_heights(&state);
+    assert!(state.expanded_groups.is_empty());
+
+    state.expand_all_thinking();
+    state.prepare_layout(80, 40);
+
+    assert!(
+        state.expanded_groups.is_empty(),
+        "expand-all must not key a run that crosses the turn marker"
+    );
+    assert_eq!(tool_and_marker_heights(&state), heights_before);
 }
 
 #[test]
@@ -940,27 +1004,6 @@ fn verb_group_leading_thought_anchors_run_and_expands() {
 }
 
 #[test]
-fn group_range_keeps_hooked_members_in_rendered_fold() {
-    let mut state = verb_state();
-    let ids = push_reads(&mut state, 2);
-    state.prepare_layout(80, 40);
-    assert!(verb_header_at(&state, 0));
-    assert_eq!(state.group_range_of(0, true), 0..2);
-
-    state.attach_hooks(
-        ids[1],
-        crate::scrollback::blocks::tool::HookPhase::Post,
-        Vec::new(),
-    );
-    assert_eq!(state.group_range_of(0, true), 0..2);
-
-    state.prepare_layout(80, 40);
-    assert!(verb_header_at(&state, 0));
-    assert_eq!(state.group_range_of(1, true), 0..2);
-    assert_eq!(cached_height_at(&state, 1), 0, "hooked member stays folded");
-}
-
-#[test]
 fn verb_group_interior_thought_claims_into_fold() {
     let mut state = verb_state();
     crate::appearance::cache::set_show_thinking_blocks(true);
@@ -1140,33 +1183,6 @@ fn verb_group_refolds_when_clear_all_resolves_pending_input() {
     state.prepare_layout(80, 40);
     assert!(verb_header_at(&state, 0));
     assert_eq!(cached_height_at(&state, 1), 0, "cleared row refolds");
-}
-
-#[test]
-fn verb_group_stays_folded_on_attach_hooks() {
-    use crate::scrollback::blocks::tool::{HookPhase, HookRunEntry, HookRunStatus};
-
-    let mut state = verb_state();
-    let ids = push_reads(&mut state, 3);
-    state.prepare_layout(80, 40);
-    assert_eq!(cached_height_at(&state, 2), 0);
-
-    state.attach_hooks(
-        ids[2],
-        HookPhase::Post,
-        vec![HookRunEntry {
-            name: "fmt".to_owned(),
-            status: HookRunStatus::Success {
-                elapsed: std::time::Duration::from_millis(1),
-            },
-            output: None,
-        }],
-    );
-    assert!(state.gaps_may_be_dirty, "hook attachment reapplies folds");
-    state.prepare_layout(80, 40);
-    assert!(verb_header_at(&state, 0));
-    assert_eq!(header_count_at(&mut state, 0), 3);
-    assert_eq!(cached_height_at(&state, 2), 0, "hooked row remains folded");
 }
 
 #[test]
@@ -1382,13 +1398,15 @@ fn verb_group_expand_keeps_preserved_scroll_pin() {
     push_reads(&mut state, 8);
     state.prepare_layout(80, 12);
 
-    // Mimic dispatch_send_prompt's page flip: prompt pinned at the viewport top, follow and preserve on, content below fits on screen
-    let pin = state.layout_cache.as_ref().unwrap().virtual_y[8];
-    state.scroll_offset = pin;
-    state.follow_mode = true;
-    state.follow_preserve_scroll = true;
+    // Use the production page-flip path so the prompt-top pose has owned trailing reserve.
+    state.page_flip_to_entry(8);
     state.prepare_layout(80, 12);
-    assert_eq!(state.scroll_offset, pin, "preserve pin holds before toggle");
+    let pin = state.scroll_offset;
+    assert_eq!(
+        state.max_scroll_offset(),
+        pin,
+        "preserve pin is a reachable bottom before toggle"
+    );
 
     // Expand the group (header at idx 9, right below the prompt).
     state.set_selected(Some(9));
@@ -1407,9 +1425,7 @@ fn verb_group_expand_keeps_preserved_scroll_pin() {
     // The same invariant holds for a plain block fold in the same shape.
     state.collapse_group_if_expanded();
     state.prepare_layout(80, 12);
-    state.scroll_offset = pin;
-    state.follow_mode = true;
-    state.follow_preserve_scroll = true;
+    state.page_flip_to_entry(8);
     state.entry_mut(9).unwrap().block = RenderBlock::ToolCall(ToolCallBlock::Read(
         ReadToolCallBlock::new("f9.rs")
             .with_content("a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl".to_owned(), 12),
@@ -2058,4 +2074,130 @@ fn expanded_group_shows_all_entries_including_first() {
         let h = cached_height_at(&state, i);
         assert!(h > 0, "entry {i} should be visible, got height={h}");
     }
+}
+
+// -----------------------------------------------------------------------
+// reapply_thinking_fold_policy (minimal → fullscreen return)
+// -----------------------------------------------------------------------
+
+#[test]
+fn reapply_thinking_fold_policy_refolds_minimal_expanded_thought() {
+    let mut state = ScrollbackState::new();
+    let thought = push_thought(&mut state, "reasoning body");
+    let answer = state.push_block(RenderBlock::stub_non_groupable("answer", Color::Blue));
+    state
+        .get_by_id_mut(answer)
+        .unwrap()
+        .set_display_mode(DisplayMode::Expanded);
+    state
+        .get_by_id_mut(thought)
+        .unwrap()
+        .set_display_mode(DisplayMode::Expanded);
+
+    state.reapply_thinking_fold_policy();
+
+    assert_eq!(
+        state.get_by_id(thought).unwrap().display_mode(),
+        DisplayMode::Collapsed,
+        "minimal's Expanded stamp must fold back to the thinking policy"
+    );
+    assert_eq!(
+        state.get_by_id(answer).unwrap().display_mode(),
+        DisplayMode::Expanded,
+        "non-thinking entries keep their mode"
+    );
+}
+
+#[test]
+fn reapply_thinking_fold_policy_honors_sticky_expand_all() {
+    let mut state = ScrollbackState::new();
+    let thought = push_thought(&mut state, "reasoning body");
+    // Ctrl+E: sticky session-wide expand; a minimal round trip must not undo it.
+    state.expand_all_thinking();
+
+    state.reapply_thinking_fold_policy();
+
+    assert_eq!(
+        state.get_by_id(thought).unwrap().display_mode(),
+        DisplayMode::Expanded,
+        "the sticky thinking_display_mode wins over the collapse default"
+    );
+}
+
+#[test]
+fn reapply_thinking_fold_policy_skips_pinned_and_running_thoughts() {
+    let mut state = ScrollbackState::new();
+    state.appearance.scrollback.scroll.respect_manual_folds = true;
+    let pinned = push_thought(&mut state, "user expanded this one");
+    {
+        let entry = state.get_by_id_mut(pinned).unwrap();
+        entry.set_display_mode(DisplayMode::Expanded);
+        entry.display_mode_pinned = true;
+    }
+    let streaming = state.push(ScrollbackEntry::running(RenderBlock::thinking("live")));
+    state
+        .get_by_id_mut(streaming)
+        .unwrap()
+        .set_display_mode(DisplayMode::Expanded);
+
+    state.reapply_thinking_fold_policy();
+
+    assert_eq!(
+        state.get_by_id(pinned).unwrap().display_mode(),
+        DisplayMode::Expanded,
+        "pins win under respect_manual_folds"
+    );
+    assert_eq!(
+        state.get_by_id(streaming).unwrap().display_mode(),
+        DisplayMode::Expanded,
+        "a still-streaming thought keeps its mode"
+    );
+}
+
+#[test]
+fn reapply_thinking_fold_policy_preserves_expanded_tool_groups() {
+    let mut state = ScrollbackState::new();
+    let mut appearance = AppearanceConfig::default();
+    appearance.scrollback.display.group_max_visible = 3;
+    state.set_appearance(appearance);
+
+    let thought = push_thought(&mut state, "reasoning body");
+    state
+        .get_by_id_mut(thought)
+        .unwrap()
+        .set_display_mode(DisplayMode::Expanded);
+    // Non-groupable answer so the tool run is independent of the thought.
+    state.push_block(RenderBlock::stub_non_groupable("answer", Color::Blue));
+
+    let ids = push_tool_calls(&mut state, 6);
+    state.prepare_layout(80, 40);
+    // thought=0, answer=1, first tool=2
+    state.selected = Some(2);
+    assert!(
+        state.toggle_group_expansion(),
+        "tool group should toggle on its header"
+    );
+    assert!(
+        state.expanded_groups.contains(&ids[0]),
+        "precondition: group is expanded"
+    );
+
+    state.reapply_thinking_fold_policy();
+
+    assert_eq!(
+        state.get_by_id(thought).unwrap().display_mode(),
+        DisplayMode::Collapsed,
+        "minimal's Expanded stamp still refolds"
+    );
+    assert!(
+        state.expanded_groups.contains(&ids[0]),
+        "user-expanded tool groups must survive the thinking refold"
+    );
+
+    state.prepare_layout(80, 40);
+    let visible_tools = (2..8).filter(|&i| cached_height_at(&state, i) > 0).count();
+    assert!(
+        visible_tools >= 6,
+        "expanded tool-call members must stay visible after thinking refold, visible_tools={visible_tools}"
+    );
 }

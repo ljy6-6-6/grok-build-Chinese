@@ -12,18 +12,9 @@ use crate::types::permission::{PermissionDecision, PermissionRequest};
 use crate::types::plan_mode::{PlanModeDecision, PlanModeTransition};
 use crate::types::tools::{ToolCallResult, ToolDef, ToolOutputChunk, ToolProgress};
 
-/// Streaming chunk for a tool call.
-///
-/// Stream contract:
-/// - For tool invocations, the stream emits zero or more `Output` / `Progress` chunks then **exactly one** `Final` chunk and closes.
-/// - A tool may additionally yield zero or more `NeedPermission`, `NeedUserAnswer`, or `NeedPlanModeChange` chunks before its `Final`.
-///   Each blocks the tool until the sampler replies with the matching [`ToolResponse`] on the paired response sender (correlated by `req_id`).
-///   The sampler is the unique consumer of the stream, so exhaustive matching forces it to handle every variant.
-///   This is how the "must respond" property is enforced at the type level.
-/// - For `ToolRequest::Definitions`, the stream emits exactly one `Definitions` chunk and closes.
-///
-/// `Eq` is not derived because [`Progress`](Self::Progress) carries `ToolProgress::Percent.fraction: f32`.
-/// `PartialEq` is sufficient for round-trip and equality tests.
+/// Streaming chunk for a tool call. Invocations emit `Output`/`Progress`, optional blocking `Need*` chunks, then exactly one `Final`.
+/// The sampler is the unique consumer, so exhaustive matching forces a reply to every `Need*`. Definitions emit exactly one `Definitions` chunk.
+/// No `Eq`: [`Progress`](Self::Progress) carries an `f32`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum ToolChunk {
@@ -52,11 +43,8 @@ pub enum ToolChunk {
         /// The reply (`ToolResponse::UserAnswer { answers, .. }`) supplies one [`UserAnswer`] per [`UserQuestion`].
         questions: Vec<UserQuestion>,
     },
-    /// Tool needs the sampler to approve a plan-mode transition (entering or exiting plan mode).
-    /// The sampler must reply with [`ToolResponse::PlanModeChange { req_id, decision }`](ToolResponse::PlanModeChange) on the bidi response sender.
-    ///
-    /// Plan mode transitions are deliberately *not* broadcast on the EventBus.
-    /// Sampler-caused state flows back via the call's stream chunks (here) and the resulting `Final` payload, never via EventBus.
+    /// Tool needs the sampler to approve a plan-mode transition; reply with [`ToolResponse::PlanModeChange`](ToolResponse::PlanModeChange) on the bidi sender.
+    /// Not broadcast on the EventBus: sampler-caused state returns on this stream and the `Final` payload.
     NeedPlanModeChange {
         /// Correlation id; the sampler must echo this back in the matching [`ToolResponse::PlanModeChange`].
         req_id: String,
@@ -80,13 +68,8 @@ impl ToolChunk {
     }
 }
 
-/// Sampler-to-workspace message sent on the tool's bidi response sender.
-/// It satisfies a [`ToolChunk::NeedPermission`], [`ToolChunk::NeedUserAnswer`], or [`ToolChunk::NeedPlanModeChange`].
-///
-/// One `ToolResponse` per `Need*` chunk; correlated by `req_id` (echoed back from the corresponding `Need*` chunk).
-///
-/// Tagged with `tag = "type", content = "data"` (adjacent tagging) to match every other wire enum in the crate.
-/// See `crate::lib` doc-comment "# Wire format" for the rationale.
+/// Sampler-to-workspace reply on the tool's bidi sender, one per `Need*` chunk, correlated by `req_id`.
+/// Adjacent tagging (`tag = "type", content = "data"`) matches every other wire enum; see "# Wire format".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum ToolResponse {

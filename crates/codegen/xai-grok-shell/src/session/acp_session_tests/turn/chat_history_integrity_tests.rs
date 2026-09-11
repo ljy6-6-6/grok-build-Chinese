@@ -67,9 +67,7 @@ fn tool_results_by_call_id(conv: &[ConversationItem]) -> HashMap<String, Vec<Str
 
 /// A mid-turn system reminder must not fabricate a cancel `tool_result` that duplicates a live tool's result.
 /// Here the reminder is the stationarity nudge after 8 identical tool calls.
-///
 /// The regression: the nudge was pushed after the assistant `tool_use` was committed and before `execute_tool_calls`.
-/// Integrity repair then wrote a cancel result and the real result landed beside it under the same id.
 #[tokio::test(flavor = "current_thread")]
 async fn mid_turn_user_injection_must_not_duplicate_tool_results_for_one_tool_use_id() {
     let local = tokio::task::LocalSet::new();
@@ -104,7 +102,6 @@ async fn mid_turn_user_injection_must_not_duplicate_tool_results_for_one_tool_us
                 sampling_cfg,
                 xai_grok_sampler::RetryPolicy {
                     max_retries: 0,
-                    rate_limit_retry_threshold: 0,
                     ..Default::default()
                 },
                 sampler_event_tx,

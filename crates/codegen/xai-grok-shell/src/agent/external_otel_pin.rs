@@ -66,12 +66,8 @@ const PROTOCOL_FAMILY: GenericSignalFamily = GenericSignalFamily {
 
 const GENERIC_SIGNAL_FAMILIES: &[GenericSignalFamily] = &[ENDPOINT_FAMILY, PROTOCOL_FAMILY];
 
-/// Client identity (cert/key): pin any member → strip unlisted siblings *and*
-/// unlisted endpoint family members.
-///
-/// CA is a sibling-only family: pin any CA member → strip unlisted CA env
-/// names. Does **not** strip endpoints (a fleet can pin a trust store
-/// without locking destination).
+/// Client identity (cert/key): pin any member → strip unlisted siblings *and* unlisted endpoint family members.
+/// CA is a sibling-only family: pin any CA member → strip unlisted CA env names. Does **not** strip endpoints (a fleet can pin a trust store without locking destination).
 struct ClientIdentityFamily {
     members: &'static [(&'static str, &'static str)],
 }
@@ -199,10 +195,7 @@ fn apply_content_gate_inherit_trap(
 }
 
 /// Map a `[telemetry] otel_*` file key to the env var the resolver reads.
-///
-/// Mechanical: `otel_enabled` → `GROK_EXTERNAL_OTEL`; otherwise `OTEL_` +
-/// screaming-snake remainder — except the OTLP exporter family, whose spec
-/// names insert `EXPORTER_OTLP`. Headers are never mapped.
+/// Mechanical: `otel_enabled` → `GROK_EXTERNAL_OTEL`; otherwise `OTEL_` + screaming-snake remainder — except the OTLP exporter family, whose spec names insert `EXPORTER_OTLP`. Headers are never mapped.
 pub fn otel_file_key_to_env(key: &str) -> Option<String> {
     let rest = key.strip_prefix("otel_")?;
     if rest.contains("header") {
@@ -323,10 +316,7 @@ impl RequirementOtelPins {
         out
     }
 
-    /// Drop unlisted `[telemetry] otel_*` file keys that the pin strip
-    /// matrix would hide in env. Listed keys stay; keys outside the strip
-    /// set stay (a timeout in user config still applies when only the
-    /// endpoint is pinned).
+    /// Drop unlisted `[telemetry] otel_*` file keys that the pin strip matrix would hide in env. Listed keys stay; keys outside the strip set stay (a timeout in user config still applies when only the endpoint is pinned).
     pub fn hide_unlisted_file_siblings(&self, table: &mut toml::map::Map<String, toml::Value>) {
         if self.listed_file_keys.is_empty() {
             return;
@@ -345,10 +335,8 @@ impl RequirementOtelPins {
 }
 
 /// Overlay requirements pins onto `getenv`. Does not mutate process env.
-/// Unlisted names that the pin strip matrix would drop are hidden so
-/// `resolve_with` tests (injected getenv) match production after `remove_var`.
-/// Pair with [`RequirementOtelPins::hide_unlisted_file_siblings`] so user
-/// and managed file config cannot fill those holes.
+/// Unlisted names that the pin strip matrix would drop are hidden so `resolve_with` tests (injected getenv) match production after `remove_var`.
+/// Pair with [`RequirementOtelPins::hide_unlisted_file_siblings`] so user and managed file config cannot fill those holes.
 pub fn getenv_with_pins<'a>(
     pins: &'a RequirementOtelPins,
     getenv: impl Fn(&str) -> Option<String> + 'a,
@@ -366,13 +354,8 @@ pub fn getenv_with_pins<'a>(
 }
 
 /// Strip conflicting developer `OTEL_*` from process env.
-///
 /// # Safety
-/// Unix `remove_var` is unsound beside concurrent `getenv`. Call exactly
-/// once from the process composition root (`pager-bin` `main`), after
-/// clap / version / doctor early-exits and **before** `memory_trace::start`,
-/// Sentry, Tokio, `build_otel_layer`, or `external::init`. Do not call
-/// from `run()`, `init_tracing`, or `init_tracing_simple`.
+/// `remove_var` is unsound beside concurrent `getenv`. Call once from pager-bin `main`, after clap/version/doctor, before `memory_trace::start`, Sentry, Tokio, `build_otel_layer`, or `external::init`. Not from `run()`, `init_tracing`, or `init_tracing_simple`.
 pub unsafe fn strip_conflicting_process_env() {
     let Some(req) = xai_grok_config::load_merged_requirements() else {
         return;
@@ -387,12 +370,9 @@ pub unsafe fn strip_conflicting_process_env() {
     }
 }
 
-/// Production strip: `remove_var` conflicting developer OTEL_* names.
-/// Returns the names that were stripped (for debug logs).
-///
+/// Production strip of conflicting developer OTEL_* names; returns stripped names.
 /// # Safety
-/// Same contract as [`strip_conflicting_process_env`]. Tests that call this
-/// live in a dedicated binary so they cannot race the lib suite.
+/// Same contract as [`strip_conflicting_process_env`]. Tests live in a dedicated binary so they cannot race the lib suite.
 pub unsafe fn apply_process_env_strip(requirements: &toml::Value) -> Vec<String> {
     let pins = RequirementOtelPins::from_requirements(Some(requirements));
     let names = pins.names_to_strip();

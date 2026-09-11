@@ -9,6 +9,7 @@ description = "SQLite-backed persistent dashboard workspace: membership, layout 
 # rusqlite 0.37 + bundled = self-contained SQLite (>= 3.50.2).
 # Keep in step with xai-sqlite-journal (CVE-2025-29087/-3277/-6965 floor).
 rusqlite = { version = "0.37", features = ["bundled"] }
+strum = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 xai-grok-config = { workspace = true }

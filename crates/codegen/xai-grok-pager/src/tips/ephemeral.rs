@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use ratatui::text::Line;
 
 /// Default tip lifetime in animation ticks (~3 s: 90 ticks at the default 30 fps animation cadence).
-///
 /// Expiry takes N+1 ticks: [`EphemeralTipState::tick`] checks `== 0` *before* decrementing.
 /// A tip shown with `ticks_remaining = N` therefore survives N ticks and is cleared on the (N+1)th.
 pub const DEFAULT_TIP_TICKS: u16 = 90;
@@ -67,15 +66,9 @@ pub struct EphemeralTipState {
 }
 
 impl EphemeralTipState {
-    /// Show `tip`, replacing any currently shown tip.
-    /// Re-showing the key already on screen only refreshes the TTL (no second count increment).
-    ///
-    /// Seen-gating runs against `seen_counts` (the app-level per-session map): a tip whose count reached its cap is a no-op.
-    /// A passing show increments the map in place.
-    /// Returns true when the tip was newly shown (false on a same-key TTL refresh or a gated no-op).
-    ///
-    /// Pager code must go through `AgentView::show_ephemeral_tip`, which adds the renderability gate.
-    /// Calling this directly skips that gate and can burn a seen count on a tip the user never sees (tests only).
+    /// Re-showing the key already on screen only refreshes the TTL (no second count increment). Pager code must go
+    /// through `AgentView::show_ephemeral_tip`, which adds the renderability gate. Calling this directly skips that
+    /// gate and can burn a seen count on a tip the user never sees (tests only).
     pub(crate) fn show(
         &mut self,
         tip: EphemeralTip,
@@ -194,7 +187,8 @@ impl EphemeralTipState {
 }
 
 /// Why a tip left the slot, mapped to the `tip.dismissed` telemetry reason.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, strum::AsRefStr, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 enum DismissReason {
     /// A different-keyed tip took the slot.
     Replaced,
@@ -203,23 +197,11 @@ enum DismissReason {
     /// An explicit clear (keyed clear, `clear_all`, or submit).
     Cleared,
 }
-
-impl DismissReason {
-    /// Telemetry string; must stay stable for `tip.dismissed` dashboards.
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Replaced => "replaced",
-            Self::Expired => "expired",
-            Self::Cleared => "cleared",
-        }
-    }
-}
-
 fn log_dismissed(key: &'static str, reason: DismissReason) {
     crate::unified_log::info(
         "tip.dismissed",
         None,
-        Some(serde_json::json!({ "key": key, "reason": reason.as_str() })),
+        Some(serde_json::json!({ "key": key, "reason": reason.as_ref() })),
     );
 }
 

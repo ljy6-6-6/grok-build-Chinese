@@ -58,9 +58,7 @@ fn for_each_jsonl_line<R: BufRead>(
     for_each_jsonl_line_capped(reader, MAX_UPDATE_LINE_BYTES, f)
 }
 
-/// Invoke `f` with the index and bytes of each non-empty line, reusing one capped line buffer.
 /// Lines over `cap` content bytes are discarded without being buffered whole and consume no index.
-/// `f` returns `Break` to stop early.
 /// `f` gets raw bytes rather than the typed `UpdatesIterator`.
 /// Classification must tolerate non-UTF-8 lines, and both copy passes need identical line indexes.
 fn for_each_jsonl_line_capped<R: BufRead>(
@@ -226,9 +224,7 @@ impl<'a> UpdateLineWriter<'a> {
 }
 
 /// Copy `source` (an `updates.jsonl`) to `target` without materializing it.
-/// With a `target_prompt_index`, pass one computes the surviving line set and pass two writes exactly those lines.
 /// Without one, every line streams through, preserving rewind markers and dead branches.
-/// Both passes read one pinned, rewound file handle, so their line indexes cannot skew under a concurrent rename.
 /// `updates.jsonl` is append-only by contract, so lines appended after pass one land past every survivor index.
 fn copy_updates_streaming(
     source: &Path,
@@ -371,6 +367,7 @@ impl JsonlStorageAdapter {
                 inherited_prefix_len,
             },
         );
+        let minted_agent_id = target_summary.agent_id.clone();
         let summary_bytes = serde_json::to_vec_pretty(&target_summary).map_err(invalid_data)?;
         std::fs::write(self.summary_file(target_info), summary_bytes)?;
 
@@ -425,20 +422,18 @@ impl JsonlStorageAdapter {
             &self.announcement_state_file(source_info),
             &self.announcement_state_file(target_info),
         )?;
-        // A truncating or filtering copy can drop the failure announcement from the child's context
-        // The copied state still marks it announced, permanently muting it
-        // End the episodes so still-down servers re-announce, the same rule as after rewind or compaction
-        // Connected fingerprints stay latched: connected tools remain visible in the tool definitions regardless
+        // A truncating or filtering copy can drop the failure announcement from the child's context.
+        // The copied state still marks it announced, permanently muting it.
+        // End the episodes so still-down servers re-announce, the same rule as after rewind or compaction.
         if announcement_state_copied
             && (options.target_prompt_index.is_some() || options.fork_filter)
         {
             clear_announced_failure_episodes(&self.announcement_state_file(target_info))?;
         }
 
-        // Title-refresh watermark: only a managed parent (one with a watermark) passes managed state to the child
-        // So a fork of a pre-feature session stays unmanaged (frozen) rather than being adopted
-        // A full fork inherits the parent's checkpoint (keeping the inherited title frozen)
-        // A partial fork starts fresh at `0` so it can retitle its shorter conversation
+        // Title-refresh watermark: only a managed parent (one with a watermark) passes managed state to the child.
+        // So a fork of a pre-feature session stays unmanaged (frozen) rather than being adopted.
+        // A full fork inherits the parent's checkpoint (keeping the inherited title frozen).
         if let Some(parent_idx) =
             crate::session::helpers::session_summary::load_title_refresh_watermark(
                 &self.session_dir(source_info),
@@ -486,8 +481,11 @@ impl JsonlStorageAdapter {
             &source_info.id,
         )?;
 
+        self.persist_fork_status(source_info, target_info, &target_dir, &options);
+
         Ok(CopySessionResult {
             chat_messages_copied: num_chat_messages,
+            agent_id: minted_agent_id,
             updates_copied: num_messages,
             plan_state_copied: plan_copied,
             plan_mode_state_copied,
@@ -497,6 +495,31 @@ impl JsonlStorageAdapter {
             compaction_segments_copied,
             compaction_checkpoints_copied,
         })
+    }
+
+    fn persist_fork_status(
+        &self,
+        source_info: &Info,
+        target_info: &Info,
+        target_dir: &std::path::Path,
+        options: &CopySessionOptions,
+    ) {
+        let kind = options.session_kind.as_deref().unwrap_or("fork");
+        if !crate::session::fork_status::should_persist(
+            kind,
+            options.fork_context_source.as_deref(),
+        ) {
+            return;
+        }
+        let status = crate::session::fork_status::capture(
+            kind,
+            &source_info.cwd,
+            &target_info.cwd,
+            options.source_workspace_dir.as_deref(),
+            options.prompt_display_cwd.as_deref(),
+            options.target_prompt_index.is_some(),
+        );
+        crate::session::fork_status::persist(target_dir, &status);
     }
 }
 
@@ -518,8 +541,13 @@ fn fork_summary(
 ) -> Summary {
     let target_worktree_identity =
         crate::session::worktree::worktree_identity_for_cwd(&target_info.cwd);
+    let identity = options.mint_session_identity.then(|| {
+        crate::session::persistence::mint_next_session_identity(source.agent_id.as_deref(), true)
+    });
     let mut summary = Summary {
         info: target_info.clone(),
+        agent_id: identity.as_ref().map(|identity| identity.agent_id.clone()),
+        attempt_id: identity.map(|identity| identity.attempt_id),
         cwd_generation: source.cwd_generation,
         previous_cwd: source.previous_cwd,
         pending_cwd_switch_reminder: None,

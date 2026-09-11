@@ -69,7 +69,17 @@ impl super::super::coordinator::ChildRunner for BackendTestRunner {
         Box::pin(std::future::pending())
     }
 
-    fn on_completed(&self, _: super::super::coordinator::ChildCompletion<Self::CompletionData>) {}
+    fn supports_wake(&self) -> bool {
+        true
+    }
+
+    fn on_completed(
+        &self,
+        _: super::super::coordinator::ChildCompletion<Self::CompletionData>,
+        terminal_published: Box<dyn FnOnce() + Send>,
+    ) {
+        terminal_published();
+    }
 }
 
 #[async_trait::async_trait]
@@ -163,6 +173,7 @@ async fn channel_backend_spawn_success() {
         fork_context: false,
         owner: super::super::types::SubagentOwner::Task,
         cancel_token: tokio_util::sync::CancellationToken::new(),
+        spawn_root: Default::default(),
     };
 
     let result = backend.spawn(request, None).await.unwrap();
@@ -196,6 +207,7 @@ async fn channel_backend_spawn_closed_channel() {
         fork_context: false,
         owner: super::super::types::SubagentOwner::Task,
         cancel_token: tokio_util::sync::CancellationToken::new(),
+        spawn_root: Default::default(),
     };
 
     let err = backend.spawn(request, None).await.unwrap_err();
@@ -307,7 +319,12 @@ async fn channel_backend_active_message_binds_parent_and_round_trips() {
         .expect("active-message ingress closed");
     let super::super::active_message::ActiveMessageIngress { request, permit } = ingress;
     assert_eq!(request.parent_session_id, "bound-parent");
-    assert_eq!(request.request.subagent_id(), "sub-1");
+    assert!(matches!(
+        request.request.target(),
+        crate::implementations::grok_build::task::active_message::ActiveMessageTarget::ChildId(
+            id
+        ) if id == "sub-1"
+    ));
     assert_eq!(request.request.text().as_ref(), "follow up");
     request
         .respond_to
@@ -461,6 +478,7 @@ async fn workflow_spawn_future_drop_cancels_but_task_drop_does_not() {
             fork_context: false,
             owner,
             cancel_token: tokio_util::sync::CancellationToken::new(),
+            spawn_root: Default::default(),
         }
     }
 
@@ -514,6 +532,7 @@ async fn channel_backend_spawn_result_dropped() {
         fork_context: false,
         owner: super::super::types::SubagentOwner::Task,
         cancel_token: tokio_util::sync::CancellationToken::new(),
+        spawn_root: Default::default(),
     };
 
     let err = backend.spawn(request, None).await.unwrap_err();
@@ -697,10 +716,9 @@ async fn validate_reply_timeout_warn_reports_the_raced_duration() {
     assert!(saw_timeout_warn, "timeout WARN must carry the raced value");
 }
 
-/// Pins the raised default: a coordinator busy past the old 2s default (e.g.
-/// pegged by turn-end trace packaging) but inside [`VALIDATE_TYPE_TIMEOUT`]
-/// must still get its verdict through instead of a spurious
-/// `ValidationUnavailable`.
+/// Pins the raised default: a coordinator busy past the old 2s default (e.g. pegged by turn-end
+/// trace packaging) but inside [`VALIDATE_TYPE_TIMEOUT`] must still get its verdict through instead
+/// of a spurious `ValidationUnavailable`.
 #[tokio::test(start_paused = true)]
 async fn channel_backend_validate_type_waits_out_a_busy_coordinator() {
     let (tx, mut rx) = mpsc::unbounded_channel::<SubagentEvent>();
@@ -844,10 +862,9 @@ async fn channel_backend_describe_returns_unavailable_on_timeout() {
     holder.abort();
 }
 
-/// Pins that describe did NOT inherit the spawn-validation timeout raise: a
-/// reply past [`DESCRIBE_TYPE_TIMEOUT`] but inside [`VALIDATE_TYPE_TIMEOUT`]
-/// must already have timed out (the /goal gate awaits describe serially per
-/// agent type, so its budget stays short).
+/// Pins that describe did NOT inherit the spawn-validation timeout raise: a reply past
+/// [`DESCRIBE_TYPE_TIMEOUT`] but inside [`VALIDATE_TYPE_TIMEOUT`] must already have timed out (the
+/// /goal gate awaits describe serially per agent type, so its budget stays short).
 #[tokio::test(start_paused = true)]
 async fn channel_backend_describe_times_out_before_validate_default() {
     use super::super::types::{SubagentDescribeOutcome, SubagentTypeSummary};

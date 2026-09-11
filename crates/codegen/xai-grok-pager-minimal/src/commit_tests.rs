@@ -82,10 +82,9 @@ fn pending_user_input_holds_the_frontier() {
 
 #[test]
 fn running_agent_message_commits_once_a_later_block_exists() {
-    // The tracker leaves an agent message's `is_running` flag set until turn end
-    // handle_tool_call resets current_agent_msg without finishing the entry when a tool follows
-    // Minimal must still commit that message mid-turn once a later *turn-progress* block proves it's complete
-    // Otherwise the rest of the turn piles up in the live tail and scrolls instead of accumulating into native scrollback
+    // The tracker leaves an agent message's `is_running` flag set until turn end handle_tool_call resets
+    // current_agent_msg without finishing the entry when a tool follows. Otherwise the rest of the turn piles up in
+    // the live tail and scrolls instead of accumulating into native scrollback.
     let mut s = ScrollbackState::new();
     s.push(ScrollbackEntry::running(RenderBlock::agent_message(
         "answer text",
@@ -217,10 +216,9 @@ fn revised_plan_anchors_to_its_own_tool_row_and_neither_plan_re_emits() {
 
 #[test]
 fn bg_task_started_commits_while_running_and_does_not_wedge_frontier() {
-    // A fresh background task is pushed as a running "started" block (`set_last_running(true)`)
-    // Its `is_running` flag is animation-only: the block is a finalized lifecycle event whose content never changes
-    // It must commit immediately even mid-turn
-    // Otherwise it wedges the frontier and the task (plus everything after it) stays hidden in the live tail until the task finishes
+    // Its `is_running` flag is animation-only: the block is a finalized lifecycle event whose content never changes.
+    // It must commit immediately even mid-turn. Otherwise it wedges the frontier and the task (plus everything after
+    // it) stays hidden in the live tail until the task finishes.
     let mut s = ScrollbackState::new();
     s.push(finalized("a"));
     s.push(ScrollbackEntry::running(RenderBlock::bg_task(
@@ -268,11 +266,9 @@ fn no_double_commit_after_mid_list_shift_remove() {
 
 #[test]
 fn mid_list_removal_below_cursor_does_not_strand_uncommitted_entries() {
-    // Regression: a committed placeholder ("Loading session...") is removed AFTER new uncommitted entries were appended past the cursor
-    // That is the `/resume` / reconnect `SessionLoaded` ordering
-    // Removing below the cursor shifts the uncommitted entries down one
-    // Without the cursor decrement in `remove_entry` the first of them slid below the cursor
-    // It was never committed NOR drawn in the live tail (silently missing from minimal mode)
+    // Regression: a committed placeholder ("Loading session.") is removed AFTER new uncommitted entries were appended
+    // past the cursor. Without the cursor decrement in `remove_entry` the first of them slid below the cursor. It was
+    // never committed NOR drawn in the live tail (silently missing from minimal mode).
     let mut s = ScrollbackState::new();
     s.push(finalized("old-1"));
     let placeholder = s.push(finalized("Loading session..."));
@@ -506,10 +502,8 @@ fn clear_resets_the_frontier() {
     assert_eq!(minimal_api::commit_scan_cursor(&s), 0);
 }
 
-/// Height-exactness guard: `commit_active` reserves exactly `desired_height(width)` rows via `insert_before`.
-/// If `render` paints real content beyond that, those rows are silently clipped from native scrollback.
-/// Render each block type into an over-tall buffer and assert no non-space glyph lands past `desired_height`.
-/// Background fill of blank spaces past `h` is fine; only real content matters.
+/// Height-exactness guard: `commit_active` reserves exactly `desired_height(width)` rows via `insert_before`. only
+/// real content matters.
 fn assert_committed_fits(label: &str, block: RenderBlock, width: u16) {
     let mut entry = ScrollbackEntry::new(block);
     entry.set_display_mode(minimal_commit_display_mode(
@@ -858,9 +852,9 @@ fn committed_edit_keeps_diff_line_backgrounds() {
 }
 
 /// Asserted through `chrome_width` because that is what both `desired_height` and `render` subtract from the wrap width.
-/// One column is the whole cost of the rail, which is why restoring it is height-safe.
+/// With the reasoning rail moved into the body rows (`rail_under_bullet`), no block reserves the accent column, so every block's chrome starts flush at column 0.
 #[test]
-fn only_thinking_spends_the_accent_column() {
+fn no_block_spends_the_accent_column() {
     let theme = Theme::current();
     let appearance = committed_appearance(&AppearanceConfig::default());
     let chrome = |entry: &ScrollbackEntry| {
@@ -874,13 +868,8 @@ fn only_thinking_spends_the_accent_column() {
         .chrome_width()
     };
 
-    assert_eq!(
-        chrome(&ScrollbackEntry::new(RenderBlock::thinking("reasoning"))),
-        1,
-        "reasoning reserves the 1-col accent gutter"
-    );
-
     for block in [
+        RenderBlock::thinking("reasoning"),
         RenderBlock::agent_message("answer"),
         RenderBlock::user_prompt("ask"),
         RenderBlock::execute("ls"),
@@ -892,17 +881,24 @@ fn only_thinking_spends_the_accent_column() {
         assert_eq!(
             chrome(&entry),
             0,
-            "only reasoning may spend the accent column: {:?}",
+            "no block may spend the accent column: {:?}",
             entry.block
         );
     }
 
-    // A column is reserved only where the block actually paints one
-    // Reserving without painting leaves the content indented over a blank gutter
-    // That is what a collapsed reasoning header did while `hide_accent` keyed off the block type alone
+    // The rail is body chrome now: an open reasoning block leads with its header bullet at column 0
+    // and carries the rail on the rows below it, never a rail beside the header (the pre-`rail_under_bullet` look)
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     let rail = xai_grok_pager::glyphs::accent_bar();
+    let bullet = appearance
+        .scrollback
+        .blocks
+        .tool
+        .bullet
+        .char()
+        .expect("minimal keeps the tool bullet")
+        .to_string();
     minimal_api::set_show_thinking_blocks(true);
     for mode in [
         DisplayMode::Collapsed,
@@ -921,25 +917,35 @@ fn only_thinking_spends_the_accent_column() {
             test_cwd(),
             COMMITTED_TICK,
         );
-        let reserved = renderer.chrome_width();
         let h = renderer.desired_height(60);
         let area = Rect::new(0, 0, 60, h);
         let mut buf = Buffer::empty(area);
         renderer.render(area, &mut buf);
-        let painted = buf.cell((0, 0)).expect("first cell").symbol() == rail;
 
+        // Every mode leads with the header's bullet, flush at column 0.
         assert_eq!(
-            reserved == 1,
-            painted,
-            "{mode:?}: reserved a column={} but painted the rail={painted} — a \
-             reserved-but-unpainted column is a blank indent",
-            reserved == 1,
+            buf.cell((0, 0)).expect("first cell").symbol(),
+            bullet,
+            "{mode:?}: the header bullet must sit at column 0"
         );
+        // Open modes run the rail down every row below the header; collapsed
+        // has no body to delimit and stays a single rail-free header row.
+        if mode == DisplayMode::Collapsed {
+            assert_eq!(h, 1, "collapsed reasoning is its one-line header");
+        } else {
+            for y in 1..h {
+                assert_eq!(
+                    buf.cell((0, y)).expect("body cell").symbol(),
+                    rail,
+                    "{mode:?}: row {y} must carry the rail under the bullet"
+                );
+            }
+        }
     }
 }
 
 #[test]
-fn committed_thinking_paints_a_dim_rail_in_column_zero() {
+fn committed_thinking_paints_a_dim_rail_under_the_bullet() {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     use ratatui::style::Modifier;
@@ -980,8 +986,9 @@ fn committed_thinking_paints_a_dim_rail_in_column_zero() {
     renderer.render(area, &mut buf);
 
     let rail = xai_grok_pager::glyphs::accent_bar();
-    for y in 0..h {
-        let cell = buf.cell((0, y)).expect("accent cell");
+    // Row 0 is the header (`◆ Thought…`) — the rail starts under its bullet.
+    for y in 1..h {
+        let cell = buf.cell((0, y)).expect("rail cell");
         assert_eq!(cell.symbol(), rail, "row {y} lost the rail");
         assert!(
             cell.modifier.contains(Modifier::DIM),

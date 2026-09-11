@@ -39,8 +39,7 @@ pub(crate) const SKIPPED_IMAGE_MARKER: &str = "[skipped-due-to-limit]";
 const OPTIONAL_CONTEXT_TAGS: &[&str] = &[];
 /// Strip template-specific context tags from text before it reaches the image-description prompt.
 /// Uses attribute-aware matching so tags like `<always_applied_workspace_rules type="...">` are caught.
-///
-/// Runs **after** `extract_user_query` (which handles the shared tags), so this only needs to cover the template-specific additions.
+/// Runs after `extract_user_query` (which handles the shared tags), so this only needs to cover the template-specific additions.
 pub(crate) fn strip_template_context_tags(text: &str) -> String {
     let mut result = text.to_string();
     for tag in OPTIONAL_CONTEXT_TAGS {
@@ -85,14 +84,8 @@ fn collapse_newlines(s: &str) -> String {
     }
     result.trim().to_string()
 }
-/// Build the deterministic conversation outline from prior user messages.
-///
-/// Rules:
-/// - The source is `extract_real_user_queries(conversation)` (already filters synthetic, auto-continue, and disclaimer turns).
-/// - The caller passes the conversation snapshot **before** pushing the current turn, so the latest user request is naturally excluded.
-///   That text is rendered separately inside `<user_query>`.
-/// - Strip wrapper tags via [`extract_user_query`] (idempotent on already-stripped text).
-///
+/// The caller passes the conversation snapshot before pushing the current turn, so the latest user request is naturally excluded.
+/// Strip wrapper tags via [`extract_user_query`] (idempotent on already-stripped text).
 /// Returns `None` when no prior user messages exist, so callers can omit the entire `<conversation_history_outline>` block from the prompt.
 pub(crate) fn build_conversation_outline(
     prior_conversation: &[ConversationItem],
@@ -123,9 +116,7 @@ pub(crate) fn build_conversation_outline(
 }
 /// Render the system/user prompt text shown to the image-description model.
 /// The actual image bytes/URLs are attached as separate content parts by the caller.
-///
 /// `current_query` should be the extracted user query text (without `<user_query>` wrappers).
-/// We wrap it here to keep the template owned in one place.
 pub(crate) fn build_describe_prompt(outline: Option<&str>, current_query: &str) -> String {
     let capped_query = truncate_middle(current_query, CURRENT_QUERY_CAP);
     let mut parts: Vec<String> = Vec::with_capacity(6);
@@ -160,14 +151,8 @@ pub(crate) fn build_describe_prompt(outline: Option<&str>, current_query: &str) 
         );
     parts.join(" ")
 }
-/// Sanitize a **single-line** string before interpolating it into a structured envelope.
-///
-/// Intended for fields that are one logical line: paths, MIME types, upstream error messages.
-/// In those, newlines, CR, or NUL would forge log lines in text-formatted subscribers.
+/// Sanitize a single-line string before interpolating it into a structured envelope.
 /// Replaces `<` / `>` with the typographic look-alikes `‹` / `›` so envelope-close tags cannot be forged.
-///
-/// For **multi-line body** content (e.g. the vision-model description), use [`scrub_envelope_body`] instead, which preserves paragraph structure.
-///
 /// Trade-off: model output sees `‹` instead of `<` in the scrubbed region; these are envelope fillers, not source code.
 pub(crate) fn scrub_for_envelope(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -181,10 +166,8 @@ pub(crate) fn scrub_for_envelope(s: &str) -> String {
     }
     out
 }
-/// Sanitize a **body** string (multi-paragraph) before interpolating it into a structured envelope.
-///
-/// Like [`scrub_for_envelope`] but **preserves `\n`** so multi-paragraph content keeps its structure inside the envelope.
-/// `\r` and `\0` are still stripped (CR mid-line is a log-forge risk regardless of newlines elsewhere, and NUL has no legitimate use in model text).
+/// Sanitize a body string (multi-paragraph) before interpolating it into a structured envelope.
+/// Like [`scrub_for_envelope`] but preserves `\n` so multi-paragraph content keeps its structure inside the envelope.
 /// Other ASCII controls (BEL, ESC, etc.) are also stripped; they render as nothing useful and can corrupt terminal output in TUI consumers.
 pub(crate) fn scrub_envelope_body(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -279,7 +262,6 @@ impl ImageDescribeCache {
 }
 /// Build the `<image_files>` envelope that lists the workspace paths where copies of the user's images live.
 /// `paths` should be in the same order the user supplied them.
-///
 /// Each path goes through [`scrub_for_envelope`], so a user-controlled path containing a literal `</image_files>` cannot close the envelope early.
 pub(crate) fn render_image_files_block(paths: &[String]) -> Option<String> {
     if paths.is_empty() {
@@ -306,7 +288,6 @@ pub(crate) struct PersistedImage {
     pub mime_type: String,
 }
 /// Persist a batch of normalized images to `<session_dir>/assets/`.
-///
 /// Each file is written as `image-<uuid>.<ext>` where `<ext>` is inferred from `mime_type` (falling back to `png`).
 /// Returns one [`PersistedImage`] per input, in input order, so callers can render the `<image_files>` list deterministically.
 pub(crate) fn persist_user_images(
@@ -361,9 +342,7 @@ pub(crate) enum DescribeError {
     EmptyResponse,
 }
 /// Call the vision model and return its description text.
-///
 /// `image_urls` should be the cached URLs from [`persist_user_images`].
-/// That is `uri` if present on the original [`ImageContent`], otherwise the `data:<mime>;base64,...` URI.
 /// The caller is responsible for outline and prompt assembly so this stays a pure transport helper.
 pub(crate) async fn describe_user_images(
     client: OaiCompatClient,
@@ -424,13 +403,8 @@ pub(crate) fn render_image_user_message(
     parts.push(original_user_message.to_owned());
     parts.join("\n\n")
 }
-/// Persist attachments under `<session_dir>/assets/` and prepend an
-/// `<image_files>` block so the coding model has real on-disk paths for
-/// `Read` / `read_file` (and does not invent cloud paths like
-/// `/home/workdir/attachments/image.png`).
-///
-/// Used by other harnesses that still pass images inline as
-/// multimodal parts — persistence is independent of vision describe.
+/// Persist attachments under `<session_dir>/assets/` and prepend an `<image_files>` block so the coding model has real on-disk paths for `Read` / `read_file` (and does not invent cloud paths like.
+/// Used by other harnesses that still pass images inline as multimodal parts — persistence is independent of vision describe.
 pub(crate) fn persist_and_prepend_image_files(
     session_dir: &Path,
     images: &[ImageContent],

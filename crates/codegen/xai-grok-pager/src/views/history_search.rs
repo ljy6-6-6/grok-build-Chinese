@@ -290,15 +290,11 @@ enum Mode {
     Browse,
 }
 
-/// UI-side state for the history search overlay.
-///
-/// The UI thread never runs nucleo; all matching happens on the daemon thread.
-/// The UI sends queries via `update_query()` and polls results via `poll()`, exactly like `FuzzyFileMatcherDaemon`.
+/// UI-side state for the history search overlay. The UI thread never runs nucleo; all matching
+/// happens on the daemon thread. The UI sends queries via `update_query()` and polls results via
+/// `poll()`, exactly like `FuzzyFileMatcherDaemon`.
 pub struct HistorySearchState {
     /// Matcher daemon, built lazily on first activation (the module docs say why eager spawning leaks).
-    /// Kept until the widget drops (`Daemon::drop` stops the thread).
-    /// Its copy of the history is released on `deactivate`, so retained memory is bounded by the time the overlay is open.
-    /// Mirrors `FileSearchState::daemon`.
     daemon: Option<Daemon>,
     /// Test-only count of daemon builds, to prove reuse (no drop-and-rebuild).
     #[cfg(test)]

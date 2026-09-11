@@ -714,12 +714,13 @@ mod tests {
         assert!(matches!(result, HookRunnerResult::Failed(_)));
     }
 
+    /// The error names the bad value only; `HookRunResult::Failed.hook_name` carries the attribution.
     #[test]
     fn http_unknown_decision_is_failed() {
         match parse_http_blocking_result(r#"{"decision":"maybe"}"#, StatusCode::OK, "test-hook") {
             HookRunnerResult::Failed(msg) => {
                 assert!(
-                    msg.contains("maybe") && msg.contains("test-hook"),
+                    msg.contains("maybe") && !msg.contains("test-hook"),
                     "got: {msg}"
                 )
             }
@@ -1009,6 +1010,7 @@ mod tests {
             session_id: "test",
             workspace_root: "/tmp",
             process_scope: None,
+            disabled: Default::default(),
         }
     }
 

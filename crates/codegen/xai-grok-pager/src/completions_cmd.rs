@@ -33,18 +33,9 @@ pub fn run(shell: Shell) {
     }
 }
 
-/// Work around clap_complete's broken zsh output for an optional free-form positional (`[PROMPT]`) preceding the subcommand slot.
-/// Upstream bug: <https://github.com/clap-rs/clap/issues/6282>.
-///
-/// The generated root `_arguments` spec emits a `'::prompt …'` slot before the subcommand slot but dispatches subcommands with `case $line[2]`.
-/// zsh assigns the typed subcommand to the *prompt* slot (`$line[1]`), leaves `$line[2]` empty, and the dispatch falls through.
-/// `grok worktree <TAB>` then re-offers every top-level command.
-/// (`hide = true` on the positional does not change the generated script.)
-///
-/// Completing an arbitrary prompt string is useless, so drop the prompt slot and shift the root dispatch to `$line[1]`.
-/// Nested subcommand dispatch blocks already use `$line[1]` and are untouched.
-/// The three rewritten patterns are unique to the root block, pinned by the test below.
-/// Delete this whole workaround once upstream fixes the generator.
+/// Work around clap_complete's broken zsh output for an optional free-form positional (`[PROMPT]`) preceding the
+/// subcommand slot. Upstream bug: <https://github.com/clap-rs/clap/issues/6282>. `grok worktree <TAB>` then
+/// re-offers every top-level command. Delete this whole workaround once upstream fixes the generator.
 fn fix_zsh_root_prompt_positional(script: &str) -> String {
     let mut out = String::with_capacity(script.len());
     script

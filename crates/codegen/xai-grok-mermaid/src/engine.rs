@@ -31,7 +31,6 @@ pub enum MermaidError {
 }
 
 /// Caps [`render_checked`] applies before the engine runs, so untrusted source can't trivially exhaust memory via an oversized payload.
-///
 /// A synchronous render cannot time itself out, so the pager enforces the wall-clock budget out of process via [`crate::run_with_timeout`].
 /// Output area and height are capped inside [`crate::rasterize`] by [`crate::MAX_OUTPUT_MEGAPIXELS`] and [`RenderParams::max_height_px`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,7 +50,6 @@ impl Default for RenderLimits {
 }
 
 /// A pluggable Mermaid rendering backend.
-///
 /// Prefer calling [`render_checked`] over [`MermaidEngine::render`] directly: it applies [`RenderLimits`] and isolates panics.
 /// Implementations must be cheap to share (`Send + Sync`) so a worker pool can hold one behind an `Arc`.
 pub trait MermaidEngine: Send + Sync {
@@ -62,20 +60,7 @@ pub trait MermaidEngine: Send + Sync {
 }
 
 /// Render `source` with `engine`, enforcing `limits` and isolating panics.
-///
-/// This is the entry point a caller (e.g. a render worker) should use over [`MermaidEngine::render`]:
-///
-/// - Source larger than [`RenderLimits::max_source_bytes`] is rejected with [`MermaidError::Unsupported`] **without invoking the engine**.
-/// - An engine panic is caught and returned as [`MermaidError::Panic`].
-///
-/// # Panic isolation is conditional on the unwind strategy
-///
-/// `catch_unwind` only intercepts panics under `panic = "unwind"`.
-/// The shipped release CLI profiles build with `panic = "abort"`, under which a panicking engine aborts the whole process and this guard is a no-op.
-/// True crash isolation over untrusted source therefore comes from running the engine *out of process*.
-/// The pager spawns a short-lived child per diagram (see [`crate::run_with_timeout`] and the pager's `mermaid_worker`).
-/// A child abort is contained, and the timeout is a real process kill.
-/// Within a single process this guard still upgrades a panic under an unwind profile (e.g. tests) to a clean error.
+/// Source larger than [`RenderLimits::max_source_bytes`] is rejected with [`MermaidError::Unsupported`] **without invoking the engine**; An engine panic is caught and returned as [`MermaidError::Panic`].
 /// Even under unwind, `catch_unwind` cannot catch aborts from stack overflow or allocation failure.
 pub fn render_checked(
     engine: &dyn MermaidEngine,

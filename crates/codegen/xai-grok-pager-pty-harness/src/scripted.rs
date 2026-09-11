@@ -91,10 +91,7 @@ pub struct TerminalConfig {
     pub rows: u16,
     #[serde(default = "default_cols")]
     pub cols: u16,
-    /// Answer terminal device queries (cursor-position reports for `ESC[6n`, etc.) from the embedded vt100 emulator, like a real terminal would.
-    /// Off by default; most scenarios don't need it.
-    /// Required for `--minimal` scenarios (see `PtyHarness::set_respond_to_queries`).
-    /// Without it the inline viewport's startup cursor-position probe times out and `--minimal` silently downgrades to full-height inline.
+    /// Off by default. Required for `--minimal` or the startup cursor-position probe times out and the mode silently downgrades.
     #[serde(default)]
     pub respond_to_queries: bool,
 }
@@ -163,10 +160,7 @@ pub struct WorkspaceConfig {
 pub struct MockConfig {
     #[serde(default = "default_mock_response")]
     pub response: String,
-    /// Required per-agent-turn responses, registered as ordered foreground expectations on both supported pager inference backends.
-    /// Every listed turn must be satisfied before the runner reports success.
-    /// Lets a scenario give each turn a distinct sentinel, e.g. to prove a transcript tail was truncated and re-generated.
-    /// Falls back to `response` when exhausted.
+    /// Ordered per-turn expectations; every listed turn must be satisfied. Falls back to `response` when exhausted.
     #[serde(default)]
     pub turns: Vec<String>,
     #[serde(default)]
@@ -1770,12 +1764,8 @@ fn decode_osc52_payloads(bytes: &[u8]) -> Result<Vec<String>> {
     Ok(payloads)
 }
 
-/// Count Kitty graphics APC sequences (`ESC _ G`) in raw PTY output that carry image data or placement.
-/// The pure control escapes, delete (`a=d`) and capability query (`a=q`), display nothing and are not counted.
-/// An image transmit is chunked into several APCs, so this counts each chunk; callers use it as a presence test, not an exact image count.
-///
-/// The pager writes these into the synchronized-update frame buffer, outside the vt100 cell grid, so the screen-text snapshot can't observe them.
-/// Excluding delete/query makes `assert_no_kitty_graphics` mean "no inline image was shown", not "the pager never probed for graphics support".
+/// Image/placement APCs only, as a presence test (transmits are chunked). Outside the vt100 grid, so screen text cannot see them.
+/// Delete/query are excluded so a no-graphics assert is not tripped by a capability probe.
 pub(crate) fn count_kitty_graphics(bytes: &[u8]) -> usize {
     const INTRO: &[u8] = b"\x1b_G";
     let mut count = 0;

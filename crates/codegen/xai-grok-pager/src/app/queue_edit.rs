@@ -38,7 +38,6 @@ pub enum PromptMode {
         /// When `Some`, this is a server-authoritative shared-queue row and `server_id` is the agent's stable `prompt_id`.
         /// Save routes through `Action::QueueEditShared` instead of mutating the local `pending_prompts` mirror.
         /// The `x.ai/queue/changed` rebroadcast paints the result.
-        /// `None` is the local-origin path.
         server_id: Option<String>,
         /// Kind snapshot for the interject guard's vanished-row fallback.
         kind: crate::app::agent::QueueEntryKind,
@@ -46,14 +45,8 @@ pub enum PromptMode {
 }
 
 impl AgentView {
-    /// Editing-mode key intercepts for the prompt pane.
-    ///
-    /// Bare Enter saves, Esc (or Ctrl-C on empty) cancels.
     /// Shift/Alt+Enter inserts a newline (same as the normal composer) and must not save.
-    /// Apple Terminal Cmd/Shift/Opt+Enter is rescued inside `is_mod_enter` via CoreGraphics; there is no universal Cmd+Enter binding.
     /// Interject is remappable, so it is not matched as a raw key here.
-    /// The `ActionId::InterjectPrompt` registry arm routes it to `interject_editing_queued_intercept`.
-    ///
     /// Returns `None` when not editing or unhandled; must fall through to the widget.
     pub(super) fn handle_editing_queued_key(&mut self, key: &KeyEvent) -> Option<InputOutcome> {
         if let PromptMode::EditingQueued { id, server_id, .. } = &self.prompt_mode {
@@ -80,7 +73,6 @@ impl AgentView {
     }
 
     /// Dirty-edit focus lock checked by `set_active_pane`.
-    ///
     /// `None` means not editing (no lock); the caller proceeds with the normal pane switch.
     /// `Some(switched)` means the lock handled the switch: `false` when blocked behind the confirm modal, `true` after a clean exit.
     pub(super) fn editing_lock_on_pane_switch(&mut self, target: AgentPane) -> Option<bool> {
@@ -228,7 +220,6 @@ impl AgentView {
         use crate::app::agent::QueueEntryKind;
         // Optimistic echo whose enqueue RPC has not confirmed: the shell has no row to hold yet
         // Toast instead of silently dropping the keypress, and wait for the confirming `x.ai/queue/changed` before allowing the edit
-        // Mirrors the send-now park gate in `force_interject_queue_row`
         // Both gates enforce the same unconfirmed-row rule, so a change to one likely applies to the other
         if let Some(sid) = row.as_ref().and_then(|r| r.server_id.as_deref())
             && self.optimistic_queue_ids.contains(sid)
@@ -353,15 +344,9 @@ impl AgentView {
         }
     }
 
-    /// Save the edited composer text back to the queued row and exit edit mode.
     /// Single owner of the save invariants for the bare-Enter intercept, the idle edit-interject, and the modal Save arm.
-    ///
-    /// `drain`: whether a local-row save requests a queue drain.
     /// Enter-save and idle edit-interject always drain (the user just released the front edit lock).
     /// Modal Save drains only when the drain was blocked on this edit; a plain save of a non-front row must not start the head prompt's turn.
-    ///
-    /// Text that resolves to a pager builtin leaves through `Action::RunEditedQueuedCommand` instead, ignoring `drain`.
-    /// Dispatch runs the command and drains once it has settled the row.
     pub(in crate::app) fn save_edited_queued_row(
         &mut self,
         id: u64,
@@ -383,7 +368,7 @@ impl AgentView {
                 self.prompt.slash_controller.registry(),
             )
         {
-            let text = self.prompt.text().to_string();
+            let mut submission = self.prompt.stash();
             // A vanished server row has no version to check, so it carries no removal and dispatch just runs the command
             let server = server_id.as_ref().and_then(|sid| {
                 self.queue
@@ -393,13 +378,24 @@ impl AgentView {
                         expected_version: row.version,
                     })
             });
+            if server.is_some() {
+                // Shared rows load no local images; only disarm temps a live queue row still owns.
+                let retained: std::collections::HashSet<u64> = self
+                    .session
+                    .pending_prompts
+                    .iter()
+                    .flat_map(|prompt| prompt.images.iter())
+                    .map(|image| image.preview.identity())
+                    .collect();
+                submission.disarm_image_cleanup(&retained);
+            }
             // Release the hold: the action's `QueueRemove` runs inside `drain_and_process`, before `pending_effects` flush, so it goes out first
             // A remove rejected on a stale version then returns the row to combine
             self.exit_editing_mode();
             return InputOutcome::Action(Action::RunEditedQueuedCommand {
                 local_id: id,
                 server,
-                text,
+                submission,
             });
         }
         match server_id {
@@ -429,7 +425,10 @@ impl AgentView {
                         .collect();
                     for old in entry.images.drain(..) {
                         if !retained.contains(&old.preview.identity()) {
-                            crate::prompt_images::cleanup_temp_file(&old);
+                            crate::prompt_images::cleanup_image(
+                                crate::prompt_images::SessionPathPolicy::Preserve,
+                                &old,
+                            );
                         }
                     }
                     entry.text = new_text;
@@ -437,7 +436,6 @@ impl AgentView {
                     entry.chip_elements = chip_elements;
                     entry.skill_token_ranges = skill_token_ranges;
                     // Clear stale wire_blocks: edited text may no longer match the original skill invocation
-                    // The prompt will be sent as plain text via the normal path
                     // Pager builtins never get here (`is_complete_builtin_invocation` routed them to dispatch)
                     // ACP, skill, and unknown `/…` text is left for the agent's resolve(), which does not know pager builtins
                     entry.wire_blocks = None;
@@ -445,7 +443,10 @@ impl AgentView {
                     // Clear both together, or the drain keeps stale skill styling over the ranges
                     entry.display_as_skill = false;
                 }
-                crate::prompt_images::drain_and_cleanup(&mut images);
+                crate::prompt_images::drain_and_cleanup(
+                    crate::prompt_images::SessionPathPolicy::Preserve,
+                    &mut images,
+                );
                 self.exit_editing_mode();
                 // Saving the blocked row is the card's Edit resolution: release and resend it in place
                 // Saving any other row must not unpark the blocked front; the card comes back
@@ -576,7 +577,10 @@ impl AgentView {
                         .collect();
                     for old in row.images.drain(..) {
                         if !retained.contains(&old.preview.identity()) {
-                            crate::prompt_images::cleanup_temp_file(&old);
+                            crate::prompt_images::cleanup_image(
+                                crate::prompt_images::SessionPathPolicy::Preserve,
+                                &old,
+                            );
                         }
                     }
                 }
@@ -586,9 +590,8 @@ impl AgentView {
     }
 
     /// Whether the next turn is held because the user is editing the front prompt.
-    ///
-    /// - Local rows (`server_id: None`): idle and the edited id is `pending_prompts` front.
-    /// - Server rows (`server_id: Some(sid)`): idle and `sid` is the front of `shared_queue` (wire excludes the running turn, so index 0 is next).
+    /// Local rows (`server_id: None`): idle and the edited id is `pending_prompts` front.
+    /// Server rows (`server_id: Some(sid)`): idle and `sid` is the front of `shared_queue` (wire excludes the running turn, so index 0 is next).
     pub(crate) fn drain_blocked(&self) -> bool {
         let PromptMode::EditingQueued { id, server_id, .. } = &self.prompt_mode else {
             return false;
@@ -633,7 +636,6 @@ impl AgentView {
 
     /// Exit editing mode: restore stashed text, clear mode, focus queue pane.
     /// No-op unless `EditingQueued`. The default exit; releases the server-side combine hold (cancel, lost-row, modal paths).
-    ///
     /// Always resets `prompt_input_mode` to `Normal` so it doesn't leak into subsequent normal prompt entry.
     pub(super) fn exit_editing_mode(&mut self) {
         self.exit_editing_mode_inner(true);
@@ -1042,7 +1044,6 @@ mod tests {
             target: crate::app::actions::ClipboardPasteTarget::AgentPrompt {
                 agent_id: agent.session.id,
                 images_dir: None,
-                from_feedback_pane: false,
             },
             source: crate::app::actions::ClipboardPasteSource::ClipboardKey {
                 text: crate::app::actions::ClipboardTextRead::Success(None),
@@ -1185,11 +1186,11 @@ mod tests {
             InputOutcome::Action(Action::RunEditedQueuedCommand {
                 local_id,
                 server,
-                text,
+                submission,
             }) => {
                 assert_eq!(local_id, row_id);
                 assert_eq!(server, None);
-                assert_eq!(text, "/btw what is the default");
+                assert_eq!(submission.text, "/btw what is the default");
             }
             other => panic!("expected RunEditedQueuedCommand, got {other:?}"),
         }
@@ -1198,6 +1199,37 @@ mod tests {
             agent.session.pending_prompts[0].text, "local one",
             "the view must not remove the row: dispatch drops it after its guards pass"
         );
+    }
+
+    #[test]
+    fn edit_local_feedback_carries_the_submitted_images() {
+        let mut agent = enter_edit_local_row();
+        agent.prompt.set_text("/feedback report ");
+        let end = agent.prompt.text().len();
+        agent.prompt.set_cursor(end);
+        agent
+            .prompt
+            .insert_image(crate::prompt_images::from_clipboard_data(
+                &crate::clipboard::ImageData {
+                    data: vec![
+                        0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0, 0, 0, 0, 0,
+                    ],
+                    mime_type: "image/png".to_owned(),
+                },
+            ))
+            .expect("chip");
+
+        let outcome = agent.handle_prompt_key_for_test(&enter_key());
+
+        match outcome {
+            InputOutcome::Action(Action::RunEditedQueuedCommand { submission, .. }) => {
+                assert_eq!(submission.images.len(), 1);
+                assert_eq!(submission.text_without_image_chips(), "/feedback report  ");
+            }
+            other => panic!("expected RunEditedQueuedCommand, got {other:?}"),
+        }
+        assert!(matches!(agent.prompt_mode, PromptMode::Normal));
+        assert!(agent.prompt.images.is_empty());
     }
 
     #[test]
@@ -1306,7 +1338,9 @@ mod tests {
 
         let outcome = agent.handle_prompt_key_for_test(&enter_key());
         match outcome {
-            InputOutcome::Action(Action::RunEditedQueuedCommand { server, text, .. }) => {
+            InputOutcome::Action(Action::RunEditedQueuedCommand {
+                server, submission, ..
+            }) => {
                 assert_eq!(
                     server,
                     Some(SharedQueueTarget {
@@ -1314,13 +1348,74 @@ mod tests {
                         expected_version: 2,
                     })
                 );
-                assert_eq!(text, "/btw why");
+                assert_eq!(submission.text, "/btw why");
             }
             other => panic!("expected RunEditedQueuedCommand, got {other:?}"),
         }
         assert_eq!(agent.shared_queue.len(), 1);
         assert_eq!(agent.shared_queue[0].text, "server one");
         assert!(matches!(agent.prompt_mode, PromptMode::Normal));
+    }
+
+    /// Server-row builtins must not disarm edit-only pastes; a live queue row still owns its own temp.
+    #[test]
+    fn server_builtin_edit_keeps_cleanup_on_edit_only_images() {
+        let dir = tempfile::tempdir().unwrap();
+        let owned_path = dir.path().join("owned.png");
+        let pasted_path = dir.path().join("pasted.png");
+        std::fs::write(&owned_path, b"owned").unwrap();
+        std::fs::write(&pasted_path, b"pasted").unwrap();
+
+        let png = crate::clipboard::ImageData {
+            data: vec![
+                0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+            mime_type: "image/png".to_owned(),
+        };
+        let mut owned = crate::prompt_images::from_clipboard_data(&png);
+        owned.staged_temp_path = Some(owned_path.clone());
+        let mut pasted = crate::prompt_images::from_clipboard_data(&png);
+        pasted.staged_temp_path = Some(pasted_path.clone());
+
+        let mut agent = make_running_agent();
+        let registry = non_vscode_registry();
+        agent.session.pending_prompts[0].images = vec![owned.clone()];
+        let ids = agent.queue.entry_ids();
+        agent.queue.list_state.select_by_id(ids[0]);
+        let _ = agent.handle_queue_key(&edit_key(), &registry);
+        agent.prompt.set_text("/btw why");
+        agent.prompt.insert_image(owned).expect("row-owned chip");
+        agent.prompt.insert_image(pasted).expect("edit-only chip");
+
+        let outcome = agent.handle_prompt_key_for_test(&enter_key());
+        match outcome {
+            InputOutcome::Action(Action::RunEditedQueuedCommand { submission, .. }) => {
+                let owned_id = agent.session.pending_prompts[0].images[0]
+                    .preview
+                    .identity();
+                let (disarmed, kept): (Vec<_>, Vec<_>) = submission
+                    .images
+                    .iter()
+                    .partition(|image| image.preview.identity() == owned_id);
+                assert_eq!(disarmed.len(), 1);
+                assert!(
+                    disarmed[0].staged_temp_path.is_none(),
+                    "row-owned temp must be disarmed so Drop cannot double-delete it"
+                );
+                assert_eq!(kept.len(), 1);
+                assert_eq!(
+                    kept[0].staged_temp_path.as_deref(),
+                    Some(pasted_path.as_path())
+                );
+                drop(submission);
+            }
+            other => panic!("expected RunEditedQueuedCommand, got {other:?}"),
+        }
+        assert!(owned_path.exists(), "row-owned temp must survive");
+        assert!(
+            !pasted_path.exists(),
+            "edit-only temp must be deleted on drop"
+        );
     }
 
     /// The hijack sends no edit, so the combine hold must be released exactly once.

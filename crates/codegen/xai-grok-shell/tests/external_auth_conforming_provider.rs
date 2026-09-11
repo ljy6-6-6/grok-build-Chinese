@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use xai_grok_shell::auth::{
+use xai_grok_login::{
     AuthMode, GrokAuth, GrokComConfig, ensure_authenticated, try_ensure_fresh_auth,
 };
 
@@ -110,7 +110,12 @@ async fn a_provider_that_declines_the_headless_run_can_still_sign_the_user_in() 
     seed_expired_credential(home.path(), &config.auth_scope());
 
     assert!(
-        try_ensure_fresh_auth(&config).await.is_none(),
+        try_ensure_fresh_auth(
+            &config,
+            xai_grok_shell::agent::config::CLI_CHAT_PROXY_BASE_URL_DEFAULT.to_string(),
+        )
+        .await
+        .is_none(),
         "the provider declines a run it cannot complete silently"
     );
     assert_eq!(
@@ -120,10 +125,19 @@ async fn a_provider_that_declines_the_headless_run_can_still_sign_the_user_in() 
     );
 
     let started = Instant::now();
-    let auth = tokio::time::timeout(LOGIN_BUDGET, ensure_authenticated(&config, false, None))
-        .await
-        .expect("the sign-in must reach the provider's interactive branch, not the browser login")
-        .expect("the provider mints when it is allowed to prompt");
+    let auth = tokio::time::timeout(
+        LOGIN_BUDGET,
+        ensure_authenticated(
+            &config,
+            None,
+            xai_grok_shell::agent::config::CLI_CHAT_PROXY_BASE_URL_DEFAULT.to_string(),
+            false,
+            None,
+        ),
+    )
+    .await
+    .expect("the sign-in must reach the provider's interactive branch, not the browser login")
+    .expect("the provider mints when it is allowed to prompt");
     let elapsed = started.elapsed();
 
     assert_eq!(

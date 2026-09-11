@@ -159,6 +159,32 @@ pub fn extra_root_ders() -> &'static [Vec<u8>] {
     bundle_snapshot().ders.as_slice()
 }
 
+pub fn extra_root_pems() -> &'static [Vec<u8>] {
+    static PEMS: OnceLock<Vec<Vec<u8>>> = OnceLock::new();
+    PEMS.get_or_init(|| {
+        extra_root_ders()
+            .iter()
+            .map(|der| der_to_pem(der))
+            .collect()
+    })
+    .as_slice()
+}
+
+fn der_to_pem(der: &[u8]) -> Vec<u8> {
+    use base64::Engine as _;
+    let body = base64::engine::general_purpose::STANDARD.encode(der);
+    let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
+    let mut offset = 0;
+    while offset < body.len() {
+        let end = (offset + 64).min(body.len());
+        pem.push_str(&body[offset..end]);
+        pem.push('\n');
+        offset = end;
+    }
+    pem.push_str("-----END CERTIFICATE-----\n");
+    pem.into_bytes()
+}
+
 /// The variable that fed the loaded roots, if any.
 pub fn configured_bundle_env() -> Option<&'static str> {
     bundle_snapshot().source

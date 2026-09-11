@@ -84,7 +84,6 @@ enum State {
 }
 
 /// Streaming, code-aware, escape-aware LaTeX delimiter normalizer.
-///
 /// Feed chunks via [`push`](Self::push) and call [`finish`](Self::finish) at end of stream.
 /// For a complete string in hand, use [`normalize_latex_delimiters`].
 #[derive(Debug, Clone)]
@@ -543,11 +542,7 @@ enum InlineClose {
 
 /// Scan for the unescaped `\)` closing an inline `\(` at `open` (`bytes[open..open + 2] == b"\\("`).
 /// The inner length is bounded by [`MAX_MATH_SOURCE_LEN`] (the converter's own input cap) so an unclosed `\(` cannot stall the stream.
-/// The bound is a distance relative to `open`, so the Found/Unmatched decision is the same whether the input arrives whole or split.
 /// Mirrors [`classify_backslash`]'s `final_flush`: at end of stream an unfound close resolves to `Unmatched` instead of `NeedMore`.
-///
-/// Backslash parity matches [`classify_backslash`]: `\\` is an escaped pair (its following byte is literal).
-/// A lone `\)` is the close, and any other `\x` consumes both bytes as span content.
 fn find_inline_close(bytes: &[u8], open: usize, final_flush: bool) -> InlineClose {
     debug_assert!(
         bytes.get(open) == Some(&b'\\') && bytes.get(open + 1) == Some(&b'('),
@@ -590,18 +585,8 @@ enum DisplayClose {
 }
 
 /// Scan for the token closing a display span whose content starts at `content_start`.
-/// Any display close token counts: `\]`, `$$`, or `\end{equation[*]}`.
-/// Mismatched opener/close pairs (e.g. `\[ … $$`) formed a span in the old scanners too, because every delimiter normalized to `$$` independently.
-///
 /// The scan is bounded by [`MAX_MATH_SOURCE_LEN`] relative to `content_start` (so the Found/Unmatched decision is split-invariant).
-/// It aborts, leaving the source for normal processing, at:
-///
-/// - a blank line: a paragraph break means the opener was almost certainly not math (e.g. `$$` used as prose).
-///   Two stray `$$` must not fuse across paragraphs.
-/// - a line starting with `>`: blockquoted display math carries `>` markers that would otherwise be joined into the span as literal content.
-///   Pulldown handles the quoted multi-line span itself after stripping the markers.
-///
-/// Backslash parity matches [`find_inline_close`]: `\\` and other `\x` pairs are span content, consumed two bytes at a time.
+/// a blank line: a paragraph break means the opener was almost certainly not math. Two stray `$$` must not fuse across paragraphs; a line starting with `>`: blockquoted display math carries `>` markers that would otherwise be joined into the span as literal content. Pulldown handles the quoted multi-line span itself after stripping the markers.
 fn find_display_close(buf: &str, content_start: usize, final_flush: bool) -> DisplayClose {
     let bytes = buf.as_bytes();
     let n = bytes.len();
@@ -1164,16 +1149,9 @@ The review is already complete at:\n\n\
 mod token_soup_stress {
     use super::*;
 
-    /// Randomized delimiter-soup stress. Two invariants are universal and pinned here for arbitrary input:
-    ///
-    /// 1. the normalizer never panics;
-    /// 2. streaming char-by-char matches the one-shot output (chunk-split invariance, what production streaming actually relies on).
-    ///
+    /// Randomized delimiter-soup stress. Two invariants are universal and pinned here for arbitrary input: the normalizer never panics; streaming char-by-char matches the one-shot output (chunk-split invariance, what production streaming actually relies on).
     /// Full byte-idempotency is deliberately *not* asserted on soup.
-    /// A conversion can glue a new `$$` out of adjacent tokens (e.g. `$` plus an unmatched `\)` becomes `$$`).
     /// A second pass would then scan that as a display opener.
-    /// Production normalizes exactly once per stream: the streaming renderer's `clone()` re-appends already-normalized source verbatim.
-    /// Idempotency for realistic documents is pinned by the `idempotent` test's curated list.
     #[test]
     fn token_soup_never_panics_and_streams_consistently() {
         const TOKENS: [&str; 18] = [

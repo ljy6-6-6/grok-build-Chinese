@@ -40,10 +40,7 @@ pub(crate) fn checkpoints_reached(turns: usize) -> usize {
 const TITLE_MAX_BYTES: usize = 80;
 
 /// Durable title-refresh checkpoint watermark under `{session_dir}/`: the number of [`TITLE_REFRESH_TURNS`] checkpoints already consumed.
-/// It is written on every completed attempt (success or failure) so the freeze survives resume, restart, and compaction.
 /// Only a committed value is persisted, so an aborted refresh still retries.
-/// See [`load_title_refresh_watermark`].
-/// It is public so the fork/copy path can carry it alongside the inherited title.
 pub(crate) const TITLE_REFRESH_WATERMARK_FILE: &str = "title_refresh_idx";
 
 /// Load the persisted checkpoint index, clamped to the number of checkpoints so a stale larger value still means "frozen".
@@ -57,12 +54,8 @@ pub(crate) fn load_title_refresh_watermark(session_dir: &std::path::Path) -> Opt
 }
 
 /// The checkpoint index a session starts at on spawn.
-/// It depends on the persisted `watermark` (`None` if unmanaged), whether the feature is `enabled`, and the current real-user-turn count.
-///
 /// A managed session (has a watermark) uses it; the watermark is authoritative and durable across compaction.
 /// An unmanaged session is *adopted* as open (`0`) only when the feature is enabled and it is brand new (no turns); otherwise it freezes.
-/// That freezes pre-feature sessions, sessions created while the feature was off, and anything already past the window, so they are never retitled.
-/// There is no turn-count guessing that compaction could distort.
 pub(crate) fn initial_title_refresh_idx(
     watermark: Option<usize>,
     enabled: bool,
@@ -242,7 +235,6 @@ pub async fn generate_session_summary(
 
 /// Instruction turn appended to a conversation snapshot to refresh the auto title.
 /// Like the recap / turn-summary side-calls, all directions live in one reminder-wrapped turn.
-/// The conversation prefix is thus reused verbatim and the prompt cache stays warm.
 /// The model sees the whole conversation, so the title reflects the real topic rather than a possibly-useless first prompt.
 pub(crate) fn title_refresh_instruction(tag: &str) -> String {
     format!(

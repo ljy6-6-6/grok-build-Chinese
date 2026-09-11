@@ -99,23 +99,16 @@ pub(crate) struct SuspendedMinimalBtwLifecycle {
     focused: bool,
 }
 
-// ── Consolidated minimal-mode state (AppView::minimal_state) ─────────────────
-//
 // Minimal's private per-session state, consolidated into a single field on the central `AppView` instead of several loose `pub` fields
 // It defaults to empty and does nothing outside `--minimal`
 
-/// In-progress incremental `/transcript` build (minimal mode).
-///
-/// The full-fidelity ANSI transcript is a layout and syntax-highlight pass over the whole session; building it in one shot froze the event loop.
-/// The block model is `!Send` (syntect's resumable highlighter state lives inside markdown blocks), so the work cannot move to a worker.
-/// Instead the minimal draw loop renders a time-budgeted slice per frame (`xai-grok-pager-minimal::full_view::pump_transcript`).
-/// It sets `pending_pager_path` when done.
+/// In-progress incremental `/transcript` build (minimal mode). The block model is `!Send` (syntect's resumable
+/// highlighter state lives inside markdown blocks), so the work cannot move to a worker. Instead the minimal draw
+/// loop renders a time-budgeted slice per frame (`xai-grok-pager-minimal::full_view::pump_transcript`).
 pub struct TranscriptBuild {
-    /// The agent whose conversation this build snapshots.
-    /// The pump resolves entries against THIS agent, never the active view.
-    /// `EntryId`s are per-`ScrollbackState` counters; every state starts at 1.
-    /// Resolving the snapshot against whichever agent is active after a session switch would silently stitch in another session's blocks.
-    /// Keying by owner also keeps the build alive (and the pager opening) when the user tabs away mid-build.
+    /// The agent whose conversation this build snapshots. The pump resolves entries against THIS agent, never the
+    /// active view. Resolving the snapshot against whichever agent is active after a session switch would silently
+    /// stitch in another session's blocks.
     pub agent: crate::app::agent::AgentId,
     /// Snapshot of the entry IDs to render, in conversation order.
     /// IDs are re-resolved per slice, so entries removed mid-build (rewind / clear) are skipped instead of skewing positions.
@@ -176,10 +169,9 @@ pub fn requeue_minimal_pending_expand(app: &mut AppView, mut ids: Vec<EntryId>) 
 
 // ── Incremental /transcript build ────────────────────────────────────────────
 
-/// Start the incremental minimal `/transcript` build from the active agent's conversation.
-/// No-op when a build is already running; the in-flight one wins.
-/// Pushes the "nothing to show" system block when the conversation is empty.
-/// The minimal draw loop pumps the build a slice per frame and sets `pending_pager_path` on completion.
+/// Start the incremental minimal `/transcript` build from the active agent's conversation. No-op when a build is
+/// already running; the in-flight one wins. Pushes the "nothing to show" system block when the conversation is
+/// empty. The minimal draw loop pumps the build a slice per frame and sets `pending_pager_path` on completion.
 pub fn request_minimal_transcript(app: &mut AppView) {
     if app.minimal_state.transcript.is_some() {
         return;
@@ -247,24 +239,9 @@ pub fn status_line_inner_width(width: u16, padding: u16) -> Option<u16> {
     crate::views::status_line::inner_width(width, padding)
 }
 
-/// Whether minimal's Ctrl+O remap opens the full-transcript pager *right now*.
-///
-/// Minimal remaps Ctrl+O to `Action::OpenTranscriptPager` except when:
-///
-/// - Ctrl+O is bound to interject and an interject would actually consume the press.
-///   Apple Terminal is where that binding exists: the kitty keyboard protocol is unavailable, so Ctrl+Enter doesn't arrive and Ctrl+I aliases to Tab.
-///   That leaves Ctrl+O as the only interject chord.
-///   An interject consumes the press when:
-///   - editing a queued row (the interject key saves / interjects the edit), or
-///   - a turn is running with a non-empty composer, or
-///   - a turn is running with an empty composer **and** a visible queued follow-up (prompt-path force-send of the top queue row; same as full TUI)
-/// - a free-tier pinned upgrade CTA is live (`pinned_upgrade_cta_live`), so Ctrl+O reaches ToggleYolo (open CTA) instead of the transcript
-///
-/// Otherwise the remap keeps the key for the transcript.
-/// When the remap yields, `minimal_key_intercept` routes to the prompt path.
-/// That path is interject, or ToggleYolo on Apple Terminal when interject has nothing to send.
-/// The info-row hint re-evaluates this every frame.
-/// The advertised key ("ctrl+o transcript" vs `/transcript`) always matches what the press would do.
+/// Ctrl+O opens the transcript unless an interject would actually consume the press, or a pinned upgrade CTA needs the key for ToggleYolo.
+/// On Apple Terminal, Ctrl+O is the only interject chord (no kitty protocol, Ctrl+I aliases to Tab).
+/// The info-row hint re-evaluates every frame so the advertised key matches what the press would do.
 pub fn minimal_ctrl_o_opens_transcript(app: &AppView) -> bool {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let ctrl_o = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL);
@@ -288,19 +265,9 @@ pub fn minimal_ctrl_o_opens_transcript(app: &AppView) -> bool {
     ) {
         return false;
     }
-    // Matches prompt-path send-now: non-empty composer text *or* a visible queued follow-up (empty-composer force-send of the top row)
-    // Exclude the in-flight shared-queue entry when it is the running turn (same rule as `AgentView::visible_queue_is_empty`)
-    let running = agent.session.current_prompt_id.as_deref();
-    let has_queued_follow_up = !agent.session.pending_prompts.is_empty()
-        || agent
-            .shared_queue
-            .iter()
-            .any(|e| Some(e.id.as_str()) != running);
-    let has_payload = !agent.prompt.text().trim().is_empty() || has_queued_follow_up;
-    if crate::actions::ActionRegistry::interjection_possible(
-        agent.session.state.is_turn_running(),
-        has_payload,
-    ) {
+    // Matches prompt-path send-now: non-empty composer text or a top queued row that dispatch can send now.
+    let has_payload = !agent.prompt.text().trim().is_empty() || agent.held_queue_top_sendable();
+    if crate::actions::ActionRegistry::interjection_possible(agent.can_send_now(), has_payload) {
         return false;
     }
     !agent.pinned_upgrade_cta_live
@@ -374,11 +341,8 @@ pub fn plan_approval_view(v: &AgentView) -> Option<&PlanApprovalViewState> {
     v.plan_approval_view.as_ref()
 }
 
-/// Whether the minimal `/btw` panel is the painted input owner.
-///
-/// This mirrors the order the shared router checks surfaces in: everything that handles input before `/btw` takes precedence here.
-/// So do the later surfaces that replace the prompt, which minimal paints in place of the panel.
-/// Keeping the whole owner check in this file gives paint and minimal input the same answer without changing the fullscreen router.
+/// Whether the minimal `/btw` panel is the painted input owner. Keeping the whole owner check in this file gives
+/// paint and minimal input the same answer without changing the fullscreen router.
 pub fn minimal_btw_surface_available(v: &AgentView) -> bool {
     v.active_subagent.is_none()
         && v.image_viewer.is_none()
@@ -464,11 +428,9 @@ pub fn clear_minimal_btw(v: &mut AgentView) {
     v.clear_btw_owned_selection();
 }
 
-/// Clear text-drag state only when it belongs to the minimal `/btw` surface.
-///
-/// Kept in this file rather than widening the viewer module's private helper.
-/// Minimal already owns this lifecycle reset and is the only cross-module caller.
-/// Does not drop a finished highlight; panel replace/dismiss must clear that separately.
+/// Clear text-drag state only when it belongs to the minimal `/btw` surface. Kept in this file rather than widening
+/// the viewer module's private helper. Minimal already owns this lifecycle reset and is the only cross-module
+/// caller. Does not drop a finished highlight; panel replace/dismiss must clear that separately.
 fn clear_btw_drag_state(v: &mut AgentView) {
     let is_btw = v
         .pending_text_drag
@@ -851,8 +813,6 @@ pub fn render_compact_logo(area: Rect, buf: &mut Buffer, theme: &Theme) {
     crate::views::welcome::logo::render_compact_logo(area, buf, theme);
 }
 
-// ── Scrollback committed frontier (minimal-mode commit bookkeeping) ──────────
-//
 // The `committed` marker lives on `ScrollbackEntry` so it survives `shift_remove`/`remove_from`
 // The scan cursor and expand ring live on `ScrollbackState`
 // Only minimal drives these; they are `pub(crate)` in `scrollback/*` and reached exclusively through the wrappers below

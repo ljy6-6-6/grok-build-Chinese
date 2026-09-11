@@ -90,7 +90,6 @@ fn command_at(rest: &str, word: &str) -> bool {
 
 /// Split an environment body into rows (`\\`) and cells (`&`) at brace and environment depth 0.
 /// Render each cell, then lay the rows out according to the environment.
-/// Returns one string per visual row; the caller attaches them as a box.
 /// In `flat` mode, matrix/cases environments render as a single row with `; ` between matrix rows.
 fn env_rows_to_strings(
     body: &str,

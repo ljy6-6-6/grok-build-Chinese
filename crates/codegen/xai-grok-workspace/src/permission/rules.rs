@@ -3,9 +3,7 @@ use std::str::FromStr;
 use crate::permission::types::{PatternMode, PermissionRule, PromptPolicy, RuleAction, ToolFilter};
 
 /// Recognized `permissions.defaultMode` values.
-///
-/// Unknown strings fail `FromStr` and fall back to [`Self::Default`] at the call site.
-/// The failed value still claims its settings scope, so a typo in a more-specific file blocks a looser parent mode.
+/// Unknown strings fail `FromStr` and fall back to [`Self::Default`], but still claim their settings scope so a typo blocks a looser parent mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DefaultPermissionMode {
     Default,
@@ -106,52 +104,8 @@ impl std::error::Error for RuleParseError {}
 // ═════════════════════════════════════════════════════════════════════════════
 
 /// Parse a permission rule string into a native `PermissionRule`.
-///
-/// Supported tool prefixes:
-///   - `Bash(...)` -> `ToolFilter::Bash`
-///   - `Read(...)` -> `ToolFilter::Read`
-///   - `Edit(...)` / `Write(...)` -> `ToolFilter::Edit`
-///   - `MCPTool(...)` -> `ToolFilter::Mcp`
-///   - `Grep(...)` / `Glob(...)` -> `ToolFilter::Grep`
-///   - `WebFetch(...)` -> `ToolFilter::WebFetch`
-///   - `WebSearch(...)` -> `ToolFilter::WebSearch`
-///   - `AgentMessage(...)` / `SendSubagentMessage(...)` -> `ToolFilter::AgentMessage`
-///   - legacy `SendAgentMessage(...)` remains accepted so already-persisted policies still parse
-///   - No prefix / bare pattern -> `ToolFilter::Any`
-///
-/// `WebFetch` patterns support a `domain:` prefix (e.g., `WebFetch(domain:example.com)`).
-/// It sets `PatternMode::Domain`, which matches on the host instead of as a glob.
-///
-/// Explicitly unsupported (returns `Err`; the rule is skipped):
-///   - `EnterWorktree(...)`
-///   - `NotebookEdit` / `NotebookEdit(...)`
-///   - `NotebookRead` / `NotebookRead(...)`
-///   - Any unrecognized tool prefix
-///
-/// Pattern semantics:
-///   - Supports `*` as prefix/suffix/middle wildcard
-///   - Supports `**` for recursive path matching (zero or more segments)
-///   - Bash: a trailing `:*` is a prefix idiom; `Bash(cmd:*)` matches any command starting with `cmd`
-///
-/// Bare tool names (no parentheses) are recognized and treated as wildcard rules for that tool type:
-///   - `"Bash"` → `{ Allow, Bash, None }` (matches all bash commands)
-///   - `"Edit"` → `{ Allow, Edit, None }` (matches all edit operations)
-///
-/// Bare-name MCP rules use the `mcp__…` spelling from `.claude/settings.json`.
-/// They map onto `ToolFilter::Mcp` patterns over Grok's qualified `<server>__<tool>` names, which carry no `mcp__` prefix:
-///   - `"mcp__*"` → `{ Mcp, None }` (every MCP tool)
-///   - `"mcp__github"` → `{ Mcp, "github__*" }` (every tool on that server)
-///   - `"mcp__github__get_issue"` → `{ Mcp, "github__get_issue" }` (exact tool)
-///   - `"mcp__github__*"` → `{ Mcp, "github__*" }` (wildcard form)
-///
-/// Examples:
-///   - `Ok`: `"Bash(npm run build)"` → `{ Allow, Bash, "npm run build" }`
-///   - `Ok`: `"Read(src/*.rs)"` → `{ Allow, Read, "src/*.rs" }`
-///   - `Ok`: `"Read(**/src/**)"` → `{ Allow, Read, "**/src/**" }`
-///   - `Ok`: `"Edit(src/**/*.rs)"` → `{ Allow, Edit, "src/**/*.rs" }`
-///   - `Ok`: `"Bash"` → `{ Allow, Bash, None }` (bare tool name)
-///   - `Err`: `"EnterWorktree(*)"` → `UnsupportedToolPrefix`
-///   - `Err`: `"NotebookEdit"` / `"NotebookRead"` → `UnsupportedToolPrefix`
+/// Unrecognized prefixes (`EnterWorktree`, `NotebookEdit`/`NotebookRead`, anything else) return `Err` and the rule is skipped; legacy `SendAgentMessage` still parses.
+/// `WebFetch(domain:…)` matches the host, not a glob; bare tool names are wildcards; `.claude` `mcp__…` is rewritten onto Grok's unprefixed `<server>__<tool>` names.
 pub fn parse_permission_rule(
     rule: &str,
     action: RuleAction,
@@ -235,10 +189,8 @@ pub fn parse_permission_rule(
             });
         }
 
-        // `mcp__<server>[__<tool>]` rule (the `.claude/settings.json` spelling)
-        // Grok qualifies MCP tools as `<server>__<tool>` with no `mcp__` prefix, so strip it and rewrite into a glob over the qualified name
-        // The literal rule string would otherwise fall through to `ToolFilter::Any` and match nothing
-        // A bare `mcp__` with nothing after it still falls through
+        // `.claude` `mcp__<server>[__<tool>]` spelling: strip `mcp__` and rewrite onto Grok's unprefixed `<server>__<tool>` names
+        // Otherwise the literal falls through to `ToolFilter::Any` and matches nothing; a bare `mcp__` still falls through
         if let Some(rest) = rule.strip_prefix("mcp__")
             && !rest.is_empty()
         {

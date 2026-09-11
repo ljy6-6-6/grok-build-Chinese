@@ -42,7 +42,6 @@ impl ActionableStartupWarning {
 }
 
 /// A non-fatal startup warning from any subsystem.
-///
 /// This is a **display contract only**: the subsystem formats the message and optional action hint.
 /// Actionable diagnostic notices link to `/doctor`, which owns detailed evidence and remediation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,12 +63,8 @@ pub enum WarningSeverity {
 }
 
 /// Pick the warning the single-slot welcome banner shows: the first `Warning`-severity entry, else the last entry.
-///
-/// `startup_warnings` grows at runtime while the user sits on the welcome screen (session-start failures, Claude import results).
-/// A plain `first()` would let an old Info at index 0 hide a Warning pushed behind it.
-/// Severity decides first; among Warnings, assemble order wins.
-/// A Warning-less list falls back to the **last** entry because the newest Info is direct feedback on what the user just did.
-/// Every banner surface (height calc and render) picks through here so they cannot disagree.
+/// A plain `first()` would let an old Info at index 0 hide a Warning pushed behind it. A Warning-less list falls
+/// back to the last entry because the newest Info is direct feedback on what the user just did.
 pub fn banner_warning(warnings: &[StartupWarning]) -> Option<&StartupWarning> {
     warnings
         .iter()

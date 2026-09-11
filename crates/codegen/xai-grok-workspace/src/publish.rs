@@ -81,12 +81,8 @@ pub trait PublishBackend {
     async fn deploy(&self, merge_sha: &str) -> Result<String, PublishError>;
 }
 
-/// Run the strict publish flow.
-/// It commits a dirty tree, merges the conv branch into `target`, pushes to the durable remote, and only then builds/deploys from the merge SHA.
-/// A conflict or merge failure returns an error and never deploys.
-///
-/// The caller must first ensure the workspace is on the conversation branch tip (via `EnsureBinding`, restoring the resume snapshot if needed).
-/// This flow operates on the current working tree and does not resolve the branch itself.
+/// Strict publish: commit a dirty tree, merge the conv branch into `target`, push, and only then deploy from the merge SHA.
+/// A conflict or merge failure never deploys. Caller must already be on the conversation branch tip; this flow does not resolve the branch.
 pub async fn publish<B: PublishBackend + ?Sized>(
     backend: &B,
     conv_branch: &str,
@@ -119,11 +115,8 @@ pub async fn publish<B: PublishBackend + ?Sized>(
     })
 }
 
-/// Multi-repo publish: commit and dry-run merge on **every** repo first, then serial merge, push, and deploy.
-/// A dry-run conflict aborts before any remote push.
-///
-/// `push = false` on the dry-run must not update the durable remote.
-/// Implementers that cannot preview without mutating local `main` should reset after the probe.
+/// Multi-repo publish: commit and dry-run merge on every repo first, then serial merge, push, and deploy. A dry-run conflict aborts before any push.
+/// `push = false` must not update the durable remote; reset local `main` if the probe had to mutate it.
 pub async fn publish_serial_after_dry_run<B: PublishBackend + ?Sized>(
     backends: &[&B],
     conv_branch: &str,

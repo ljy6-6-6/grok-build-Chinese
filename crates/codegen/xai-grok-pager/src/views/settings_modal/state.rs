@@ -82,9 +82,8 @@ pub enum SettingsModalMode {
         original_value: SettingValue,
         supports_preview: bool,
     },
-    /// Group sub-sheet: a list of the group's child Bool toggles.
-    /// `child_idx` is the focused child within the group.
-    /// Space/Enter toggles in place (the sheet stays open); Esc returns to Browse.
+    /// Group sub-sheet: a list of the group's child Bool toggles. `child_idx` is the focused child
+    /// within the group. Space/Enter toggles in place (the sheet stays open); Esc returns to Browse.
     /// Mirrors `PickingEnum`'s open/render/commit flow but for independent toggles.
     PickingGroup {
         key: SettingKey,
@@ -206,6 +205,8 @@ pub struct SettingsModalState {
     /// When true, Esc/Enter from `PickingEnum` close the modal instead of returning to Browse.
     /// Set by deep-link open (`OpenSettingsFocus` / `/privacy`); cleared on leave from the picker.
     pub close_on_picker_exit: bool,
+    /// Last left-click on a picker radio: `(choice index, when)`.
+    pub(super) picker_last_click: Option<(usize, std::time::Instant)>,
 }
 
 impl SettingsModalState {
@@ -245,6 +246,7 @@ impl SettingsModalState {
             expanded_keys: std::collections::HashSet::new(),
             hover_row: None,
             close_on_picker_exit: false,
+            picker_last_click: None,
         }
     }
 
@@ -503,6 +505,7 @@ impl SettingsModalState {
         self.settings_breadcrumb_rect = None;
         self.breadcrumb_hovered = false;
         self.close_on_picker_exit = false;
+        self.picker_last_click = None;
     }
 
     pub fn focus_filter(&mut self) {
@@ -1059,11 +1062,9 @@ pub(super) fn validate_string(
     }
 }
 
-/// Soft product cap on static Enum choices (settings unit tests enforce it).
-///
-/// The chooser already scrolls within the viewport when the focused choice falls off-screen (`picker_scroll_offset`).
-/// This limit exists so catalogs stay intentionally curated rather than unbounded.
-/// Sized to fit the full Grok STT language list (25 codes + client-only `auto` = 26) with headroom.
+/// Soft product cap on static Enum choices (settings unit tests enforce it). This limit exists so
+/// catalogs stay intentionally curated rather than unbounded. Sized to fit the full Grok STT
+/// language list (25 codes + client-only `auto` = 26) with headroom.
 pub(crate) const MAX_PICKER_CHOICES: usize = 32;
 
 /// The children of a group setting, or an empty slice if `key` is not a group.
@@ -1074,17 +1075,27 @@ pub(super) fn group_children(state: &SettingsModalState, key: SettingKey) -> &'s
     }
 }
 
+/// The runtime gates that can hide an Enum choice, gathered once per picker query.
+#[derive(Clone, Copy)]
+pub(super) struct EnumChoiceGates {
+    pub auto_mode: bool,
+    pub kitty_releases: bool,
+    pub terminal_theme: bool,
+}
+
 /// Whether `(key, canonical)` is gated off and must not be offered as a choice.
-/// The gated pairs: `permission_mode`'s "auto" when the auto gate is off, and `voice_capture_mode`'s "hold" without key-release reporting.
-/// Pure (gates passed as args) so it's unit-testable without touching process globals.
+/// The gated pairs: `permission_mode`'s "auto" when the auto gate is off, `voice_capture_mode`'s "hold" without key-release reporting, and the theme keys' "terminal" while its rollout gate is off.
+/// Pure (gates passed as a value) so it's unit-testable without touching process globals.
 pub(super) fn enum_choice_gated_off(
     key: SettingKey,
     canonical: &str,
-    auto_mode_gate: bool,
-    kitty_releases: bool,
+    gates: EnumChoiceGates,
 ) -> bool {
-    (key == "permission_mode" && canonical == "auto" && !auto_mode_gate)
-        || (key == "voice_capture_mode" && canonical == "hold" && !kitty_releases)
+    (key == "permission_mode" && canonical == "auto" && !gates.auto_mode)
+        || (key == "voice_capture_mode" && canonical == "hold" && !gates.kitty_releases)
+        || ((key == "theme" || key == "auto_dark_theme" || key == "auto_light_theme")
+            && canonical == "terminal"
+            && !gates.terminal_theme)
 }
 
 /// The effective static Enum choices for a picker, hiding gated-off options so the modal never offers a choice the setter would silently no-op.
@@ -1094,11 +1105,13 @@ pub(super) fn effective_enum_choices<'a>(
     choices: &'a [EnumChoice],
     snapshot: &PagerLocalSnapshot,
 ) -> Vec<&'a EnumChoice> {
-    let kitty_releases = crate::app::kitty_releases_reported();
+    let gates = EnumChoiceGates {
+        auto_mode: snapshot.auto_mode_gate,
+        kitty_releases: crate::app::kitty_releases_reported(),
+        terminal_theme: crate::theme::cache::terminal_theme_enabled(),
+    };
     choices
         .iter()
-        .filter(|c| {
-            !enum_choice_gated_off(key, c.canonical, snapshot.auto_mode_gate, kitty_releases)
-        })
+        .filter(|c| !enum_choice_gated_off(key, c.canonical, gates))
         .collect()
 }

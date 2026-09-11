@@ -246,12 +246,8 @@ pub fn volatile_centered(
     volatile_image(image_data, cols, rows, x, y)
 }
 
-/// Release the shared pixel slot on a frame that did not paint it.
-///
-/// Kitty deletes the placement by id.
-/// iTerm2 has no delete escape (its pixels die when the cells underneath repaint), but the ownership tracking must still reset.
-/// Pixels are only known-alive while the owner repaints every frame.
-/// A later identical placement request must therefore re-emit rather than take the keep path (which would leave a blank box).
+/// Kitty deletes by id; iTerm2 has no delete, but ownership must still reset.
+/// Pixels are known-alive only while repainted every frame, so a later identical placement must re-emit or the keep path leaves a blank box.
 pub fn clear() -> Option<Escapes> {
     match prompt_preview_graphics_protocol() {
         GraphicsProtocol::Kitty => Some(clear_kitty()),

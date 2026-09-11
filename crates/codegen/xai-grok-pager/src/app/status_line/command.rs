@@ -37,9 +37,14 @@ async fn run_status_command(
     timeout: Duration,
     locale: &LocaleContext,
 ) -> RunOutcome {
+    let span = xai_grok_telemetry::region::Region::from_span(tracing::info_span!(
+        "status_line.command_run",
+        elapsed_ms = tracing::field::Empty,
+    ));
     let started = Instant::now();
     let result = run_command(command, ctx, term_size, timeout).await;
     let elapsed_ms = started.elapsed().as_millis() as u64;
+    span.span().record("elapsed_ms", elapsed_ms as i64);
     match result {
         Ok(line) => {
             metrics::global().record_ok(elapsed_ms);
@@ -200,12 +205,9 @@ impl Drop for GroupGuard {
     }
 }
 
-/// Works the child's three pipes together and waits for it, returning its status and the bytes stdout produced.
-///
 /// The wait races the read rather than following it.
 /// Stdout closes only when every writer does.
 /// A script that backgrounds a job without redirecting it would otherwise hold the row until the deadline.
-/// The shell is long gone and a grandchild owns the pipe.
 async fn pump(
     child: &mut tokio::process::Child,
     json: &str,

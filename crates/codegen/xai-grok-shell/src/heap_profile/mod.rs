@@ -134,8 +134,7 @@ mod tests {
         FAKE_DUMP_PATH.lock().expect("dump path lock").clone()
     }
 
-    /// `HOOKS` is a process-global `OnceLock`, first caller wins.
-    /// This test is the sole installer under serial key `heap_profile_hooks`.
+    /// `HOOKS` is a process-global `OnceLock`, first caller wins. This test is the sole installer under serial key `heap_profile_hooks`.
     /// Calling `install` from another serial group would make the empty/inert phase order-sensitive.
     /// The inert checks do not assert `HOOKS` is empty, so a future install site breaks the install-path assertions, not an opaque `is_none` check.
     #[test]

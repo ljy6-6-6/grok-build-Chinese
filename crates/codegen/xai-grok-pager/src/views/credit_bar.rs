@@ -153,14 +153,9 @@ fn fmt_dollars(cents: i64) -> String {
     }
 }
 
-/// Build the `/usage` summary block shown in scrollback.
-///
-/// Always shows usage % and (when known) the next reset time.
-/// The credits block is rendered only when the user has a positive prepaid balance:
-/// - no prepaid balance       → credits block omitted entirely
-/// - auto top-up off/unknown  → `Auto topup: disabled` (no max line)
-/// - auto top-up on, no max   → `Auto topup: $N`
-/// - auto top-up on, max set  → `Auto topup: $N` + `Max monthly topup: $M`
+/// Build the `/usage` summary block shown in scrollback. Always shows usage % and (when known) the
+/// next reset time. The credits block is rendered only when the user has a positive prepaid
+/// balance.
 pub fn format_usage_summary(balance: &CreditBalance, autotopup: Option<&AutoTopupInfo>) -> String {
     format_usage_summary_with_locale(balance, autotopup, None)
 }
@@ -250,13 +245,9 @@ pub fn format_usage_summary_with_locale(
 const LOW_BALANCE_CENTS: i64 = 1000;
 const PAY_AS_YOU_GO_CRITICAL_CENTS: i64 = 500;
 
-/// The prompt's usage/credits warning as `(text, critical)`, or `None`.
-/// `critical` renders yellow, else grey; team users with `usage_visible = false` never warn.
-/// Behaviour splits by billing model: prepaid credits, pay-as-you-go on-demand, or the included-allowance percentage.
-/// The unit tests pin the exact thresholds and copy.
-///
-/// Gateway light-frontend (`kind: "chat"`) sessions must not show Build coding-credit warnings.
-/// Use [`usage_warning_for_session`] with `gateway_chat = true` so the prompt shows no fake local sampler telemetry.
+/// The prompt's usage/credits warning as `(text, critical)`, or `None`. `critical` renders yellow,
+/// else grey; team users with `usage_visible = false` never warn. Gateway light-frontend (`kind:
+/// "chat"`) sessions must not show Build coding-credit warnings.
 pub fn usage_warning(
     balance: &CreditBalance,
     autotopup: Option<&AutoTopupInfo>,
@@ -368,13 +359,9 @@ pub fn usage_warning_for_session_with_locale(
     }
 }
 
-/// Build the credit balance indicator as a `Line<'static>`.
-///
-/// Shows `Credits used: XX%` in the status bar.
-///
-/// Gateway light-frontend (`kind: "chat"`) sessions must not show Build coding credits.
-/// Use [`credit_bar_line_for_session`] with `gateway_chat = true`, which returns `None`.
-/// Remote settings or a managed opt-in for chat entry can share the same gate later; for now it only suppresses misleading local telemetry.
+/// Gateway light-frontend (`kind: "chat"`) sessions must not show Build coding credits. Remote
+/// settings or a managed opt-in for chat entry can share the same gate later; for now it only
+/// suppresses misleading local telemetry.
 pub fn credit_bar_line(balance: &CreditBalance, hovered: bool, theme: &Theme) -> Line<'static> {
     credit_bar_line_for_session(balance, hovered, theme, false)
         .expect("non-chat credit_bar_line always renders")

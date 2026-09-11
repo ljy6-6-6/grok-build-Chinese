@@ -40,7 +40,7 @@ async fn handle_record(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let token_header = agent.auth_manager.grok_com_config().token_header.clone();
 
     let provider: std::sync::Arc<dyn xai_grok_auth::AuthCredentialProvider> = std::sync::Arc::new(
-        crate::auth::credential_provider::ShellAuthCredentialProvider::new(
+        xai_grok_login::credential_provider::ShellAuthCredentialProvider::new(
             agent.auth_manager.clone(),
             None,
             None,

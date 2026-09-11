@@ -98,17 +98,19 @@ User-level configuration lives in `$GROK_HOME/config.toml` (default `~/.grok/con
 | --- | --- | --- | --- | --- |
 | `cli.auto_update` | `boolean` | `pin` | `user` | Check for CLI updates on launch. Also GROK_DISABLE_AUTOUPDATER to suppress. |
 | `cli.channel` | `stable / alpha` | `pin` | `user` | Release channel preference. |
+| `cli.grove_worktree` | `boolean` or `grove` / `grove-fuse` / `grove-nfs` / `nfs` / `copy` / `true` / `false` / `1` / `0` / `on` / `off` | `yes` | `user` | Session / `-w` Grove vs copy. Default copy. Distinct from creation-mode `cli.worktree_type`. Also `GROK_WORKTREE_TYPE`. Layer order: request → env → local → remote-true; then kill last: remote `grove_worktree = false` → copy (`remote_kill`); missing remote settings → copy (`remote_unavailable`). Does not enable `grok clone`. |
 | `cli.installer` | `string` | `—` | `user` | Which installer last set up this CLI, used to pick the update path. |
 | `cli.maximum_version` | `string` | `pin` | `user` | Highest CLI version that still runs without a hard block. Also GROK_MAXIMUM_VERSION. |
 | `cli.minimum_version` | `string` | `pin` | `user` | Lowest CLI version that still runs without a hard block. Also GROK_MINIMUM_VERSION. |
 | `cli.npm_registry` | `string` | `yes` | `user` | npm registry used by the auto-updater. |
+| `cli.nfs_worktree` | same as `cli.grove_worktree` | `yes` | `user` | Read alias of `cli.grove_worktree`. |
 | `cli.required_maximum_version` | `string` | `pin` | `user` | Hard maximum CLI version. Also GROK_REQUIRED_MAXIMUM_VERSION. |
 | `cli.required_minimum_version` | `string` | `pin` | `user` | Hard minimum CLI version. Also GROK_REQUIRED_MINIMUM_VERSION. |
 | `cli.session_picker_grouped` | `boolean` | `yes` | `user` | Group sessions by repo in the picker and CLI listings. |
 | `cli.session_registry` | `boolean` | `yes` | `user` | Participate in the cross-process session registry. |
 | `cli.show_tips` | `boolean` | `pin` | `user` | Startup tips. |
 | `cli.use_leader` | `boolean` | `pin` | `user` | Use the leader process for config reload and MCP watches. |
-| `cli.worktree_type` | `string` | `yes` | `user` | Worktree implementation preference. |
+| `cli.worktree_type` | `string` | `yes` | `user` | Creation-mode when set to `linked`, `standalone`, or `git`. The spellings `grove`, `grove-fuse`, `grove-nfs`, `nfs`, and `copy` also feed the session / `-w` Grove gate (same as `cli.grove_worktree`); they are not creation-mode values. |
 
 ### `compat`
 
@@ -224,6 +226,7 @@ User-level configuration lives in `$GROK_HOME/config.toml` (default `~/.grok/con
 | `features.subagent_worktree_snapshot` | `boolean` | `pin` | `user` | Enable or disable `subagent_worktree_snapshot`. Default false. Also `GROK_SUBAGENT_WORKTREE_SNAPSHOT`. |
 | `features.support_permission` | `boolean` | `yes` | `user` | Allow the agent to ask permission for tool executions. |
 | `features.telemetry` | `boolean / session_metrics / off` | `pin` | `user` | Product telemetry mode. Enterprise default is off. |
+| `features.terminal_theme` | `boolean` | `pin` | `user` | Reveal the terminal-native `terminal` color theme during its rollout. Default false. Also `GROK_TERMINAL_THEME`. |
 | `features.title_refresh` | `boolean` | `pin` | `user` | Early-session auto-title refresh. Pin this in requirements to beat GROK_TITLE_REFRESH. |
 | `features.turn_summary` | `boolean` | `pin` | `user` | Enable or disable `turn_summary`. Default true. Also `GROK_TURN_SUMMARY`. |
 | `features.two_pass_compaction` | `boolean` | `pin` | `user` | Enable or disable `two_pass_compaction`. Default true. Also `GROK_TWO_PASS_COMPACTION`. |
@@ -278,7 +281,7 @@ User-level configuration lives in `$GROK_HOME/config.toml` (default `~/.grok/con
 
 | Key | Type / Values | Requirements | Managed | Details |
 | --- | --- | --- | --- | --- |
-| `harness.block_for_upload` | `boolean` | `yes` | `user` | Block turn end until the workspace snapshot upload finishes. |
+| `harness.wait_for_uploads` | `boolean` | `yes` | `user` | Wait for turn-end trace uploads before returning the prompt response. Off by default; one-shot headless runs instead drain pending turn-end uploads at exit within a mandatory minimum budget (about 150s: the parse window plus one upload attempt) that `upload_flush_timeout_secs`, when larger, extends. |
 | `harness.disable_workspace_teleport` | `boolean` | `pin` | `user` | Kill switch for per-turn workspace snapshots. |
 
 ### `hints`
@@ -309,6 +312,7 @@ User-level configuration lives in `$GROK_HOME/config.toml` (default `~/.grok/con
 | Key | Type / Values | Requirements | Managed | Details |
 | --- | --- | --- | --- | --- |
 | `marketplace.sources` | `array of tables` | `yes` | `user` | `[[marketplace.sources]]` plugin marketplace repos. |
+| `marketplace.require_sha` | `boolean` | `yes` | `user` | Tighten-only: remote plugin installs and updates must pin a full commit sha. Also `GROK_MARKETPLACE_REQUIRE_SHA`. Neither this key nor the env var can turn the gate back off. |
 
 ### `mcp`
 
@@ -344,6 +348,7 @@ User-level configuration lives in `$GROK_HOME/config.toml` (default `~/.grok/con
 | Key | Type / Values | Requirements | Managed | Details |
 | --- | --- | --- | --- | --- |
 | `memory.enabled` | `boolean` | `pin` | `user` | Cross-session memory master switch. Also GROK_MEMORY. |
+| `memory.mode` | `"legacy"`, `"v2"` | — | `user` | Selects the persistent-memory implementation for new sessions. Default: `"legacy"`. `"v2"` is experimental; its legacy search, flush, and Dream paths are disabled. |
 
 ### `model`
 
@@ -371,12 +376,15 @@ User-level configuration lives in `$GROK_HOME/config.toml` (default `~/.grok/con
 | `model.<id>.model` | `string` | `yes` | `user` | Model id sent to the API. |
 | `model.<id>.model_family` | `string` | `yes` | `user` | Family id used for compaction and capability grouping. |
 | `model.<id>.model_provider` | `string` | `yes` | `user` | Named `[model_providers.<name>]` provider id for this model. |
+| `model.<id>.mtls_cert_dir` | `string` | `yes` | `user` | Directory containing the model endpoint's mTLS identity as `client.crt` and `client.key`, or `tls.crt` and `tls.key`; configuration is rejected unless the same model has one HTTPS `base_url` and no `api_base_url`, and requests do not follow redirects. |
 | `model.<id>.name` | `string` | `yes` | `user` | Label shown in the model picker. |
 | `model.<id>.query_params` | `map<string,string>` | `yes` | `user` | Extra query parameters on this model's requests. |
+| `model.<id>.rate_limit_retry_threshold` | `number` | `yes` | `user` | Total-attempt ceiling for rate-limited requests, capped by the resolved `max_retries`; when configured, it disables the separate subagent 429 wait loop. |
 | `model.<id>.reasoning_effort` | `string` | `yes` | `user` | Deprecated per-model effort; prefer `reasoning_efforts`. |
 | `model.<id>.reasoning_efforts` | `array of tables` | `yes` | `user` | Allowed reasoning-effort values for this model. |
 | `model.<id>.show_model_fingerprint` | `boolean` | `yes` | `user` | Show the provider model fingerprint in the UI when present. |
 | `model.<id>.stream_tool_calls` | `boolean` | `yes` | `user` | Per-model tool-call streaming request shape. |
+| `model.<id>.subagent_rate_limit_max_attempts` | `number` | `yes` | `user` | Maximum subagent 429 wait-loop attempts when `rate_limit_retry_threshold` is unset; default 8, maximum 32, and `0` disables the wait loop. |
 | `model.<id>.supported_in_api` | `boolean` | `yes` | `user` | Whether this catalog entry is offered as a public API model. |
 | `model.<id>.supports_backend_search` | `boolean` | `yes` | `user` | Whether the endpoint supports Grok-hosted server-side search tools. |
 | `model.<id>.supports_reasoning_effort` | `boolean` | `yes` | `user` | Deprecated; prefer `reasoning_efforts`. |
@@ -407,8 +415,10 @@ User-level configuration lives in `$GROK_HOME/config.toml` (default `~/.grok/con
 | `models.max_completion_tokens` | `number` | `yes` | `user` | Global max completion tokens default when a model leaves it unset. |
 | `models.max_retries` | `number` | `yes` | `user` | Global inference retry default when a model leaves it unset. |
 | `models.prompt_suggestion` | `string` | `yes` | `user` | Model pin for next-prompt ghost text. Unset falls through remote, then the session model. |
+| `models.rate_limit_retry_threshold` | `number` | `yes` | `user` | Global total-attempt ceiling for rate-limited requests when a model leaves it unset, capped by the resolved `max_retries`; when configured, it disables the separate subagent 429 wait loop. |
 | `models.session_summary` | `string` | `yes` | `user` | Model used for session titles and summaries. |
 | `models.stream_tool_calls` | `boolean` | `yes` | `user` | Global tool-call streaming request shape; some BYOK endpoints need false. |
+| `models.subagent_rate_limit_max_attempts` | `number` | `yes` | `user` | Global default for subagent 429 wait-loop attempts when `rate_limit_retry_threshold` is unset; default 8, maximum 32, and `0` disables the wait loop. |
 | `models.temperature` | `number` | `yes` | `user` | Global sampling temperature default when a model leaves it unset. |
 | `models.top_p` | `number` | `yes` | `user` | Global top_p default when a model leaves it unset. |
 | `models.web_search` | `string` | `pin` | `user` | Model used by the client `web_search` tool. Also `GROK_WEB_SEARCH_MODEL`. |

@@ -3,13 +3,7 @@ use xai_grok_tools::types::{claude_names_for, grok_names_for};
 
 /// A compiled hook matcher for tool names.
 /// The pattern semantics are chosen so that `matcher` entries in hooks migrated from other agent CLIs keep firing unchanged:
-///
-/// - an empty pattern or `"*"` matches every tool;
-/// - a "simple" pattern (a plain name or `|`-list) is an **exact** match against each name (after external-to-Grok alias expansion), NOT a regex;
-/// - anything else is an **unanchored** regex, also tested against the tool's external aliases, so e.g. `^Bash$` matches `run_terminal_command`.
-///
-/// The simple-vs-regex split avoids anchoring a `|`-alternation (a naive `^a|b|c$` anchors only the first/last term and silently over-matches).
-/// Whitespace is significant (not trimmed): `"  "` is a regex that matches nothing.
+/// an empty pattern or `"*"` matches every tool; a "simple" pattern (a plain name or `|`-list) is an **exact** match against each name (after external-to-Grok alias expansion), NOT a regex; anything else is an **unanchored** regex, also tested against the tool's external aliases, so e.g. `^Bash$` matches `run_terminal_command`.
 #[derive(Debug, Clone)]
 pub struct HookMatcher {
     kind: MatcherKind,

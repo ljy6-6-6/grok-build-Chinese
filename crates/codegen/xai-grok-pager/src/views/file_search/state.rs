@@ -73,12 +73,8 @@ pub struct FileSearchState {
     hovered: Option<usize>,
     /// Scroll offset for the dropdown list.
     scroll_offset: usize,
-    /// Floor for accepted result generations: the stale-result fence.
-    ///
-    /// Rises monotonically and is never lowered.
-    /// Each new query bumps it (see `start_query`); the daemon paces its own per-tick `generation` independently.
-    /// So `poll` drops any snapshot whose `generation` predates the floor and, on accept, raises the floor to the accepted generation.
-    /// This keeps matches from a prior query from flickering in.
+    /// Floor for accepted result generations: the stale-result fence. Rises monotonically and is never
+    /// lowered.
     min_generation: usize,
     /// Directory being drilled into; keeps the @-token alive when its name has whitespace (`my dir`).
     /// Self-validating: applies only while the path matches.
@@ -346,12 +342,8 @@ impl FileSearchState {
         self.results.topk.get(self.selected)
     }
 
-    /// Compute the text replacement for accepting the currently selected directory (drill-down acceptance).
-    ///
-    /// Pure query.
-    /// `dismiss` reports whether the caller should clear the context.
-    /// A directory whose `/`-append matches text already present is committed (dismiss); otherwise the caller drills in and stays open.
-    /// The `src` parameter is the full prompt text, needed to detect that no-op `/`-append.
+    /// A directory whose `/`-append matches text already present is committed (dismiss); otherwise the
+    /// caller drills in and stays open.
     pub fn try_replace(&self, src: &str) -> Option<FileSearchReplacement> {
         let ctx = self.context.as_ref()?;
         let res = self.results.topk.get(self.selected)?;

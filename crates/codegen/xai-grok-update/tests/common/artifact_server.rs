@@ -90,11 +90,8 @@ impl ArtifactServer {
         self.state.lock().unwrap().mode = mode;
     }
 
-    /// Number of body-serving GET requests handled so far (HEAD probes from the parallel-download path are excluded).
-    /// Tests use this to assert how many downloads actually happened.
-    /// For example: a sequential updater converged onto an already-installed binary without re-downloading.
-    /// One download may span multiple GETs when the parallel byte-range path splits it.
-    /// Tests asserting exact counts therefore use a small artifact (single-connection path, 1 GET per download).
+    /// Number of body-serving GET requests handled so far (HEAD probes from the parallel-download path are excluded). Tests
+    /// use this to assert how many downloads actually happened.
     pub fn request_count(&self) -> usize {
         self.gets.load(Ordering::Relaxed)
     }

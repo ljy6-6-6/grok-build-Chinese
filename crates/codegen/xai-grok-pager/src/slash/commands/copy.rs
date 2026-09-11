@@ -33,12 +33,9 @@ impl SlashCommand for CopyCommand {
     }
 }
 
-/// Parse `/copy` args into `(n, optional_file_path)`.
-///
-/// - empty parses to `(1, None)`
-/// - `2` parses to `(2, None)`
-/// - `out.txt` parses to `(1, Some(out.txt))`
-/// - `2 out.txt` parses to `(2, Some(out.txt))` (rest of line is the path, spaces ok)
+/// Parse `/copy` args into `(n, optional_file_path)`. empty parses to `(1, None)`. `2` parses to `(2, None)`.
+/// `out.txt` parses to `(1, Some(out.txt))`. `2 out.txt` parses to `(2, Some(out.txt))` (rest of line is the path,
+/// spaces ok).
 fn parse_copy_args(args: &str) -> Result<(usize, Option<PathBuf>), String> {
     let trimmed = args.trim();
     if trimmed.is_empty() {

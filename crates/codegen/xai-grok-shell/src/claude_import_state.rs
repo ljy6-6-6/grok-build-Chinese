@@ -95,7 +95,6 @@ pub(crate) fn save_import_state(state: &ImportState) -> std::io::Result<()> {
 
 /// Compute a SHA-256 hash over the contents of all Claude settings files for a given set of paths.
 /// Files that don't exist or can't be read are skipped.
-///
 /// Paths are sorted before hashing so the result is deterministic regardless of discovery order.
 fn compute_settings_hash(paths: &[PathBuf]) -> String {
     let mut existing: Vec<(&PathBuf, Vec<u8>)> = paths
@@ -119,7 +118,6 @@ fn compute_settings_hash(paths: &[PathBuf]) -> String {
 }
 
 /// Compute hash for global Claude settings (`~/.claude/settings*.json`, `~/.claude.json`).
-///
 /// `xai_dirs::home_dir()` resolves home the way the imported tool itself does (Node `os.homedir()`: `USERPROFILE` on Windows).
 /// So the hash covers the files that tool actually wrote even under a redirected profile.
 fn compute_global_hash() -> (String, Vec<PathBuf>) {

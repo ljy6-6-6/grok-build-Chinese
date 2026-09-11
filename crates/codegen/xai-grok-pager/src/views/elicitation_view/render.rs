@@ -529,6 +529,17 @@ fn row_bg(is_cur: bool, focused: bool, theme: &Theme) -> ratatui::style::Color {
     }
 }
 
+/// Row line style: `paint_row` applies it to the whole row rect. Band bg on
+/// RGB themes; reverse video on Reset palettes (terminal theme).
+fn row_style(is_cur: bool, focused: bool, theme: &Theme) -> Style {
+    let style = Style::default().bg(row_bg(is_cur, focused, theme));
+    if is_cur && focused {
+        style.patch(theme.selection_overlay())
+    } else {
+        style
+    }
+}
+
 fn paint_row(buf: &mut Buffer, x: u16, y: u16, width: u16, line: Line<'_>) {
     let row = Rect {
         x,
@@ -669,7 +680,14 @@ fn field_row(
     if !value_disp.is_empty() {
         spans.push(Span::styled(value_disp.to_string(), value_style));
     }
-    Line::from(spans).style(Style::default().bg(bg))
+    // Editable line while editing: bandless, no reverse (design rule).
+    let editing = is_cur && state.focus == ElicitationFocus::Editing;
+    let style = if editing {
+        Style::default().bg(bg)
+    } else {
+        row_style(is_cur, focused, theme)
+    };
+    Line::from(spans).style(style)
 }
 
 fn option_row(field: &FormFieldUi, option: usize, focused: bool, theme: &Theme) -> Line<'static> {
@@ -698,7 +716,7 @@ fn option_row(field: &FormFieldUi, option: usize, focused: bool, theme: &Theme) 
         Span::styled(format!("{mark} "), Style::default().fg(theme.gray).bg(bg)),
         Span::styled(label, label_style),
     ])
-    .style(Style::default().bg(bg))
+    .style(row_style(is_cur, focused, theme))
 }
 
 fn error_row(err: &str, on_cursor: bool, theme: &Theme) -> Line<'static> {
@@ -707,6 +725,10 @@ fn error_row(err: &str, on_cursor: bool, theme: &Theme) -> Line<'static> {
     } else {
         theme.bg_light
     };
+    let mut style = Style::default().bg(bg);
+    if on_cursor {
+        style = style.patch(theme.selection_overlay());
+    }
     Line::from(vec![
         Span::styled("      ", Style::default().bg(bg)),
         Span::styled(
@@ -714,7 +736,7 @@ fn error_row(err: &str, on_cursor: bool, theme: &Theme) -> Line<'static> {
             Style::default().fg(theme.accent_error).bg(bg),
         ),
     ])
-    .style(Style::default().bg(bg))
+    .style(style)
 }
 
 fn action_row(
@@ -756,5 +778,5 @@ fn action_row(
         Span::styled(format!("{marker} "), marker_style),
         Span::styled(label.to_string(), label_style),
     ])
-    .style(Style::default().bg(bg))
+    .style(row_style(is_cur, focused, theme))
 }

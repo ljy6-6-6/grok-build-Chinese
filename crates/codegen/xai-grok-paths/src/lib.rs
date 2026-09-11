@@ -31,7 +31,6 @@ pub trait ToAbsPath {
 }
 
 /// Convert an absolute path to relative by stripping the root prefix.
-///
 /// Returns the path unchanged if not under `root`.
 /// For strict validation, use [`RelPathBuf::from_absolute`] instead.
 pub fn to_relative_path(root: &Path, abs_path: &Path) -> PathBuf {
@@ -51,9 +50,7 @@ pub fn from_relative_path(root: &Path, rel_path: &Path) -> PathBuf {
 }
 
 /// Resolve `.` and `..` components without touching the filesystem.
-///
 /// Use only for lexical display or containment.
-/// If `b` is a symlink, normalizing `a/b/../c` can name a different filesystem target than the OS would resolve from the original spelling.
 /// Filesystem consumers must preserve the original path or deliberately canonicalize it before use.
 pub fn normalize_lexically(path: &Path) -> PathBuf {
     use std::path::Component;

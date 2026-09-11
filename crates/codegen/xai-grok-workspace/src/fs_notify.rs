@@ -10,9 +10,7 @@ use xai_fsnotify::{FsEvent, FsEventKind};
 use xai_hunk_tracker::HunkTrackerHandle;
 
 /// True if `path` lies under a hidden component below `cwd`.
-///
-/// The `cwd` prefix is stripped first, so a `cwd` like `/home/u/.config/foo` does not flag paths inside that directory as hidden.
-/// Only components below `cwd` that start with `.` (and are longer than a bare `.`) are considered hidden.
+/// The `cwd` prefix is stripped first so a hidden cwd itself is not flagged; only longer-than-`.` components below it count.
 pub(crate) fn is_under_hidden_dir(path: &Path, cwd: &Path) -> bool {
     let rel = path.strip_prefix(cwd).unwrap_or(path);
     rel.components().any(|c| {
@@ -104,12 +102,8 @@ pub(crate) fn to_workspace_event_kind(kind: FsEventKind) -> xai_grok_workspace_t
     }
 }
 
-/// Spawn a background task that reads [`FsEvent`]s from a broadcast receiver and forwards `FilesChanged` to the hunk tracker.
-/// Each affected path is re-broadcast as [`WorkspaceEvent::FsChanged`](xai_grok_workspace_types::WorkspaceEvent::FsChanged) on the event bus.
-///
-/// The task exits when:
-/// - the broadcast sender drops (all `FsEventSource`s for this receiver are gone), or
-/// - `cancel` is cancelled.
+/// Forward `FilesChanged` from an [`FsEvent`] broadcast to the hunk tracker and re-broadcast each path as `FsChanged`.
+/// Exits when the broadcast sender drops or `cancel` is cancelled.
 pub(crate) fn spawn_fs_event_forwarder(
     rx: tokio::sync::broadcast::Receiver<FsEvent>,
     hunk_tracker: HunkTrackerHandle,
@@ -210,11 +204,8 @@ fn parse_diff_name_status_line(
     }
 }
 
-/// After a HEAD change, diff `ORIG_HEAD..HEAD` and send targeted events to the codebase graph.
-/// Falls back to full rebuild if too many files changed.
-///
-/// Emits [`WorkspaceEvent::CodebaseIndexUpdated`] on `events_tx` after the index has been updated (via targeted events or a full rebuild).
-/// Skips the event if the index actor channel is closed (i.e. the actor has been dropped).
+/// After a HEAD change, diff `ORIG_HEAD..HEAD` and send targeted graph events, or rebuild if too many files changed.
+/// Emits `CodebaseIndexUpdated` after the update; skips it if the index actor channel is closed.
 pub(crate) async fn refresh_codebase_graph_after_head_change(
     idx: &xai_codebase_graph::IndexManagerHandle,
     repo_root: &Path,

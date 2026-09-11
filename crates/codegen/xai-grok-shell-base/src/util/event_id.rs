@@ -17,23 +17,8 @@ pub fn generate_event_id(session_id: &str) -> String {
 }
 
 /// Stamp `_meta.eventId` and `agentTimestampMs` onto a notification's meta unless an `eventId` is already present, preserving other meta fields.
-///
-/// Every persisted notification should carry an `eventId`.
 /// The reconnect cursor (`session/load` `_meta.cursor`) can only bound the replay tail when each persisted line is identifiable.
-/// The same id must go out on the live broadcast so clients advance their cursor to ids that exist on disk.
-/// Broadcast-only notifications are deliberately left unstamped.
-/// A cursor pointing at an id absent from `updates.jsonl` never resolves and forces a full replay on every reconnect.
-///
-/// Stamping chokepoints (stamp before the persist/broadcast fork so both copies share one id):
-/// - `SessionActor::emit_notification_direct` (all actor ACP notifications, including the buffered pipeline)
-/// - `send_xai_notification` / `persist_xai_update_only` / `handle_xai_session_notification` (actor xAI)
-/// - `notification_bridge::stamp_event_id` (bridge)
-/// - `emit_subagent_notification` (subagent)
-/// - `GoalNotifySender::send_update` (goal mode)
-/// - the inline `build_notification_meta` persists of echoed user messages
-///
-/// An emitter outside these is not a correctness bug, but it silently disables incremental reconnect for its sessions.
-/// `prepare_replay_lines` refuses a cursor over a tail whose lines lack ids and falls back to a safe full replay.
+/// The same id must go out on the live broadcast so clients advance their cursor to ids that exist on disk. Broadcast-only notifications are deliberately left unstamped. A cursor pointing at an id absent from `updates.jsonl` never resolves and forces a full replay on every reconnect.
 pub fn ensure_event_id_meta(
     session_id: &str,
     meta: &mut Option<serde_json::Map<String, serde_json::Value>>,
@@ -53,16 +38,9 @@ pub fn ensure_event_id_meta(
         .or_insert_with(|| timestamp_ms.into());
 }
 
-/// Raise the global event counter so the next generated id is at least `next`.
-///
-/// The counter is process-global and starts at 0 on every launch.
+/// Raise the global event counter so the next generated id is at least `next`. The counter is process-global and starts at 0 on every launch.
 /// Client dedup (`acp::meta::NotificationMeta::event_seq`) relies on `eventId` increasing over a session's whole history, not just one process.
-/// On `--resume` (or any reload into a fresh process) the replayed transcript carries the original process's high counters.
-/// Without re-seeding, this process would mint lower ids for new live events.
-/// The client's dedup would then drop every one of them (frozen token counter, missing turns).
-/// Call this once on session load with `persisted_max + 1`.
-///
-/// Uses `fetch_max`, so it only ever raises the counter and is safe to call from concurrently-loading sessions.
+/// On `--resume` (or any reload into a fresh process) the replayed transcript carries the original process's high counters. Without re-seeding, this process would mint lower ids for new live events. Uses `fetch_max`, so it only ever raises the counter and is safe to call from concurrently-loading sessions.
 pub fn ensure_event_counter_at_least(next: u64) {
     EVENT_COUNTER.fetch_max(next, Ordering::SeqCst);
 }

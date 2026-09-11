@@ -125,3 +125,49 @@ async fn managed_policy_hook_disable_actions_are_refused() {
     // Both refusals happened before any disable state was written
     guard.assert_unchanged();
 }
+
+/// Enable/disable refresh the dispatch snapshot in place, so `hook_run_ctx` never reads the disabled-hooks file itself.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(disabled_hooks_file)]
+async fn toggling_a_hook_refreshes_the_dispatch_snapshot() {
+    const HOOK: &str = "global/qa:pre_tool_use[0].hooks[0]";
+    let _guard = DisabledHooksGuard::capture();
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) =
+                mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor =
+                Arc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
+            let _ = xai_grok_hooks::trust::enable_hook(HOOK);
+            actor.refresh_hook_disabled();
+            assert!(!actor.hook_run_ctx().disabled().contains(HOOK));
+
+            let outcome = actor
+                .handle_hooks_action(xai_hooks_plugins_types::HooksAction::Disable {
+                    hook_name: HOOK.to_string(),
+                })
+                .await;
+            assert_eq!(
+                outcome.status,
+                xai_hooks_plugins_types::OutcomeStatus::Success
+            );
+            assert!(
+                actor.hook_run_ctx().disabled().contains(HOOK),
+                "the next dispatch must see the disable without reading the file"
+            );
+
+            let outcome = actor
+                .handle_hooks_action(xai_hooks_plugins_types::HooksAction::Enable {
+                    hook_name: HOOK.to_string(),
+                })
+                .await;
+            assert_eq!(
+                outcome.status,
+                xai_hooks_plugins_types::OutcomeStatus::Success
+            );
+            assert!(!actor.hook_run_ctx().disabled().contains(HOOK));
+        })
+        .await;
+}

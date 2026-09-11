@@ -418,6 +418,8 @@ View credit usage or manage billing. Alias: `/cost`.
 /usage manage
 ```
 
+Inside a session this opens the usage modal with the account allowance plus that session's context and token totals. From the [Agent Dashboard](23-dashboard.md#dispatch-input) the same modal opens over the dashboard; there is no session there, so only the **Usage limit** tab carries data.
+
 For persisted per-turn token and cost totals of any local session, use `grok usage <session-id> [turn]` from the shell. See [Session Management](17-sessions.md#the-grok-usage-subcommand).
 
 ### `/privacy`

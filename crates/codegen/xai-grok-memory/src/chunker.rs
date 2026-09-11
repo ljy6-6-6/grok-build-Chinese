@@ -22,12 +22,7 @@ pub fn chunk_hash(text: &str) -> String {
 }
 
 /// Split markdown content into chunks, respecting structure.
-///
-/// Strategy:
-/// 1. Split on `##` headers; each section is a candidate chunk
-/// 2. If a section exceeds `max_chunk_chars`, split on paragraph boundaries (`\n\n`)
-/// 3. If a paragraph still exceeds `max_chunk_chars`, split on line boundaries
-///
+/// Split on `##` headers; each section is a candidate chunk; If a section exceeds `max_chunk_chars`, split on paragraph boundaries (`\n\n`); If a paragraph still exceeds `max_chunk_chars`, split on line boundaries.
 /// Continuation chunks are prefixed with the last `chunk_overlap_chars` of the previous chunk for embedding continuity, plus ancestor header context.
 pub fn chunk_markdown(content: &str, config: &MemoryIndexConfig) -> Vec<Chunk> {
     if content.is_empty() {

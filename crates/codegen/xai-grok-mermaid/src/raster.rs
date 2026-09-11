@@ -15,7 +15,6 @@ use resvg::usvg;
 use crate::{MermaidError, RenderParams, RenderedDiagram, Rgba};
 
 /// Bundled primary sans face (Roboto Regular, Apache-2.0); system fonts are consulted only as glyph fallback for characters it lacks.
-///
 /// The vendored layout engine measures text with fixed char-width metrics (no font file), so there is no layout/raster font to keep in sync.
 /// This face is used purely to rasterize glyphs.
 pub(crate) const BUNDLED_FONT: &[u8] = include_bytes!("../assets/Roboto-Regular.ttf");
@@ -51,11 +50,8 @@ fn build_font_set(with_system_fonts: bool) -> FontSet {
     if with_system_fonts {
         db.load_system_fonts();
     }
-    // The engine emits font-family lists ending in a generic (e.g. "Inter, ..., sans-serif").
+    // The engine emits font-family lists ending in a generic.
     // None of the named families are loaded, so resolution falls to the generic
-    // The generic maps to fontdb's default name (Arial, Times, ...), which is also not loaded
-    // With system fonts disabled that drops every glyph (blank node labels)
-    // Point all generics at the one bundled face so any list resolves to Roboto
     db.set_serif_family(&family);
     db.set_sans_serif_family(&family);
     db.set_monospace_family(&family);
@@ -99,14 +95,7 @@ fn rgba_to_color(c: Rgba) -> tiny_skia::Color {
 }
 
 /// Rasterize `svg` to a PNG using `params`.
-///
-/// Sizing: the SVG's intrinsic size is scaled to [`RenderParams::target_width_px`] (or by [`RenderParams::scale`] when that is `0`).
-/// The scale is raised to meet [`RenderParams::min_width_px`] when set.
-/// The output is then clamped to fit [`RenderParams::max_height_px`], [`MAX_OUTPUT_MEGAPIXELS`] total area, and the internal per-axis cap.
 /// A [`RenderParams::background`] of `Some` fills the canvas opaquely; `None` leaves it transparent.
-///
-/// # Errors
-///
 /// Returns [`MermaidError::Rasterize`] if the SVG cannot be parsed, has zero size, or cannot be encoded to PNG.
 pub fn rasterize(svg: &str, params: &RenderParams) -> Result<RenderedDiagram, MermaidError> {
     rasterize_with_font(svg, params, font_set_for(svg))
@@ -204,9 +193,6 @@ fn effective_scale(base_w: f32, base_h: f32, params: &RenderParams) -> f32 {
 }
 
 /// Convert floored float dimensions into the final integer pixmap size, enforcing the hard caps.
-///
-/// `effective_scale` caps the *float* area.
-/// For an extreme-aspect diagram, bumping a sub-1px axis up to 1 (`.max(1)`) can inflate the integer product past that cap.
 /// So after the floor and `max(1)`, cap each axis at [`MAX_OUTPUT_DIMENSION`] and shrink the larger axis until `width * height` fits the area cap.
 fn clamp_dimensions(width_f: f32, height_f: f32) -> (u32, u32) {
     let mut width_px = (width_f.floor() as u32).clamp(1, MAX_OUTPUT_DIMENSION);
@@ -455,8 +441,7 @@ mod tests {
 
     #[test]
     fn text_with_engine_font_family_actually_renders_glyphs() {
-        // Regression: the engine themes set font-family lists like "Inter, ..., sans-serif", none of which name the bundled Roboto face
-        // usvg resolves the generic `sans-serif` via fontdb's generic-family map (default "Arial"), which isn't loaded
+        // Regression: the engine themes set font-family lists like "Inter, ..., sans-serif", none of which name the bundled Roboto face usvg resolves the generic `sans-serif` via fontdb's generic-family map (default "Arial"), which isn't loaded
         // Unless the generics point at the bundled face, the glyphs are silently dropped and node labels render blank
         // Black text on white: assert dark pixels exist
         let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="60" viewBox="0 0 200 60"><text x="10" y="38" font-family="Inter, ui-sans-serif, system-ui, -apple-system, &quot;Segoe UI&quot;, sans-serif" font-size="28" fill="#000000">Hello</text></svg>"##;

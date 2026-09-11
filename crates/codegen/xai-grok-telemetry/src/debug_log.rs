@@ -40,17 +40,14 @@ impl DebugSource {
     }
 }
 
-/// Target for the pager's always-on compact ACP update summary line (kind, ids, status, payload sizes).
-///
-/// Lives here (not in `xai-grok-pager`) so the firehose directives below and the pager's own filter are built from the same constants.
-/// A rename can't silently turn the directive into a no-op.
+/// Target for the pager's always-on compact ACP update summary line (kind, ids, status, payload sizes). Lives here (not
+/// in `xai-grok-pager`) so the firehose directives below and the pager's own filter are built from the same constants. A
+/// rename can't silently turn the directive into a no-op.
 pub const ACP_UPDATE_TARGET: &str = "acp_update";
 
-/// Target for the pager's full ACP update payload dump (plain JSON).
-///
-/// Off in the pager's release filter.
-/// The firehose is the always-available subscriber for full payloads, and it writes to disk, where the volume is safe.
-/// See `xai-grok-pager/src/tracing.rs` for the consumer side.
+/// Target for the pager's full ACP update payload dump (plain JSON). Off in the pager's release filter. The firehose is
+/// the always-available subscriber for full payloads, and it writes to disk, where the volume is safe. See
+/// `xai-grok-pager/src/tracing.rs` for the consumer side.
 pub const ACP_UPDATE_PAYLOAD_TARGET: &str = "acp_update_payload";
 
 /// Module path of rmcp 2.1's per-reconnect SSE warn (`sse stream error: ...`), which subscribers demote to `error` to drop the flood.
@@ -60,7 +57,7 @@ pub const RMCP_SSE_NOISE_TARGET: &str = "rmcp::transport::common::client_side_ss
 // Broad firehose filter for the routing and GROK_DEBUG_LOG sources
 // Capture our crates at debug regardless of a narrowing RUST_LOG, with deps at info so they don't flood
 // Curated first-party allowlist: new grok crates default to `info` until added here
-const FIREHOSE_BASE_DIRECTIVES: &str = "info,xai_grok_pager=debug,xai_grok_shell=debug,xai_grok_tools=debug,xai_grok_telemetry=debug,xai_grok_agent=debug,xai_grok_mcp=debug,xai_grok_session_search=debug,xai_acp_lib=debug,sampling_log=off";
+const FIREHOSE_BASE_DIRECTIVES: &str = "info,xai_grok_pager=debug,xai_grok_shell=debug,xai_grok_gateway=debug,xai_grok_login=debug,xai_grok_tools=debug,xai_grok_telemetry=debug,xai_grok_agent=debug,xai_grok_mcp=debug,xai_grok_session_search=debug,xai_acp_lib=debug,sampling_log=off";
 
 // Full firehose directives: the curated crate list plus the pager's ACP update target (built from the constant above, not a literal)
 fn firehose_directives() -> String {
@@ -140,10 +137,9 @@ impl Visit for EventVisitor {
     }
 }
 
-// Format one compact, ANSI-free firehose line
-// The output is intentionally not byte-identical to `fmt::Layer`
-// Its `FormatEvent` can't be reused from another layer and a `MakeWriter` can't see span context, so we render here
-// Span context is omitted on purpose; the file name already carries the session id
+// Format one compact, ANSI-free firehose line The output is intentionally not byte-identical to `fmt::Layer`. Its
+// `FormatEvent` can't be reused from another layer and a `MakeWriter` can't see span context, so we render here. Span
+// context is omitted on purpose; the file name already carries the session id
 fn format_event(event: &tracing::Event<'_>) -> String {
     let meta = event.metadata();
     let mut visitor = EventVisitor::default();
@@ -217,9 +213,8 @@ fn update_latest_symlink(dir: &Path, target: &Path) {
 #[cfg(not(unix))]
 fn update_latest_symlink(_dir: &Path, _target: &Path) {}
 
-/// Per-session sinks plus a single fallback sink, all behind the routing layer's mutex.
-/// No cap or eviction: each session id opens one file, worker, and parked guard for the process lifetime.
-/// That is fine for an opt-in, debug-only firehose.
+/// Per-session sinks plus a single fallback sink, all behind the routing layer's mutex. No cap or eviction: each session
+/// id opens one file, worker, and parked guard for the process lifetime. That is fine for an opt-in, debug-only firehose.
 /// The central guard parking (`appender`) lets `flush()` drain these at exit, so we do not reclaim per session.
 #[derive(Default)]
 struct SinkMap {
@@ -335,11 +330,8 @@ where
 // ── Install + lifecycle ──────────────────────────────────────────────────────
 
 /// Resolve the requested debug target and install the matching firehose layer on `registry`, then init the subscriber.
-///
-/// PerSession installs the routing layer (firehose filter, RUST_LOG-immune) and prunes old session logs.
-/// SingleFile installs a flat `fmt` file picking the filter by source (GROK_LOG_FILE respects RUST_LOG).
-/// Open failures warn after init in the single-file case; routing open failures are per-file at write time and degrade gracefully.
-/// `role` names the per-pid fallback file.
+/// PerSession installs the routing layer (firehose filter, RUST_LOG-immune) and prunes old session logs. Open failures
+/// warn after init in the single-file case; routing open failures are per-file at write time and degrade gracefully.
 pub fn install_firehose<S>(registry: S, role: &str)
 where
     S: Subscriber + for<'span> LookupSpan<'span> + Send + Sync + 'static,
@@ -386,11 +378,9 @@ pub(crate) enum DebugTarget {
     SingleFile { path: PathBuf, src: DebugSource },
 }
 
-/// Resolve the debug target, honoring precedence: explicit GROK_LOG_FILE wins
-/// (single file, RUST_LOG filter); else GROK_DEBUG_LOG — a truthy bool routes
-/// per session into `~/.grok/debug`, an explicit path writes a single file.
-///
-/// Read via `var_os` (not `var`) so a non-UTF-8 path isn't silently dropped.
+/// Resolve the debug target, honoring precedence: explicit GROK_LOG_FILE wins (single file, RUST_LOG filter); else
+/// GROK_DEBUG_LOG — a truthy bool routes per session into `~/.grok/debug`, an explicit path writes a single file. Read
+/// via `var_os` (not `var`) so a non-UTF-8 path isn't silently dropped.
 pub(crate) fn resolve_debug_target() -> Option<DebugTarget> {
     let grok_log_file = std::env::var_os("GROK_LOG_FILE");
     let grok_debug_log = std::env::var_os("GROK_DEBUG_LOG");
@@ -415,9 +405,8 @@ fn os_path(v: &OsStr) -> PathBuf {
     }
 }
 
-// Env-free precedence core so the resolution rules are unit-testable
-// The routing layer owns fallback naming, so resolution only decides between a routing dir and a single-file path
-// Takes `OsStr` so non-UTF-8 paths round-trip
+// Env-free precedence core so the resolution rules are unit-testable. The routing layer owns fallback naming, so
+// resolution only decides between a routing dir and a single-file path. Takes `OsStr` so non-UTF-8 paths round-trip.
 // Only the bool-vs-path discrimination needs UTF-8 (a non-UTF-8 value can't be a bool keyword, so it's a path)
 fn resolve_debug_target_inner(
     grok_log_file: Option<&OsStr>,
@@ -456,10 +445,9 @@ pub(crate) fn sweep_old_logs() {
     prune_old_logs(&grok_home().join("debug"), LOG_RETENTION);
 }
 
-// Pure prune core: remove `*.txt` files and orphaned `latest.txt` swap temps in `dir` older than `max_age`
-// Age-based so a recently-written (active) log is never deleted
-// Spares the `latest.txt` symlink (a stale link is harmless and never an active file)
-// Best-effort so cleanup never fails logging setup; testable against a tempdir
+// Pure prune core: remove `*.txt` files and orphaned `latest.txt` swap temps in `dir` older than `max_age`. Age-based so
+// a recently-written (active) log is never deleted. Spares the `latest.txt` symlink (a stale link is harmless and never
+// an active file). Best-effort so cleanup never fails logging setup; testable against a tempdir
 fn prune_old_logs(dir: &Path, max_age: std::time::Duration) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -497,6 +485,12 @@ mod tests {
     fn flush_test_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: Mutex<()> = Mutex::new(());
         LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Bridge diagnostics moved to `xai_grok_gateway`; the firehose allowlist must keep it at debug.
+    #[test]
+    fn firehose_directives_allowlist_gateway_target() {
+        assert!(firehose_directives().contains("xai_grok_gateway=debug"));
     }
 
     #[test]

@@ -26,27 +26,13 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use crossterm::event::KeyboardEnhancementFlags;
 
-/// Highest packed `alacritty_terminal` version that mis-encodes `REPORT_EVENT_TYPES`.
-/// The *release* of Backspace, Tab, Enter and Escape comes back as a duplicate legacy byte, which carries no event type.
-/// So crossterm reads it as a second `Press` and one keypress acts twice: Enter submits twice.
-/// (Upstream's CHANGELOG omits Escape; its `key_release` arm does not.)
-///
-/// DA2 reports the **library** version, not the Alacritty release: 0.14.0 ships 0.24.1, packed `2401`; 0.15.0 ships 0.24.2, packed `2402`.
-/// Fixed by `7bda13b8aa` (2025-01-04).
-/// The v0.15.0 CHANGELOG lists it under Fixed: *"Report of Enter/Tab/Backspace in kitty keyboard's report event types mode."*
-/// There is no `v0.14.1`, so 0.14.0 is the whole affected *release* population; this threshold never moves, it only gets retired.
-///
-/// Git builds escape it: master carried `0.24.2-dev` from 2024-10-18 to 2025-01-09 and the suffix is stripped before packing.
-/// So a pre-fix build from that window reports `2402`.
+/// Highest packed library version that emits a duplicate legacy release for Backspace/Tab/Enter/Escape.
+/// Crossterm reads that as a second Press, so Enter submits twice. Threshold is the 0.14.0 library (`2401`); it only gets retired.
+/// Git builds strip `-dev` before packing, so a pre-fix `0.24.2-dev` reports `2402` and escapes this gate.
 pub const ALACRITTY_BROKEN_EVENT_TYPES_MAX_PACKED: u32 = 2401;
 
-/// The flags to push at startup; empty means push nothing.
-///
-/// An unknown version never downgrades: DA2 is skipped under multiplexers and off unix, so `None` is common.
-/// The downgrade costs the features listed in the module docs; only a positively identified affected version gets it.
-///
-/// The missing brand check is load-bearing: [`super::da2`]'s probe gate admits Alacritty alone, so a version in hand already implies the brand.
-/// Widening that gate silently widens this one.
+/// Empty means push nothing. Unknown version never downgrades — DA2 is often skipped, and only a positively identified broken version pays the cost.
+/// No brand check: [`super::da2`]'s gate admits Alacritty alone, so widening that gate widens this one.
 pub fn negotiated_kitty_flags(
     skip_reason: Option<&str>,
     da2_packed: Option<u32>,
@@ -63,10 +49,8 @@ pub fn negotiated_kitty_flags(
     flags
 }
 
-/// Bits of the [`KeyboardEnhancementFlags`] `init_terminal` pushed; `0` is `empty()`.
-/// Storing the set actually sent, rather than a classification of it, is what keeps the predicates below from drifting apart.
-///
-/// `Relaxed`: the cell publishes no other memory, and readers are already ordered after `init_terminal` by the task creation between them.
+/// Bits actually pushed (`0` is empty), not a classification, so the predicates cannot drift.
+/// Relaxed: no other memory is published, and readers are ordered after `init_terminal`.
 static PUSHED_KITTY_FLAGS: AtomicU8 = AtomicU8::new(0);
 
 /// The exact flag set `init_terminal` pushed; the suspend/resume path re-pushes this verbatim so the two can never drift.
@@ -78,11 +62,8 @@ pub fn set_pushed_kitty_flags(flags: KeyboardEnhancementFlags) {
     PUSHED_KITTY_FLAGS.store(flags.bits(), Ordering::Relaxed);
 }
 
-/// Whether Kitty keyboard enhancement flags were actually pushed during `init_terminal`.
-/// That means the brand wasn't in the skip list *and* the runtime probe (`supports_keyboard_enhancement`) succeeded.
-/// False means modified keys (Shift+Enter, Ctrl+.) arrive as legacy bytes.
-///
-/// This is **not** "key releases arrive"; use [`kitty_releases_reported`].
+/// True only if flags were actually pushed. False means modified keys arrive as legacy bytes.
+/// This is not "key releases arrive"; use [`kitty_releases_reported`].
 pub fn kitty_flags_pushed() -> bool {
     !pushed_kitty_flags().is_empty()
 }

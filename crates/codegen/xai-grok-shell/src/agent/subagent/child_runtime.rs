@@ -59,10 +59,10 @@ impl ChildControl for ShellChildRuntime {
                 if self.force_queue_envelope {
                     xai_message_delivery_core::Operation::Queue
                 } else {
-                    crate::session::message_delivery::delivery_operation(delivery.operation())
+                    xai_message_delivery_core::Operation::from(delivery.operation())
                 }
                 #[cfg(not(test))]
-                crate::session::message_delivery::delivery_operation(delivery.operation())
+                xai_message_delivery_core::Operation::from(delivery.operation())
             },
             message.text.clone(),
             crate::session::message_delivery::agent_delivery_identity(message.message_id.clone()),

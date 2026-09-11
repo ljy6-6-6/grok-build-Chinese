@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::auth::{AuthManager, GrokAuth};
+use xai_grok_login::{AuthManager, GrokAuth};
 
 const GROK_WEB_URL: &str = "https://grok.com";
 
@@ -141,7 +141,7 @@ impl ConversationsClient {
         if let Some(email) = &auth.email {
             builder = builder.header("x-email", email);
         }
-        xai_file_utils::trace_context::inject_trace_context_into_request(builder)
+        xai_grok_otel::inject_trace_context_into_request(builder)
     }
 
     pub async fn list_conversations(

@@ -12,11 +12,7 @@ use super::MemoryStorage;
 /// planted `/dev/zero` symlink) must not balloon the process.
 const MAX_MEMORY_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
-/// Open `path` without following a final-component symlink, without blocking
-/// on a FIFO, and only if it is a regular file. The memory dir is writable
-/// to sandboxed agents, so a planted symlink must not smuggle sandbox-denied
-/// files (`~/.ssh/id_rsa`, …) into the uploaded archive, and a special file
-/// must not hang or grow the non-abortable build.
+/// Open `path` without following a final-component symlink, without blocking on a FIFO, and only if it is a regular file. The memory dir is writable to sandboxed agents, so a planted symlink must not smuggle sandbox-denied files (`~/.ssh/id_rsa`, …) into the uploaded archive, and a special file must not hang or grow the non-abortable build.
 fn open_regular_nofollow(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     let mut opts = std::fs::OpenOptions::new();
     opts.read(true);
@@ -32,11 +28,7 @@ fn open_regular_nofollow(path: &std::path::Path) -> std::io::Result<std::fs::Fil
     Ok(file)
 }
 
-/// Snapshot `path`'s bytes and append them as `name`: the tar header size must
-/// match the copied bytes even when a same-process writer (dream
-/// consolidation, `/flush`) resizes the live file mid-build. Skips (never
-/// fails the archive) on: vanished files, symlinks, non-regular files, and
-/// files over [`MAX_MEMORY_FILE_BYTES`].
+/// Snapshot `path`'s bytes and append them as `name`: the tar header size must consolidation, `/flush`) resizes the live file mid-build. Skips (never fails the archive) on: vanished files, symlinks, non-regular files, and files over [`MAX_MEMORY_FILE_BYTES`].
 fn append_file_snapshot<W: std::io::Write>(
     ar: &mut tar::Builder<W>,
     path: &std::path::Path,

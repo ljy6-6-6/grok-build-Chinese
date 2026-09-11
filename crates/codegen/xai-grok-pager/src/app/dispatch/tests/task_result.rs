@@ -1,12 +1,45 @@
 //! Tests for async task-result application arms.
 
 use super::super::task_result::{
-    X11_PRIMARY_PASTE_HINT, maybe_show_x11_primary_paste_hint, show_clipboard_failure,
-    wrap_host_image_request_eligible,
+    LiveSessionKind, X11_PRIMARY_PASTE_HINT, live_session_kind, maybe_show_x11_primary_paste_hint,
+    show_clipboard_failure, wrap_host_image_request_eligible,
 };
 use super::*;
+use crate::app::subagent::{SubagentLifecycleReduction, SubagentLifecycleTransition};
 use xai_grok_shell::session::helpers::session_compact::COMPACT_CANCELLED_MSG;
 use xai_grok_shell::session::unified_list::ListScope;
+
+#[test]
+fn live_session_kind_distinguishes_missing_conversation_and_build_matches() {
+    let mut app = test_app_with_agent();
+    assert_eq!(live_session_kind(&app, "missing"), LiveSessionKind::Missing);
+
+    let session_id = app.agents[&AgentId(0)]
+        .session
+        .session_id
+        .as_ref()
+        .unwrap()
+        .0
+        .to_string();
+    app.agents.get_mut(&AgentId(0)).unwrap().conversation_entry = true;
+    assert_eq!(
+        live_session_kind(&app, &session_id),
+        LiveSessionKind::ConversationOnly
+    );
+
+    let duplicate = AgentId(1);
+    app.agents.insert(
+        duplicate,
+        crate::app::agent_view::test_fixtures::make_agent(),
+    );
+    app.agents.get_mut(&duplicate).unwrap().session.session_id =
+        Some(acp::SessionId::new(session_id.clone()));
+    app.agents.get_mut(&duplicate).unwrap().conversation_entry = false;
+    assert_eq!(
+        live_session_kind(&app, &session_id),
+        LiveSessionKind::IncludesBuild
+    );
+}
 
 fn doctor_target(app: &AppView, id: AgentId) -> crate::app::actions::DoctorFixTarget {
     let agent = &app.agents[&id];
@@ -83,6 +116,35 @@ fn doctor_planning_rejects_bind_replace_and_unbind_rebind() {
             "{replacement}"
         );
     }
+}
+
+#[test]
+fn doctor_planning_displaces_feedback_before_opening_question() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let target = doctor_target(&app, id);
+    app.agents.get_mut(&id).unwrap().feedback_modal =
+        Some(crate::views::feedback_modal::FeedbackModalState::new(
+            crate::views::feedback_modal::OpenFeedbackModal {
+                text: Some("unsent report".to_owned()),
+                ..Default::default()
+            },
+        ));
+
+    dispatch_task_result(
+        TaskResult::DoctorFixPlanned {
+            target,
+            result: Ok(crate::app::actions::DoctorPlanningOutcome::Plan(Box::new(
+                crate::diagnostics::test_fix_plan(temp.path()),
+            ))),
+        },
+        &mut app,
+    );
+
+    let agent = &app.agents[&id];
+    assert!(agent.feedback_modal.is_none());
+    assert!(agent.question_view.is_some());
 }
 
 #[test]
@@ -494,7 +556,6 @@ fn x11_primary_hint_requires_canonical_full_miss_outcome() {
     let target = ClipboardPasteTarget::AgentPrompt {
         agent_id: AgentId(0),
         images_dir: None,
-        from_feedback_pane: false,
     };
 
     for completion in [
@@ -560,7 +621,6 @@ fn x11_primary_hint_routes_to_originating_agent() {
     let target = crate::app::actions::ClipboardPasteTarget::AgentPrompt {
         agent_id: origin,
         images_dir: None,
-        from_feedback_pane: false,
     };
 
     maybe_show_x11_primary_paste_hint(
@@ -620,7 +680,6 @@ fn clipboard_failure_routes_to_originating_agent_without_duplicate() {
     let target = crate::app::actions::ClipboardPasteTarget::AgentPrompt {
         agent_id: origin,
         images_dir: None,
-        from_feedback_pane: false,
     };
 
     show_clipboard_failure(
@@ -949,7 +1008,7 @@ fn kill_rpc_failure_does_not_finalize_but_nothing_live_does() {
     {
         let agent = app.agents.get_mut(&id).unwrap();
         let mut info = make_test_subagent("child-1", "sa-1");
-        info.pending_kill = true;
+        info.attempt.pending_kill = true;
         agent.subagent_sessions.insert("child-1".into(), info);
     }
 
@@ -958,12 +1017,13 @@ fn kill_rpc_failure_does_not_finalize_but_nothing_live_does() {
         TaskResult::KillSubagentComplete {
             session_id: sid.clone(),
             subagent_id: "sa-1".into(),
+            attempt_id: None,
             outcome: SubagentKillOutcome::RpcFailed,
         },
         &mut app,
     );
     assert!(
-        !app.agents[&id].subagent_sessions["child-1"].finished,
+        !app.agents[&id].subagent_sessions["child-1"].is_finished(),
         "a failed cancel RPC must not finalize the row"
     );
 
@@ -972,12 +1032,13 @@ fn kill_rpc_failure_does_not_finalize_but_nothing_live_does() {
         TaskResult::KillSubagentComplete {
             session_id: sid,
             subagent_id: "sa-1".into(),
+            attempt_id: None,
             outcome: SubagentKillOutcome::NothingLive { status: None },
         },
         &mut app,
     );
     assert!(
-        app.agents[&id].subagent_sessions["child-1"].finished,
+        app.agents[&id].subagent_sessions["child-1"].is_finished(),
         "nothing-live must finalize the orphan row"
     );
 }
@@ -992,7 +1053,7 @@ fn kill_nothing_live_with_status_stamps_real_terminal_status() {
     {
         let agent = app.agents.get_mut(&id).unwrap();
         let mut info = make_test_subagent("child-1", "sa-1");
-        info.pending_kill = true;
+        info.attempt.pending_kill = true;
         agent.subagent_sessions.insert("child-1".into(), info);
     }
 
@@ -1000,6 +1061,7 @@ fn kill_nothing_live_with_status_stamps_real_terminal_status() {
         TaskResult::KillSubagentComplete {
             session_id: sid,
             subagent_id: "sa-1".into(),
+            attempt_id: None,
             outcome: SubagentKillOutcome::NothingLive {
                 status: Some("completed".into()),
             },
@@ -1007,12 +1069,72 @@ fn kill_nothing_live_with_status_stamps_real_terminal_status() {
         &mut app,
     );
     let info = &app.agents[&id].subagent_sessions["child-1"];
-    assert!(info.finished, "already-finished orphan must be finalized");
+    assert!(
+        info.is_finished(),
+        "already-finished orphan must be finalized"
+    );
     assert_eq!(
-        info.status.as_deref(),
+        info.attempt.status.as_deref(),
         Some("completed"),
         "the shell's real terminal status must be stamped, not 'cancelled'"
     );
+}
+
+#[test]
+fn stale_kill_result_does_not_finish_replacement_attempt() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let sid = acp::SessionId::new("test-session".to_owned());
+    let mut info = make_test_subagent("child-1", "sa-1");
+    let first_attempt = "at1.first";
+    let second_attempt = "at1.second";
+    let SubagentLifecycleReduction::Accepted(first_spawn) = info.attempt.lifecycle.reduce(
+        SubagentLifecycleTransition::Spawned,
+        Some(first_attempt),
+        Some(1),
+    ) else {
+        panic!("first attempt spawn");
+    };
+    first_spawn.commit(&mut info.attempt.lifecycle);
+    let SubagentLifecycleReduction::Accepted(first_finish) = info.attempt.lifecycle.reduce(
+        SubagentLifecycleTransition::Finished,
+        Some(first_attempt),
+        Some(2),
+    ) else {
+        panic!("first attempt finish");
+    };
+    first_finish.commit(&mut info.attempt.lifecycle);
+    let SubagentLifecycleReduction::Accepted(second_spawn) = info.attempt.lifecycle.reduce(
+        SubagentLifecycleTransition::Spawned,
+        Some(second_attempt),
+        Some(3),
+    ) else {
+        panic!("second attempt spawn");
+    };
+    second_spawn.commit(&mut info.attempt.lifecycle);
+    info.attempt.pending_kill = false;
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .subagent_sessions
+        .insert("child-1".into(), info);
+
+    dispatch_task_result(
+        TaskResult::KillSubagentComplete {
+            session_id: sid,
+            subagent_id: "sa-1".into(),
+            attempt_id: Some(first_attempt.into()),
+            outcome: SubagentKillOutcome::NothingLive { status: None },
+        },
+        &mut app,
+    );
+
+    let info = &app.agents[&id].subagent_sessions["child-1"];
+    assert_eq!(
+        info.attempt.lifecycle.current_attempt_id(),
+        Some(second_attempt)
+    );
+    assert!(info.is_running());
 }
 
 #[test]
@@ -1513,7 +1635,6 @@ fn no_deferred_switch_means_no_extra_effect() {
             agent_id: id,
             session_id: "new-session".into(),
             models: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -1536,7 +1657,6 @@ fn session_success_arms_finish_startup_obligation() {
             agent_id: id,
             session_id: "new-session".into(),
             models: None,
-            scheduler_background_loops: None,
         },
         TaskResult::SessionLoaded {
             agent_id: id,
@@ -1546,7 +1666,6 @@ fn session_success_arms_finish_startup_obligation() {
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
-            scheduler_background_loops: None,
         },
         TaskResult::WorktreeSessionCreated {
             agent_id: id,
@@ -1554,7 +1673,7 @@ fn session_success_arms_finish_startup_obligation() {
             worktree_path: std::path::PathBuf::from("/tmp/wt"),
             session_cwd: std::path::PathBuf::from("/tmp/wt"),
             models: None,
-            scheduler_background_loops: None,
+            strategy_summary: None,
         },
         TaskResult::WorktreeForked {
             agent_id: id,
@@ -1565,6 +1684,7 @@ fn session_success_arms_finish_startup_obligation() {
             restore_summary: None,
             restore_degree: None,
             resume_session_id: None,
+            strategy_summary: None,
         },
     ];
 
@@ -1936,6 +2056,25 @@ fn delete_remote_session_clears_modal_and_welcome_content_hits() {
     use crate::views::modal::ActiveModal;
 
     let mut app = test_app_with_agent();
+    app.workspace_dashboard_enabled = true;
+    app.workspace_membership
+        .set_snapshot_for_test(xai_grok_dashboard_store::WorkspaceSnapshot {
+            grouping: xai_grok_dashboard_store::Grouping::State,
+            members: vec![xai_grok_dashboard_store::Member {
+                session_id: xai_grok_dashboard_store::SessionId::new("remote-only").unwrap(),
+                kind: xai_grok_dashboard_store::MemberKind::Build,
+                origin: xai_grok_dashboard_store::MemberOrigin::Remote,
+                cwd: Some("/r".into()),
+                title: Some("remote-only".into()),
+                model: None,
+                last_turn_summary: None,
+                is_worktree: false,
+                last_change_unix_ms: 1,
+                pin_rank: None,
+                order_rank: None,
+            }],
+            data_version: 1,
+        });
     let mut remote = make_picker_entry("remote-only", "/r");
     remote.source = "remote".into();
     open_session_picker_with(&mut app, vec![remote.clone()]);
@@ -1986,12 +2125,49 @@ fn delete_remote_session_clears_modal_and_welcome_content_hits() {
             .unwrap()
             .is_empty()
     );
+    assert!(
+        app.workspace_membership.view().unwrap().members.is_empty(),
+        "the derived view hides a pending removal"
+    );
+    assert_eq!(
+        app.workspace_membership.snapshot().unwrap().members.len(),
+        1,
+        "optimism must not mutate committed state"
+    );
+    assert!(app.workspace_membership.removal_pending_for_test(
+        &xai_grok_dashboard_store::SessionId::new("remote-only").unwrap()
+    ));
+    assert!(
+        !app.workspace_membership.removal_suppressed_for_test(
+            &xai_grok_dashboard_store::SessionId::new("remote-only").unwrap()
+        ),
+        "an unloaded picker row needs no live-adoption exclusion"
+    );
 }
 
 #[test]
 fn delete_session_failed_keeps_all_entries() {
     use crate::views::modal::ActiveModal;
     let mut app = test_app_with_agent();
+    app.workspace_dashboard_enabled = true;
+    app.workspace_membership
+        .set_snapshot_for_test(xai_grok_dashboard_store::WorkspaceSnapshot {
+            grouping: xai_grok_dashboard_store::Grouping::State,
+            members: vec![xai_grok_dashboard_store::Member {
+                session_id: xai_grok_dashboard_store::SessionId::new("s1").unwrap(),
+                kind: xai_grok_dashboard_store::MemberKind::Build,
+                origin: xai_grok_dashboard_store::MemberOrigin::Local,
+                cwd: Some("/r".into()),
+                title: Some("s1".into()),
+                model: None,
+                last_turn_summary: None,
+                is_worktree: false,
+                last_change_unix_ms: 1,
+                pin_rank: None,
+                order_rank: None,
+            }],
+            data_version: 1,
+        });
     open_session_picker_with(
         &mut app,
         vec![make_picker_entry("s0", "/r"), make_picker_entry("s1", "/r")],
@@ -2015,6 +2191,107 @@ fn delete_session_failed_keeps_all_entries() {
         panic!("expected SessionPicker modal");
     };
     assert_eq!(list.len(), 2, "a failed delete must not remove any entry");
+    assert_eq!(
+        app.workspace_membership.snapshot().unwrap().members.len(),
+        1,
+        "failed permanent delete must leave membership intact"
+    );
+    assert!(!app.workspace_membership.has_pending_removals_for_test());
+}
+
+#[test]
+fn picker_delete_of_open_build_suppresses_immediate_workspace_re_adoption() {
+    let mut app = test_app_with_agent();
+    let session_id = app.agents[&AgentId(0)]
+        .session
+        .session_id
+        .as_ref()
+        .unwrap()
+        .0
+        .to_string();
+    app.workspace_dashboard_enabled = true;
+    app.workspace_membership
+        .set_snapshot_for_test(xai_grok_dashboard_store::WorkspaceSnapshot {
+            grouping: xai_grok_dashboard_store::Grouping::State,
+            members: vec![],
+            data_version: 1,
+        });
+
+    let _ = dispatch_task_result(
+        TaskResult::DeleteSessionComplete {
+            source: "local".into(),
+            session_id: session_id.clone(),
+            after: crate::app::actions::AfterSessionDelete::Stay,
+        },
+        &mut app,
+    );
+
+    let id = xai_grok_dashboard_store::SessionId::new(session_id).unwrap();
+    assert!(
+        app.agents.contains_key(&AgentId(0)),
+        "Stay keeps the view open"
+    );
+    assert!(app.workspace_membership.removal_pending_for_test(&id));
+    assert!(
+        !app.workspace_membership.removal_suppressed_for_test(&id),
+        "suppression becomes a tombstone only after removal succeeds"
+    );
+}
+
+#[test]
+fn deleting_current_conversation_does_not_remove_build_membership_with_same_id() {
+    let mut app = test_app_with_agent();
+    let session_id = app.agents[&AgentId(0)]
+        .session
+        .session_id
+        .as_ref()
+        .unwrap()
+        .0
+        .to_string();
+    app.agents.get_mut(&AgentId(0)).unwrap().conversation_entry = true;
+    app.workspace_dashboard_enabled = true;
+
+    let _ = dispatch_task_result(
+        TaskResult::DeleteSessionComplete {
+            source: "current".into(),
+            session_id,
+            after: crate::app::actions::AfterSessionDelete::Stay,
+        },
+        &mut app,
+    );
+
+    assert!(!app.workspace_membership.has_pending_removals_for_test());
+}
+
+#[test]
+fn delete_completion_reports_membership_failure_if_store_became_read_only() {
+    let mut app = test_app_with_agent();
+    app.workspace_dashboard_enabled = true;
+    let temp = tempfile::tempdir().unwrap();
+    let store =
+        xai_grok_dashboard_store::WorkspaceStore::open(&temp.path().join("workspace.db")).unwrap();
+    app.workspace_membership.set_read_only_for_test(
+        store,
+        xai_grok_dashboard_store::WorkspaceSnapshot {
+            grouping: xai_grok_dashboard_store::Grouping::State,
+            members: vec![],
+            data_version: 1,
+        },
+    );
+
+    let _ = dispatch_task_result(
+        TaskResult::DeleteSessionComplete {
+            source: "local".into(),
+            session_id: "deleted-during-schema-race".into(),
+            after: crate::app::actions::AfterSessionDelete::Stay,
+        },
+        &mut app,
+    );
+
+    assert!(
+        read_toast(&app).contains("dashboard membership could not be removed"),
+        "the irreversible history deletion must not be reported as wholly successful"
+    );
 }
 
 #[test]
@@ -2195,7 +2472,7 @@ fn reset_session_title_complete_pushes_system_block() {
 fn gate_refreshed_emits_check_subscription_on_gate_lift() {
     let mut app = test_app();
     // User starts gated (no subscription).
-    app.gate = Some(xai_grok_shell::auth::GateInfo {
+    app.gate = Some(xai_grok_login::GateInfo {
         message: "SuperGrok subscription required".into(),
         url: Some("https://grok.com/supergrok".into()),
         label: Some("Subscribe".into()),
@@ -2227,7 +2504,7 @@ fn gate_refreshed_emits_check_subscription_on_gate_lift() {
 #[test]
 fn gate_refreshed_no_effect_when_still_gated() {
     let mut app = test_app();
-    app.gate = Some(xai_grok_shell::auth::GateInfo {
+    app.gate = Some(xai_grok_login::GateInfo {
         message: "Subscribe".into(),
         url: None,
         label: None,
@@ -2304,8 +2581,8 @@ fn gate_refreshed_newly_blocked_defers_gate_for_verification() {
 
 // ── Stale-gate verification resolution ──────────────────────────
 
-fn test_gate() -> xai_grok_shell::auth::GateInfo {
-    xai_grok_shell::auth::GateInfo {
+fn test_gate() -> xai_grok_login::GateInfo {
+    xai_grok_login::GateInfo {
         message: "Subscribe".into(),
         url: None,
         label: None,
@@ -2319,7 +2596,7 @@ fn verify_check_with_meta_resolves_pending_gate() {
     let _effs = app.impose_gate(test_gate());
     assert!(app.has_access());
 
-    let meta = serde_json::to_value(xai_grok_shell::auth::AuthMeta::default()).unwrap();
+    let meta = serde_json::to_value(xai_grok_login::AuthMeta::default()).unwrap();
     dispatch_task_result(
         TaskResult::CheckSubscriptionComplete {
             verify: Some(app.gate_verify_gen),
@@ -2338,7 +2615,7 @@ fn verify_check_with_gated_meta_shows_gate() {
     let mut app = test_app();
     let _effs = app.impose_gate(test_gate());
 
-    let meta = serde_json::to_value(xai_grok_shell::auth::AuthMeta {
+    let meta = serde_json::to_value(xai_grok_login::AuthMeta {
         gate: Some(test_gate()),
         ..Default::default()
     })
@@ -2481,7 +2758,7 @@ fn gate_verify_timeout_noop_when_already_resolved() {
     let _effs = app.impose_gate(test_gate());
     let generation = app.gate_verify_gen;
     // Live check resolved first (access confirmed).
-    let meta = serde_json::to_value(xai_grok_shell::auth::AuthMeta::default()).unwrap();
+    let meta = serde_json::to_value(xai_grok_login::AuthMeta::default()).unwrap();
     dispatch_task_result(
         TaskResult::CheckSubscriptionComplete {
             verify: None,
@@ -2504,7 +2781,7 @@ fn gate_verify_timeout_stale_generation_is_ignored() {
     // First deferral resolves (access confirmed)
     let _effs = app.impose_gate(test_gate());
     let stale_gen = app.gate_verify_gen;
-    let meta = serde_json::to_value(xai_grok_shell::auth::AuthMeta::default()).unwrap();
+    let meta = serde_json::to_value(xai_grok_login::AuthMeta::default()).unwrap();
     dispatch_task_result(
         TaskResult::CheckSubscriptionComplete {
             verify: None,
@@ -2542,7 +2819,7 @@ fn verified_gate_via_check_complete_starts_paywall_chain() {
     let mut app = test_app();
     let _effs = app.impose_gate(test_gate());
 
-    let meta = serde_json::to_value(xai_grok_shell::auth::AuthMeta {
+    let meta = serde_json::to_value(xai_grok_login::AuthMeta {
         gate: Some(test_gate()),
         ..Default::default()
     })
@@ -2568,7 +2845,7 @@ fn verified_gate_via_check_complete_starts_paywall_chain() {
     );
 
     // Steady-state paywall-poller responses (already gated) must NOT fan out extra timers
-    let meta = serde_json::to_value(xai_grok_shell::auth::AuthMeta {
+    let meta = serde_json::to_value(xai_grok_login::AuthMeta {
         gate: Some(test_gate()),
         ..Default::default()
     })
@@ -2589,7 +2866,6 @@ fn verified_gate_via_check_complete_starts_paywall_chain() {
 /// `GateRefreshed` with gate-free settings while a deferred gate awaits verification must drop the pending copy.
 /// The fresh settings are newer than the stale snapshot that produced it.
 /// It must still run the lift bookkeeping (`CheckSubscription` for the JWT refresh).
-/// The pending deferral means the user was conceptually blocked.
 #[test]
 fn gate_refreshed_without_gate_clears_pending_verification() {
     let mut app = test_app();

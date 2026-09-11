@@ -107,11 +107,8 @@ pub fn server_version_at_least(version: Option<&str>, baseline: &semver::Version
         .and_then(|v| semver::Version::parse(v).ok())
         .is_some_and(|v| v >= *baseline)
 }
-/// Check whether a [`ToolError`](xai_tool_runtime::ToolError) indicates a fatal transport failure that should mark the hub as disconnected.
-///
-/// Returns `true` for:
-/// - `NetworkError`: a direct transport failure (socket dropped, stream ended without a terminal item, etc.)
-/// - `Custom` with `details.code == "protocol_error"`: a half-closed WebSocket producing malformed frames
+/// Whether a [`ToolError`](xai_tool_runtime::ToolError) is a fatal transport failure that should mark the hub disconnected.
+/// True for `NetworkError`, and for `Custom` with `details.code == "protocol_error"` (half-closed WebSocket, malformed frames).
 pub fn is_transport_fatal(err: &xai_tool_runtime::ToolError) -> bool {
     match err.kind {
         xai_tool_runtime::ToolErrorKind::NetworkError => true,
@@ -139,10 +136,7 @@ fn is_non_retryable_workspace_unavailable(err: &xai_tool_runtime::ToolError) -> 
         .is_some_and(|d| d.code == xai_tool_protocol::WORKSPACE_UNAVAILABLE_SUBCODE && !d.retryable)
 }
 /// Typed client over a bound [`ToolHarness`] for `workspace.*` RPCs.
-///
-/// Clones share the harness and the connected latch, which fast-fails calls after a fatal transport error.
-/// [`mark_connected`](Self::mark_connected) resets the latch.
-/// An SDK `on_reconnect` callback can do that by holding the same flag, passed in via [`with_connected_flag`](Self::with_connected_flag).
+/// Clones share the harness and the connected latch, which fast-fails after a fatal transport error; [`mark_connected`](Self::mark_connected) / [`with_connected_flag`](Self::with_connected_flag) reset it.
 #[derive(Clone)]
 pub struct WorkspaceClient {
     harness: ToolHarness,
@@ -212,6 +206,8 @@ impl WorkspaceClient {
             .expect("constant tool id is valid");
         let args = serde_json::json!({ "method": method, "params": params });
         tracing::debug!(method, "WorkspaceClient::rpc");
+        let span = tracing::info_span!("workspace_client.rpc", method = tracing::field::Empty);
+        span.record("method", method);
         let fut = async {
             let mut stream = self
                 .harness

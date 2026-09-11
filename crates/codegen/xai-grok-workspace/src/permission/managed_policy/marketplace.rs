@@ -4,9 +4,11 @@
 
 use super::layer::{PolicyLayerOwnership, PolicySourceAuthority};
 use super::mcp::PolicySubjectOrigin;
+use super::verdict::user_facing_policy_source;
 
-/// Marketplace allowlist from ONE managed source.
-#[derive(Debug, Clone, Default)]
+/// Marketplace allowlist from ONE source; exists only when its strict key was
+/// present, so empty `allowed_urls` is a lockdown (see `McpServerAllowlist::lockdown`; no `Default`).
+#[derive(Debug, Clone)]
 pub struct MarketplaceAllowlist {
     pub allowed_urls: Vec<String>,
     pub source_path: Option<std::path::PathBuf>,
@@ -15,19 +17,18 @@ pub struct MarketplaceAllowlist {
 }
 
 impl MarketplaceAllowlist {
-    pub fn is_restricted(&self) -> bool {
-        !self.allowed_urls.is_empty()
-    }
-
     /// See [`McpServerAllowlist::binds`].
     fn binds(&self, origin: PolicySubjectOrigin) -> bool {
         self.authority == PolicySourceAuthority::Native || origin == PolicySubjectOrigin::Foreign
     }
 
+    /// Full lockdown (see the type docs): reporting must not render it unrestricted.
+    pub fn is_lockdown(&self) -> bool {
+        self.allowed_urls.is_empty()
+    }
+
+    /// Membership check; an empty list allows nothing (see the type docs).
     pub fn is_url_allowed(&self, url: &str) -> bool {
-        if !self.is_restricted() {
-            return true;
-        }
         let normalized = normalize_git_url(url);
         self.allowed_urls
             .iter()
@@ -37,6 +38,18 @@ impl MarketplaceAllowlist {
     pub fn block_reason(&self) -> String {
         match &self.source_path {
             Some(p) => format!("source not in strictKnownMarketplaces ({})", p.display()),
+            None => "source not in strictKnownMarketplaces".to_string(),
+        }
+    }
+
+    /// [`Self::block_reason`] with the policy file reduced to its name — the
+    /// user-facing refusal form; tracing logs keep the full-path form.
+    fn user_facing_block_reason(&self) -> String {
+        match &self.source_path {
+            Some(p) => format!(
+                "source not in strictKnownMarketplaces ({})",
+                user_facing_policy_source(p)
+            ),
             None => "source not in strictKnownMarketplaces".to_string(),
         }
     }
@@ -58,15 +71,13 @@ impl MarketplacePolicy {
     }
 
     pub fn is_restricted(&self) -> bool {
-        self.sources.iter().any(MarketplaceAllowlist::is_restricted)
+        !self.sources.is_empty()
     }
 
     /// Restriction active for a subject of `origin` (advisory strict lists
     /// don't bind grok-native marketplaces).
     pub fn is_restricted_for(&self, origin: PolicySubjectOrigin) -> bool {
-        self.sources
-            .iter()
-            .any(|s| s.binds(origin) && s.is_restricted())
+        self.sources.iter().any(|s| s.binds(origin))
     }
 
     pub fn is_url_allowed(&self, url: &str, origin: PolicySubjectOrigin) -> bool {
@@ -76,32 +87,37 @@ impl MarketplacePolicy {
             .all(|s| s.is_url_allowed(url))
     }
 
-    /// Reason `url` is blocked, attributed to the binding source that
-    /// actually rejects it (falling back to the first binding restricted
-    /// source when every one allows — callers only ask after a block).
-    pub fn block_reason(&self, url: &str, origin: PolicySubjectOrigin) -> String {
+    /// The binding source that actually rejects `url`, falling back to the first binding source
+    /// when every one allows (callers only ask after a block).
+    fn blocking_source(
+        &self,
+        url: &str,
+        origin: PolicySubjectOrigin,
+    ) -> Option<&MarketplaceAllowlist> {
         self.sources
             .iter()
-            .find(|s| s.binds(origin) && s.is_restricted() && !s.is_url_allowed(url))
-            .or_else(|| {
-                self.sources
-                    .iter()
-                    .find(|s| s.binds(origin) && s.is_restricted())
-            })
+            .find(|s| s.binds(origin) && !s.is_url_allowed(url))
+            .or_else(|| self.sources.iter().find(|s| s.binds(origin)))
+    }
+
+    /// Reason `url` is blocked, attributed to the blocking source. Full-path
+    /// form (tracing logs); user surfaces get [`Self::add_block_reason`].
+    pub fn block_reason(&self, url: &str, origin: PolicySubjectOrigin) -> String {
+        self.blocking_source(url, origin)
             .map(MarketplaceAllowlist::block_reason)
             .unwrap_or_else(|| "source not in strictKnownMarketplaces".to_string())
     }
 
-    /// Fail-closed add/install gate: `Some(reason)` when restricted and
-    /// `identity` isn't allowed (local paths never match — intentional).
-    /// The subject of an add/install is by definition not yet grok-native, so
-    /// every policy source binds — including advisory ones. The advisory
-    /// carve-out covers what grok config already defines, never the
-    /// acquisition of new sources.
+    /// Fail-closed add/install gate: `Some(reason)` when restricted and `identity` isn't allowed (local paths never match).
+    /// An add/install is not yet grok-native, so every policy source binds, including advisory ones; the carve-out never covers acquiring new sources.
+    /// The refusal names the blocking policy file only (logs use [`Self::block_reason`]).
     pub fn add_block_reason(&self, identity: &str) -> Option<String> {
         let origin = PolicySubjectOrigin::Foreign;
-        (self.is_restricted_for(origin) && !self.is_url_allowed(identity, origin))
-            .then(|| self.block_reason(identity, origin))
+        (self.is_restricted_for(origin) && !self.is_url_allowed(identity, origin)).then(|| {
+            self.blocking_source(identity, origin)
+                .map(MarketplaceAllowlist::user_facing_block_reason)
+                .unwrap_or_else(|| "source not in strictKnownMarketplaces".to_string())
+        })
     }
 
     /// Union across sources — display only (matching intersects).
@@ -141,11 +157,8 @@ pub enum ManagedMarketplaceKind {
     },
 }
 
-/// Canonical git-URL identity for marketplace allowlist/dedup comparisons.
-/// Only the scheme and authority fold case — repo paths are case-sensitive on
-/// most git hosts, so lowercasing them would widen an allowlist entry to
-/// sibling repos. Exactly one `.git` suffix is stripped (`repo.git.git` and
-/// `repo` are different repos).
+/// Canonical git-URL identity for marketplace allowlist/dedup.
+/// Only scheme and authority fold case — lowercasing the path would widen an entry to sibling repos. Exactly one `.git` suffix is stripped.
 pub fn normalize_git_url(url: &str) -> String {
     let url = url.strip_suffix(".git").unwrap_or(url);
     if let Some((scheme, rest)) = url.split_once("://") {

@@ -42,10 +42,8 @@ pub fn is_apple_terminal_newline_modifier_held() -> bool {
     os_any_newline_modifier_held()
 }
 
-/// Shift/Alt+Enter, or bare Enter while a newline modifier is held and the terminal drops those flags ([`is_apple_terminal_newline_modifier_held`]).
-/// Always requires `KeyCode::Enter` so Shift+Tab / Shift+letters never match.
-/// SUPER/Cmd is not included: on most terminals Cmd+Enter is fullscreen or split.
-/// Apple Terminal Cmd+Enter is rescued via CoreGraphics on bare Enter ([`is_apple_terminal_newline_modifier_held`]), not the SUPER flag.
+/// Shift/Alt+Enter, or bare Enter when Apple Terminal drops the modifier flags.
+/// Requires Enter so Shift+Tab never matches. Cmd is excluded: most terminals bind Cmd+Enter to fullscreen; Apple Terminal is rescued on bare Enter.
 pub fn is_mod_enter(key: &KeyEvent) -> bool {
     key.code == KeyCode::Enter
         && (key

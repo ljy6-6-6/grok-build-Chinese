@@ -43,10 +43,9 @@ impl OverlayAction {
     }
 }
 
-/// Shared visibility / focus / fullscreen state for overlay panes.
-///
-/// Embedded in each toggleable pane (TracingPane, TodoPane, etc.).
-/// The pane's shortcut handler calls [`toggle()`], and the shared [`handle_overlay_key()`] handles Tab/Esc/q/Space/Ctrl-F.
+/// Shared visibility / focus / fullscreen state for overlay panes. Embedded in each toggleable pane
+/// (TracingPane, TodoPane, etc.). The pane's shortcut handler calls [`toggle()`], and the shared
+/// [`handle_overlay_key()`] handles Tab/Esc/q/Space/Ctrl-F.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OverlayState {
     pub visible: bool,
@@ -69,11 +68,8 @@ impl OverlayState {
         Self::default()
     }
 
-    /// Pane shortcut: three-state toggle.
-    ///
-    /// When hidden: show and focus.
-    /// When visible but unfocused: focus.
-    /// When visible and focused: hide.
+    /// Pane shortcut: three-state toggle. When hidden: show and focus. When visible but unfocused:
+    /// focus. When visible and focused: hide.
     pub fn toggle(&mut self) -> OverlayAction {
         if !self.visible {
             self.visible = true;
@@ -95,9 +91,7 @@ impl OverlayState {
         OverlayAction::FocusScrollback
     }
 
-    /// Esc / q: exit one nesting level.
-    ///
-    /// When fullscreen: exit fullscreen, stay visible and focused.
+    /// Esc / q: exit one nesting level. When fullscreen: exit fullscreen, stay visible and focused.
     /// Otherwise: hide entirely.
     pub fn escape(&mut self) -> OverlayAction {
         if self.fullscreen {
@@ -136,14 +130,8 @@ impl OverlayState {
     }
 }
 
-/// Handle structural keys for any focused overlay pane.
-///
-/// Processes Tab, Esc, q, Space, and Ctrl-F consistently. Returns
-/// `Some(action)` if a structural key was consumed, `None` to let the
-/// pane's content handler process the key.
-///
-/// When `has_input_bar` is true, only Ctrl-F is processed (the input
-/// bar handles Esc/Tab/etc. itself).
+/// When `has_input_bar` is true, only. CtrlCtrl-F is processed (the input bar handles. EscEsc/Tab/etc.
+/// itself).
 pub fn handle_overlay_key(state: &mut OverlayState, key: &KeyEvent) -> Option<OverlayAction> {
     // Ctrl-F: toggle fullscreen (works even with input bar open).
     if key.code == KeyCode::Char('f') && key.modifiers.contains(KeyModifiers::CONTROL) {

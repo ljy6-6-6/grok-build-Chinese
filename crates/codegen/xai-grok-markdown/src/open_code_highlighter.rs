@@ -34,13 +34,11 @@ type HlLine = Vec<(SyntectStyle, String)>;
 
 /// Byte budget for memoized closed-fence bodies; cleared wholesale on overflow.
 /// Sized in body bytes (not entries) because pulldown can split a list-indented fence into per-line `Event::Text` fragments.
-/// An entry count would overflow on one large fence.
 /// If live bodies ever exceed the budget the memo degrades to recomputing each pass, never to unbounded memory or wrong output.
 const CLOSED_MEMO_CAP_BYTES: usize = 256 * 1024;
 
 /// Streaming syntect caches for fenced code blocks in the unfrozen tail (see module docs).
 /// Holds incremental state for the single still-open trailing block, plus a memo for closed blocks the tail re-parses every pass.
-///
 /// Owns all the low-level syntect state so the parser/renderer don't have to.
 pub(crate) struct OpenCodeHighlighter {
     /// Language/info token of the block currently cached.
@@ -103,10 +101,7 @@ impl OpenCodeHighlighter {
     }
 
     /// Batch-highlight a **closed** fence body, memoized on `(fence_info, body)`.
-    ///
-    /// Closed fences trapped in an unfreezable tail (e.g. inside an open list) are re-parsed by every `rerender_tail` pass.
     /// The memo makes syntect run once per distinct body.
-    /// The compute path *is* [`syntax_highlight_raw`], so output is byte-identical by construction.
     /// Theme stability follows [`highlight`](Self::highlight): the streaming renderer drops this struct on any style change.
     fn highlight_closed(
         &mut self,
@@ -140,19 +135,8 @@ impl OpenCodeHighlighter {
     }
 
     /// Highlight the open block body `text` (the full body so far, append-only), reusing persisted syntect state where possible.
-    ///
-    /// Returns one styled line per source line, including the trailing partial line if the body does not end in `\n`.
-    /// The output matches what a batch `HighlightLines` run would produce.
-    /// Returns `None` if the fence has no known syntax or a line fails to parse.
-    /// The caller can then fall back to the plain/untagged code path exactly like [`syntax_highlight_raw`].
-    ///
-    /// # Theme stability invariant
-    ///
-    /// The persisted state and the already-highlighted `committed_lines` bake in the colors of the `syn.theme` seen so far.
     /// The caller MUST therefore pass a [`Syntect`] whose `theme` is stable for the lifetime of a given open block.
     /// A theme swap must go through a cache reset (the streaming renderer does this in `set_style`).
-    /// Otherwise committed lines keep their old colors while newly-committed lines use the new theme.
-    /// The batch path has no such constraint because it re-highlights from scratch every call.
     fn highlight(
         &mut self,
         syn: &Syntect,
@@ -226,7 +210,6 @@ impl OpenCodeHighlighter {
         // TODO: this clone keeps the open-block RETURN at O(lines)/pass = O(lines^2)/stream
         // It only copies precomputed style spans; the expensive syntect parse/highlight CPU is already O(N) total
         // The surrounding tail render and url_scan are likewise O(N)/pass, so this is tracked as an accepted residual, not a regression
-        // Removing it needs a borrowed return threaded through `Replace` and the render pipeline
         let mut out = self.committed_lines.clone();
         if let Some(last) = tentative {
             out.push(last);

@@ -299,10 +299,8 @@ async fn drain_interjection_truncation_never_touches_image_data() {
         .await;
 }
 
-/// A turn abort (send-now or cancel) can drop the drain future at an await before the batch is
-/// submitted. The drained entries must go back to the buffer in arrival order so
-/// `flush_stranded_interjections` can still convert them into fallback prompts; previously they
-/// left the buffer and vanished.
+/// A turn abort (send-now or cancel) can drop the drain future at an await before the batch is submitted.
+/// The drained entries must go back to the buffer in arrival order so `flush_stranded_interjections` can still convert them into fallback prompts; previously they left the buffer and vanished.
 #[tokio::test]
 async fn cancelled_drain_restores_entries_for_stranded_flush() {
     let local = tokio::task::LocalSet::new();

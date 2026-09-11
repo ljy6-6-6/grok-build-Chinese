@@ -6,11 +6,7 @@ const fn rgb(r: u8, g: u8, b: u8) -> Color {
     Color::Rgb(r, g, b)
 }
 
-/// The backgrounds are deep and dark with a subtle purple/blue tint (OKLCH hue 265), inspired by the Oscura Midnight palette (narative/oscura).
-/// Accent colors lean purple to give the theme its distinctive identity.
-///
-/// Base colors were converted from OKLCH to sRGB programmatically via the `coloraide` Python library.
-/// Purple accent colors are hand-picked to complement the hue-265 background tint.
+/// Deep backgrounds with OKLCH hue 265; accents are hand-picked purple to match that tint.
 #[allow(dead_code)]
 mod palette {
     use super::*;

@@ -48,7 +48,6 @@ pub(crate) fn create_owner_only(path: &Path) -> std::io::Result<()> {
 
 /// Re-assert owner-only mode on an existing file (a restored or hand-copied 0644 database is tightened on load).
 /// Missing files are fine; a non-regular file or any other failure is a hard error, failing closed on a private store.
-/// Windows keeps the default profile ACLs.
 /// Same pattern as `xai_grok_shell_base::util::secure_file`; depending on that crate is too heavy.
 pub(crate) fn tighten_owner_only(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]

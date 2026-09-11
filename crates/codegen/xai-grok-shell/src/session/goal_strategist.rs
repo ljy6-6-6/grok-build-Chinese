@@ -76,9 +76,7 @@ pub(crate) trait GoalStrategistSpawner: Send + Sync {
 
 // Trigger predicate
 
-/// Fires when the consecutive-failure count has advanced at least `every` (N) past the count at which the strategist last fired (`last_fired`).
 /// Using `>= last_fired + N` rather than a strict `consecutive % N == 0` makes the trigger SKIP-ROBUST.
-/// The synthetic concurrent-in-flight path can bump the streak by more than one at a time (e.g. from N-1 to N+1).
 /// An exact-equality check would miss the `== N` fire entirely.
 /// `every` must be at least 1 (the resolver clamps it).
 pub(crate) fn strategist_should_fire(consecutive: u32, last_fired: u32, every: u32) -> bool {
@@ -182,6 +180,7 @@ impl ChannelSpawner {
             fork_context: false,
             owner: SubagentOwner::Task,
             cancel_token: tokio_util::sync::CancellationToken::new(),
+            spawn_root: Default::default(),
         };
         let backend = ChannelBackend::new(self.event_tx.clone());
         let result = backend
@@ -402,7 +401,6 @@ enum PlanSnapshot {
     Unsafe,
 }
 
-/// RAII guard that restores plan.md to its pre-strategist bytes.
 /// Restores once via [`Self::restore`] on the normal path, and again on `Drop` as a cancellation safety net.
 /// The runner future may be dropped mid-`.await`.
 /// Uses sync `std::fs` (so `Drop` can call it; plan.md is small, this is rare) and `symlink_metadata` everywhere (never follows a planted symlink).

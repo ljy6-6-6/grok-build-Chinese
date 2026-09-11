@@ -11,10 +11,8 @@ pub use ops::WorkspaceOpsRequest;
 pub use session::SessionLifecycleRequest;
 pub use tool::{ToolCallArgs, ToolRequest};
 
-/// Outer-envelope wire request.
-///
-/// Each variant maps to one of the streaming gRPC RPCs (`Tool`, `Ops`, `Session`).
-/// The fourth RPC, `Events`, is a separate subscription type and does not appear here.
+/// Outer-envelope wire request. Each variant maps to a streaming gRPC RPC (`Tool`, `Ops`, `Session`).
+/// `Events` is a separate subscription and does not appear here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum WorkspaceRequest {

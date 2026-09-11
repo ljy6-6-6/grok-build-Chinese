@@ -2616,7 +2616,7 @@ The `--debug` firehose uses a fixed filter (first-party crates at `debug`) and i
 
 ```bash
 # Debug auth, info for everything else
-GROK_LOG_FILE=/tmp/grok-debug.log RUST_LOG="info,xai_grok_shell::auth=debug" grok
+GROK_LOG_FILE=/tmp/grok-debug.log RUST_LOG="info,xai_grok_login=debug" grok
 ```
 
 ### Authentication fails

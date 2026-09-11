@@ -82,15 +82,14 @@ impl SessionActor {
                 },
             );
             if entered {
-                tracing::info_span!(
+                xai_grok_telemetry::event_span!(
                     "session.permission_mode_changed",
                     from_mode =
                         super::telemetry::permission_mode_label(self.permissions.is_yolo_mode()),
                     to_mode = "plan",
                     trigger = "user",
                     enabled = true,
-                )
-                .in_scope(|| {});
+                );
             }
             return;
         }
@@ -118,14 +117,13 @@ impl SessionActor {
                     from_mode: Some("plan".into()),
                 },
             );
-            tracing::info_span!(
+            xai_grok_telemetry::event_span!(
                 "session.permission_mode_changed",
                 from_mode = "plan",
                 to_mode = %session_mode_id.0,
                 trigger = "user",
                 enabled = false,
-            )
-            .in_scope(|| {});
+            );
         }
         let agent_def = match session_mode_id.0.as_ref() {
             "browser_use" => Some(AgentDefinition::browser_use()),
@@ -162,13 +160,8 @@ impl SessionActor {
             self.chat_state_handle.replace_conversation(conversation);
         }
     }
-    /// Settle the mode a turn runs in, applying the prompt's declaration when it made one.
-    ///
     /// Only a real user turn declares a mode.
-    /// Synthetic turns (a background task wake, a goal summary, a notification drain) inherit the session's mode.
-    /// Their placeholder `PromptMode::Agent` reads as "the user asked for agent mode".
     /// Reconciling one would end plan mode just by waking the session.
-    ///
     /// Returns the resolved mode rather than echoing the argument, so a synthetic turn is also *recorded* under the mode it really ran in.
     pub(super) fn resolve_turn_prompt_mode(
         &self,
@@ -180,12 +173,7 @@ impl SessionActor {
         }
         *self.current_prompt_mode.lock()
     }
-    /// Bring the plan-mode tracker into agreement with the prompt's mode.
-    ///
     /// Mirrors `handle_session_mode` but driven from `_meta.mode` on the prompt, the only signal the client sends.
-    /// Both transitions are idempotent, so `set_mode`-driven flows are unaffected.
-    ///
-    /// Like `handle_session_mode`, a real transition here emits a `CurrentModeUpdate`.
     /// Without it a client that carries its mode on the prompt could enter or leave plan mode with no signal.
     /// The same line is what lands in `updates.jsonl`, so a later replay could not recover the mode either.
     pub(super) fn reconcile_plan_mode_with_prompt(&self, prompt_mode: PromptMode) {
@@ -212,15 +200,7 @@ impl SessionActor {
             }
         }
     }
-    /// Inject plan mode system-reminders into the conversation.
-    ///
     /// Called once per turn from `handle_prompt()`, before the user's actual message is pushed.
-    /// Handles three cases, in order:
-    ///
-    /// 1. **Pending to Active**: the first prompt after the user toggles plan mode on injects the full (or reentry) reminder and moves to Active.
-    /// 2. **Already Active**: subsequent prompts while plan mode is on inject an alternating full/sparse per-turn reminder.
-    /// 3. **Exit reminder**: a one-shot reminder after plan mode was exited, injected once, then the flag is cleared.
-    ///
     /// All reminders are pushed as `<system-reminder>`-wrapped user messages so the model sees them in the same turn as the user's prompt.
     /// Tool names are resolved at render time via `TemplateRenderer`.
     pub(super) async fn inject_plan_mode_reminders(&self) {
@@ -298,22 +278,9 @@ impl SessionActor {
             self.persist_plan_mode_state();
         }
     }
-    /// Activate plan mode for a turn that is already running.
-    ///
-    /// Mid-turn counterpart of `inject_plan_mode_reminders` case 1.
-    /// The user toggled plan mode ON (Shift+Tab) while the model was thinking, so the tracker sits in `Pending`.
+    /// Mid-turn counterpart of `inject_plan_mode_reminders` case 1. The user toggled plan mode ON (Shift+Tab) while the model was thinking, so the tracker sits in `Pending`.
     /// The running turn would otherwise proceed without any plan-mode instruction.
-    /// Activate immediately (so `is_active()` tool gating applies to subsequent calls) and buffer the activation reminder on the tracker.
-    /// `flush_pending_skill_reminders` delivers it at the running turn's next safe point (loop top, after each tool batch).
-    /// If the turn ends first, the cancel/idle flush lands it for the next turn.
-    /// Buffering (instead of a direct conversation push) keeps the in-flight batch's tool_result blocks adjacent.
-    /// It also lets a toggle-off withdraw an undelivered reminder (`user_exit`).
-    ///
     /// No-op unless the tracker is `Pending`.
-    /// `enter_pending`'s `ExitPending` to `Active` re-entry needs no reminder.
-    /// The model already has plan-mode context and no exit reminder was injected yet.
-    ///
-    /// A failed template render still activates (without a buffer), keeping gating in lockstep with the turn-start path.
     pub(super) async fn activate_plan_mode_mid_turn(&self) {
         use crate::session::plan_mode::PlanModeState;
         let activation = {
@@ -356,10 +323,8 @@ impl SessionActor {
             "Plan mode activated mid-turn"
         );
     }
-    /// The activation reminder template for the active template (no
-    /// first-entry/reentry distinction), or grok's reentry/full variant.
-    /// Shared by turn-start injection (`inject_plan_mode_reminders` case 1)
-    /// and the mid-turn toggle (`activate_plan_mode_mid_turn`).
+    /// The activation reminder template for the active template (no first-entry/reentry distinction), or grok's reentry/full variant.
+    /// Shared by turn-start injection (`inject_plan_mode_reminders` case 1) and the mid-turn toggle (`activate_plan_mode_mid_turn`).
     fn plan_activation_template(&self, is_reentry: bool) -> &'static str {
         use crate::session::plan_mode::{
             plan_mode_reentry_reminder_template, plan_mode_reminder_full_template,

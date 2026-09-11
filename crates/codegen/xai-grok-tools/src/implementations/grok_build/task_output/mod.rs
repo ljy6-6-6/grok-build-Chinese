@@ -25,16 +25,14 @@ use xai_tool_types::{
     MultiTaskOutputResult, TaskOutputOutput, TaskOutputResult, TaskOutputToolInput,
 };
 
-/// Default wait budget when a caller is already in wait mode but omitted
-/// `timeout_ms` (legacy `wait_tasks` / internal `capped_wait_timeout`). On
-/// `get_task_output`, omitting `timeout_ms` is a non-blocking snapshot — this
-/// constant is not applied unless a wait is active.
+/// Default wait budget when a caller is already in wait mode but omitted `timeout_ms` (legacy
+/// `wait_tasks` / internal `capped_wait_timeout`). On `get_task_output`, omitting `timeout_ms` is a
+/// non-blocking snapshot — this constant is not applied unless a wait is active.
 pub(crate) const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The blocking-wait ceiling: `GROK_MAX_WAIT_BLOCK_MS`, else `MAX_WAIT_BLOCK_MS_DEFAULT`.
-///
-/// The same value fills `{max_wait_ms}` in the descriptions, so a wait can
-/// never exceed what the model was told it may ask for.
+/// The blocking-wait ceiling: `GROK_MAX_WAIT_BLOCK_MS`, else `MAX_WAIT_BLOCK_MS_DEFAULT`. The same
+/// value fills `{max_wait_ms}` in the descriptions, so a wait can never exceed what the model was
+/// told it may ask for.
 pub(crate) fn max_wait_block() -> Duration {
     Duration::from_millis(xai_tool_types::max_wait_block_ms())
 }
@@ -205,10 +203,14 @@ impl TaskOutputTool {
             .get::<xai_tool_runtime::BehaviorVersion>()
             .map(|v| v.0.clone());
         let is_legacy = crate::versions::is_legacy_contract(contract_version.as_deref());
-        let terminal;
-        {
-            terminal = resources.lock().await.require::<Terminal>()?.0.clone();
-        }
+        let (terminal, my_owner) = {
+            let res = resources.lock().await;
+            (
+                res.require::<Terminal>()?.0.clone(),
+                res.get::<crate::types::resources::OwnerSessionId>()
+                    .map(|owner| owner.0.clone()),
+            )
+        };
 
         let waits = xai_tool_types::task_output_waits(timeout_ms);
         let wait_cap = max_wait_block();
@@ -284,7 +286,14 @@ impl TaskOutputTool {
             let msg = if is_legacy {
                 render_legacy_task_output_not_found(task_id)
             } else {
-                let known = terminal.list_tasks().await;
+                // The terminal backend is shared with the root session.
+                let mut known = terminal.list_tasks().await;
+                known.retain(|task| {
+                    crate::reminders::task_completion::task_owned_by_session(
+                        task,
+                        my_owner.as_deref(),
+                    )
+                });
                 if known.is_empty() {
                     format!(
                         "Task {task_id} not found. No background tasks or subagents exist in this session.",
@@ -462,23 +471,13 @@ pub(crate) async fn resolve_tasks(
         pending_subagent_ids,
     }
 }
-//
-// Uses `TerminalBackend::wait_for_completion` for bash tasks (event-driven via
-// the underlying `Notify`) and `SubagentQueryRequest { block: true }` for
-// subagents (blocks in the coordinator until the child session finishes).
+// Uses `TerminalBackend::wait_for_completion` for bash tasks (event-driven via the underlying `Notify`) and
+// `SubagentQueryRequest { block: true }` for subagents (blocks in the coordinator until the child session finishes).
 // No 200ms polling loop — wakeups happen on actual state transitions.
 
-/// Aborts all wrapped helper-wait tasks when dropped.
-///
-/// The per-task waits below are `tokio::spawn`ed so they can race each other,
-/// but they must not outlive the wait call itself: a detached wait left
-/// running after the caller returns (first completion, deadline) or is
-/// cancelled (turn abort dropping the tool future) becomes a zombie that
-/// consumes its task's completion later — marking the task `block_waited`
-/// and swallowing a result the model never saw, which suppresses the
-/// completion auto-wake. Aborting drops the underlying
-/// `wait_for_completion` future, whose dropped reply channel the terminal
-/// actor detects to keep `block_waited` accurate.
+/// Aborts all wrapped helper-wait tasks when dropped. Aborting drops the underlying
+/// `wait_for_completion` future, whose dropped reply channel the terminal actor detects to keep
+/// `block_waited` accurate.
 struct AbortWaitsOnDrop(Vec<tokio::task::AbortHandle>);
 
 impl Drop for AbortWaitsOnDrop {
@@ -624,24 +623,22 @@ pub(crate) async fn wait_all_event_driven(
     finalize_wait_outcome(outcome, deadline)
 }
 
-//
-// Historical fixture captured from the 0.4.10 implementation.
-//
-// In 0.4.10, get_task_output returned:
-//   Err(ToolError::ProcessManagerError(format!("Task {} not found", input.task_id)))
-//
-// The meaningful customer-facing message content is the inner string.
-// Subagent wording is out of scope — subagents didn't exist in 0.4.10.
+// Historical fixture captured from the 0.4.10 implementation. In 0.4.10, get_task_output returned:
+// Err(ToolError::ProcessManagerError(format!("Task {} not found", input.task_id))) The meaningful customer-facing
+// message content is the inner string. Subagent wording is out of scope — subagents didn't exist in 0.4.10.
 
 /// Exact historical not-found message for `get_task_output` in legacy-0.4.10.
 fn render_legacy_task_output_not_found(task_id: &str) -> String {
     format!("Task {} not found", task_id)
 }
 
-fn format_subagent_snapshot(snap: &SubagentSnapshot, wait_hint: WaitHint) -> TaskOutputOutput {
-    let started = format_epoch_ms_as_rfc3339(snap.started_at_epoch_ms);
+pub(crate) fn format_subagent_snapshot(
+    snap: &SubagentSnapshot,
+    wait_hint: WaitHint,
+) -> TaskOutputOutput {
     match &snap.status {
         SubagentSnapshotStatus::Initializing => {
+            let started = format_epoch_ms_as_rfc3339(snap.started_at_epoch_ms);
             let duration_secs = snap.duration_ms as f64 / 1000.0;
             // Measure body only — wait-hint is harness advisory, not task output.
             let body = format!(
@@ -677,6 +674,7 @@ fn format_subagent_snapshot(snap: &SubagentSnapshot, wait_hint: WaitHint) -> Tas
             tools_used,
             error_count,
         } => {
+            let started = format_epoch_ms_as_rfc3339(snap.started_at_epoch_ms);
             let tools_str = if tools_used.is_empty() {
                 "none yet".to_string()
             } else {
@@ -715,6 +713,17 @@ fn format_subagent_snapshot(snap: &SubagentSnapshot, wait_hint: WaitHint) -> Tas
                 raw_output_bytes,
             })
         }
+        SubagentSnapshotStatus::Completed { .. }
+        | SubagentSnapshotStatus::Failed { .. }
+        | SubagentSnapshotStatus::Cancelled { .. } => {
+            TaskOutputOutput::Result(terminal_subagent_result(snap))
+        }
+    }
+}
+
+/// Terminal statuses only; reminders render the same value, so notice and poll cannot drift.
+pub(crate) fn terminal_subagent_result(snap: &SubagentSnapshot) -> TaskOutputResult {
+    let (status, exit_code, output) = match &snap.status {
         SubagentSnapshotStatus::Completed {
             output,
             tool_calls,
@@ -735,65 +744,34 @@ fn format_subagent_snapshot(snap: &SubagentSnapshot, wait_hint: WaitHint) -> Tas
                 &snap.subagent_type,
                 snap.persona.as_deref(),
             ));
-            let raw_output_bytes = output.len();
-            TaskOutputOutput::Result(TaskOutputResult {
-                task_id: snap.subagent_id.clone(),
-                command: format!("[subagent:{}] {}", snap.subagent_type, snap.description),
-                status: "completed".to_string(),
-                exit_code: Some(0),
-                started,
-                ended: Some(format_epoch_ms_as_rfc3339(
-                    snap.started_at_epoch_ms + snap.duration_ms,
-                )),
-                duration_secs: snap.duration_ms as f64 / 1000.0,
-                output,
-                output_file: String::new(),
-                truncated: false,
-                truncation_hint: String::new(),
-                raw_output_bytes,
-            })
+            ("completed", Some(0), output)
         }
-        SubagentSnapshotStatus::Failed { error } => {
-            let raw_output_bytes = error.len();
-            TaskOutputOutput::Result(TaskOutputResult {
-                task_id: snap.subagent_id.clone(),
-                command: format!("[subagent:{}] {}", snap.subagent_type, snap.description),
-                status: "failed".to_string(),
-                exit_code: Some(1),
-                started,
-                ended: Some(format_epoch_ms_as_rfc3339(
-                    snap.started_at_epoch_ms + snap.duration_ms,
-                )),
-                duration_secs: snap.duration_ms as f64 / 1000.0,
-                output: error.clone(),
-                output_file: String::new(),
-                truncated: false,
-                truncation_hint: String::new(),
-                raw_output_bytes,
-            })
-        }
-        SubagentSnapshotStatus::Cancelled { reason } => {
-            let output = reason
+        SubagentSnapshotStatus::Failed { error } => ("failed", Some(1), error.clone()),
+        SubagentSnapshotStatus::Cancelled { reason } => (
+            "cancelled",
+            None,
+            reason
                 .clone()
-                .unwrap_or_else(|| "Subagent was cancelled".to_string());
-            let raw_output_bytes = output.len();
-            TaskOutputOutput::Result(TaskOutputResult {
-                task_id: snap.subagent_id.clone(),
-                command: format!("[subagent:{}] {}", snap.subagent_type, snap.description),
-                status: "cancelled".to_string(),
-                exit_code: None,
-                started,
-                ended: Some(format_epoch_ms_as_rfc3339(
-                    snap.started_at_epoch_ms + snap.duration_ms,
-                )),
-                duration_secs: snap.duration_ms as f64 / 1000.0,
-                output,
-                output_file: String::new(),
-                truncated: false,
-                truncation_hint: String::new(),
-                raw_output_bytes,
-            })
+                .unwrap_or_else(|| "Subagent was cancelled".to_string()),
+        ),
+        SubagentSnapshotStatus::Initializing | SubagentSnapshotStatus::Running { .. } => {
+            unreachable!("terminal_subagent_result called for a live subagent")
         }
+    };
+    let ended_at_epoch_ms = snap.started_at_epoch_ms + snap.duration_ms;
+    TaskOutputResult {
+        task_id: snap.subagent_id.clone(),
+        command: format!("[subagent:{}] {}", snap.subagent_type, snap.description),
+        status: status.to_string(),
+        exit_code,
+        started: format_epoch_ms_as_rfc3339(snap.started_at_epoch_ms),
+        ended: Some(format_epoch_ms_as_rfc3339(ended_at_epoch_ms)),
+        duration_secs: snap.duration_ms as f64 / 1000.0,
+        raw_output_bytes: output.len(),
+        output,
+        output_file: String::new(),
+        truncated: false,
+        truncation_hint: String::new(),
     }
 }
 
@@ -866,11 +844,9 @@ impl crate::types::tool_metadata::ToolMetadata for TaskOutputTool {
     }
 }
 
-/// Resolve the model-facing `get_task_output` description from the finalized
-/// toolset, honoring an explicit config override. Wording lives in the shared
-/// [`xai_tool_types::build_task_output_description`] builder so the CLI and
-/// prod-chat can't drift; presence-gated clauses (monitor note, subagent
-/// source, read-file hint) follow the tools actually registered this turn.
+/// Resolve the model-facing `get_task_output` description from the finalized toolset, honoring an explicit config override. Wording lives in
+/// the shared [`xai_tool_types::build_task_output_description`] builder so the CLI and prod-chat can't drift; presence-gated clauses (monitor
+/// note, subagent source, read-file hint) follow the tools actually registered this turn.
 fn task_output_description(
     renderer: &TemplateRenderer,
     description_override: Option<&str>,
@@ -980,20 +956,32 @@ pub(crate) mod test_helpers {
     use crate::types::template_renderer::TemplateRenderer;
     use crate::types::tool::ToolKind;
 
-    /// Mock backend that returns a pre-configured snapshot.
+    /// Mock backend that returns a pre-configured snapshot and task listing.
     pub(crate) struct MockTerminal {
         snapshot: Option<TaskSnapshot>,
+        tasks: Vec<TaskSnapshot>,
     }
 
     impl MockTerminal {
         pub(crate) fn with_snapshot(snapshot: TaskSnapshot) -> Self {
             Self {
+                tasks: vec![snapshot.clone()],
                 snapshot: Some(snapshot),
             }
         }
 
         pub(crate) fn empty() -> Self {
-            Self { snapshot: None }
+            Self {
+                snapshot: None,
+                tasks: Vec::new(),
+            }
+        }
+
+        pub(crate) fn listing(tasks: Vec<TaskSnapshot>) -> Self {
+            Self {
+                snapshot: None,
+                tasks,
+            }
         }
     }
 
@@ -1030,7 +1018,7 @@ pub(crate) mod test_helpers {
         }
 
         async fn list_tasks(&self) -> Vec<TaskSnapshot> {
-            self.snapshot.iter().cloned().collect()
+            self.tasks.clone()
         }
     }
 
@@ -1540,6 +1528,69 @@ mod tests {
         }
     }
 
+    /// Not-found hint for `"task-unknown"` as seen by session `"me"` when the
+    /// shared terminal lists `tasks`.
+    async fn owner_scoped_not_found_message(tasks: &[(&str, Option<&str>)]) -> String {
+        let tasks = tasks
+            .iter()
+            .map(|(id, owner)| TaskSnapshot {
+                owner_session_id: owner.map(str::to_owned),
+                ..make_snapshot(id, false, None)
+            })
+            .collect();
+        let mut resources = Resources::new();
+        let backend: Arc<dyn TerminalBackend> = Arc::new(MockTerminal::listing(tasks));
+        resources.insert(Terminal(backend));
+        resources.insert(crate::types::resources::OwnerSessionId("me".into()));
+        resources.insert(TemplateRenderer::new(
+            std::collections::HashMap::from([(ToolKind::Read, "read_file".to_string())]),
+            std::collections::HashMap::new(),
+        ));
+        let result = xai_tool_runtime::Tool::run(
+            &TaskOutputTool,
+            test_ctx(resources.into_shared()),
+            TaskOutputToolInput {
+                task_ids: vec!["task-unknown".into()],
+                timeout_ms: None,
+            },
+        )
+        .await
+        .unwrap();
+        match result {
+            TaskOutputOutput::TaskNotFound(msg) => msg,
+            other => panic!("Expected TaskNotFound, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_task_not_found_lists_only_this_sessions_known_tasks() {
+        let msg = owner_scoped_not_found_message(&[
+            ("task-mine", Some("me")),
+            ("task-theirs", Some("other")),
+            ("task-legacy", None),
+        ])
+        .await;
+        assert!(msg.contains("task-mine"), "msg: {msg}");
+        assert!(msg.contains("task-legacy"), "msg: {msg}");
+        assert!(!msg.contains("task-theirs"), "msg: {msg}");
+    }
+
+    #[tokio::test]
+    async fn get_task_not_found_with_only_foreign_tasks_reports_empty_session() {
+        let msg =
+            owner_scoped_not_found_message(&[("task-a", Some("other")), ("task-b", Some("other"))])
+                .await;
+        assert!(
+            msg.contains("No background tasks or subagents exist in this session."),
+            "msg: {msg}"
+        );
+        assert!(!msg.contains("Known task IDs"), "msg: {msg}");
+        assert!(
+            !msg.contains("task-a") && !msg.contains("task-b"),
+            "msg: {msg}"
+        );
+    }
+
     #[tokio::test]
     async fn get_task_not_found_block_mode_lists_known_tasks() {
         // Verify that blocking mode also provides helpful errors.
@@ -1991,14 +2042,8 @@ mod tests {
         }
     }
 
-    // ── Legacy message parity fixture tests ────────────────────────
-    //
-    // These tests verify exact historical wording for legacy-0.4.10.
-    // Fixture source: the historical 0.4.10 task_output implementation.
-    //
-    // Historical 0.4.10 message (inner string from ToolError::ProcessManagerError):
-    //   "Task {task_id} not found"
-    //
+    // Legacy message parity fixture tests These tests verify exact historical wording for legacy-0.4.10. Fixture source: the historical 0.4.10
+    // task_output implementation. Historical 0.4.10 message (inner string from ToolError::ProcessManagerError): "Task {task_id} not found"
     // Subagent wording is out of scope — subagents didn't exist in 0.4.10.
 
     #[tokio::test]

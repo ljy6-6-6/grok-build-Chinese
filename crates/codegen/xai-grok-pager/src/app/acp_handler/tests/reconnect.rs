@@ -41,9 +41,7 @@
 
     #[test]
     fn duplicate_event_id_is_dropped_and_highwater_advances() {
-        // Each session/update carries a monotonic eventId; live and replay of the same event share it
         // A client that receives an event twice must render it once
-        // That is what eliminates the driver-side duplication when a second client opens the same session
         // Per-session events arrive in increasing order, so the pager keeps a highwater and drops anything at or below it
         // Updates without an eventId still apply (back-compat)
         let mut app = make_app_with_agent("sess-dedup");
@@ -201,10 +199,7 @@
         assert!(matches!(agent.session.state, AgentState::Idle));
     }
 
-    /// Failed reconnect reload: the partial replay is discarded and the pre-outage transcript (plus cursor/highwaters) is restored.
     /// The view must never end up permanently blank.
-    ///
-    /// Both highwaters are advanced IN-WINDOW (live lines land in staging) before the failure.
     /// A seed-only check would pass even with the restore deleted.
     /// A stale post-discard highwater silently dedup-drops the next reload's cursor-tail re-deliveries of the discarded blocks.
     #[test]
@@ -449,7 +444,7 @@
         assert_eq!(agent.scrollback.len(), 1);
         let info = &agent.subagent_sessions["child-replay"];
         assert!(
-            info.scrollback_entry_id
+            info.attempt.scrollback_entry_id
                 .is_some_and(|entry_id| agent.scrollback.get_by_id(entry_id).is_some()),
             "full replay must rebuild the retained subagent row"
         );
@@ -494,7 +489,7 @@
         assert_eq!(agent.scrollback.len(), 2);
         let info = &agent.subagent_sessions["child-late-replay"];
         assert!(
-            info.scrollback_entry_id
+            info.attempt.scrollback_entry_id
                 .is_some_and(|entry_id| agent.scrollback.get_by_id(entry_id).is_some()),
             "late-grace replay must rebuild a subagent row discarded with the stash"
         );
@@ -910,11 +905,7 @@
     }
 
     /// Characterization (leader-relaunch orphan rows).
-    /// A reconnect reload whose replay contains `SubagentSpawned` with NO `SubagentFinished` leaves the row `finished == false` after the success
-    /// swap.
-    /// The replay looks like that when the subagent died with the old leader, or is still running on the surviving one.
     /// The window finalize force-idles only the ROOT transcript; nothing resolves or expires subagent rows.
-    /// Pager-side child tracking itself stays functional: a live child update delivered after the swap still renders into the child view.
     /// So a post-reconnect freeze would be leader route loss (see the `leader::server` child-route backfill tests), not pager state.
     #[test]
     fn reload_replayed_spawn_without_finished_keeps_unresolved_running_row() {
@@ -949,7 +940,7 @@
             .get("child-sub")
             .expect("replayed spawn registers the subagent row");
         assert!(
-            !info.finished,
+            info.is_running(),
             "no Finished in the replay → the row stays running indefinitely \
              (current behavior: nothing resolves it after the swap)"
         );
@@ -975,7 +966,6 @@
         // Regression: the context bar must not drop when a stale, already-passed replay delta arrives after a fresher live one
         // In leader / reconnect / replay-live-overlap, a historical delta (LOWER eventId, LOWER totalTokens) is deduped for rendering
         // `refresh_context_used` must respect the dedup too, otherwise the bar regresses below the real usage
-        // That was the reported "resume shows lower context" bug
         let mut app = make_app_with_agent("sess-ctx");
         let id = AgentId(0);
 
@@ -1099,4 +1089,3 @@
         );
         assert_eq!(app.agents[&id].last_applied_event_seq, Some(8));
     }
-

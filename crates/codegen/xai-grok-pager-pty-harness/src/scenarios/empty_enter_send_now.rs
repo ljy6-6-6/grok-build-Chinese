@@ -7,6 +7,7 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use serde_json::json;
 
 use super::wait_for_welcome;
 use crate::{ContentController, PtyHarness, pager_binary};
@@ -56,10 +57,26 @@ pub async fn assert_empty_enter_force_sends_top_queued() -> Result<()> {
         "TURNTWO reply to the promoted follow-up.",
     );
 
+    content
+        .server()
+        .set_settings(json!({ "allow_access": true, "dock_enabled": true }));
+    std::fs::write(
+        content.sandbox().grok_home().join("requirements.toml"),
+        "[features]\ndock = true\n",
+    )
+    .context("pin dock in test requirements")?;
+
     let binary = pager_binary().context("resolve pager binary")?;
-    let mut harness =
-        PtyHarness::spawn_with_content(&binary, DEFAULT_ROWS, DEFAULT_COLS, &content, &[])
-            .context("spawn pager")?;
+    let mut harness = PtyHarness::spawn_with_content_env_in_dir(
+        &binary,
+        DEFAULT_ROWS,
+        DEFAULT_COLS,
+        &content,
+        &[],
+        &[("GROK_DOCK", "1")],
+        Some(content.home()),
+    )
+    .context("spawn pager")?;
 
     wait_for_welcome(&mut harness).await?;
 
@@ -77,6 +94,12 @@ pub async fn assert_empty_enter_force_sends_top_queued() -> Result<()> {
     harness
         .wait_for_text("please also check the logs", Duration::from_secs(10))
         .context("queued text visible")?;
+    if harness.contains_text("Queued · Enter to send now") {
+        bail!(
+            "dock-shown queueing must not show the send-now tip\n{}",
+            harness.screen_contents()
+        );
+    }
 
     harness.inject_keys(b"\r").context("empty Enter send-now")?;
     // Cancel-and-send: the shell cancels turn 1 (its held completion is irrelevant; the abort wins) and promotes the row to run as turn 2

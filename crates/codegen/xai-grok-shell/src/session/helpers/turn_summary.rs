@@ -14,10 +14,7 @@ pub(crate) const TURN_SUMMARY_MAX_CHARS: usize = 200;
 /// Max characters of the user message quoted in the instruction as the last-turn anchor.
 const ANCHOR_MAX_CHARS: usize = 120;
 
-/// First ~[`ANCHOR_MAX_CHARS`] of the last *real* user message (`synthetic_reason.is_none()`), whitespace-collapsed.
-///
 /// The conversation contains user-role turns the user never wrote (reminders, injected context).
-/// Quoting the real message in the instruction is how the model learns where "the last turn" starts.
 /// Angle brackets are dropped so the quote cannot close the instruction's reminder tag.
 /// `None` when no real user message with text exists (caller should skip generation).
 pub(crate) fn last_user_anchor(conversation: &[ConversationItem]) -> Option<String> {
@@ -44,8 +41,6 @@ pub(crate) fn last_user_anchor(conversation: &[ConversationItem]) -> Option<Stri
     Some(anchor)
 }
 
-/// Build the instruction turn appended to the conversation snapshot.
-///
 /// Same single-user-message design as recap (`recap_instruction`): all directions live in one reminder-wrapped turn.
 /// The conversation prefix is then reused verbatim, so the prompt cache stays warm.
 /// Few-shots must stay synthetic: never embed real eval/session content.

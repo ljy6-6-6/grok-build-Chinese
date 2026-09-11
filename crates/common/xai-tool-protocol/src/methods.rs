@@ -65,6 +65,13 @@ define_methods! {
     // harness → service
     SessionOpen => "session_open",
     SessionClose => "session_close",
+    /// The harness is leaving the session but the workspace is untouched,
+    /// exactly as if the harness connection had dropped; the hub sweeps
+    /// only what no other connection still holds. Used when a pooled
+    /// connection stays open for other sessions. A separate verb (not a
+    /// `session_close` flag) so a hub predating it rejects the frame with
+    /// `-32601` instead of silently unbinding the workspace.
+    SessionDetach => "session_detach",
     SessionBindServer => "session_bind_server",
     SessionUnbindServer => "session_unbind_server",
     /// Attach this harness connection to an EXISTING session as an
@@ -142,12 +149,18 @@ define_methods! {
     BotCommand => "bot.command",
     /// Short-lived noVNC descriptor. May wake a hibernated box.
     BotVncDescriptor => "bot.vncDescriptor",
-    /// Cached agent roster. Cold — never wakes the box.
+    /// Live agent roster read from the box. May wake a hibernated box; the
+    /// hub bounds the wait and answers a retryable `box_unavailable`
+    /// (`box_waking` / `box_hibernated`) or `box_migrating` while the box is
+    /// coming up — never an empty list because of a failure.
     BotRoster => "bot.roster",
     /// Off-box run-state read. Cold — never wakes the box.
     BotStatus => "bot.status",
     /// Off-box transcript page. Cold — never wakes the box.
     BotTranscriptOffbox => "bot.transcript.offbox",
+    /// Caller-scoped weekly Grok Bot usage summary. Cold — never wakes the
+    /// box.
+    BotUsage => "bot.usage",
     /// Subscribe this connection to `bot.event` for the given agents.
     BotSubscribe => "bot.subscribe",
     /// Drop this connection's `bot.event` subscription for the given agents.

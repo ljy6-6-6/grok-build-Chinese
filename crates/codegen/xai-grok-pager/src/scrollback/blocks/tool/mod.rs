@@ -1,7 +1,5 @@
 mod edit;
 mod execute;
-pub(crate) mod hook;
-mod lifecycle;
 pub mod list_dir;
 pub(crate) mod memory_search;
 mod other;
@@ -19,8 +17,6 @@ pub use edit::{
     render_diff_hunk_highlighted, render_diff_hunks_highlighted, render_diff_hunks_with_styles,
 };
 pub use execute::ExecuteToolCallBlock;
-pub use hook::{HookPhase, HookRunEntry, HookRunStatus, ToolCallHookData};
-pub use lifecycle::LifecycleEventBlock;
 pub use list_dir::ListDirToolCallBlock;
 pub use memory_search::MemorySearchToolCallBlock;
 pub use other::OtherToolCallBlock;
@@ -45,7 +41,6 @@ use crate::scrollback::types::{
 use std::fmt;
 
 /// Shared selection-range id for tool-call header lines.
-///
 /// Headers are single logical selection targets (path/query/url/command);
 /// using one id across tool kinds keeps multi-line drag/copy grouping simple.
 pub(crate) const TOOL_HEADER_RANGE: u16 = 0;
@@ -110,9 +105,8 @@ impl fmt::Display for LineRange {
     }
 }
 
-/// Names what a verb-groupable (non-destructive) run member touched.
-/// A folded run of consecutive rows renders as "Read 3 files" or "Searched 4 patterns".
-/// Most kinds classify tool blocks via [`ToolCallBlock::verb_group_kind`].
+/// Names what a verb-groupable (non-destructive) run member touched. A folded run of consecutive rows renders as
+/// "Read 3 files" or "Searched 4 patterns". Most kinds classify tool blocks via [`ToolCallBlock::verb_group_kind`].
 /// `Subagent` classifies subagent lifecycle render blocks, which are not tool calls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VerbGroupKind {
@@ -267,9 +261,6 @@ pub enum ToolCallBlock {
     /// Skill invocation (user skills / slash commands via the Skill tool).
     Skill(OtherToolCallBlock),
     Other(OtherToolCallBlock),
-    /// Lifecycle event (e.g. `user_prompt_submit`, `session_start`).
-    /// Not a real tool call, so `last_tool_call_entry_id()` skips it.
-    Lifecycle(LifecycleEventBlock),
 }
 
 /// Delegate to inner variant, with tool bullet prepended to output.
@@ -289,7 +280,6 @@ macro_rules! delegate_tool {
             ToolCallBlock::SentMessage(b) => b.$method($($arg),*),
             ToolCallBlock::Skill(b) => b.$method($($arg),*),
             ToolCallBlock::Other(b) => b.$method($($arg),*),
-            ToolCallBlock::Lifecycle(b) => b.$method($($arg),*),
         }
     };
 }
@@ -385,7 +375,6 @@ impl BlockContent for ToolCallBlock {
 
 impl ToolCallBlock {
     /// Transfer timing data from another block of the same variant.
-    ///
     /// Used when a running block is replaced with its completed version (e.g., in the `handle_tool_call_update` completion path).
     /// The new block inherits `started_at` from the old block so `finish()` can compute real elapsed time.
     pub fn transfer_timing_from(&mut self, old: &ToolCallBlock) {
@@ -439,8 +428,7 @@ impl ToolCallBlock {
                 | ToolCallBlock::MemorySearch(_)
                 | ToolCallBlock::SentMessage(_)
                 | ToolCallBlock::Skill(_)
-                | ToolCallBlock::Other(_)
-                | ToolCallBlock::Lifecycle(_),
+                | ToolCallBlock::Other(_),
                 _,
             ) => {}
         }
@@ -462,12 +450,10 @@ impl ToolCallBlock {
             ToolCallBlock::SentMessage(b) => b.is_success(),
             ToolCallBlock::Skill(b) => b.is_success(),
             ToolCallBlock::Other(b) => b.is_success(),
-            ToolCallBlock::Lifecycle(_) => true,
         }
     }
 
     /// Set `started_at` on the inner variant block.
-    ///
     /// Unlike `transfer_timing_from`, this works across variant boundaries.
     /// For example, it can set `started_at` on a `Search` block from a value captured when the block was still `Other`.
     pub fn set_started_at(&mut self, instant: std::time::Instant) {
@@ -485,16 +471,11 @@ impl ToolCallBlock {
             ToolCallBlock::SentMessage(b) => b.started_at = Some(instant),
             ToolCallBlock::Skill(b) => b.started_at = Some(instant),
             ToolCallBlock::Other(b) => b.started_at = Some(instant),
-            // Lifecycle events have no timing.
-            ToolCallBlock::Lifecycle(_) => {}
         }
     }
 
-    /// Start timing for this block (sets `started_at = now`).
-    ///
-    /// Called when a block enters running UI state.
-    /// Only blocks that actually run in the UI get meaningful timing.
-    /// Pre-completed blocks keep `started_at = None` and show no timing data.
+    /// Start timing for this block (sets `started_at = now`). Only blocks that actually run in the UI get meaningful
+    /// timing.
     pub fn start_timing(&mut self) {
         match self {
             ToolCallBlock::Execute(b) => {
@@ -562,8 +543,6 @@ impl ToolCallBlock {
                     b.started_at = Some(std::time::Instant::now());
                 }
             }
-            // Lifecycle events have no timing.
-            ToolCallBlock::Lifecycle(_) => {}
         }
     }
 
@@ -596,7 +575,6 @@ impl ToolCallBlock {
     }
 
     /// Full stored SOURCE text of this tool call for full-text scrollback search.
-    ///
     /// Reads stored source fields and the `copy_text` accessors that read source data.
     /// It never lays out (`output()`, word-wrap) or syntax-highlights, so indexing stays cheap.
     pub(crate) fn searchable_text(&self) -> Option<String> {
@@ -668,46 +646,52 @@ impl ToolCallBlock {
                 b.output.clone(),
                 b.error.clone(),
             ]),
-            ToolCallBlock::Lifecycle(b) => join_searchable([Some(b.name.clone())]),
         }
     }
 
     /// Verb-group kind; `None` renders standalone and splits verb-group runs (still dense-packs via `is_groupable`).
     pub fn verb_group_kind(&self) -> Option<VerbGroupKind> {
         match self {
+            ToolCallBlock::Read(b) if b.is_memory_activity => Some(VerbGroupKind::MemorySearch),
             ToolCallBlock::Read(b) => Some(if b.is_skill_read() {
                 VerbGroupKind::Skill
             } else {
                 VerbGroupKind::File
             }),
-            ToolCallBlock::ListDir(_) => Some(VerbGroupKind::Dir),
-            ToolCallBlock::Search(_) => Some(VerbGroupKind::Search),
+            ToolCallBlock::ListDir(b) => Some(if b.is_memory_activity {
+                VerbGroupKind::MemorySearch
+            } else {
+                VerbGroupKind::Dir
+            }),
+            ToolCallBlock::Search(b) => Some(if b.is_memory_activity {
+                VerbGroupKind::MemorySearch
+            } else {
+                VerbGroupKind::Search
+            }),
             ToolCallBlock::WebFetch(_) => Some(VerbGroupKind::WebFetch),
             ToolCallBlock::WebSearch(_) => Some(VerbGroupKind::WebSearch),
             ToolCallBlock::IntegrationSearch(_) => Some(VerbGroupKind::IntegrationSearch),
             ToolCallBlock::MemorySearch(_) => Some(VerbGroupKind::MemorySearch),
             ToolCallBlock::Skill(_) => Some(VerbGroupKind::Skill),
+            ToolCallBlock::Edit(b) if b.is_memory_activity => Some(VerbGroupKind::MemorySearch),
             ToolCallBlock::Execute(_)
             | ToolCallBlock::Edit(_)
             | ToolCallBlock::UseTool(_)
             | ToolCallBlock::SentMessage(_)
-            | ToolCallBlock::Other(_)
-            | ToolCallBlock::Lifecycle(_) => None,
+            | ToolCallBlock::Other(_) => None,
         }
     }
 
-    /// The bucket a row falls into for aggregated header LABELS; a superset of [`Self::verb_group_kind`].
-    /// The action kinds excluded from eager verb folding still get a bucket when a truncation header describes the rows it hides.
-    /// `None` is returned only for lifecycle rows, which are never worth labeling.
-    /// Variants are listed explicitly so a new `ToolCallBlock` variant must decide here too.
+    /// The bucket a row falls into for aggregated header LABELS. `None` is returned only for lifecycle rows, which are
+    /// never worth labeling. Variants are listed explicitly so a new `ToolCallBlock` variant must decide here too.
     pub fn label_kind(&self) -> Option<VerbGroupKind> {
         match self {
             ToolCallBlock::Execute(_) => Some(VerbGroupKind::Command),
+            ToolCallBlock::Edit(b) if b.is_memory_activity => Some(VerbGroupKind::MemorySearch),
             ToolCallBlock::Edit(_) => Some(VerbGroupKind::EditFile),
             ToolCallBlock::UseTool(_) => Some(VerbGroupKind::McpCall),
             ToolCallBlock::SentMessage(_) => Some(VerbGroupKind::Message),
             ToolCallBlock::Other(_) => Some(VerbGroupKind::OtherTool),
-            ToolCallBlock::Lifecycle(_) => None,
             ToolCallBlock::Read(_)
             | ToolCallBlock::ListDir(_)
             | ToolCallBlock::Search(_)
@@ -798,7 +782,6 @@ mod tests {
             )),
             ToolCallBlock::Skill(OtherToolCallBlock::new("Skill", "deploy")),
             ToolCallBlock::Other(OtherToolCallBlock::new("todo_write", "update")),
-            ToolCallBlock::Lifecycle(LifecycleEventBlock::new("session_start")),
         ];
         for block in &blocks {
             // Exhaustive on purpose: a new variant fails compilation here until it gets an explicit verb-grouping decision
@@ -816,8 +799,7 @@ mod tests {
                 | ToolCallBlock::Edit(_)
                 | ToolCallBlock::UseTool(_)
                 | ToolCallBlock::SentMessage(_)
-                | ToolCallBlock::Other(_)
-                | ToolCallBlock::Lifecycle(_) => None,
+                | ToolCallBlock::Other(_) => None,
             };
             assert_eq!(block.verb_group_kind(), expected, "block: {block:?}");
         }
@@ -849,10 +831,6 @@ mod tests {
         assert_eq!(
             ToolCallBlock::Other(OtherToolCallBlock::new("todo_write", "update")).label_kind(),
             Some(VerbGroupKind::OtherTool)
-        );
-        assert_eq!(
-            ToolCallBlock::Lifecycle(LifecycleEventBlock::new("session_start")).label_kind(),
-            None
         );
         // Verb-groupable kinds defer to the fold's own classification.
         assert_eq!(

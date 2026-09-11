@@ -80,13 +80,9 @@ fn mode_bit(mode: u32) -> Option<u32> {
     })
 }
 
-/// Tracks latched terminal state, shared (via `Arc`) between the wrap output filter, the exit-path drop guard, and the terminate-signal thread.
-///
-/// All state is atomic: the read loop updates it while other threads snapshot it.
-/// The two-phase `restore_claimed`/`restore_done` gate keeps the multiple exit paths from emitting restores twice.
-/// It still lets a losing path wait for the winner to finish.
-/// `SeqCst` throughout: every access is on a cold path (a few RMWs per tracked mode change, none per output byte).
-/// So the uniform strongest ordering is chosen over reasoning about minimal per-site orderings.
+/// Tracks latched terminal state, shared (via `Arc`) between the wrap output filter, the exit-path drop guard, and
+/// the terminate-signal thread. So the uniform strongest ordering is chosen over reasoning about minimal per-site
+/// orderings.
 #[derive(Debug, Default)]
 pub(crate) struct ModeTracker {
     /// Bitmask of latched modes (the `MOUSE_*`/`PASTE_*`/... bits above).
@@ -178,10 +174,9 @@ impl ModeTracker {
         }
     }
 
-    /// Claim the one-shot restore shared by every exit path (drop guard, signal thread).
-    /// The first caller gets `true` and must call [`finish_restore`](Self::finish_restore) when done.
-    /// Later callers get `false` and must not emit (the terminal would be reset twice, and the kitty pop is a destructive stack operation).
-    /// They should instead wait for completion before letting the process exit.
+    /// The first caller gets `true` and must call `finish_restore` when done. Later callers get `false` and must not
+    /// emit (the terminal would be reset twice, and the kitty pop is a destructive stack operation). They should
+    /// instead wait for completion before letting the process exit.
     pub(crate) fn begin_restore(&self) -> bool {
         !self.restore_claimed.swap(true, Ordering::SeqCst)
     }
@@ -197,13 +192,9 @@ impl ModeTracker {
     }
 }
 
-/// Disable sequences for exactly the latched state in `snapshot`.
-///
-/// Nothing latched yields an empty vec: clean exits must stay byte-transparent.
-/// The emission order matches `xai_crash_handler::terminal::RESTORE_SEQ` for every element the two share (pinned by a unit test below).
-/// Synchronized-update end goes first: multiplexers must stop buffering before the other resets arrive.
-/// Cursor show and the mouse/paste/focus disables follow.
-/// Kitty pops come before the alt-screen exits (the kitty stack is per-screen), and the alt-screen exits go last.
+/// Disable sequences for exactly the latched state in `snapshot`. Nothing latched yields an empty vec: clean exits
+/// must stay byte-transparent. Synchronized-update end goes first: multiplexers must stop buffering before the
+/// other resets arrive.
 pub(crate) fn restore_bytes(snapshot: ModeSnapshot) -> Vec<u8> {
     let mut out = Vec::new();
     if snapshot.modes & SYNC_2026 != 0 {
@@ -417,10 +408,9 @@ mod tests {
         assert!(tracker.restore_done());
     }
 
-    /// Guards the module doc's claim that the tracked set mirrors `RESTORE_SEQ` across crates.
-    /// `RESTORE_SEQ` is the canonical "every mode the pager enables" teardown table, so every disable it contains must be covered by this tracker.
-    /// The shared elements must also be emitted in the same relative order.
-    /// If a mode is added to `RESTORE_SEQ` without extending the tracker, this fails.
+    /// `RESTORE_SEQ` is the canonical "every mode the pager enables" teardown table, so every disable it contains must
+    /// be covered by this tracker. The shared elements must also be emitted in the same relative order. If a mode is
+    /// added to `RESTORE_SEQ` without extending the tracker, this fails.
     #[test]
     fn covers_and_orders_every_crash_handler_restore_seq_element() {
         let elements: Vec<Vec<u8>> = xai_crash_handler::terminal::RESTORE_SEQ

@@ -19,8 +19,7 @@ use xai_grok_tools::types::output::{
 use xai_tool_types::{KillTaskOutput, TaskOutputOutput};
 
 /// Rewrites real worktree paths to display paths in serialized output.
-///
-/// In forked sessions, tools produce output containing the worktree directory (e.g., `/root/.grok/worktrees/project/fork-019cb252-...`).
+/// In forked sessions, tools produce output containing the worktree directory.
 /// The client UI should instead see the original project path (the `display_cwd`).
 #[derive(Clone, Debug)]
 pub(crate) struct PathRewriter {
@@ -46,9 +45,7 @@ impl PathRewriter {
     }
 
     /// Rewrite all occurrences of the real worktree path with the display path.
-    ///
-    /// Handles both plain paths (e.g., `/root/.grok/worktrees/project/fork-...`)
-    /// and URL-encoded paths (e.g., `%2Froot%2F.grok%2Fworktrees%2F...`) that appear in session directory structures and `output_file` references.
+    /// Handles both plain paths and URL-encoded paths that appear in session directory structures and `output_file` references.
     pub(crate) fn rewrite(&self, text: &str) -> String {
         let plain = text.replace(&self.real_cwd, &self.display_cwd);
         // Also replace the URL-encoded form: session directory paths use urlencoding::encode(&cwd) as a path component,
@@ -71,8 +68,6 @@ impl PathRewriter {
     }
 
     /// Rewrite a `serde_json::Value` by replacing paths in the serialized JSON string.
-    ///
-    /// Serialize to string, replace (plain and URL-encoded), re-parse.
     /// Catches paths embedded anywhere in the JSON tree without needing to walk the structure.
     /// Reuses `rewrite()` so both plain and encoded replacements are applied consistently.
     pub(crate) fn rewrite_json(&self, value: serde_json::Value) -> serde_json::Value {
@@ -116,11 +111,8 @@ pub(crate) fn raw_output_json(
 }
 
 /// Convert tool output to an ACP `ToolCallUpdate` for rich TUI rendering.
-///
-/// `Todo` output returns a minimal `Completed` update (the richer rendering goes through `acp_plan_update` as a `Plan` notification).
-///
-/// `tool_meta` is attached as `_meta` on the update for MCP tools that have MCP Apps UI metadata (e.g., `_meta.ui.resourceUri`).
-/// This allows clients to render interactive UIs without maintaining a separate metadata store.
+/// `Todo` returns a minimal `Completed` update; the richer view is the separate `Plan` notification.
+/// `tool_meta` is attached as `_meta` so MCP Apps clients can render interactive UI without a side metadata store.
 pub(crate) fn acp_tool_update(
     output: &ToolOutput,
     tool_call_id: &str,
@@ -309,11 +301,8 @@ pub(crate) fn acp_tool_update(
                     .raw_output(raw_output_json(output, rewriter)),
             ))
         }
-        // Todo also sends a Plan notification (see acp_plan_update), but we still
-        // need to complete the tool call so the TUI flushes pending agent messages and avoids concatenating text across tool-call boundaries
-        //
-        // Error variants (e.g., DuplicateId) get `Failed` status so the Python
-        // side can distinguish tool-logic errors from infra errors via raw_output.
+        // Todo also sends a Plan notification, but we still need to complete the tool call so the TUI flushes pending agent messages and avoids concatenating text across tool-call boundaries.
+        // Error variants get `Failed` status so the Python side can distinguish tool-logic errors from infra errors via raw_output.
         ToolOutput::Todo(todo_output) => {
             use xai_grok_tools::types::output::TodoWriteOutput;
             let (status, content) = match todo_output {
@@ -642,11 +631,7 @@ pub(crate) fn acp_tool_update(
 }
 
 /// Convert a `Todo` tool output to an ACP `Plan` notification.
-///
 /// Returns `None` for non-Todo outputs.
-///
-/// This converts `xai-grok-tools`' TodoItem (which has `id`, `content: Option<String>`,
-/// `status: Option<String>`) to `acp::PlanEntry` (which has `content`, `priority`, `status`).
 /// The `id` is not directly represented in `PlanEntry` but the ordering is preserved.
 pub(crate) fn acp_plan_update(output: &ToolOutput) -> Option<acp::Plan> {
     use crate::tools::todo::plan_entry_from_todo_item;

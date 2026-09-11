@@ -65,7 +65,6 @@ impl FakeLeaderHandle {
     }
 }
 /// Bind a fake leader at `socket_path` behaving per `behavior`.
-///
 /// Returns once the listener is bound (readiness signalled via oneshot, no fixed startup sleep), so callers can connect immediately.
 /// Serves clients sequentially: the point of a fake is wire shape, not concurrency.
 pub(crate) async fn spawn_fake_leader(

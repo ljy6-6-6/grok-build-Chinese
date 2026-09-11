@@ -153,10 +153,7 @@ static STOP_WORDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
 });
 
 /// Extract meaningful keywords from a conversational query by removing stop words.
-/// Keywords are deduplicated and kept in order of first appearance.
-/// The 2-char minimum preserves meaningful short terms like "go", "js", "ui", "db", "ai", "ml".
-/// The stop-word list catches the common 2-letter noise ("is", "it", "do", "we").
-/// When every word is filtered out (e.g. "what is that?"), the result is empty and the caller (hybrid search) falls back to the vector path.
+/// When every word is filtered out, the result is empty and the caller (hybrid search) falls back to the vector path.
 pub fn extract_keywords(query: &str) -> Vec<String> {
     let lowered = query.to_lowercase();
     let mut seen = HashSet::new();

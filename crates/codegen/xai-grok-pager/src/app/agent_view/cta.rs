@@ -25,11 +25,8 @@ impl AgentView {
             && !self.session.state.is_busy();
     }
 
-    /// Log the `shown` telemetry impression for the prompt-suggestion ghost at its *first actual visibility*.
     /// Logged exactly once per installed suggestion (latched in the controller).
-    /// Visibility is derived per frame, not fixed at load.
     /// A suggestion that arrives behind a divergent draft (or a closed gate) renders only once the input is cleared (or the gate re-opens).
-    /// Called after every gate refresh on the load path and the prompt key path, the latter *before* the Tab/Esc intercepts.
     /// `shown` therefore always precedes any `accepted`/`dismissed` for the same suggestion, and the funnel can't exceed 100%.
     pub(crate) fn log_prompt_suggestion_shown_if_visible(&mut self) {
         let Some(ghost) = self.prompt.prompt_suggestion_ghost() else {
@@ -54,8 +51,6 @@ impl AgentView {
 
     /// Notify the suggestion controller that the prompt text changed.
     /// Returns an Effect to dispatch if the controller wants a debounce.
-    ///
-    /// Shell suggestions are a bash-mode (`!`) feature.
     /// Outside it the pipeline never fires (no shell-history ghosts over natural-language chat text) and any leftover ghost/dropdown is torn down.
     pub(crate) fn notify_suggestion_text_changed(&mut self) -> Option<super::actions::Effect> {
         use crate::views::suggestion_controller::SuggestionAction;
@@ -250,7 +245,7 @@ impl AgentView {
         let connect_x = area.x + area.width - right_w;
         let connect_w = connect_label.width() as u16 + hint_w;
         let connect_style = if self.plugin_cta.hit_connect.hovered {
-            Style::default().fg(theme.link_fg).bg(theme.bg_hover)
+            theme.hover_overlay().fg(theme.link_fg)
         } else {
             Style::default().fg(theme.text_secondary)
         };
@@ -273,7 +268,7 @@ impl AgentView {
 
         let dismiss_x = connect_x + connect_w + 1;
         let dismiss_style = if self.plugin_cta.hit_dismiss.hovered {
-            Style::default().fg(theme.text_secondary).bg(theme.bg_hover)
+            theme.hover_overlay().fg(theme.text_secondary)
         } else {
             Style::default().fg(theme.gray)
         };
@@ -293,17 +288,9 @@ impl AgentView {
         ));
     }
 
-    /// Apply an `x.ai/follow_ups` notification, keyed by `response_id` (newest-response-wins).
-    ///
     /// Monotonic accept-the-newer: a never-seen `response_id` is strictly newer than any previously accepted one, so it supersedes the shown chips.
     /// A re-delivery of an already-accepted (hence older) response is ignored, so a buffer-replay or duplicate cannot clobber the newest chips.
-    /// That needs no clear wired at turn boundaries and leaves no eviction window that could let a stale id pass as new.
     /// A re-delivery of the currently-shown response refreshes it in place (no-op when identical).
-    /// Empty `suggestions` retracts that response's chips.
-    /// Returns `true` when the displayed chips changed (a redraw is warranted).
-    ///
-    /// Backward-compatible test shim: equivalent to a delivery with no stamped `promptId` (the older-shell / replay path).
-    /// Production always routes through [`apply_follow_ups_with_prompt`] from `handle_follow_ups`.
     #[cfg(test)]
     pub(crate) fn apply_follow_ups(
         &mut self,
@@ -313,16 +300,8 @@ impl AgentView {
         self.apply_follow_ups_with_prompt(response_id, None, suggestions)
     }
 
-    /// `apply_follow_ups` with the turn identity (`prompt_id`) the shell stamps on each `x.ai/follow_ups` notification.
-    /// It is the same `promptId` the shell stamps on every `session/update`.
-    /// The identity makes viewer-adoption dedup deterministic:
-    ///
-    /// - A re-delivery for the adopted turn (`prompt_id` equals `session.current_prompt_id`) re-renders even when turn adoption cleared its chips.
-    ///   Chips that were applied and then cleared reappear instead of being lost until reload.
-    /// - A buffer-replayed `x.ai/follow_ups` for a prior turn's `response_id` stays rejected by the seen-ring (its `prompt_id` isn't the active one).
-    ///   Stale chips are therefore never revived on the new turn.
-    ///
-    /// `prompt_id == None` (older shells, or a replay path that lacks it) is treated as "not provably the current turn".
+    /// Chips that were applied and then cleared reappear instead of being lost until reload.
+    /// Stale chips are therefore never revived on the new turn.
     /// It falls back to the monotonic newest-wins seen-ring and never revives a cleared prior turn.
     pub(crate) fn apply_follow_ups_with_prompt(
         &mut self,
@@ -346,8 +325,6 @@ impl AgentView {
             self.follow_up_chips.clear();
             self.hovered_follow_up_chip = None;
             if suggestions.is_empty() {
-                // Empty retraction of the currently-shown chips: drop this id from the seen-ring
-                // A later non-empty delivery for the same response can then be re-accepted and re-rendered
                 // Otherwise the id recorded at first acceptance would make the re-delivery hit the `follow_up_seen` reject below and never display
                 // This only ever affects the currently-shown (newest) id
                 // A genuinely older, superseded id is never the shown one, so it never reaches this branch and stays rejected (newest-wins intact)
@@ -373,17 +350,11 @@ impl AgentView {
         // A stamped `promptId` that names a different turn than the one currently adopted is a non-current turn's follow_ups
         // That is either a prior turn's late first-time arrival or a not-yet-adopted turn
         // It must never render while another turn is active, as a re-delivery or as "newest", or its chips would appear over the running turn
-        //
-        // Guarded on `current == Some`: a `None` `promptId` (older shells) has no turn identity and falls back to newest-wins
-        // `current == None` is not a mismatch either, so those chips still render
-        // That covers a just-finished turn whose trailing follow_ups arrive after `current_prompt_id` was cleared
         let names_other_active_turn =
             matches!((prompt_id, current_prompt_id), (Some(pid), Some(cur)) if pid != cur);
 
         if self.follow_up_seen.contains_key(&response_id) {
-            // Already accepted: normally an older, superseded response, rejected (newest-wins)
             // A stale prior-turn buffer-replay must not revive chips
-            // The exception is the currently adopted turn (its `prompt_id` matches the active turn) when it carries chips
             // A re-delivery whose chips were cleared by turn adoption must re-render
             // That is scoped deterministically to the active turn, so a prior turn is never revived
             if is_current_turn && !suggestions.is_empty() {
@@ -401,11 +372,7 @@ impl AgentView {
 
         // First-time (never-seen) arrival for a turn that is not the active one
         // It must not render now (it would draw over the running turn)
-        // But it may be a not-yet-adopted future turn whose follow_ups raced ahead of the `session/update` that adopts it
         // Dropping it would lose the chips forever if it is the only delivery
-        // Instead buffer it keyed by its `promptId`; [`flush_pending_follow_ups`] renders it if/when that turn becomes current
-        // A genuinely prior turn's `promptId` never becomes current again, so its buffered entry is never flushed (no stale revival)
-        // The cap eventually FIFO-evicts it
         if names_other_active_turn {
             if let Some(pid) = prompt_id
                 && !suggestions.is_empty()
@@ -467,9 +434,7 @@ impl AgentView {
 
     /// Flush a buffered `x.ai/follow_ups` for `prompt_id` (a turn that has just become current).
     /// Renders the chips through [`apply_follow_ups_with_prompt`].
-    /// Now that `current_prompt_id == prompt_id`, the stamped delivery is accepted as the active turn's.
     /// Returns whether chips were rendered; a no-op when nothing is buffered for `prompt_id`.
-    /// Callers invoke this after setting `current_prompt_id` to `prompt_id` at every turn-adoption site.
     pub(crate) fn flush_pending_follow_ups(&mut self, prompt_id: &str) -> bool {
         let Some(pending) = self.follow_up_pending.remove(prompt_id) else {
             return false;
@@ -486,7 +451,6 @@ impl AgentView {
 
     /// Drop the shown follow-up chips at a turn start (UX: they belong to the previous response).
     /// The response stays recorded in `follow_up_seen`, so a stale re-delivery stays rejected.
-    /// The active turn's own re-delivery still re-renders via the `prompt_id` match in [`apply_follow_ups_with_prompt`].
     /// This is therefore used for both viewer-adoption and self-driven turn starts.
     pub(crate) fn clear_follow_ups(&mut self) {
         self.follow_ups = None;
@@ -495,7 +459,6 @@ impl AgentView {
         self.hovered_follow_up_chip = None;
     }
 
-    /// Full follow-up reset for a session reload.
     /// [`clear_follow_ups`] at a turn boundary keeps `follow_up_seen` so a stale re-delivery stays rejected.
     /// A reload instead starts a fresh streaming session.
     /// Follow-ups never persist across a reload, so the prior session's seen ids must also be dropped or they would suppress chips streamed after it.
@@ -503,21 +466,9 @@ impl AgentView {
         self.reset_follow_ups_for_reload_preserving(None);
     }
 
-    /// Reload reset that preserves the running turn's follow-ups for `keep_prompt_id` (the turn the load is about to adopt).
-    /// On `SessionLoaded` the running turn's `x.ai/follow_ups` arrive on the ext channel during `loading_replay`.
     /// An unconditional reset would drop them before adoption could re-render them, so the chips would never appear unless the server resent them.
-    /// The running turn's chips live in one of two places at reset time:
-    ///
-    /// * [`follow_up_pending`](Self::follow_up_pending): buffered, never displayed (the turn was not current when the chips arrived); or
-    /// * [`follow_ups`](Self::follow_ups): already on screen, because `current_prompt_id` was unset or already equalled the running turn.
-    ///   The delivery then took the newest-wins / current-turn render path instead of the buffer.
-    ///
-    /// Both are preserved by re-buffering the survivor into `follow_up_pending` keyed by `keep_prompt_id`.
-    /// The on-screen copy is the live, latest state, so it wins.
-    /// [`adopt_running_prompt`](Self::adopt_running_prompt) then flushes it.
-    /// All other state (every other turn's buffer, the seen ring, on-screen chips of any other turn) is still cleared.
+    /// [`follow_up_pending`](Self::follow_up_pending): buffered, never displayed (the turn was not current when the chips arrived); or
     /// A reload therefore never leaves stale chips behind.
-    /// `None` is a full reset (the reconnect-reload finalize path, which has no running turn to adopt).
     pub(crate) fn reset_follow_ups_for_reload_preserving(&mut self, keep_prompt_id: Option<&str>) {
         // Capture the running turn's follow_ups before wiping state
         // Prefer the on-screen copy (it rendered, so it is the latest accepted delivery); fall back to the pending buffer
@@ -562,6 +513,28 @@ impl AgentView {
         }
         self.hovered_follow_up_chip = idx;
         true
+    }
+
+    /// Dismiss the shown plugin CTA: hide the row, sync the in-memory dismissed set, queue the persist effect (the locked config write must not run on the render path).
+    /// persist effect (the locked config write must not run on the render path).
+    pub(in crate::app) fn dismiss_matched_plugin(&mut self) {
+        let (CtaPhase::Matched { name, .. } | CtaPhase::Error { name, .. }) =
+            &self.plugin_cta.phase
+        else {
+            return;
+        };
+        let plugin_id = name.clone();
+        self.plugin_cta.dismissed.insert(plugin_id.clone());
+        xai_grok_telemetry::session_ctx::log_event(
+            xai_grok_telemetry::events::PluginCtaDismissed {
+                plugin_name: plugin_id.clone(),
+            },
+        );
+        self.plugin_cta.phase = CtaPhase::Hidden;
+        self.plugin_cta.hit_connect.clear();
+        self.plugin_cta.hit_dismiss.clear();
+        self.pending_effects
+            .push(super::actions::Effect::PersistPluginCtaDismissed { plugin_id });
     }
 
     /// Install the plugin the CTA currently shows.
@@ -780,6 +753,31 @@ mod plugin_cta_notify_tests {
             } => assert_eq!(source_url_or_path, "/srv/spacex-marketplace"),
             other => panic!("expected InstallPluginFromCta, got {other:?}"),
         }
+    }
+
+    /// Dismiss hides the row, remembers the id in memory, and queues the persist effect — never an inline config write.
+    #[test]
+    fn dismiss_hides_and_queues_the_persist_effect() {
+        use crate::app::actions::Effect;
+        use crate::app::agent_view::CtaPhase;
+        let mut agent = make_agent();
+        agent.plugin_cta.phase = CtaPhase::Matched {
+            plugin_relative_path: "plugins/figma".into(),
+            name: "figma".into(),
+        };
+        agent.dismiss_matched_plugin();
+
+        assert!(matches!(agent.plugin_cta.phase, CtaPhase::Hidden));
+        assert!(agent.plugin_cta.dismissed.contains("figma"));
+        assert_eq!(agent.pending_effects.len(), 1);
+        match &agent.pending_effects[0] {
+            Effect::PersistPluginCtaDismissed { plugin_id } => assert_eq!(plugin_id, "figma"),
+            other => panic!("expected PersistPluginCtaDismissed, got {other:?}"),
+        }
+
+        // Outside Matched/Error the dismiss is a no-op.
+        agent.dismiss_matched_plugin();
+        assert_eq!(agent.pending_effects.len(), 1);
     }
 
     #[test]

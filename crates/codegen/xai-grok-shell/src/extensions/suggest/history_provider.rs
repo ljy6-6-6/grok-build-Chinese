@@ -294,10 +294,7 @@ fn load_bash_history(path: &std::path::Path) -> Vec<String> {
     commands
 }
 
-/// Load zsh history.
-/// Lines may be in extended format (`: timestamp:0;command`) or plain format (one command per line).
-///
-/// TODO: zsh represents multiline commands with backslash-newline continuations in the history file.
+/// Load zsh history. Lines may be in extended format (`: timestamp:0;command`) or plain format (one command per line). TODO: zsh represents multiline commands with backslash-newline continuations in the history file.
 /// Currently each continuation line is treated as a separate command, yielding broken fragments for multiline entries.
 fn load_zsh_history(path: &std::path::Path) -> Vec<String> {
     let data = match std::fs::read(path) {
@@ -333,12 +330,6 @@ fn load_zsh_history(path: &std::path::Path) -> Vec<String> {
 }
 
 /// Load fish history. The file uses a YAML-like format:
-/// ```text
-/// - cmd: some command
-///   when: 1234567890
-/// - cmd: another command
-///   when: 1234567891
-/// ```
 fn load_fish_history(path: &std::path::Path) -> Vec<String> {
     let file = match std::fs::File::open(path) {
         Ok(f) => f,

@@ -23,20 +23,11 @@ use futures::{
 };
 
 /// Maximum size of a single NDJSON line (64 MiB).
-///
-/// Prevents unbounded memory growth if a peer sends data without newlines.
-/// 64 MiB accommodates the largest legitimate ACP messages (e.g. a
-/// multi-megabyte file read response after JSON string escaping).
+/// Prevents unbounded growth if a peer sends data without newlines.
 const MAX_LINE_SIZE: usize = 64 * 1024 * 1024;
 
 /// An [`AsyncRead`] that only yields complete `\n`-delimited lines.
-///
-/// Internally, a background task reads lines from the wrapped reader and sends
-/// them through a channel. [`poll_read`](AsyncRead::poll_read) serves bytes
-/// from the current line buffer and only returns `Poll::Pending` when no
-/// buffered bytes remain (i.e. between lines). This guarantees that a consumer
-/// calling `BufReader::read_line` on this reader will always complete without
-/// intermediate `Pending` states, making it safe to use inside `select!`.
+/// `poll_read` returns `Pending` only between lines, so `read_line` inside `select!` is cancel-safe.
 pub struct LineBufferedRead {
     /// Buffered bytes from the current line being served.
     buf: Vec<u8>,
@@ -56,9 +47,7 @@ impl LineBufferedRead {
     }
 
     /// Wrap an `AsyncRead` source with cancel-safe line buffering.
-    ///
-    /// A background task is spawned (via `spawn`) that reads `\n`-delimited
-    /// lines from `source` and feeds them into the returned reader.
+    /// A background task reads `\n`-delimited lines and feeds the returned reader.
     pub fn new(
         source: impl AsyncRead + Unpin + 'static,
         spawn: impl FnOnce(futures::future::LocalBoxFuture<'static, ()>),
@@ -133,10 +122,7 @@ impl AsyncRead for LineBufferedRead {
 }
 
 /// Read a single `\n`-delimited line into `buf`, capped at [`MAX_LINE_SIZE`].
-///
-/// Unlike `read_line`, this checks the accumulated size after each internal
-/// buffer fill, so memory usage stays bounded even if the peer never sends
-/// a newline.
+/// Unlike `read_line`, size is checked after each fill so a missing newline stays bounded.
 async fn read_line_capped(
     reader: &mut (impl AsyncBufRead + Unpin),
     buf: &mut Vec<u8>,

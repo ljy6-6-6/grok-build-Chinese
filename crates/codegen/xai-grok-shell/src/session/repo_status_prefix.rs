@@ -215,10 +215,8 @@ impl Drop for RepoStatusPrefetch {
     }
 }
 
-/// An enum so illegal combinations (a prefetch without a gather, a suppressed
-/// status with a live prefetch) are unrepresentable. `RootOnly` = repo present,
-/// status body suppressed (toggle off / non-interactive): the root is still
-/// surfaced, nothing is gathered.
+/// An enum so illegal combinations (a prefetch without a gather, a suppressed status with a live prefetch) are unrepresentable.
+/// `RootOnly` = repo present, status body suppressed (toggle off / non-interactive): the root is still surfaced, nothing is gathered.
 #[derive(Default)]
 pub(crate) enum RepoStatusPlan {
     #[default]

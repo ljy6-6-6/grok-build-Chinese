@@ -54,7 +54,17 @@ impl ChildRunner for ToolTestRunner {
         Box::pin(std::future::pending())
     }
 
-    fn on_completed(&self, _: ChildCompletion<Self::CompletionData>) {}
+    fn supports_wake(&self) -> bool {
+        true
+    }
+
+    fn on_completed(
+        &self,
+        _: ChildCompletion<Self::CompletionData>,
+        terminal_published: Box<dyn FnOnce() + Send>,
+    ) {
+        terminal_published();
+    }
 }
 
 fn coordinator_backend() -> (ChannelBackend, SubagentCoordinatorReceiver) {
@@ -152,7 +162,11 @@ async fn accepted_roundtrip_uses_backend_bound_parent_and_preserves_request() {
             .await
             .expect("expected active-message ingress");
         assert_eq!(ingress.request.parent_session_id, "trusted-parent");
-        assert_eq!(ingress.request.request.subagent_id(), "sub-1");
+        assert!(matches!(
+            ingress.request.request.target(),
+            crate::implementations::grok_build::task::types::ActiveMessageTarget::ChildId(id)
+                if id == "sub-1"
+        ));
         assert_eq!(ingress.request.request.text().as_ref(), "follow up");
         assert_eq!(
             ingress.request.request.operation(),

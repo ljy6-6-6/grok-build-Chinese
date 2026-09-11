@@ -48,13 +48,8 @@ impl Default for TodoNudgeConfig {
 }
 
 /// Configuration for the runtime turn-end TodoGate.
-///
-/// The gate inspects `TodoState` after every content-only assistant message.
-/// It forces another turn via `<system-reminder>` injection if pending or unbacked in-progress todos remain.
-/// See `xai-grok-shell::session::acp_session::evaluate_todo_gate`.
-///
-/// **Disabled by default.** Operators opt in via the `todo_gate_enabled = true` remote settings key.
-/// The `--todo-gate` CLI flag also force-enables it for the session, at highest precedence.
+/// Injects a `<system-reminder>` if pending or unbacked in-progress todos remain after a content-only assistant message.
+/// Disabled by default; opt in via remote settings or the `--todo-gate` flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TodoGateConfig {
     /// Whether the gate runs at all.

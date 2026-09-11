@@ -144,12 +144,9 @@ pub(super) fn make_response(message: ConversationItem) -> ConversationResponse {
     }
 }
 
-// KV Cache Invariant Tests
-//
-// These tests enforce prefix stability and correct turn ordering for the Responses API input construction
-// Prompt caching (server-side prefix match) requires that request N's serialised input is a strict prefix of request N+1's
-// Any re-ordering of items, especially reasoning items, destroys the prefix and tanks the cache hit rate
-// The invariant asserted is `&input2[..input1.len()] == input1` for every pair of consecutive turns
+// These tests enforce prefix stability and correct turn ordering for the Responses API input construction. Prompt
+// caching (server-side prefix match) requires that request N's serialised input is a strict prefix of request N+1's. The
+// invariant asserted is `&input2[..input1.len()] == input1` for every pair of consecutive turns
 
 pub(super) fn reasoning_sibling(
     id: &str,

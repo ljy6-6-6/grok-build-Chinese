@@ -11,11 +11,11 @@ pub mod folder_trust;
 pub(crate) mod handlers;
 pub mod init;
 pub mod model_providers;
-pub mod models;
 pub mod mvp_agent;
 pub(crate) mod otel_gate;
 pub(crate) mod proxy;
 pub mod relay;
+pub mod remote_config;
 pub(crate) mod restore_code;
 pub mod roster;
 pub mod server;
@@ -24,6 +24,8 @@ pub(crate) mod session_metrics;
 pub mod session_registry_client;
 pub(crate) mod subagent;
 pub(crate) mod subscription_check;
+#[cfg(feature = "test-support")]
+pub mod testkit;
 pub(crate) mod update_chunk_merge;
 
 pub use mvp_agent::MvpAgent;

@@ -77,6 +77,9 @@ impl MvpAgent {
             }
             Some(_) => {}
         }
+        if let Some(handle) = self.resident_handle(id) {
+            handle.persist_resume_status().await;
+        }
         if !self.hard_stop_resident(id, CancelTrigger::SessionClose) {
             return CloseOutcome::NotResident;
         }
@@ -104,9 +107,7 @@ impl MvpAgent {
             .send(SessionCommand::Shutdown(ShutdownKind::CancelRunningTurn));
         true
     }
-    /// Hard-stop before wiping history so delete cannot race live writers.
-    ///
-    /// Order matches [`Self::close_active_session`]: drop residency before any await.
+    /// Hard-stop before wiping history so delete cannot race live writers. Order matches [`Self::close_active_session`]: drop residency before any await.
     /// The supervisor treats a finished still-resident actor as a crash, so awaiting the subagent drain while resident races that sweep.
     /// Every wait spends from a shared [`DELETE_TOTAL_BUDGET`] so the two drains cannot stack into a toast twice as long as close's.
     pub(crate) async fn teardown_live_session_before_delete(&self, id: &acp::SessionId) {

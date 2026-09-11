@@ -32,8 +32,30 @@ fn summary_deserializes_without_head_fields_backward_compat() {
             "current_model_id": "test-model"
         }"#;
     let summary: Summary = serde_json::from_str(json).unwrap();
+    assert!(summary.agent_id.is_none());
+    assert!(summary.attempt_id.is_none());
     assert!(summary.head_commit.is_none());
     assert!(summary.head_branch.is_none());
+}
+
+#[test]
+fn session_identity_start_resume_and_fork() {
+    let started = next_session_identity(None, false, (0x11, 0x22));
+    assert_eq!(started.agent_id, "ag1.11");
+    assert_eq!(started.attempt_id, "at1.22");
+
+    let resumed = next_session_identity(Some(&started.agent_id), false, (0x33, 0x44));
+    assert_eq!(resumed.agent_id, started.agent_id);
+    assert_eq!(resumed.attempt_id, "at1.44");
+
+    let forked = next_session_identity(Some(&resumed.agent_id), true, (0x55, 0x66));
+    assert_eq!(forked.agent_id, "ag1.55");
+    assert_ne!(forked.agent_id, resumed.agent_id);
+    assert_eq!(forked.attempt_id, "at1.66");
+
+    let invalid_legacy = next_session_identity(Some("legacy-session-id"), false, (0x77, 0x88));
+    assert_eq!(invalid_legacy.agent_id, "ag1.77");
+    assert_eq!(invalid_legacy.attempt_id, "at1.88");
 }
 
 #[test]

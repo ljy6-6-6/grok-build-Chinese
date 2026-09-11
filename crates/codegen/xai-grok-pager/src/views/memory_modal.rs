@@ -566,7 +566,7 @@ fn render_file_list_with_locale(
         if cursor_x < area.x + area.width
             && let Some(cell) = buf.cell_mut((cursor_x, search_y))
         {
-            cell.set_style(Style::default().fg(theme.bg_base).bg(theme.text_primary));
+            cell.set_style(theme.block_cursor_over(theme.bg_base));
         }
     }
 
@@ -672,6 +672,11 @@ fn render_file_list_with_locale(
                         meta_w,
                     );
                 }
+            }
+
+            // Terminal theme (Reset bands): reverse video; no-op on RGB.
+            if is_selected {
+                buf.set_style(row_rect, theme.selection_overlay());
             }
         }
     }
@@ -865,13 +870,6 @@ fn apply_scrollbar_jump(
 }
 
 /// Handle mouse events for the memory modal content area.
-///
-/// Supports:
-/// - Left-click on a file list row to select it
-/// - Scroll wheel over the file list to scroll the list
-/// - Scroll wheel over the preview pane to scroll the preview
-/// - Click/drag on list scrollbar to jump-scroll the list
-/// - Click/drag on preview scrollbar to jump-scroll the preview
 pub fn handle_memory_mouse(
     state: &mut MemoryModalState,
     kind: MouseEventKind,
@@ -1388,9 +1386,6 @@ mod tests {
     }
 
     /// Wiring check: the Browse footer carries the shared `i search` hint under vim nav mode.
-    /// The gate is covered centrally by `modal_window`'s `vim_nav_search_hint_only_in_vim_nav_mode`.
-    /// The `set_vim_mode` pin (a thread-local that, once set, blocks disk-seeding) keeps this independent of the dev's on-disk `[ui].vim_mode`.
-    /// Reset afterward since libtest reuses worker threads.
     #[test]
     fn browse_footer_advertises_i_search_under_vim() {
         crate::appearance::cache::set_vim_mode(true);

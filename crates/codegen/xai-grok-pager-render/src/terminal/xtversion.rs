@@ -78,11 +78,8 @@ pub fn probe_at_startup() {
     send_query();
 }
 
-/// Brand allowlist, as in Crush: Unknown plus brands validated by hand as clean XTVERSION responders (version fidelity is the payoff there).
-/// CSI-intercepting multiplexers skip: the innermost layer answers as itself, which the `multiplexer` field already records.
-/// Transparent muxes (e.g. cmux) need no special case.
-///
-/// `pub(super)` for [`super::da2`], which must stay disjoint from this list.
+/// Unknown plus brands validated as clean XTVERSION responders. CSI-intercepting muxes skip; the innermost layer answers as itself.
+/// Must stay disjoint from [`super::da2`]'s probe list.
 pub(super) fn gate_allows_probe(ctx: &super::TerminalContext) -> bool {
     use super::TerminalName::*;
     matches!(

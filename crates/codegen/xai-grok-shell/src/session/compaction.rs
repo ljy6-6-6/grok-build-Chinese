@@ -85,7 +85,8 @@ fn fingerprint_prefix(items: &[ConversationItem]) -> u64 {
 }
 /// Outcome of a background prefire pass-1 run, recorded on the `session.prefire_pass1` span as `compaction_prefire_outcome`.
 /// [`PrefireOutcome::as_str`] values are stable telemetry keys (telemetry/dashboards key off them); don't rename the strings.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, strum::AsRefStr, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 enum PrefireOutcome {
     Cached,
     Disabled,
@@ -94,19 +95,6 @@ enum PrefireOutcome {
     EmptySplit,
     SampleFailed,
     EmptyNote1,
-}
-impl PrefireOutcome {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Cached => "cached",
-            Self::Disabled => "disabled",
-            Self::DebugFailPass1 => "debug_fail_pass1",
-            Self::TooSmall => "too_small",
-            Self::EmptySplit => "empty_split",
-            Self::SampleFailed => "sample_failed",
-            Self::EmptyNote1 => "empty_note1",
-        }
-    }
 }
 /// Telemetry from one prefire pass-1 run; recorded onto the `session.prefire_pass1` span by [`SessionActor::run_prefire_pass1`].
 /// A `None` field means the run exited before that stage.
@@ -137,12 +125,8 @@ impl SessionActor {
         let agent = self.agent.borrow();
         agent.compaction_policy().two_pass_enabled
     }
-    /// Run one summarization sample over a fully-built two-pass history.
     /// The prompt is already embedded, so this bypasses the single-pass sampler and calls `generate_session_compact` directly.
-    /// Returns `None` on any error so callers fall back to single-pass.
-    ///
     /// Agent `RefCell` borrows are only taken for synchronous snapshots (never held across `.await`).
-    /// Prefire is `spawn_local` on the same LocalSet as the turn loop.
     /// A long-lived borrow would race with turn/compact/cancel and panic on double-borrow.
     async fn two_pass_sample(&self, history: Vec<ConversationItem>) -> Option<CompactOutput> {
         let sampling_config = self.reconstruct_full_config().await;
@@ -202,7 +186,6 @@ impl SessionActor {
     /// Background pass-1: summarize the ~95% prefix into NOTE₁ and cache it for a later pass-2 apply.
     /// Always releases the in-flight guard.
     /// Spawned via `spawn_local` from the turn loop; reads a conversation snapshot and does not mutate session state.
-    /// The span makes speculative pass-1 spend measurable (hit rate, wasted input tokens) ahead of the fleet-wide ramp.
     #[tracing::instrument(
         name = "session.prefire_pass1",
         skip_all,
@@ -225,7 +208,7 @@ impl SessionActor {
         let _guard = InFlightGuard(&self.compaction.prefire);
         let run = self.run_prefire_pass1_inner().await;
         let span = tracing::Span::current();
-        span.record("compaction_prefire_outcome", run.outcome.as_str());
+        span.record("compaction_prefire_outcome", run.outcome.as_ref());
         if let Some(v) = run.prefix_len {
             span.record("compaction_prefire_prefix_len", v as i64);
         }
@@ -311,15 +294,9 @@ impl SessionActor {
         self.compaction.prefire.store(cache);
         attempted(PrefireOutcome::Cached, Some(note1_chars))
     }
-    /// Pass-2 apply: summarize the cached NOTE₁, the recent tail, and the special prompt into the final summary and return its `CompactOutput`.
     /// Runs only when a valid cached NOTE₁ exists for the current conversation.
-    /// Returning `None` means the caller runs the single-pass path.
-    ///
-    /// **telemetry:** the returned `CompactOutput` stream timings land on `compaction_ttft_ms` / `compaction_stream_ms` (`session.compact_inner`).
-    /// Those reflect **user-visible sync wait only**:
-    /// - background pass-1 that already finished before compact is *not* included (prefire hid that cost);
-    /// - if pass-1 is still in flight we **do** add that await into `ttft_ms` (first token of the final summary), because the user is blocked on it;
-    /// - `stream_ms` / `delta_count` / `itl_max_ms` are always pass-2 only (the only sample that streams the successor-visible summary).
+    /// if pass-1 is still in flight we do add that await into `ttft_ms` (first token of the final summary), because the user is blocked on it;.
+    /// `stream_ms` / `delta_count` / `itl_max_ms` are always pass-2 only (the only sample that streams the successor-visible summary).
     async fn try_two_pass_pass2_apply(
         &self,
         user_context: Option<&str>,
@@ -412,7 +389,8 @@ fn lossy_input_budget(context_window: u64, tool_tokens: u64) -> u64 {
 }
 /// Why auto-compaction was suppressed after a deterministic failure.
 /// [`SuppressReason::as_str`] is a stable telemetry value (BQ/OTLP/dashboards key off it); don't rename the strings.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, strum::AsRefStr, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub(crate) enum SuppressReason {
     CreditBlock,
     Size,
@@ -421,20 +399,9 @@ pub(crate) enum SuppressReason {
     Other,
 }
 impl SuppressReason {
-    fn as_str(self) -> &'static str {
-        match self {
-            SuppressReason::CreditBlock => "credit_block",
-            SuppressReason::Size => "size",
-            SuppressReason::Auth => "auth",
-            SuppressReason::Schema => "schema",
-            SuppressReason::Other => "other",
-        }
-    }
-    /// Suppression scope for this reason:
-    /// - `size` and `schema` get [`SUPPRESS_STICKY`]: cleared only on a context-budget change.
-    /// - `credit_block` gets [`SUPPRESS_UNTIL_SUCCESS`]: wait for a model `200`.
-    /// - `auth` gets [`SUPPRESS_AUTH`]: cleared on login/token refresh, not on a `200` (an over-window session never gets one).
-    /// - `other` gets [`SUPPRESS_TURN`]: optimistic per-turn retry.
+    /// `size` and `schema` get [`SUPPRESS_STICKY`]: cleared only on a context-budget change.
+    /// `credit_block` gets [`SUPPRESS_UNTIL_SUCCESS`]: wait for a model `200`.
+    /// `auth` gets [`SUPPRESS_AUTH`]: cleared on login/token refresh, not on a `200` (an over-window session never gets one).
     fn suppress_state(self) -> u8 {
         match self {
             SuppressReason::Size | SuppressReason::Schema => SUPPRESS_STICKY,
@@ -467,10 +434,7 @@ fn preserve_inherited_prefix(
 }
 /// Project the token count a re-pinned (preserved) history would reseed to.
 /// The release decision then compares against the same threshold the auto-compact trigger applies next turn.
-/// This only APPROXIMATES the reseed done by `xai-chat-state` `replace_conversation`, the authority.
-/// It divides by the current conversation estimate, not the reseed's frozen `estimate_at_last_response`.
 /// The conversation only grows, so this under-estimates the reseed (a lower bound) and can lean toward preserve.
-/// That never re-loops: the post-replace `exceeds_threshold` check still sets sticky Size suppression if a preserve leaves the fork over budget.
 fn project_preserved_reseed_tokens(
     preserved_estimate: u64,
     tokens_before: u64,
@@ -486,8 +450,7 @@ impl SessionActor {
     }
     /// Path to the raw `updates.jsonl` transcript if it exists, else `None`.
     /// `pub(crate)` so the `Transcript`-mode dispatch in `compaction_segments` and transcript-location pointers can both reuse it.
-    ///
-    /// The `path.exists()` guard keeps the pointer safe when a session (e.g. a nested sub-agent) never wrote one.
+    /// The `path.exists()` guard keeps the pointer safe when a session never wrote one.
     pub(crate) fn get_transcript_path(&self) -> Option<String> {
         let path = self.transcript_path();
         if path.exists() {
@@ -624,7 +587,6 @@ impl SessionActor {
         Err(crate::session::helpers::session_compact::CompactFailure::cancelled_error())
     }
     /// Suppress AUTO compaction after a deterministic failure.
-    /// Scope depends on the reason (see [`SuppressReason::suppress_state`]).
     /// Emits telemetry and one notification per transition; manual `/compact` is exempt.
     /// Only `Other` shows `detail`; the canned reasons are already actionable.
     async fn suppress_auto_compaction(
@@ -647,14 +609,14 @@ impl SessionActor {
             .is_ok()
         {
             tracing::warn!(
-                suppress_reason = reason.as_str(),
+                suppress_reason = reason.as_ref(),
                 estimated_tokens,
                 context_window,
                 "auto-compaction suppressed after deterministic compaction failure"
             );
             xai_grok_telemetry::session_ctx::log_event(
                 xai_grok_telemetry::events::AutoCompactSuppressed {
-                    reason: reason.as_str(),
+                    reason: reason.into(),
                     estimated_tokens,
                     context_window,
                 },
@@ -802,10 +764,7 @@ impl SessionActor {
     }
     /// Choose the post-compaction history for a forked session.
     /// Re-pin the inherited prefix, or release it when re-pinning would leave the fork at/over the auto-compact threshold.
-    /// A release falls back to the self-contained summary the summarizer already built from the whole conversation.
     /// A release also sets the sticky flag and records the release span field (this runs within the `run_compact_inner` span).
-    ///
-    /// This runtime release compensates for a verbatim mirror-fork that pinned its whole parent transcript.
     async fn resolve_forked_compacted_history(
         &self,
         compacted_history: Vec<ConversationItem>,
@@ -959,7 +918,6 @@ impl SessionActor {
                 source: compact_source.into(),
             },
             None,
-            None,
         )
         .await;
         let max_retries = 3u32;
@@ -1068,20 +1026,12 @@ impl SessionActor {
         );
         let mut last_error: Option<acp::Error> = None;
         let mut last_failure_outcome = CompactionOutcome::Failed;
-        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, strum::AsRefStr, strum::IntoStaticStr)]
+        #[strum(serialize_all = "snake_case")]
         enum InputStage {
             Verbatim,
             VerbatimFitted,
             Lossy,
-        }
-        impl InputStage {
-            fn as_str(self) -> &'static str {
-                match self {
-                    Self::Verbatim => "verbatim",
-                    Self::VerbatimFitted => "verbatim_fitted",
-                    Self::Lossy => "lossy",
-                }
-            }
         }
         let mut input_stage = if verbatim_input_enabled {
             InputStage::Verbatim
@@ -1192,8 +1142,8 @@ impl SessionActor {
                                 xai_grok_telemetry::events::CompactionRetryDegraded {
                                     trigger,
                                     reason: "input_overflow",
-                                    from_stage: Some(input_stage.as_str()),
-                                    to_stage: Some(stage.as_str()),
+                                    from_stage: Some(input_stage.into()),
+                                    to_stage: Some(stage.into()),
                                     summary_chars: None,
                                     attempt: observer.attempt_count(),
                                     context_window,
@@ -1316,7 +1266,7 @@ impl SessionActor {
                     "compaction_transient_rejections",
                     telemetry.transient_rejections as i64,
                 );
-                span.record("compaction_outcome", last_failure_outcome.as_str());
+                span.record("compaction_outcome", last_failure_outcome.as_ref());
                 return Err(last_error.unwrap_or_else(|| {
                     acp::Error::internal_error().data("compaction failed: unknown error")
                 }));
@@ -1477,7 +1427,6 @@ impl SessionActor {
                                 prompt: t.prompt,
                                 recurring: t.recurring,
                                 durable: t.durable,
-                                foreground: t.foreground,
                             }
                         })
                         .collect()
@@ -1494,7 +1443,7 @@ impl SessionActor {
                                 elapsed_ms: guard.elapsed_ms(&r.run_id),
                                 name: r.name,
                                 run_id: r.run_id,
-                                status: r.status.as_str().to_string(),
+                                status: r.status.as_ref().to_string(),
                                 objective: r.objective,
                                 current_phase: r.current_phase,
                                 agents_used: r.agents_used,
@@ -1624,6 +1573,48 @@ impl SessionActor {
                 workflow_listing.as_deref(),
             )
             .await
+        };
+        let v2_memory_context = if self.memory.is_enabled()
+            && self.memory.mode() == Some(crate::config::MemoryMode::V2)
+        {
+            if let Some(storage) = self.memory.storage() {
+                match tokio::task::spawn_blocking(move || {
+                    crate::session::helpers::memory_context::format_v2_memory_context(&storage)
+                })
+                .await
+                {
+                    Ok(Ok(context)) => Some(context),
+                    Ok(Err(error)) => {
+                        tracing::warn!(
+                            target: xai_grok_telemetry::memory_log::TARGET,
+                            %error,
+                            "MEMORY_COMPACTION_RECOVERY: failed to refresh v2 manifests"
+                        );
+                        None
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            target: xai_grok_telemetry::memory_log::TARGET,
+                            %error,
+                            "MEMORY_COMPACTION_RECOVERY: v2 manifest task failed"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let system_reminder = match (system_reminder, v2_memory_context) {
+            (Some(mut reminder), Some(context)) => {
+                reminder.push_str("\n\n");
+                reminder.push_str(&context);
+                Some(reminder)
+            }
+            (None, Some(context)) => Some(context),
+            (reminder, None) => reminder,
         };
         let system_reminder = {
             let plan_path = {
@@ -1863,7 +1854,6 @@ impl SessionActor {
                 source: compact_source.into(),
             },
             None,
-            None,
         )
         .await;
         let tokens_after = self.chat_state_handle.get_total_tokens().await;
@@ -1898,7 +1888,7 @@ impl SessionActor {
             } else {
                 CompactionOutcome::Success
             };
-            span.record("compaction_outcome", outcome.as_str());
+            span.record("compaction_outcome", outcome.as_ref());
             span.record("compaction_delta_count", compact_output.delta_count as i64);
             if let Some(ms) = compact_output.ttft_ms {
                 span.record("compaction_ttft_ms", ms as i64);
@@ -1949,7 +1939,6 @@ impl SessionActor {
     }
     /// Returns true if the error response indicates tokens exceed the model's context window.
     /// Inspects only the model-metadata portion of the [`SamplingErrorInfo`] (the `context_window` field) against the tracked token estimate.
-    ///
     /// Called from `handle_sampling_failure` with the `SamplingErrorInfo` the sampler hands back.
     pub(crate) async fn should_compact_on_error(
         &self,
@@ -2141,6 +2130,7 @@ impl SessionActor {
     ) -> Result<(), acp::Error> {
         use crate::extensions::notification::SessionUpdate as XaiSessionUpdate;
         let (_cancel, _cancel_scope) = self.compaction.cancel.enter();
+        let _compaction_phase = self.turn_phases.begin_compaction();
         self.record_compaction_variant();
         let tokens_before = self.chat_state_handle.get_total_tokens().await;
         tracing::Span::current().record("pre_tokens", tokens_before as i64);
@@ -2213,15 +2203,8 @@ impl SessionActor {
             }
         }
     }
-    /// Persist a compaction request artifact for offline prompt iteration.
-    ///
-    /// Writes `{session_dir}/compaction_requests/{request_id}.json`.
-    /// The file holds the exact ConversationItem list sent to the compaction model plus the summary (or final error) it produced.
-    /// The file rides on the post-turn session archive to cloud storage via the existing per-turn upload pipeline.
-    ///
     /// `created_at` is taken from the caller-supplied `started_at` (captured before the retry loop) rather than `Utc::now()` here.
     /// Transient retries then don't skew the timestamp away from when the call actually started.
-    ///
     /// Best-effort: send-failures are logged at `warn` and never shown to the user, because the artifact is purely for offline analysis.
     #[allow(clippy::too_many_arguments)]
     fn persist_compaction_request_artifact(
@@ -2285,7 +2268,6 @@ impl SessionActor {
     }
     /// Persist a compaction checkpoint.
     /// Writes the compacted history to a separate file and records a `CompactionCheckpoint` marker in `updates.jsonl`.
-    ///
     /// `auto_continue` should be `Some` when this compaction was triggered by auto-compact and an auto-continue prompt will follow.
     fn persist_compaction_checkpoint(
         &self,

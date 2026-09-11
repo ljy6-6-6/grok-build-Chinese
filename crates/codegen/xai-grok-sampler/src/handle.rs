@@ -27,7 +27,6 @@ pub struct CollectedSamplingResult {
 }
 
 /// Cheaply-cloneable handle to the sampler actor.
-///
 /// Internally just an `mpsc::UnboundedSender<SamplerCommand>`.
 /// All methods are non-blocking (fire-and-forget) except for the `*_async` queries which return a future awaiting an `oneshot::Receiver`.
 #[derive(Clone)]

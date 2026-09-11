@@ -8,7 +8,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Widget};
 
 use crate::theme::Theme;
 
-use super::WelcomeLayout;
+use super::{WelcomeLayout, WelcomeLayoutInput};
 
 /// Minimum terminal width for the side-by-side hero box layout.
 pub(super) const HERO_BOX_MIN_WIDTH: u16 = 90;
@@ -28,6 +28,7 @@ const UPGRADE_CTA_ROWS: u16 = 2;
 
 const HERO_SUBTITLE: &str = "Thanks for trying Grok Build, give feedback with /feedback!";
 
+use super::logo::LogoTier;
 use super::{PROMPT_HEIGHT, VERSION_GAP};
 
 /// Rows the "thanks" subtitle occupies.
@@ -47,36 +48,28 @@ fn right_col_height(menu_height: u16, info_height: u16) -> u16 {
 /// That covers the optional error row, the box, a one-row flex gap, and the fixed rows below (tip + prompt + version).
 /// The box always shows the full-height logo, so a terminal shorter than this falls back to the stacked layout instead of overflowing.
 pub(super) fn min_content_height(
-    error_height: u16,
-    menu_height: u16,
-    tip_height: u16,
+    input: &WelcomeLayoutInput<'_>,
     info_height: u16,
-    logo_hidden: bool,
+    prompt_height: u16,
 ) -> u16 {
-    let inner = super::logo::full_logo_line_count_for(logo_hidden)
-        .max(right_col_height(menu_height, info_height));
+    let inner = super::logo::full_logo_line_count_for(input.logo_hidden)
+        .max(right_col_height(input.menu_height, info_height));
     let hero_box_height = 2 + V_PAD * 2 + inner;
-    let gap_after_error = if error_height > 0 { 1u16 } else { 0 };
-    gap_after_error + error_height + hero_box_height + 1 + WelcomeLayout::fixed_below(tip_height)
+    let gap_after_error = if input.error_height > 0 { 1u16 } else { 0 };
+    gap_after_error
+        + input.error_height
+        + hero_box_height
+        + 1
+        + WelcomeLayout::fixed_below(input.tip_height, prompt_height)
 }
 
-/// Largest in-box info-slot height, at most `desired`, for which the hero box still fits in `content_height`.
+/// Largest in-box info-slot height, at most `desired`, for which the hero box still fits beside a one-line prompt.
 /// Lets the expanded announcement grow without ever pushing the box past the fit gate.
 /// The renderer trails a `…` for whatever tail still doesn't fit, so the fallback never overflows.
-pub(super) fn clamp_info_height(
-    desired: u16,
-    content_height: u16,
-    error_height: u16,
-    menu_height: u16,
-    tip_height: u16,
-    logo_hidden: bool,
-) -> u16 {
+fn clamp_info_height(desired: u16, input: &WelcomeLayoutInput<'_>, one_line_prompt: u16) -> u16 {
     (0..=desired)
         .rev()
-        .find(|&h| {
-            content_height
-                >= min_content_height(error_height, menu_height, tip_height, h, logo_hidden)
-        })
+        .find(|&h| input.content_area.height >= min_content_height(input, h, one_line_prompt))
         .unwrap_or(0)
 }
 
@@ -91,24 +84,19 @@ fn left_col_width(logo_hidden: bool) -> u16 {
     }
 }
 
-/// Compute the hero box layout: a bordered box with the logo on the left and the version and menu on the right.
-///
-/// Sizes the in-box info slot here (the announcement clamped to fit, else the fixed `changelog_height`) so the renderer just draws into `hero_info`.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn compute_hero_box(
-    content_area: Rect,
-    error_height: u16,
-    menu_height: u16,
-    tip_height: u16,
-    changelog_height: u16,
-    announcement: Option<&xai_grok_announcements::RemoteAnnouncement>,
-    expanded: bool,
-    has_upgrade_cta: bool,
-    logo_hidden: bool,
-) -> WelcomeLayout {
+/// A taller draft never reflows the slot: when the box no longer fits beside it, this returns
+/// `None` and the caller falls back to the stacked layout.
+pub(super) fn compute_hero_box(input: &WelcomeLayoutInput<'_>) -> Option<WelcomeLayout> {
+    let logo_hidden = input.logo_hidden;
+    let content_area = input.content_area;
+    let error_height = input.error_height;
+    let menu_height = input.menu_height;
+    let tip_height = input.tip_height;
+    let prompt_height = input.prompt_height.unwrap_or(PROMPT_HEIGHT);
+    let one_line_prompt = prompt_height.min(PROMPT_HEIGHT);
     let zero = Rect::default();
     let tip_gap = if tip_height > 0 { 1u16 } else { 0 };
-    let fixed_below = WelcomeLayout::fixed_below(tip_height);
+    let fixed_below = WelcomeLayout::fixed_below(tip_height, prompt_height);
 
     // Column widths are height-independent, so derive them once and reuse for both the measurement and the rects
     // `hero_info.width == info_slot_width`, so the measured width is the drawn width
@@ -117,17 +105,17 @@ pub(super) fn compute_hero_box(
     let left_col_width = left_col_width(logo_hidden);
     let right_width = inner_width.saturating_sub(left_col_width);
     let info_slot_width = right_width.saturating_sub(H_INSET);
-    let info_height = match announcement {
+    let info_height = match input.announcement {
         Some(ann) => clamp_info_height(
-            announcement_desired_rows(ann, info_slot_width, expanded, has_upgrade_cta),
-            content_area.height,
-            error_height,
-            menu_height,
-            tip_height,
-            logo_hidden,
+            announcement_desired_rows(ann, info_slot_width, input.expanded, input.has_upgrade_cta),
+            input,
+            one_line_prompt,
         ),
-        None => changelog_height,
+        None => input.changelog_height,
     };
+    if content_area.height < min_content_height(input, info_height, prompt_height) {
+        return None;
+    }
 
     let logo_rows = super::logo::full_logo_line_count_for(logo_hidden);
     let info_gap = if info_height > 0 { 1u16 } else { 0 };
@@ -137,17 +125,17 @@ pub(super) fn compute_hero_box(
     let gap_after_error = if error_height > 0 { 1 } else { 0 };
     let fixed_above = gap_after_error + error_height;
 
-    // Top padding for vertical centering (use the default menu height so the logo position stays constant regardless of picker or focus state)
+    // Top padding for vertical centering (use the default menu height and the one-line prompt so the logo position stays constant regardless of picker/focus state or draft length)
     let default_menu_height = 4u16;
     let default_inner = logo_rows.max(right_col_height(default_menu_height, info_height));
     let default_hero = 2 + V_PAD * 2 + default_inner;
     let remaining = content_area.height.saturating_sub(fixed_above);
     let top_pad = remaining
         .saturating_sub(default_hero)
-        .saturating_sub(fixed_below)
+        .saturating_sub(WelcomeLayout::fixed_below(tip_height, one_line_prompt))
         / 3;
     // Centering derives top_pad from the default-menu box, but the fit gate (min_content_height) sizes for the actual box with no pad
-    // Clamp to the real slack so a menu taller than the default can't push the rows below the box off the bottom at the tight boundary
+    // Clamp to the real slack so a taller menu or draft can't push the rows below the box off the bottom
     let top_pad = top_pad.min(
         content_area
             .height
@@ -173,7 +161,7 @@ pub(super) fn compute_hero_box(
         Constraint::Min(1), // flex gap
         Constraint::Length(tip_height),
         Constraint::Length(tip_gap),
-        Constraint::Length(PROMPT_HEIGHT),
+        Constraint::Length(prompt_height),
         Constraint::Length(VERSION_GAP),
         Constraint::Length(1),
     ])
@@ -258,7 +246,7 @@ pub(super) fn compute_hero_box(
         height: menu_height.min(inner.height.saturating_sub(right_header_rows)),
     };
 
-    WelcomeLayout {
+    Some(WelcomeLayout {
         logo: zero,
         error,
         menu: zero,
@@ -272,7 +260,9 @@ pub(super) fn compute_hero_box(
         hero_subtitle,
         hero_info,
         hero_menu,
-    }
+        // The box paints the full logo through `render_hero_box`; the stacked `logo` rect is empty
+        logo_tier: LogoTier::Hidden,
+    })
 }
 
 /// Hit-test rects produced by [`render_hero_box`].
@@ -430,11 +420,8 @@ pub(super) fn render_hero_box(
     }
 }
 
-/// Draw the announcement text and the optional upgrade CTA into `area`.
-/// The CTA rows are reserved at the bottom so a long or expanded message never overpaints the button.
-/// The button is placed right after the drawn text and a spacer row.
-/// Shared by the hero box and the stacked layout.
-/// Returns `(text_area, truncated, upgrade_cta_rect)`.
+/// The CTA rows are reserved at the bottom so a long or expanded message never overpaints the
+/// button.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_announcement_with_upgrade_cta(
     buf: &mut Buffer,
@@ -482,10 +469,8 @@ pub(super) fn render_announcement_with_upgrade_cta(
     (text_area, truncated, cta_rect)
 }
 
-/// Render the announcement (title and message) into `area`, used by both welcome layouts.
-/// Collapsed wraps to 2 lines and a `…`; expanded shows what fits.
-/// The block brightens while hovered, but only when it's interactive (overflowing or already expanded).
-/// Returns whether the message was truncated (the "expandable" signal).
+/// The block brightens while hovered, but only when it's interactive (overflowing or already
+/// expanded).
 pub(super) fn render_announcement_block(
     buf: &mut Buffer,
     theme: &Theme,
@@ -913,10 +898,8 @@ managed devices and accounts. Report security incidents";
         assert_eq!(extract_text(&buf, 0, area.height, area.width), "");
     }
 
-    /// The upgrade CTA reserves `UPGRADE_CTA_ROWS` on top of the text rows.
-    /// `render_announcement_with_upgrade_cta` paints `[label]` below the message, plus the dim `cta.caption` for a pinned promo that configures one.
-    /// The button stays bare for a caption-less pinned promo or a dismissible one.
-    /// Returns the button rect (button only, caption excluded).
+    /// The upgrade CTA reserves `UPGRADE_CTA_ROWS` on top of the text rows. Returns the button rect
+    /// (button only, caption excluded).
     #[test]
     fn upgrade_cta_reserves_rows_and_returns_button_rect() {
         let area = Rect::new(0, 0, 40, 8);

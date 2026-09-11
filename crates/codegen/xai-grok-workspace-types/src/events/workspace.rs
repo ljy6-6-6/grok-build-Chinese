@@ -90,24 +90,16 @@ pub enum WorkspaceEvent {
     ProjectConfigChanged,
     /// Permission policy changed on disk.
     PermissionPolicyChanged,
-    /// A session's tool registry was rebuilt.
-    ///
-    /// Triggered when:
-    /// - `WorkspaceChannel::update_tool_config` swaps a session's `effective_tool_config`, or
-    /// - an MCP server snapshot changes and the workspace re-resolves each session's `FinalizedToolset`.
-    ///
-    /// Subscribers should re-fetch tool definitions for the affected session via `WorkspaceChannel::tool_definitions`.
+    /// A session's tool registry was rebuilt (tool-config swap or MCP snapshot re-resolve).
+    /// Subscribers should re-fetch definitions for the affected session.
     ToolsChanged {
         /// Affected session id.
         session_id: String,
     },
 }
 
-/// Topic discriminator for workspace events.
-///
-/// Used by `EventBus::subscribe_filtered` to skip uninteresting events.
-/// The mapping from event variant to topic is documented inline.
-/// Topic filtering is purely a delivery optimisation; it never changes the event payload.
+/// Topic discriminator for workspace events, used by `EventBus::subscribe_filtered` to skip uninteresting events.
+/// Filtering is delivery-only; it never changes the payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceTopic {

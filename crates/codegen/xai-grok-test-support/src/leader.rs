@@ -119,10 +119,9 @@ impl acp::Client for LeaderAcpClient {
     }
 }
 
-/// Owns the concrete initial persistent leader shared by a test's clients.
-///
-/// A replacement leader spawned by the code under test is outside this fixture's ownership.
-/// [`Self::wait_for_new_leader`] may observe one for assertions but never signals the PID it reads.
+/// Owns the concrete initial persistent leader shared by a test's clients. A replacement leader spawned by the code under
+/// test is outside this fixture's ownership. [`Self::wait_for_new_leader`] may observe one for assertions but never
+/// signals the PID it reads.
 pub struct LeaderFixture {
     inner: Arc<Mutex<LeaderFixtureState>>,
 }
@@ -255,7 +254,7 @@ impl LeaderFixture {
             .env("GROK_TRACE_UPLOAD_URL", base_url)
             .env("XAI_API_KEY", "test-key-for-ci")
             .env("GROK_LEADER_SOCKET", &socket)
-            .env("RUST_LOG", "xai_grok_shell=debug");
+            .env("RUST_LOG", "xai_grok_shell=debug,xai_grok_login=debug");
         let log_path = sandbox.grok_home().join("leader.log");
         match std::fs::File::create(&log_path) {
             Ok(log) => {
@@ -638,7 +637,7 @@ impl LeaderStdioClient {
                 .env("GROK_TRACE_UPLOAD_URL", base_url)
                 .env("XAI_API_KEY", "test-key-for-ci")
                 .env("GROK_LEADER_SOCKET", leader_socket)
-                .env("RUST_LOG", "xai_grok_shell=debug"),
+                .env("RUST_LOG", "xai_grok_shell=debug,xai_grok_login=debug"),
         )
         .map_err(|error| {
             io::Error::new(

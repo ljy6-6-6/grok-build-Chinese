@@ -262,6 +262,7 @@ impl From<&xai_grok_tools::types::ToolInput> for AccessKind {
             ToolInput::SendSubagentMessage(message) => AccessKind::AgentMessage {
                 subagent_id: message.subagent_id.clone(),
             },
+            ToolInput::SendFeedback(_) => AccessKind::Edit("feedback_draft".to_owned()),
             ToolInput::WebSearch(ws) => AccessKind::WebSearch(ws.query.clone()),
             ToolInput::SearchReplace(search_replace) => {
                 AccessKind::Edit(search_replace.file_path.to_string())
@@ -298,6 +299,11 @@ fn dynamic_has_field(value: &serde_json::Value, keys: &[&str]) -> bool {
         .is_some_and(|object| keys.iter().any(|key| object.contains_key(*key)))
 }
 fn access_kind_from_dynamic(value: &serde_json::Value) -> AccessKind {
+    if let Some(name) = dynamic_string_field(value, &["name", "tool", "tool_name", "variant"])
+        && (name == "send_feedback" || name == "SendFeedback")
+    {
+        return AccessKind::Edit("feedback_draft".to_owned());
+    }
     if let Some(path) = dynamic_string_field(value, &["filePath", "file_path", "path"]) {
         let is_mutation = dynamic_has_field(
             value,
@@ -653,6 +659,29 @@ mod tests {
         };
         assert_eq!(subagent_id, "sub-1");
         assert!(!subagent_id.contains(text));
+    }
+    #[test]
+    fn send_feedback_maps_to_write_access() {
+        use xai_grok_tools::types::ToolInput;
+        let input: ToolInput = serde_json::from_value(serde_json::json!({
+            "variant": "SendFeedback",
+            "title": "Draft title",
+            "details": "What happened:\n- The tool failed.",
+            "type": "bug"
+        }))
+        .unwrap();
+        assert!(matches!(
+            AccessKind::from(&input),
+            AccessKind::Edit(path) if path == "feedback_draft"
+        ));
+        assert!(matches!(
+            AccessKind::from(&ToolInput::Dynamic(serde_json::json!({
+                "name": "send_feedback",
+                "title": "Draft title",
+                "details": "What happened",
+            }))),
+            AccessKind::Edit(path) if path == "feedback_draft"
+        ));
     }
     #[test]
     fn use_tool_maps_to_mcp_tool_access() {

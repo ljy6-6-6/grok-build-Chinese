@@ -54,7 +54,9 @@ use xai_tool_runtime::{
 use xai_tool_types::ToolDescription;
 
 use crate::auth::{AuthCredential, AuthProvider};
-use crate::connection::{HubConnection, ReconnectCallback, ReconnectEvent};
+use crate::connection::{
+    HubConnection, ReconnectCallback, ReconnectEvent, build_request_frame, try_send_request_on_drop,
+};
 use crate::connection_borrow::ConnectionBorrow;
 use crate::error::ClientError;
 use crate::pool::HubConnectionPool;
@@ -522,7 +524,7 @@ impl ToolHarnessBuilder {
             if let Err(e) = connection.call_request(request_id, &req).await {
                 // Roll back the local track so a later successful harness for
                 // this session can still reach the last-borrower untrack edge.
-                let _ = connection.untrack_session(&session);
+                connection.untrack_session_and_detach(&session);
                 tracing::warn!(error = %e, "session_open failed during harness build");
                 return Err(e);
             }
@@ -825,13 +827,14 @@ async fn list_remote_tools(
     }
 }
 
-/// Untrack; if last borrower, identity-unregister our inbox only.
+/// Untrack (detaching on the hub if last borrower); if last borrower,
+/// identity-unregister our inbox only.
 fn release_session_binding(
     connection: &HubConnection,
     session: &SessionId,
     inbox_tx: Option<&tokio::sync::mpsc::WeakSender<crate::demux::InboundFrame>>,
 ) {
-    if connection.untrack_session(session) != Some(0) {
+    if !connection.untrack_session_and_detach(session) {
         return;
     }
     if let Some(weak) = inbox_tx {
@@ -861,6 +864,18 @@ impl std::fmt::Debug for ToolHarness {
             .field("session", &self.inner.session)
             .field("local_tool_count", &self.inner.local_registry.len())
             .finish_non_exhaustive()
+    }
+}
+
+fn decode_subscribe_ack(value: Value) -> Result<(), ClientError> {
+    let ack: xai_tool_protocol::SubscribeAck =
+        serde_json::from_value(value).map_err(|e| ClientError::Serde(e.to_string()))?;
+    match ack.outcome {
+        xai_tool_protocol::SubscribeOutcome::Subscribed
+        | xai_tool_protocol::SubscribeOutcome::AlreadySubscribed => Ok(()),
+        xai_tool_protocol::SubscribeOutcome::NotAuthorized => Err(ClientError::AuthError(
+            "connection is not bound to the requested session".to_owned(),
+        )),
     }
 }
 
@@ -1257,7 +1272,9 @@ impl ToolHarness {
     /// Close a session, unbinding all servers.
     ///
     /// On the server side, this drops all tool bindings for the session
-    /// and sends `session.unbind` to any bound tool servers.
+    /// and sends `session.unbind` to any bound tool servers. The
+    /// workspace-preserving `session_detach` is only emitted implicitly when
+    /// the last harness for a session drops off a still-open connection.
     pub async fn session_close(&self) -> Result<(), ClientError> {
         let connection = self.require_connection()?;
         let request_id = connection.try_alloc_request_id()?;
@@ -1753,6 +1770,41 @@ impl ToolHarness {
         Ok(event_rx)
     }
 
+    /// Ask the hub to deliver hub-produced kinds (for example
+    /// [`xai_tool_protocol::HUB_KIND_BOT_AGENT_TURN_COMPLETED`]) on this
+    /// connection. Auto-subscribe does not include those kinds.
+    ///
+    /// Call after [`Self::subscribe_notifications`] so the local inbox
+    /// is already registered. Best-effort. No replay.
+    pub async fn opt_in_notification_kinds(&self, kinds: &[&str]) -> Result<(), ClientError> {
+        let connection = self.require_connection()?;
+        if self.inner.borrow.as_ref().is_some_and(|b| b.is_torn_down()) {
+            return Err(ClientError::InvalidConfig(
+                "harness already torn down".to_owned(),
+            ));
+        }
+        let request_id = connection.try_alloc_request_id()?;
+        let params = xai_tool_protocol::SubscribeNotificationsParams {
+            session_id: self.inner.session.clone(),
+            filter: Some(xai_tool_protocol::NotificationFilter {
+                tool_id: None,
+                kinds: Some(kinds.iter().map(|k| (*k).to_owned()).collect()),
+            }),
+        };
+        let req = JsonRpcRequest {
+            jsonrpc: JsonRpcVersion,
+            id: JsonRpcId::from_request_id(&request_id),
+            session_id: Some(self.inner.session.clone()),
+            method: Method::SubscribeNotifications.as_wire_str().to_owned(),
+            params,
+        };
+        let resp = connection.call_request(request_id, &req).await?;
+        match resp.outcome {
+            ResponseOutcome::Result(value) => decode_subscribe_ack(value),
+            ResponseOutcome::Error(err) => Err(ClientError::from_jsonrpc_error(err)),
+        }
+    }
+
     /// Query the server for remote tool descriptions via `tools.list` RPC
     /// and merge them into the in-memory cache. After a successful bind,
     /// a strictly smaller list does not drop tools the bind ack advertised.
@@ -2168,29 +2220,6 @@ async fn dispatch_remote(
     ))
 }
 
-/// Assemble a JSON-RPC request frame: allocate a request id, wrap
-/// `params` under `method`, and serialize to text. The id is returned
-/// for callers that park a response waiter; fire-and-forget callers
-/// discard it. The enqueue (async [`HubConnection::send_outbound`] vs
-/// sync [`HubConnection::try_send_outbound`]) stays with the caller.
-fn build_request_frame<P: serde::Serialize>(
-    connection: &HubConnection,
-    session_id: &SessionId,
-    method: Method,
-    params: P,
-) -> Result<(RequestId, String), ClientError> {
-    let request_id = connection.try_alloc_request_id()?;
-    let req = JsonRpcRequest {
-        jsonrpc: JsonRpcVersion,
-        id: JsonRpcId::from_request_id(&request_id),
-        session_id: Some(session_id.clone()),
-        method: method.as_wire_str().to_owned(),
-        params,
-    };
-    let text = serde_json::to_string(&req).map_err(ClientError::from)?;
-    Ok((request_id, text))
-}
-
 /// Unified stream that interleaves per-call progress with the
 /// eventual JSON-RPC response and ends after exactly one terminal.
 ///
@@ -2245,11 +2274,8 @@ impl RemoteCallStream {
         }
     }
 
-    /// Best-effort, non-blocking call-scoped `Cancel` hook for the
-    /// cancel-on-drop path. `Drop` cannot `.await`, so the frame is
-    /// try-enqueued onto the outbound channel; a full or closed channel
-    /// drops it (the connection is already winding down / abandoning the
-    /// call), matching the heartbeat-pong drop discipline.
+    /// Best-effort call-scoped `Cancel` hook for the cancel-on-drop path
+    /// (the connection is already winding down / abandoning the call).
     fn try_emit_cancel_on_drop(&self, session_id: &SessionId, tool_id: &ToolId) {
         let hook = xai_tool_protocol::HookFrame::cancel(
             session_id.clone(),
@@ -2259,17 +2285,13 @@ impl RemoteCallStream {
         // Counts the attempt (including a frame later dropped on a full /
         // closed channel), matching `send_hook`'s count-before-send.
         crate::metrics::hook_send("cancel");
-        let Ok((_request_id, text)) =
-            build_request_frame(&self.connection, session_id, Method::Hook, hook)
-        else {
-            return;
-        };
-        if self.connection.try_send_outbound(text).is_err() {
-            tracing::debug!(
-                call_id = %self.call_id,
-                "cancel-on-drop hook dropped (outbound channel full or closed)"
-            );
-        }
+        try_send_request_on_drop(
+            &self.connection,
+            session_id,
+            Method::Hook,
+            hook,
+            "cancel-on-drop hook",
+        );
     }
 }
 
@@ -2444,6 +2466,34 @@ mod tests {
         ) -> Result<Self::Output, ToolError> {
             Ok(EchoOut { echoed: args.msg })
         }
+    }
+
+    #[test]
+    fn subscribe_ack_accepts_success_outcomes() {
+        for outcome in [
+            xai_tool_protocol::SubscribeOutcome::Subscribed,
+            xai_tool_protocol::SubscribeOutcome::AlreadySubscribed,
+        ] {
+            let value = serde_json::to_value(xai_tool_protocol::SubscribeAck {
+                outcome,
+                subscription_id: "default".to_owned(),
+            })
+            .expect("serialize ack");
+            assert!(decode_subscribe_ack(value).is_ok());
+        }
+    }
+
+    #[test]
+    fn subscribe_ack_rejects_not_authorized() {
+        let value = serde_json::to_value(xai_tool_protocol::SubscribeAck {
+            outcome: xai_tool_protocol::SubscribeOutcome::NotAuthorized,
+            subscription_id: "default".to_owned(),
+        })
+        .expect("serialize ack");
+        assert!(matches!(
+            decode_subscribe_ack(value),
+            Err(ClientError::AuthError(_))
+        ));
     }
 
     #[tokio::test]
@@ -3228,39 +3278,53 @@ mod tests {
     use crate::auth::AuthCredential;
     use crate::pool::HubConnectionPool;
 
+    /// Every JSON-RPC request the mock hub received, in wire order.
+    type RecordedFrames = Arc<parking_lot::Mutex<Vec<Value>>>;
+
     async fn spawn_discovery_mock_hub() -> SocketAddr {
-        spawn_tools_list_mock_hub(json!({ "tools": [] })).await
+        spawn_mock_hub(json!({ "tools": [] })).await.0
     }
 
-    async fn spawn_tools_list_mock_hub(list_result: Value) -> SocketAddr {
+    /// Mock hub: acks the hello, records every request before replying, acks
+    /// `session_open` / `session_detach` with `{}` and answers `tools.list`
+    /// with `list_result`.
+    async fn spawn_mock_hub(list_result: Value) -> (SocketAddr, RecordedFrames) {
         let list_result = Arc::new(list_result);
+        let recorded = RecordedFrames::default();
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind ephemeral");
         let addr = listener.local_addr().expect("local addr");
-        tokio::spawn(async move {
-            let app = Router::new().route(
-                "/v1/tools",
-                get({
-                    let list_result = Arc::clone(&list_result);
-                    move |ws: WebSocketUpgrade| {
+        tokio::spawn({
+            let recorded = Arc::clone(&recorded);
+            async move {
+                let app = Router::new().route(
+                    "/v1/tools",
+                    get(move |ws: WebSocketUpgrade| {
                         let list_result = Arc::clone(&list_result);
+                        let recorded = Arc::clone(&recorded);
                         async move {
-                            ws.on_upgrade(move |socket| list_handle_socket(socket, list_result))
+                            ws.on_upgrade(move |socket| {
+                                mock_hub_handle_socket(socket, list_result, recorded)
+                            })
                         }
-                    }
-                }),
-            );
-            let _ = axum::serve(listener, app.into_make_service()).await;
+                    }),
+                );
+                let _ = axum::serve(listener, app.into_make_service()).await;
+            }
         });
         tokio::task::yield_now().await;
-        addr
+        (addr, recorded)
     }
 
-    async fn list_handle_socket(mut socket: WebSocket, list_result: Arc<Value>) {
+    async fn mock_hub_handle_socket(
+        mut socket: WebSocket,
+        list_result: Arc<Value>,
+        recorded: RecordedFrames,
+    ) {
         let _ = socket.recv().await;
         let ack = json!({
-            "connection_id": "discovery-mock",
+            "connection_id": "mock-hub",
             "user_id": "test",
             "computer_hub_version": "test",
             "supported_protocol_versions": ["1.0.0"],
@@ -3272,24 +3336,28 @@ mod tests {
             let Ok(value) = serde_json::from_str::<Value>(text.as_ref()) else {
                 continue;
             };
-            let method = value.get("method").and_then(Value::as_str).unwrap_or("");
+            let Some(method) = value.get("method").and_then(Value::as_str) else {
+                continue;
+            };
             let id = value.get("id").cloned().unwrap_or(Value::Null);
-            match method {
-                "session_open" => {
-                    let resp = json!({ "jsonrpc": "2.0", "id": id, "result": {} });
-                    let _ = socket.send(Message::Text(resp.to_string().into())).await;
-                }
-                "tools.list" => {
-                    let resp = json!({
-                        "jsonrpc": "2.0",
-                        "id": id,
-                        "result": list_result.as_ref(),
-                    });
-                    let _ = socket.send(Message::Text(resp.to_string().into())).await;
-                }
-                _ => {}
-            }
+            let result = match method {
+                "session_open" | "session_detach" => json!({}),
+                "tools.list" => list_result.as_ref().clone(),
+                _ => continue,
+            };
+            recorded.lock().push(value);
+            let resp = json!({ "jsonrpc": "2.0", "id": id, "result": result });
+            let _ = socket.send(Message::Text(resp.to_string().into())).await;
         }
+    }
+
+    fn frames_with_method(recorded: &RecordedFrames, method: &str) -> Vec<Value> {
+        recorded
+            .lock()
+            .iter()
+            .filter(|frame| frame["method"] == json!(method))
+            .cloned()
+            .collect()
     }
 
     async fn build_connected_harness(
@@ -3335,7 +3403,7 @@ mod tests {
     #[tokio::test]
     async fn query_remote_tools_preserves_workspace_bound_from_wire() {
         for bound in [true, false] {
-            let addr = spawn_tools_list_mock_hub(json!({
+            let (addr, _recorded) = spawn_mock_hub(json!({
                 "tools": [{"name": "listed", "description": "d"}],
                 "workspace_bound": bound,
             }))
@@ -3608,6 +3676,143 @@ mod tests {
             "session fully released after last harness drop",
         )
         .await;
+    }
+
+    /// Dropping the last harness for a session on a still-open pooled
+    /// connection must tell the hub via `session_detach`, scoped to that
+    /// session only; the sibling session on the same socket stays open.
+    #[tokio::test]
+    async fn drop_detaches_only_its_session_on_shared_connection() {
+        let (addr, recorded) = spawn_mock_hub(json!({ "tools": [] })).await;
+        let detaches = || frames_with_method(&recorded, "session_detach");
+        let url = Url::parse(&format!("ws://{addr}/v1/tools")).expect("valid url");
+        let pool = HubConnectionPool::new();
+        let cred = AuthCredential::bearer("ignored");
+        let session_a = SessionId::new("detach-a").expect("valid");
+        let session_b = SessionId::new("detach-b").expect("valid");
+
+        let harness_a = ToolHarnessBuilder::default()
+            .pool(pool.clone())
+            .url(url.clone())
+            .auth(cred.clone())
+            .session(session_a.clone())
+            .build()
+            .await
+            .expect("harness a");
+        let harness_b = ToolHarnessBuilder::default()
+            .pool(pool.clone())
+            .url(url)
+            .auth(cred)
+            .session(session_b.clone())
+            .build()
+            .await
+            .expect("harness b");
+        let conn = harness_a.connection().expect("connected").clone();
+        assert!(
+            Arc::ptr_eq(&conn, harness_b.connection().expect("connected")),
+            "both harnesses must share one pooled connection"
+        );
+        assert_eq!(2, conn.bound_session_count());
+
+        drop(harness_a);
+        poll_until(|| detaches().len() == 1, "detach frame for session a").await;
+        let frame = detaches()[0].clone();
+        assert_eq!(json!("session_detach"), frame["method"]);
+        assert_eq!(json!(session_a.as_str()), frame["session_id"]);
+        assert_eq!(1, conn.bound_session_count());
+
+        drop(harness_b);
+        poll_until(|| detaches().len() == 2, "detach frame for session b").await;
+        let frame = detaches()[1].clone();
+        assert_eq!(json!("session_detach"), frame["method"]);
+        assert_eq!(json!(session_b.as_str()), frame["session_id"]);
+        assert_eq!(0, conn.bound_session_count());
+    }
+
+    /// Dropping the last harness for a session while another build for the
+    /// same session races it on the same pooled connection must never put
+    /// `session_detach` on the wire after the new borrower's `session_open`:
+    /// the hub would unbind a session with a live borrower. Each round ends
+    /// with a live harness, so the last lifecycle frame the hub saw must be
+    /// an open. The awaited `tools.list` fences: the mock records frames in
+    /// wire order, so once it answered, every earlier frame is recorded.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn racing_drop_and_rebuild_never_detach_a_live_session() {
+        const ROUNDS: usize = 200;
+        let (addr, recorded) = spawn_mock_hub(json!({ "tools": [] })).await;
+        let url = Url::parse(&format!("ws://{addr}/v1/tools")).expect("valid url");
+        let pool = HubConnectionPool::new();
+        let cred = AuthCredential::bearer("ignored");
+        let session = SessionId::new("detach-race").expect("valid");
+        let builder = || {
+            ToolHarnessBuilder::default()
+                .pool(pool.clone())
+                .url(url.clone())
+                .auth(cred.clone())
+                .session(session.clone())
+        };
+        let lifecycle_frames = || {
+            recorded
+                .lock()
+                .iter()
+                .filter(|frame| {
+                    frame["method"] == json!("session_open")
+                        || frame["method"] == json!("session_detach")
+                })
+                .map(|frame| frame["method"].as_str().unwrap_or_default().to_owned())
+                .collect::<Vec<_>>()
+        };
+
+        let mut live = builder().build().await.expect("first harness");
+        let conn = live.connection().expect("connected").clone();
+        for round in 0..ROUNDS {
+            // Spin barrier: the window is microseconds wide, so both sides
+            // must leave the gate within nanoseconds of each other. The drop
+            // side then staggers by a cycling spin count to sweep its
+            // decrement across the build side's refcount increment. Without
+            // the lifecycle lock this fails well inside the 200 rounds.
+            let gate = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let arrive_and_spin = |gate: &std::sync::atomic::AtomicUsize, extra: usize| {
+                gate.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                while gate.load(std::sync::atomic::Ordering::SeqCst) < 2 {
+                    std::hint::spin_loop();
+                }
+                for _ in 0..extra {
+                    std::hint::spin_loop();
+                }
+            };
+            let dropper = tokio::spawn({
+                let gate = Arc::clone(&gate);
+                let old = live;
+                async move {
+                    arrive_and_spin(&gate, (round % 32) * 8);
+                    drop(old);
+                }
+            });
+            let rebuild = tokio::spawn({
+                let gate = Arc::clone(&gate);
+                let pending = builder();
+                async move {
+                    arrive_and_spin(&gate, 0);
+                    pending.build().await.expect("rebuilt harness")
+                }
+            });
+            dropper.await.expect("dropper task");
+            live = rebuild.await.expect("rebuild task");
+            live.query_remote_tools().await.expect("fence tools.list");
+
+            assert!(
+                Arc::ptr_eq(&conn, live.connection().expect("connected")),
+                "round {round}: rebuild must reuse the pooled connection"
+            );
+            assert_eq!(1, conn.bound_session_count(), "round {round}");
+            assert_eq!(
+                Some("session_open"),
+                lifecycle_frames().last().map(String::as_str),
+                "round {round}: hub must end bound; frames {:?}",
+                lifecycle_frames()
+            );
+        }
     }
 
     #[tokio::test]

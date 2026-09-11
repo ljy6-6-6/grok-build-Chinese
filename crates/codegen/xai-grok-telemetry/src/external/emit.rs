@@ -11,15 +11,25 @@ use super::ExternalTelemetry;
 use super::config::ContentGates;
 use super::schema::{
     AttrValue, ExternalKey, ExternalRecord, Gate, METRIC_COST_USAGE, METRIC_ERROR_COUNT,
-    METRIC_SESSION_COUNT, METRIC_STARTUP_PHASE_DURATION, METRIC_STARTUP_TIMEOUT,
-    METRIC_STARTUP_TOTAL, METRIC_TOKEN_USAGE, METRIC_TOOL_DECISION, METRIC_TOOL_USAGE,
-    METRIC_TURN_COUNT, MetricIncrement,
+    METRIC_SESSION_COUNT, METRIC_STARTUP_INTERACTIVE, METRIC_STARTUP_PHASE_DURATION,
+    METRIC_STARTUP_SUBTIMER_DURATION, METRIC_STARTUP_TIMEOUT, METRIC_STARTUP_TOTAL,
+    METRIC_TOKEN_USAGE, METRIC_TOOL_DECISION, METRIC_TOOL_USAGE, METRIC_TURN_COUNT,
+    METRIC_TURN_TTFM, METRIC_TURN_TTFT, MetricIncrement,
 };
 
-/// Default OTel buckets end at 10s; startup failures land in the 10-30s range, so those samples need real buckets, not +Inf.
-const STARTUP_MS_BOUNDARIES: &[f64] = &[
+/// Default OTel buckets end at 10s; startup failures and slow first tokens land in the 10-120s range, so those samples need real buckets, not +Inf.
+const LATENCY_MS_BOUNDARIES: &[f64] = &[
     50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0, 15000.0, 30000.0, 60000.0, 120000.0,
 ];
+
+/// A `ms`-unit `u64` histogram over the shared latency buckets.
+fn ms_histogram(meter: &Meter, name: &'static str) -> Histogram<u64> {
+    meter
+        .u64_histogram(name)
+        .with_unit("ms")
+        .with_boundaries(LATENCY_MS_BOUNDARIES.to_vec())
+        .build()
+}
 
 /// Pre-created counters/histograms (a test pins the names, units, and attr keys).
 pub(crate) struct Instruments {
@@ -30,9 +40,13 @@ pub(crate) struct Instruments {
     tool_decision: Counter<u64>,
     tool_usage: Counter<u64>,
     error_count: Counter<u64>,
+    turn_ttft: Histogram<u64>,
+    turn_ttfm: Histogram<u64>,
     startup_timeout: Counter<u64>,
     startup_phase_duration: Histogram<u64>,
+    startup_subtimer_duration: Histogram<u64>,
     startup_total: Histogram<u64>,
+    startup_interactive: Histogram<u64>,
 }
 
 impl Instruments {
@@ -66,20 +80,16 @@ impl Instruments {
                 .u64_counter(METRIC_ERROR_COUNT)
                 .with_unit("{error}")
                 .build(),
+            turn_ttft: ms_histogram(meter, METRIC_TURN_TTFT),
+            turn_ttfm: ms_histogram(meter, METRIC_TURN_TTFM),
             startup_timeout: meter
                 .u64_counter(METRIC_STARTUP_TIMEOUT)
                 .with_unit("{timeout}")
                 .build(),
-            startup_phase_duration: meter
-                .u64_histogram(METRIC_STARTUP_PHASE_DURATION)
-                .with_unit("ms")
-                .with_boundaries(STARTUP_MS_BOUNDARIES.to_vec())
-                .build(),
-            startup_total: meter
-                .u64_histogram(METRIC_STARTUP_TOTAL)
-                .with_unit("ms")
-                .with_boundaries(STARTUP_MS_BOUNDARIES.to_vec())
-                .build(),
+            startup_phase_duration: ms_histogram(meter, METRIC_STARTUP_PHASE_DURATION),
+            startup_subtimer_duration: ms_histogram(meter, METRIC_STARTUP_SUBTIMER_DURATION),
+            startup_total: ms_histogram(meter, METRIC_STARTUP_TOTAL),
+            startup_interactive: ms_histogram(meter, METRIC_STARTUP_INTERACTIVE),
         }
     }
 }
@@ -167,13 +177,13 @@ pub(crate) fn emit_record(ext: &ExternalTelemetry, mut record: ExternalRecord) {
 
     if let (Some(event), Some(logger)) = (record.event, ext.logger.as_ref()) {
         let mut log_record = logger.create_log_record();
-        log_record.set_event_name(event.as_str());
+        log_record.set_event_name(event.into());
         log_record.set_severity_number(Severity::Info);
         let now = std::time::SystemTime::now();
         log_record.set_timestamp(now);
         log_record.set_observed_timestamp(now);
         log_record.add_attribute(
-            ExternalKey::EventSequence.as_str(),
+            ExternalKey::EventSequence.as_ref(),
             ext.next_sequence() as i64,
         );
         if record
@@ -182,19 +192,22 @@ pub(crate) fn emit_record(ext: &ExternalTelemetry, mut record: ExternalRecord) {
             .all(|(k, _)| *k != ExternalKey::SessionId)
             && let Some(sid) = session_id.as_deref()
         {
-            log_record.add_attribute(ExternalKey::SessionId.as_str(), sid.to_owned());
+            log_record.add_attribute(ExternalKey::SessionId.as_ref(), sid.to_owned());
         }
         if let Some(ctx) = ctx.as_ref() {
             if let Some(turn) = ctx.turn_number {
-                log_record.add_attribute(ExternalKey::TurnNumber.as_str(), turn as i64);
+                log_record.add_attribute(ExternalKey::TurnNumber.as_ref(), turn as i64);
             }
             // prompt.id: events only, never metrics (unbounded cardinality).
             if let Some(prompt_id) = ctx.prompt_id.as_deref() {
-                log_record.add_attribute(ExternalKey::PromptId.as_str(), prompt_id.to_owned());
+                log_record.add_attribute(ExternalKey::PromptId.as_ref(), prompt_id.to_owned());
             }
         }
         for (key, value) in &record.attrs {
-            log_record.add_attribute(key.as_str(), to_any_value(value.clone()));
+            log_record.add_attribute(
+                Into::<&'static str>::into(*key),
+                to_any_value(value.clone()),
+            );
         }
         for (key, value) in [
             (ExternalKey::UserId, identity.user_id.as_deref()),
@@ -207,7 +220,7 @@ pub(crate) fn emit_record(ext: &ExternalTelemetry, mut record: ExternalRecord) {
             (ExternalKey::DeploymentId, identity.deployment_id.as_deref()),
         ] {
             if let Some(v) = value.filter(|v| !v.is_empty()) {
-                log_record.add_attribute(key.as_str(), v.to_owned());
+                log_record.add_attribute(Into::<&'static str>::into(key), v.to_owned());
             }
         }
         logger.emit(log_record);
@@ -282,6 +295,14 @@ fn add_increment(
             attrs.push(KeyValue::new("model", scrub(&model)));
             instruments.turn_count.add(1, &attrs);
         }
+        MetricIncrement::TurnTtft { duration_ms, model } => {
+            attrs.push(KeyValue::new("model", scrub(&model)));
+            instruments.turn_ttft.record(duration_ms, &attrs);
+        }
+        MetricIncrement::TurnTtfm { duration_ms, model } => {
+            attrs.push(KeyValue::new("model", scrub(&model)));
+            instruments.turn_ttfm.record(duration_ms, &attrs);
+        }
         MetricIncrement::ToolDecision {
             tool_name,
             decision,
@@ -294,9 +315,14 @@ fn add_increment(
             attrs.push(KeyValue::new("permission_mode", permission_mode));
             instruments.tool_decision.add(1, &attrs);
         }
-        MetricIncrement::ToolUsage { tool_name, outcome } => {
+        MetricIncrement::ToolUsage {
+            tool_name,
+            outcome,
+            model,
+        } => {
             attrs.push(KeyValue::new("tool_name", scrub(&tool_name)));
             attrs.push(KeyValue::new("outcome", outcome));
+            attrs.push(KeyValue::new("model", scrub(&model)));
             instruments.tool_usage.add(1, &attrs);
         }
         MetricIncrement::ErrorCount {
@@ -328,6 +354,19 @@ fn add_increment(
                 .startup_phase_duration
                 .record(duration_ms, &attrs);
         }
+        MetricIncrement::StartupSubTimerDuration {
+            phase,
+            duration_ms,
+            outcome,
+            auth_mode,
+        } => {
+            attrs.push(KeyValue::new("phase", scrub(&phase)));
+            attrs.push(KeyValue::new("outcome", outcome));
+            attrs.push(KeyValue::new("auth_mode", auth_mode));
+            instruments
+                .startup_subtimer_duration
+                .record(duration_ms, &attrs);
+        }
         MetricIncrement::StartupTotal {
             duration_ms,
             outcome,
@@ -336,6 +375,13 @@ fn add_increment(
             attrs.push(KeyValue::new("outcome", outcome));
             attrs.push(KeyValue::new("auth_mode", auth_mode));
             instruments.startup_total.record(duration_ms, &attrs);
+        }
+        MetricIncrement::StartupInteractive {
+            duration_ms,
+            auth_mode,
+        } => {
+            attrs.push(KeyValue::new("auth_mode", auth_mode));
+            instruments.startup_interactive.record(duration_ms, &attrs);
         }
     }
 }

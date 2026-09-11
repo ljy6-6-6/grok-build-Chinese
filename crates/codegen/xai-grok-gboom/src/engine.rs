@@ -183,10 +183,6 @@ impl Renderer {
 
     /// Perspective-correct textured floor and ceiling (Lodev scanline casting).
     /// Each screen row below/above the horizon maps to one distance, so texels are sampled by stepping world coordinates across the row.
-    /// Distance fog matches the wall pass, making the whole scene recede uniformly into darkness.
-    ///
-    /// It runs after `draw_walls` and skips pixels inside each column's wall strip.
-    /// The world coords still step every pixel to stay aligned, but the texture sample/shade/write are skipped where a wall covers.
     fn draw_floor_ceiling(&self, fb: &mut FrameBuffer, game: &Game, light: f32) {
         let (w, h) = (fb.w, fb.h);
         let p = &game.player;

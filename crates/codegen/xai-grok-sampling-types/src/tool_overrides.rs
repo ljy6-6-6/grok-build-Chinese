@@ -154,10 +154,9 @@ impl XSearchOptions {
 /// The public web-search API caps each domain list at 5 entries.
 pub const MAX_WEB_SEARCH_DOMAINS: usize = 5;
 
-/// `web_search` override: a domain allowlist and/or blocklist (empty or absent is unbounded).
-///
-/// The two lists are mutually exclusive and each is capped at [`MAX_WEB_SEARCH_DOMAINS`];
-/// both rules are enforced by [`WebSearchOptions::validate`] on every deserialize ingress.
+/// `web_search` override: a domain allowlist and/or blocklist (empty or absent is unbounded). The two lists are mutually
+/// exclusive and each is capped at [`MAX_WEB_SEARCH_DOMAINS`]; both rules are enforced by [`WebSearchOptions::validate`]
+/// on every deserialize ingress.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", try_from = "WebSearchOptionsWire")]
 #[schemars(deny_unknown_fields)]

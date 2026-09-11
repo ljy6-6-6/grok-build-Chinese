@@ -29,13 +29,8 @@ const OSC11_WRAP_TIMEOUT: Duration = Duration::from_millis(80);
 
 const OSC11_QUERY: &[u8] = b"\x1b]11;?\x07";
 
-/// Detect system appearance by querying the terminal's background color.
-///
-/// Returns `None` if stdin is not a TTY, the terminal does not respond within `OSC11_TIMEOUT`, or the response cannot be parsed.
-///
-/// MUST be called before crossterm's event stream is initialized.
-/// Manages stdin termios locally (no `crossterm::enable_raw_mode`).
-/// The query write goes through the shared stderr lock so it cannot interleave with the render writer thread.
+/// `None` if stdin is not a TTY, the terminal misses `OSC11_TIMEOUT`, or the reply cannot be parsed.
+/// Must run before the event stream. Termios is local; the query takes the shared stderr lock so it cannot interleave with the writer.
 pub fn detect_via_osc11() -> Option<SystemAppearance> {
     use std::io::IsTerminal;
 

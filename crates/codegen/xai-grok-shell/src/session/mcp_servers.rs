@@ -1,12 +1,12 @@
 //! MCP server re-exports and shell-side wrappers for timeout override resolution.
 
 pub use xai_grok_mcp::servers::{
-    AcpServerEntry, HttpConfig, MCP_TOOL_NAME_DELIMITER, McpClient, McpClientTimeoutOverrides,
-    McpConfigDiff, McpError, McpInitStrategy, McpMetaConfigMap, McpOauthDiscovery,
-    McpServerMetaConfig, McpServerName, McpService, McpSpawnCtx, McpState, McpTool,
-    McpToolRegistration, OauthInteractivity, SharedMcpPool, mcp_server_name, mcp_target_str,
-    mcp_transport_str, parse_mcp_meta_config, parse_mcp_tool_name, sanitize_descriptor_segment,
-    validate_tool_name,
+    AcpServerEntry, Generation, HttpConfig, InitClaimGuard, MCP_TOOL_NAME_DELIMITER, McpClient,
+    McpClientTimeoutOverrides, McpConfigChange, McpConfigDiff, McpError, McpInitStrategy,
+    McpMetaConfigMap, McpOauthDiscovery, McpServerMetaConfig, McpServerName, McpService,
+    McpSpawnCtx, McpState, McpTool, McpToolRegistration, OauthInteractivity, Replacement,
+    SharedMcpPool, SharedMcpState, Superseded, mcp_server_name, mcp_target_str, mcp_transport_str,
+    parse_mcp_meta_config, parse_mcp_tool_name, sanitize_descriptor_segment, validate_tool_name,
 };
 
 use std::collections::HashMap;
@@ -72,7 +72,6 @@ pub(crate) async fn start_mcp_server(
     inner::start_mcp_server(mcp_server, overrides.as_ref(), meta_config, byo_config, ctx).await
 }
 
-/// Build all pending MCP clients for one init pass as a single merged list.
 /// Config-declared servers (HTTP/stdio) are spawned lock-free via [`start_mcp_servers`].
 /// SDK in-process servers are built under a brief lock via `McpState::build_pending_acp_clients`.
 /// SDK clients never fail to build, so they enter as `Ok`.

@@ -13,11 +13,8 @@
 
 pub(crate) const TELEMETRY_TARGET: &str = "workspace::telemetry";
 
-/// Emit a telemetry `tracing` event on [`TELEMETRY_TARGET`].
-///
-/// The target is pinned so a call site can't accidentally land an event elsewhere.
-/// `$level` is a `tracing` level-macro name (`info`, `warn`, …); the remaining tokens are the usual `tracing` fields and message.
-/// Use only the field vocabulary documented on this module.
+/// Emit a telemetry `tracing` event on [`TELEMETRY_TARGET`], pinned so a call site cannot land elsewhere.
+/// `$level` is a level-macro name; use only this module's field vocabulary.
 macro_rules! dc_log {
     ($level:ident, $($rest:tt)*) => {
         ::tracing::$level!(target: $crate::telemetry::TELEMETRY_TARGET, $($rest)*)

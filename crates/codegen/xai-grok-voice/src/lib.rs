@@ -32,13 +32,9 @@ pub use probe::{
     run_streaming_probe,
 };
 
-/// Whether this build can capture microphone audio (the `audio` feature).
-/// Production CLI builds enable it on every OS: macOS and Windows link `cpal` (coreaudio/wasapi).
-/// Linux shells out to a system recorder (`pw-record`/`parec`/`arecord`) so the static-musl binary links no audio library.
-/// Bazel builds drop `audio` (no capture in the test sandbox).
-///
-/// On Linux a `true` value means capture is *compiled in*; whether a recorder is actually installed is reported when a session starts.
-/// Consumers gate voice on this so a no-audio build never advertises a mic it can't open.
+/// Linux shells out to a system recorder (`pw-record`/`parec`/`arecord`) so the static-musl binary links no audio
+/// library. On Linux a `true` value means capture is *compiled in*; whether a recorder is actually installed is reported
+/// when a session starts. Consumers gate voice on this so a no-audio build never advertises a mic it can't open.
 pub const AUDIO_SUPPORTED: bool = cfg!(feature = "audio");
 
 /// Hidden subcommand consumers re-exec themselves with to capture microphone audio in a short-lived helper process on macOS.

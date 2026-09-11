@@ -1472,6 +1472,7 @@ fn test_connection() -> (Arc<HubConnection>, Arc<Demux>, mpsc::Receiver<String>)
         outbound_tx,
         demux: demux.clone(),
         bound_sessions: Arc::new(RefCountedSet::new()),
+        session_lifecycle: parking_lot::Mutex::new(()),
         connection_id: Arc::new(Mutex::new(None)),
         hello_capabilities: parking_lot::RwLock::new(Vec::new()),
         next_request_id: std::sync::atomic::AtomicU64::new(1),

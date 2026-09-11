@@ -32,22 +32,24 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, mpsc, oneshot};
 
 use crate::agent::feedback_client::{
     FeedbackApiError, FeedbackClient, signals_to_update, snapshot_to_turn_delta,
 };
 use crate::session::feedback::{
-    FeedbackEvaluation, FeedbackHeuristics, FeedbackRequest, FeedbackTier, TriggerCondition,
+    FeedbackHeuristics, FeedbackRequest, FeedbackTier, TriggerCondition,
 };
 use crate::session::signals::{SessionSignalsActor, SessionSignalsHandle, TurnDeltaSnapshot};
 
 use prod_mc_cli_chat_proxy_types::feedback_types::{
     ClientType, ContextType, CreateFeedbackRequestInput, FeedbackContent, FeedbackMode,
-    FeedbackSubmission, FeedbackToolOutcome,
+    FeedbackSubmission, FeedbackToolOutcome, SessionTurnDelta, TurnOutcome,
 };
 
 use crate::session::persistence::{LocalFeedbackEntry, PersistenceMsg, UserFeedbackEntry};
+use xai_grok_feedback::{parse_structured_feedback, wire_value};
+use xai_grok_telemetry::events::{FeedbackSendOutcome, UserFeedback};
 
 pub(crate) enum SubmitOutcome {
     Submitted,
@@ -55,6 +57,36 @@ pub(crate) enum SubmitOutcome {
     LocalOnly,
     /// Server request failed.
     Failed(anyhow::Error),
+}
+
+/// The `user_feedback` event for one workflow call. `source` and the taxonomy ride only as the
+/// frozen wire values of the parsed enums, never the client's raw strings.
+fn user_feedback_event(
+    submission: &FeedbackSubmission,
+    outcome: &SubmitOutcome,
+    solicited: bool,
+) -> UserFeedback {
+    let structured = parse_structured_feedback(submission.metadata.as_ref());
+    let taxonomy = structured.map(|s| s.taxonomy).unwrap_or_default();
+    UserFeedback {
+        session_id: submission.session_id.clone(),
+        has_feedback_text: submission
+            .feedback_text
+            .as_ref()
+            .is_some_and(|text| !text.is_empty()),
+        model_id: submission.model_id.clone(),
+        rating_value: submission.rating_value,
+        is_solicited: solicited,
+        outcome: match outcome {
+            SubmitOutcome::Submitted => FeedbackSendOutcome::Submitted,
+            SubmitOutcome::LocalOnly => FeedbackSendOutcome::LocalOnly,
+            SubmitOutcome::Failed(_) => FeedbackSendOutcome::Failed,
+        },
+        source: structured.and_then(|s| s.source).and_then(wire_value),
+        feedback_type: taxonomy.r#type.and_then(wire_value),
+        task_category: taxonomy.task_category.and_then(wire_value),
+        failure_mode: taxonomy.failure_mode.and_then(wire_value),
+    }
 }
 
 pub(crate) fn new_submission(
@@ -86,8 +118,16 @@ pub(crate) async fn submit_feedback_workflow(
         author_identity,
     } = opts;
 
-    if let Some(user_meta) = crate::agent::mvp_agent::parse_json_object_env("GROK_USER_METADATA") {
-        submission.merge_metadata(user_meta);
+    if let Some(mut user_meta) = crate::util::parse_json_object_env("GROK_USER_METADATA") {
+        // `structured_feedback` is reserved for the client's typed envelope. The shallow merge
+        // is later-wins, so an env copy would silently replace the client's enums (or invent
+        // the key on reports that carry none); every other env key keeps later-wins.
+        if let Some(user_meta) = user_meta.as_object_mut() {
+            user_meta.remove("structured_feedback");
+        }
+        if user_meta.as_object().is_some_and(|meta| !meta.is_empty()) {
+            submission.merge_metadata(user_meta);
+        }
     }
     // Exhaustive destructure (no `..`) so a new field must be handled, not dropped.
     if let Some(crate::util::user_identity::ResolvedUserIdentity { name, email }) = author_identity
@@ -101,10 +141,9 @@ pub(crate) async fn submit_feedback_workflow(
     }
 
     if let Some(tx) = persistence_tx {
-        // Persist the image inventory, never the payloads
-        // feedback.jsonl rides in trace archives with a hard per-file size cap (one screenshot's base64 would sink the whole record)
-        // The bytes are also cleartext terminal captures
-        // Take/restore around the clone so the megabytes are never copied either
+        // Persist the image inventory, never the payloads feedback.jsonl rides in trace archives with a hard per-file size cap (one screenshot's base64 would sink the whole record).
+        // The bytes are also cleartext terminal captures.
+        // Take/restore around the clone so the megabytes are never copied either.
         let images = std::mem::take(&mut submission.images);
         let mut persisted = submission.clone();
         persisted.images = images
@@ -135,13 +174,6 @@ pub(crate) async fn submit_feedback_workflow(
         }
     }
 
-    let telemetry_model_id = submission.model_id.clone();
-    let telemetry_rating_value = submission.rating_value;
-    let telemetry_session_id = submission.session_id.clone();
-    let has_feedback_text = submission
-        .feedback_text
-        .as_ref()
-        .is_some_and(|t| !t.is_empty());
     let request_id = submission.request_id.clone();
     let appearance_id = request_id.clone();
 
@@ -164,9 +196,9 @@ pub(crate) async fn submit_feedback_workflow(
         };
         match result {
             Ok(()) => SubmitOutcome::Submitted,
-            Err(e) => {
-                tracing::warn!(error = %e, "feedback submission failed");
-                SubmitOutcome::Failed(e)
+            Err(error) => {
+                tracing::warn!(%error, "feedback submission failed");
+                SubmitOutcome::Failed(error)
             }
         }
     } else {
@@ -174,27 +206,22 @@ pub(crate) async fn submit_feedback_workflow(
     };
 
     if telemetry_enabled {
+        let event = user_feedback_event(submission, &outcome, solicited);
         let feedback_span = tracing::info_span!(
             "feedback.survey",
             survey_type = "session",
             event_type = "responded",
             appearance_id = %appearance_id.as_deref().unwrap_or(""),
-            has_feedback_text = has_feedback_text,
+            has_feedback_text = event.has_feedback_text,
             rating = tracing::field::Empty,
             is_solicited = solicited,
         );
         // Record `rating` only for star ratings; text-only feedback has no rating and must not export a fake 0
-        if let Some(rating) = telemetry_rating_value {
+        if let Some(rating) = event.rating_value {
             feedback_span.record("rating", rating);
         }
         feedback_span.in_scope(|| {});
-        xai_grok_telemetry::session_ctx::log_event(xai_grok_telemetry::events::UserFeedback {
-            session_id: telemetry_session_id,
-            has_feedback_text,
-            model_id: telemetry_model_id,
-            rating_value: telemetry_rating_value,
-            is_solicited: solicited,
-        });
+        xai_grok_telemetry::session_ctx::log_event(event);
     }
 
     outcome
@@ -268,6 +295,70 @@ pub struct FeedbackManager {
     /// Set once after the first upload queue is created via `set_upload_queue_stats()`.
     /// `OnceLock` because `FeedbackManager` is behind `Arc` and this is set after construction.
     upload_queue_stats: std::sync::OnceLock<Arc<xai_file_utils::queue::UploadQueueStats>>,
+    /// Turn deltas post from one worker in send order, so the backend's append-only rows arrive
+    /// in turn order and [`Self::shutdown`] can wait for an exit cancel's row. `None` without a client.
+    turn_delta_tx: Option<mpsc::Sender<TurnDeltaJob>>,
+}
+
+/// Queued for the turn-delta worker. Bounded at [`TURN_DELTA_QUEUE_CAPACITY`]: a stalled backend
+/// drops the newest deltas (logged) instead of growing without limit.
+enum TurnDeltaJob {
+    Post(Box<SessionTurnDelta>),
+    /// Answered once every job queued before it has posted.
+    Barrier(oneshot::Sender<()>),
+}
+
+/// One delta per turn, so this only fills when the backend is unreachable for many turns.
+const TURN_DELTA_QUEUE_CAPACITY: usize = 64;
+
+/// The shared HTTP client bounds only connection setup; without this a stalled response would
+/// hold every later row behind it.
+const TURN_DELTA_POST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Post queued turn deltas in order until every sender is dropped.
+fn spawn_turn_delta_worker(
+    session_id: String,
+    client: FeedbackClient,
+) -> mpsc::Sender<TurnDeltaJob> {
+    let (tx, mut rx) = mpsc::channel(TURN_DELTA_QUEUE_CAPACITY);
+    tokio::spawn(async move {
+        while let Some(job) = rx.recv().await {
+            match job {
+                TurnDeltaJob::Post(delta) => {
+                    let result = tokio::time::timeout(
+                        TURN_DELTA_POST_TIMEOUT,
+                        with_one_shot_auth_retry(&client, || {
+                            client.send_turn_delta(&session_id, &delta)
+                        }),
+                    )
+                    .await;
+                    match result {
+                        Ok(Ok(_)) => tracing::debug!(
+                            session_id = %session_id,
+                            turn = delta.turn_number,
+                            "Turn delta sent to analytics backend"
+                        ),
+                        Ok(Err(e)) => tracing::warn!(
+                            session_id = %session_id,
+                            turn = delta.turn_number,
+                            error = %e,
+                            "Failed to send turn delta (non-fatal)"
+                        ),
+                        Err(_) => tracing::warn!(
+                            session_id = %session_id,
+                            turn = delta.turn_number,
+                            timeout_secs = TURN_DELTA_POST_TIMEOUT.as_secs(),
+                            "Turn delta post timed out (non-fatal)"
+                        ),
+                    }
+                }
+                TurnDeltaJob::Barrier(reached) => {
+                    let _ = reached.send(());
+                }
+            }
+        }
+    });
+    tx
 }
 
 impl FeedbackManager {
@@ -283,6 +374,9 @@ impl FeedbackManager {
 
         let session_id = session_id.into();
         let feedback_client = feedback_client.map(|c| c.with_session_id(session_id.clone()));
+        let turn_delta_tx = feedback_client
+            .as_ref()
+            .map(|client| spawn_turn_delta_worker(session_id.clone(), client.clone()));
         tracing::info!(
             session_id = %session_id,
             feedback_enabled = config.feedback_enabled,
@@ -299,6 +393,7 @@ impl FeedbackManager {
             config,
             config_loaded: Arc::new(AtomicBool::new(false)),
             upload_queue_stats: std::sync::OnceLock::new(),
+            turn_delta_tx,
         }
     }
 
@@ -425,14 +520,8 @@ impl FeedbackManager {
     }
 
     /// Evaluate heuristics and return a FeedbackRequest if one should be sent.
-    ///
     /// Call this after each turn to check if feedback should be requested.
-    /// Returns None if:
-    /// - No tier criteria are met
-    /// - The tier was already triggered this session
-    /// - Probabilistic sampling says no
-    ///
-    /// When a request is triggered, this method also creates a record via the feedback API for tracking and analytics.
+    /// The tier was already triggered this session.
     #[tracing::instrument(name = "feedback.maybe_request_feedback", skip_all, fields(
         session_id = %self.session_id,
     ))]
@@ -485,18 +574,7 @@ impl FeedbackManager {
         None
     }
 
-    /// Force check heuristics without sampling (for testing).
-    pub async fn evaluate_heuristics(&self) -> Option<FeedbackEvaluation> {
-        let signals = self.signals_handle.snapshot().await?;
-        let mut heuristics = self.heuristics.write().await;
-        Some(heuristics.evaluate(&signals))
-    }
-
-    /// Force-generate a feedback request for local testing, bypassing all heuristics, sampling, cooldown, and enabled checks.
-    ///
     /// Engineers developing clients can call this via the `x.ai/debug/trigger_feedback` ACP extension method.
-    /// It exercises the full feedback notification and response flow without needing a real session that meets tier criteria.
-    ///
     /// When a `feedback_client` is configured, the request is also recorded via the feedback API, exactly like a real trigger.
     /// The subsequent `complete_request` / `dismiss_request` round-trip from the client then works end-to-end.
     #[tracing::instrument(name = "feedback.force_feedback_request", skip_all, fields(
@@ -586,25 +664,16 @@ impl FeedbackManager {
         }
     }
 
-    /// Call this once per user turn, after the agent has finished all tool-call rounds and produced a final response.
-    /// In practice that is alongside `record_turn_complete`.
-    /// The signals actor accumulates tool calls, errors, and latency continuously, so the single snapshot at turn end captures the full diff.
-    ///
-    /// The caller provides a pre-captured `TurnDeltaSnapshot` (taken exactly once inside the session actor).
-    /// This avoids double-advancing the delta baseline.
-    /// If the snapshot is `None` (e.g. the signals actor was shut down), this is a no-op.
-    ///
-    /// Errors are logged but never block the turn flow.
-    ///
-    /// `request_id` is the prompt/request identifier for the turn.
+    /// The signals actor accumulates tool calls, errors, and latency continuously, so the snapshot captures the full diff since the previous turn's.
+    /// The caller provides the `TurnDeltaSnapshot` it took (each take advances the delta baseline), so this never advances it again.
+    /// The POST runs on the turn-delta worker; errors are logged and never block the turn flow.
     #[tracing::instrument(skip_all, fields(session_id = %self.session_id))]
     pub(crate) async fn send_turn_delta_with_snapshot(
         &self,
-        snapshot: Option<TurnDeltaSnapshot>,
+        snapshot: Option<&TurnDeltaSnapshot>,
         request_id: Option<String>,
         turn_duration_ms: Option<i64>,
-        turn_outcome: Option<String>,
-        model_fingerprint: Option<String>,
+        turn_outcome: TurnOutcome,
     ) {
         if !self.config.telemetry_enabled {
             tracing::debug!("Turn delta skipped: telemetry is disabled");
@@ -613,13 +682,16 @@ impl FeedbackManager {
 
         tracing::debug!("Turn delta: sending pre-captured snapshot");
 
-        let Some(client) = &self.feedback_client else {
+        let Some(turn_delta_tx) = &self.turn_delta_tx else {
             tracing::debug!("Turn delta skipped: no feedback client configured");
             return;
         };
 
         let Some(snapshot) = snapshot else {
-            tracing::debug!("Turn delta skipped: no snapshot available (signals actor shut down)");
+            tracing::debug!(
+                ?turn_outcome,
+                "Turn delta skipped: no snapshot (signals actor shut down)"
+            );
             return;
         };
 
@@ -628,7 +700,7 @@ impl FeedbackManager {
             (h.requests_sent(), h.last_request_at())
         };
         let delta = snapshot_to_turn_delta(
-            &snapshot,
+            snapshot,
             self.config.client_type,
             request_id,
             fb_requests_sent,
@@ -636,34 +708,40 @@ impl FeedbackManager {
             self.config.loc_tracking_enabled,
             turn_duration_ms,
             turn_outcome,
-            model_fingerprint,
         );
 
-        let session_id = self.session_id.clone();
-        let client = client.clone();
-        // Fire-and-forget: send in background so we never block the turn.
-        tokio::spawn(async move {
-            let result =
-                with_one_shot_auth_retry(&client, || client.send_turn_delta(&session_id, &delta))
-                    .await;
-            match result {
-                Ok(_) => {
-                    tracing::debug!(
-                        session_id = %session_id,
-                        turn = delta.turn_number,
-                        "Turn delta sent to analytics backend"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        session_id = %session_id,
-                        turn = delta.turn_number,
-                        error = %e,
-                        "Failed to send turn delta (non-fatal)"
-                    );
-                }
-            }
-        });
+        let turn = delta.turn_number;
+        if let Err(err) = turn_delta_tx.try_send(TurnDeltaJob::Post(Box::new(delta))) {
+            tracing::warn!(
+                session_id = %self.session_id,
+                turn,
+                capacity = TURN_DELTA_QUEUE_CAPACITY,
+                error = %err,
+                "Turn delta dropped: the post queue is full or its worker is gone"
+            );
+        }
+    }
+
+    /// Wait until every turn delta queued so far has posted, or `deadline` passes.
+    async fn flush_turn_deltas(&self, deadline: tokio::time::Instant) {
+        let Some(turn_delta_tx) = &self.turn_delta_tx else {
+            return;
+        };
+        let (reached, wait) = oneshot::channel();
+        let flushed = tokio::time::timeout_at(deadline, async {
+            turn_delta_tx
+                .send(TurnDeltaJob::Barrier(reached))
+                .await
+                .ok()?;
+            wait.await.ok()
+        })
+        .await;
+        if flushed.is_err() {
+            tracing::warn!(
+                session_id = %self.session_id,
+                "Turn deltas still posting at exit; not waiting for them"
+            );
+        }
     }
 
     /// Returns Ok(()) if sync succeeded or was skipped (no client).
@@ -733,9 +811,7 @@ impl FeedbackManager {
 
     /// Attempt OIDC token refresh after a 401 and retry the signal sync once.
     /// Returns the classified outcome for `handle_auth_outcome` to act on.
-    ///
     /// Prefers waiting for the proactive-refresh task or main-request-path recovery over driving a `ServerRejected` refresh itself.
-    /// This prevents the signals loop from amplifying 401 bursts at the API during token-expiry windows.
     async fn try_refresh_and_retry_sync(&self) -> SyncAuthOutcome {
         let Some(client) = &self.feedback_client else {
             return SyncAuthOutcome::Unrecoverable;
@@ -841,8 +917,8 @@ impl FeedbackManager {
 
     /// Force-sync with [`SHUTDOWN_SIGNAL_SYNC_TIMEOUT`].
     /// Empty sessions and telemetry-off are no-ops inside [`Self::sync_signals_inner`].
-    async fn bounded_final_sync(&self) {
-        match tokio::time::timeout(SHUTDOWN_SIGNAL_SYNC_TIMEOUT, self.force_sync_signals()).await {
+    async fn bounded_final_sync(&self, deadline: tokio::time::Instant) {
+        match tokio::time::timeout_at(deadline, self.force_sync_signals()).await {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 tracing::warn!(
@@ -861,11 +937,9 @@ impl FeedbackManager {
         }
     }
 
-    /// Shutdown: final signal sync (budget-capped), optional upload drain, then signals actor stop.
-    ///
+    /// Shutdown: turn-delta flush and final signal sync (one shared budget), optional upload drain, then signals actor stop.
     /// For an empty session (no turns or tool calls), `sync_signals_inner(force)` skips the analytics POST; drain is skipped when pending is also 0.
     /// Non-empty drains use `min(config.drain_timeout, cap)` (default cap 5s, `GROK_SESSION_EXIT_DRAIN_SECS` up to hard max 7s).
-    /// Incomplete drains leave durable pairs on disk for next-session recovery.
     pub async fn shutdown(&self, queue: Option<&xai_file_utils::queue::UploadQueue>) {
         let pending = queue
             .map(|q| q.stats().pending.load(Ordering::Relaxed))
@@ -876,8 +950,12 @@ impl FeedbackManager {
             None => false,
         };
 
-        // (1) Final force-sync: the telemetry-off and empty-session checks live in sync_signals_inner
-        self.bounded_final_sync().await;
+        // (1) Queued turn deltas (an exit cancel's row is the last one), then the final force-sync,
+        // under one budget so exit stays inside the agent join grace.
+        // The telemetry-off and empty-session checks live in sync_signals_inner.
+        let deadline = tokio::time::Instant::now() + SHUTDOWN_SIGNAL_SYNC_TIMEOUT;
+        self.flush_turn_deltas(deadline).await;
+        self.bounded_final_sync(deadline).await;
 
         // (2) Drain only when needed: an empty session with zero pending is skipped
         if let Some(queue) = queue {
@@ -1143,8 +1221,7 @@ mod tests {
         assert_eq!(snapshot.tool_call_count, 5);
         assert_eq!(snapshot.compaction_count, 2);
 
-        // Evaluate heuristics
-        let eval = manager.evaluate_heuristics().await.unwrap();
+        let eval = manager.heuristics.write().await.evaluate(&snapshot);
         assert!(eval.trigger_condition.is_some());
         assert_eq!(
             eval.trigger_condition.as_ref().unwrap().tier,
@@ -1356,9 +1433,7 @@ mod tests {
 
     /// Sync-loop cancel must return promptly once the loop is idle in `select!`.
     /// Final force-sync is owned by `shutdown` only (cancel does not re-POST).
-    ///
     /// Uses a closed-port base URL so the immediate first tick's sync fails fast and parks on the long interval.
-    /// Cancel is then observed without racing a hung in-flight force-sync (pre-existing select behavior).
     #[tokio::test]
     async fn test_sync_loop_cancel_returns_without_force_sync() {
         use crate::agent::feedback_client::FeedbackClient;
@@ -1508,6 +1583,74 @@ mod tests {
         assert!(
             elapsed >= Duration::from_millis(1500),
             "expected to wait most of the force_sync budget when reportable, got {elapsed:?}"
+        );
+    }
+
+    /// Turn deltas post from one worker in send order, and `shutdown` waits for the ones still
+    /// queued, so an exit cancel's row reaches the backend after the rows before it.
+    #[tokio::test]
+    #[allow(clippy::disallowed_methods)] // test client hits a localhost mock
+    async fn test_turn_deltas_post_in_order_and_shutdown_drains_them() {
+        use crate::agent::feedback_client::FeedbackClient;
+        use axum::{Json, Router, routing::post};
+
+        // Every POST is held briefly, so the deltas are all still queued when shutdown starts.
+        let (seen_tx, mut seen_rx) = mpsc::unbounded_channel::<i64>();
+        let router = Router::new().route(
+            "/v1/sessions/{id}/turn-deltas",
+            post(move |Json(body): Json<serde_json::Value>| {
+                let seen_tx = seen_tx.clone();
+                async move {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    let _ = seen_tx.send(body["turnNumber"].as_i64().unwrap_or(-1));
+                    Json(serde_json::json!({
+                        "sessionId": "test-fifo",
+                        "turnNumber": 0,
+                        "recordedAt": chrono::Utc::now(),
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+
+        let client =
+            FeedbackClient::with_client(reqwest::Client::new(), format!("http://{addr}/v1"), None);
+        let config = FeedbackManagerConfig {
+            telemetry_enabled: true,
+            ..Default::default()
+        };
+        let manager = FeedbackManager::new("test-fifo", Some(client), config);
+        let signals = manager.signals_handle();
+        for _ in 1..=5 {
+            signals.increment_turn();
+            let snapshot = signals
+                .take_turn_end_snapshot()
+                .await
+                .expect("signals actor up");
+            manager
+                .send_turn_delta_with_snapshot(
+                    Some(&snapshot),
+                    None,
+                    Some(1),
+                    TurnOutcome::Cancelled,
+                )
+                .await;
+        }
+
+        manager.shutdown(None).await;
+
+        let mut seen = Vec::new();
+        while let Ok(turn) = seen_rx.try_recv() {
+            seen.push(turn);
+        }
+        assert_eq!(
+            seen,
+            vec![1, 2, 3, 4, 5],
+            "every queued delta posted, in order"
         );
     }
 
@@ -1734,9 +1877,9 @@ mod tests {
     #[tokio::test]
     async fn test_is_auth_permanently_failed_reads_auth_manager() {
         use crate::agent::feedback_client::FeedbackClient;
-        use crate::auth::error::RefreshTokenFailedReason;
-        use crate::auth::{AuthManager, GrokAuth, GrokComConfig};
         use std::sync::Arc;
+        use xai_grok_login::error::RefreshTokenFailedReason;
+        use xai_grok_login::{AuthManager, GrokAuth, GrokComConfig};
 
         let dir = tempfile::tempdir().unwrap();
         let am = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
@@ -1769,17 +1912,17 @@ mod tests {
     #[tokio::test]
     async fn test_has_token_refresher_requires_refresher_attached() {
         use crate::agent::feedback_client::FeedbackClient;
-        use crate::auth::{AuthManager, GrokComConfig};
         use std::sync::Arc;
+        use xai_grok_login::{AuthManager, GrokComConfig};
 
         struct NoOpRefresher;
         #[async_trait::async_trait]
-        impl crate::auth::refresh::TokenRefresher for NoOpRefresher {
+        impl xai_grok_login::refresh::TokenRefresher for NoOpRefresher {
             async fn refresh(
                 &self,
-                _reason: crate::auth::refresh::RefreshReason,
-            ) -> crate::auth::refresh::RefreshOutcome {
-                crate::auth::refresh::RefreshOutcome::TransientFailure {
+                _reason: xai_grok_login::refresh::RefreshReason,
+            ) -> xai_grok_login::refresh::RefreshOutcome {
+                xai_grok_login::refresh::RefreshOutcome::TransientFailure {
                     message: "noop".into(),
                 }
             }
@@ -1799,6 +1942,57 @@ mod tests {
 
         am.set_refresher(std::sync::Arc::new(NoOpRefresher));
         assert!(with_am.has_token_refresher());
+    }
+
+    /// Outcome × envelope matrix: existing props keep their names, `outcome` is always present,
+    /// and `source`/taxonomy ride only when the envelope is present.
+    #[test]
+    fn user_feedback_event_matrix() {
+        let envelope = serde_json::json!({
+            "structured_feedback": {
+                "schema_version": 1,
+                "source": "draft",
+                "type": "bug",
+                "task_category": "debug",
+                "failure_mode": "sloppy_code",
+            }
+        });
+        let outcomes = [
+            (SubmitOutcome::Submitted, "submitted"),
+            (SubmitOutcome::LocalOnly, "local_only"),
+            (SubmitOutcome::Failed(anyhow::anyhow!("offline")), "failed"),
+        ];
+        for (outcome, wire) in &outcomes {
+            for enveloped in [false, true] {
+                let mut expected = serde_json::json!({
+                    "session_id": "sess-1",
+                    "has_feedback_text": true,
+                    "model_id": "grok-4",
+                    "is_solicited": false,
+                    "outcome": wire,
+                });
+                if enveloped {
+                    expected.as_object_mut().unwrap().extend([
+                        ("source".to_owned(), "draft".into()),
+                        ("feedback_type".to_owned(), "bug".into()),
+                        ("task_category".to_owned(), "debug".into()),
+                        ("failure_mode".to_owned(), "sloppy_code".into()),
+                    ]);
+                }
+                let mut submission = new_submission(
+                    "sess-1".to_owned(),
+                    ClientType::Tui,
+                    FeedbackContent::Text("great session".to_owned()),
+                );
+                submission.model_id = Some("grok-4".to_owned());
+                submission.metadata = enveloped.then(|| envelope.clone());
+                assert_eq!(
+                    serde_json::to_value(user_feedback_event(&submission, outcome, false)).unwrap(),
+                    expected,
+                    "{wire} enveloped={enveloped}"
+                );
+            }
+        }
     }
 }
 
@@ -1960,6 +2154,66 @@ email = ["$GROK_TEST_WORK_EMAIL"]
             persisted.metadata.expect("metadata merged before persist")["team"],
             "platform-tools"
         );
+    }
+
+    /// `metadata.structured_feedback` is the client's typed envelope: the later-wins env merge
+    /// must neither replace it nor invent it, while other env keys keep merging.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn workflow_env_metadata_cannot_touch_structured_feedback() {
+        let _guard = xai_grok_test_support::env::EnvGuard::set(
+            "GROK_USER_METADATA",
+            r#"{"team": "platform-tools", "structured_feedback": {"type": "forged"}}"#,
+        );
+        let (addr, captured) = start_capture_server().await;
+        let client = crate::agent::feedback_client::FeedbackClient::with_client(
+            reqwest::Client::new(),
+            format!("http://{addr}/v1"),
+            Some("tok".into()),
+        );
+        let envelope = serde_json::json!({
+            "schema_version": 1,
+            "source": "write",
+            "type": "bug",
+        });
+        let mut submission = text_submission();
+        submission.metadata = Some(serde_json::json!({ "structured_feedback": envelope.clone() }));
+
+        let outcome = submit_feedback_workflow(
+            &mut submission,
+            Some(&client),
+            None,
+            SubmitFeedbackOptions {
+                solicited: false,
+                telemetry_enabled: false,
+                author_identity: None,
+            },
+        )
+        .await;
+        assert!(matches!(outcome, SubmitOutcome::Submitted));
+
+        let body = captured.lock().clone().expect("server saw the POST");
+        assert_eq!(body["metadata"]["structured_feedback"], envelope);
+        assert_eq!(body["metadata"]["team"], "platform-tools");
+
+        // A report without the envelope must not grow one from the environment either.
+        *captured.lock() = None;
+        let mut submission = text_submission();
+        let outcome = submit_feedback_workflow(
+            &mut submission,
+            Some(&client),
+            None,
+            SubmitFeedbackOptions {
+                solicited: false,
+                telemetry_enabled: false,
+                author_identity: None,
+            },
+        )
+        .await;
+        assert!(matches!(outcome, SubmitOutcome::Submitted));
+        let body = captured.lock().clone().expect("server saw the POST");
+        assert!(body["metadata"].get("structured_feedback").is_none());
+        assert_eq!(body["metadata"]["team"], "platform-tools");
     }
 
     #[tokio::test]

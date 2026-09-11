@@ -25,11 +25,8 @@ const MAX_RECONNECT_ATTEMPTS: u32 = 3;
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 /// Bounds the wait for the server's registration response; without it a silent server hangs the client forever.
 const REGISTRATION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
-/// Timeout for waiting for `LeaderReady` after a `Registered { ready: false }`.
-///
-/// The leader signals readiness right after its bounded sign-in (`STARTUP_AUTH_TIMEOUT`).
-/// Prefetching models and settings runs off the readiness path, and the leader never opens a browser OAuth flow.
-/// So the timeout only needs to cover that bounded auth plus margin, matching the client connect ceiling.
+/// Timeout for waiting for `LeaderReady` after a `Registered { ready: false }`. The leader signals readiness right after its bounded sign-in (`STARTUP_AUTH_TIMEOUT`).
+/// Prefetching models and settings runs off the readiness path, and the leader never opens a browser OAuth flow. So the timeout only needs to cover that bounded auth plus margin, matching the client connect ceiling.
 const LEADER_READY_TIMEOUT: Duration = crate::http::MIN_CLIENT_CONNECT_TIMEOUT;
 
 /// Reason the client disconnected from the leader server.
@@ -66,15 +63,9 @@ impl LeaderRegistration {
 
 type ControlResponse = Result<ControlPayload, ControlError>;
 
-/// Client-side handle for communicating with the leader server.
-///
-/// The client maintains an IPC connection to the leader and provides send/receive channels for ACP messages.
-/// It automatically handles registration and keepalive pings.
-///
-/// When the connection ends, the reason is published to a `watch` channel accessible via [`disconnect_reason()`](Self::disconnect_reason).
-/// Callers can use this to decide whether to attempt reconnection.
-///
-/// If the server sent [`ServerMessage::ShuttingDown`] before closing, [`shutting_down_reason()`](Self::shutting_down_reason) returns the reason.
+/// Client-side handle for communicating with the leader server. The client maintains an IPC connection to the leader and provides send/receive channels for ACP messages.
+/// It automatically handles registration and keepalive pings. When the connection ends, the reason is published to a `watch` channel accessible via [`disconnect_reason()`](Self::disconnect_reason).
+/// Callers can use this to decide whether to attempt reconnection. If the server sent [`ServerMessage::ShuttingDown`] before closing, [`shutting_down_reason()`](Self::shutting_down_reason) returns the reason.
 pub struct LeaderClient {
     outbound_tx: mpsc::UnboundedSender<ClientMessage>,
     acp_rx: mpsc::UnboundedReceiver<String>,
@@ -156,11 +147,9 @@ impl LeaderClient {
         })
     }
 
-    /// Returns a receiver for the most recent `ShuttingDown` reason sent by the server.
-    ///
-    /// - `None`: no `ShuttingDown` has arrived yet (still connected, or the server closed without a planned shutdown announcement).
-    /// - `Some(reason)`: the server announced a planned shutdown with this reason.
-    ///   Use this to distinguish e.g. `AutoUpdate` (safe to reconnect immediately) from `Manual` (may indicate a deliberate stop).
+    /// `None`: no `ShuttingDown` has arrived yet (still connected, or the server closed without a planned shutdown announcement).
+    /// `Some(reason)`: the server announced a planned shutdown with this reason.
+    /// Use this to distinguish e.g. `AutoUpdate` (safe to reconnect immediately) from `Manual` (may indicate a deliberate stop).
     pub fn shutting_down_reason(&self) -> watch::Receiver<Option<super::protocol::ShutdownReason>> {
         self.shutting_down_rx.clone()
     }
@@ -241,10 +230,7 @@ impl LeaderClient {
         self.cancel.cancel();
     }
 
-    /// Get a receiver for the disconnect reason.
-    ///
-    /// The initial value is [`DisconnectReason::Connected`].
-    /// When the connection ends, the value changes to the specific reason (shutdown, lost, or client-initiated).
+    /// Get a receiver for the disconnect reason. The initial value is [`DisconnectReason::Connected`]. When the connection ends, the value changes to the specific reason (shutdown, lost, or client-initiated).
     /// Callers can use `changed().await` to wait for disconnection, or `borrow()` to check the current state.
     pub fn disconnect_reason(&self) -> watch::Receiver<DisconnectReason> {
         self.disconnect_rx.clone()
@@ -529,9 +515,7 @@ mod tests {
     };
     use tempfile::TempDir;
 
-    // --- Misbehaving-leader wire shapes (fake leaders, paused clock) ---
-    //
-    // `start_paused` auto-advances the client-side timeouts under test
+    // --- Misbehaving-leader wire shapes (fake leaders, paused clock) --- `start_paused` auto-advances the client-side timeouts under test
     // The fakes stall on cancellation, never timers, so the paused clock cannot wake them (see `leader::test_support`)
 
     /// A leader stuck at `Registered { ready: false }` parks the client for the full readiness deadline, then returns a hard timeout.

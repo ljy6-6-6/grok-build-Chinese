@@ -144,7 +144,6 @@ pub enum ActionId {
     DashboardToggleWorktree,
 }
 /// When an action is available / visible.
-///
 /// Used for **exact** matching in `registry.lookup()`.
 /// Each layer in the input chain queries its own context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,7 +222,6 @@ pub struct ActionDef {
 
 impl ActionDef {
     /// Convert this action def into a [`HintItem`] for the shortcuts bar.
-    ///
     /// Uses `default_key` only.
     /// For paired hints (j/k, h/l), the view should use [`HintItem::paired`] with keys from two related action defs.
     pub fn hint(&self) -> HintItem {
@@ -294,9 +292,7 @@ impl ActionRegistry {
     }
 
     /// Look up an action by key event and current context.
-    ///
     /// Uses **exact** context matching; each layer in the input chain calls this with its own context level.
-    ///
     /// Peek/probe only: does **not** emit telemetry.
     pub fn lookup(&self, event: &KeyEvent, context: When) -> Option<ActionId> {
         for def in &self.actions {
@@ -322,10 +318,9 @@ impl ActionRegistry {
         def.default_key.matches(event) || def.alt_keys.iter().any(|k| k.matches(event))
     }
 
-    /// True when the send-now (interject) chord should act or be advertised: a turn is running and there is something to send.
-    /// `has_payload` is true for non-empty composer text, editing a queued row, or a visible queued follow-up.
-    /// The last case is the empty-composer force-send from the prompt.
-    /// Idle or no payload remains a no-op (not send-like-Enter).
+    /// True when the send-now (interject) chord should act or be advertised: a turn is running and there is something
+    /// to send. The last case is the empty-composer force-send from the prompt. Idle or no payload remains a no-op (not
+    /// send-like-Enter).
     pub fn interjection_possible(turn_running: bool, has_payload: bool) -> bool {
         turn_running && has_payload
     }
@@ -406,17 +401,9 @@ impl ActionRegistry {
         Self::new(actions)
     }
 
-    /// Look up an action like [`Self::lookup`] but optionally suppress bare-letter (or `Shift+letter`) bindings when `vim_mode == false`.
-    /// The suppression is for contexts where those letters double as text-input keys.
-    ///
-    /// Applies to [`When::ScrollbackFocused`] and [`When::DashboardFocused`].
-    /// The scrollback `j`/`k` scroll and the dashboard `j`/`k` row-nav only resolve when vim-mode is on.
-    /// With vim-mode off the letters fall through so the caller can type them into its prompt.
-    /// The dashboard dispatch input and the agent prompt both rely on this.
-    ///
-    /// Arrow, Tab, Esc, Space, PgUp, PgDn, `?`, and all `Ctrl+letter` shortcuts always resolve.
-    /// They come in as either the action's `default_key` (e.g. `PageUp`, `Esc`) or `alt_keys` (arrows on `SelectNext`, `Collapse`, etc.).
-    /// Only the bare-letter primary or alt is gated; arrow `alt_keys` on the same `ActionDef` still match.
+    /// The scrollback `j`/`k` scroll and the dashboard `j`/`k` row-nav only resolve when vim-mode is on. With vim-mode
+    /// off the letters fall through so the caller can type them into its prompt. Arrow, Tab, Esc, Space, PgUp, PgDn,
+    /// `?`, and all `Ctrl+letter` shortcuts always resolve. Only the bare-letter primary or alt is gated.
     pub fn lookup_with_mode(
         &self,
         event: &KeyEvent,
@@ -455,7 +442,6 @@ impl ActionRegistry {
     }
 
     /// Get hints for the shortcuts bar, filtered by contexts and sorted by priority.
-    ///
     /// Pass multiple contexts to collect hints from all applicable levels.
     /// E.g., for scrollback mode: `&[ScrollbackFocused, AgentScreen, Always]`.
     pub fn hints(&self, contexts: &[When]) -> Vec<&ActionDef> {
@@ -480,7 +466,6 @@ impl ActionRegistry {
     }
 
     /// Get the effective hint key for an action, accounting for vim mode.
-    ///
     /// In non-vim mode, bare-letter scrollback bindings are suppressed.
     /// This returns the first non-letter alt key instead (e.g. arrow keys), so hints show a key that actually works.
     pub fn key_for_mode(&self, id: ActionId, vim_mode: bool) -> Option<KeyShortcut> {
@@ -504,11 +489,9 @@ impl ActionRegistry {
     }
 }
 
-/// Emit [`xai_grok_telemetry::events::ShortcutUsed`] for an allowlisted binding.
-///
-/// See that event's docs for the product contract (intent-only allowlist).
-/// `context` is a free-form label for where the key was pressed (`When::telemetry_name()` or e.g. `"queue"` when focus is not a registry `When`).
-/// Call only on the commit path that handles the allowlisted id, not peeks.
+/// Emit [`xai_grok_telemetry::events::ShortcutUsed`] for an allowlisted binding. See that event's docs for the
+/// product contract (intent-only allowlist). Call only on the commit path that handles the allowlisted id, not
+/// peeks.
 pub fn log_shortcut_used(key: &KeyEvent, action_id: ActionId, context: &str) {
     let Some(action) = shortcut_used_action_label(action_id) else {
         return;
@@ -914,8 +897,10 @@ mod tests {
             registry.lookup(&ctrl_r, When::ScrollbackFocused),
             Some(ActionId::ToggleMouseCapture)
         );
-        // Not on agent/prompt contexts (Ctrl+R is deliberately unbound there; agent keeps the model picker on Ctrl+M)
-        assert_eq!(registry.lookup(&ctrl_r, When::AgentScreen), None);
+        assert_eq!(
+            registry.lookup(&ctrl_r, When::AgentScreen),
+            Some(ActionId::OpenSessions)
+        );
         assert_eq!(registry.lookup(&ctrl_r, When::PromptFocused), None);
         assert_eq!(
             registry.lookup(&ctrl_m, When::AgentScreen),

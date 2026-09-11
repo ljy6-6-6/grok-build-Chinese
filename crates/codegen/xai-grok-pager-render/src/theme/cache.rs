@@ -27,6 +27,10 @@ static AUTO_MODE: AtomicBool = AtomicBool::new(false);
 /// Whether the theme is locked to `Theme::terminal_default` for the whole session (minimal mode, no theming).
 static TERMINAL_NATIVE_LOCK: AtomicBool = AtomicBool::new(false);
 
+/// Fail-closed until seeded. Off: names stop parsing and catalogs drop it, so `theme = "terminal"` resolves to the default.
+/// Independent of minimal mode's `TERMINAL_NATIVE_LOCK`.
+static TERMINAL_THEME_ENABLED: AtomicBool = AtomicBool::new(false);
+
 /// Decode the u8 stored in `CURRENT` back to a `ThemeKind`.
 /// Falls back to `GrokNight` for an out-of-range byte, which `set` can't produce but a future variant missing from this match could.
 fn theme_kind_from_u8(byte: u8) -> ThemeKind {
@@ -36,6 +40,7 @@ fn theme_kind_from_u8(byte: u8) -> ThemeKind {
         x if x == ThemeKind::TokyoNight as u8 => ThemeKind::TokyoNight,
         x if x == ThemeKind::RosePineMoon as u8 => ThemeKind::RosePineMoon,
         x if x == ThemeKind::OscuraMidnight as u8 => ThemeKind::OscuraMidnight,
+        x if x == ThemeKind::Terminal as u8 => ThemeKind::Terminal,
         x if x == ThemeKind::Auto as u8 => ThemeKind::Auto,
         _ => ThemeKind::GrokNight,
     }
@@ -62,43 +67,82 @@ pub fn current_kind() -> ThemeKind {
     if terminal_native_locked() {
         return ThemeKind::GrokNight;
     }
+    selected_kind()
+}
+
+/// The stored theme selection, ignoring the minimal-mode lock's masking (seeding from disk on first use like [`current_kind`]).
+/// The rollout kill switch checks the real selection: under the lock `current_kind()` reports a nominal GrokNight even when the stored kind is `Terminal`, which would let a gated-off theme resurface when the lock lifts.
+#[must_use]
+pub fn selected_kind() -> ThemeKind {
     if !LOADED.load(Ordering::Acquire) {
         // Two threads racing into the seed path is harmless: the disk read is idempotent and `store` is atomic
         // Worst case both threads call `load_from_disk` once
         if let Some(kind) = load_from_disk() {
-            CURRENT.store(kind as u8, Ordering::Relaxed);
+            store_kind(kind);
         }
         LOADED.store(true, Ordering::Release);
     }
     theme_kind_from_u8(CURRENT.load(Ordering::Relaxed))
 }
 
-/// Set the in-memory theme kind without writing to disk.
-///
-/// Used by the dispatcher (after `Action::SetTheme` is processed) and by the live-preview path during the picker.
-/// Disk-write happens via `Effect::PersistSetting`, NOT here.
+/// In-memory only. Disk write is `Effect::PersistSetting`, not here — picker preview must not persist.
 pub fn set(kind: ThemeKind) {
-    CURRENT.store(kind as u8, Ordering::Relaxed);
+    store_kind(kind);
     LOADED.store(true, Ordering::Release);
 }
 
-// -- Terminal-native lock (minimal mode) --------------------------------------
+/// Store `kind` and re-derive everything keyed off terminal-nativeness.
+/// Every write to `CURRENT` goes through here so the markdown renderer
+/// can never drift from the selected theme.
+fn store_kind(kind: ThemeKind) {
+    CURRENT.store(kind as u8, Ordering::Relaxed);
+    sync_markdown_polarity();
+}
+
+// -- Terminal-native palette (minimal-mode lock + `terminal` theme) ----------
 
 #[must_use]
 pub fn terminal_native_locked() -> bool {
     TERMINAL_NATIVE_LOCK.load(Ordering::Relaxed)
 }
 
+/// Minimal-mode lock or the selected `terminal` theme. Loads `CURRENT` directly so it cannot re-seed from disk and drift from `Theme::current`.
+#[must_use]
+pub fn terminal_native_active() -> bool {
+    terminal_native_locked()
+        || theme_kind_from_u8(CURRENT.load(Ordering::Relaxed)).is_terminal_native()
+}
+
+/// Engage or clear the terminal-native theme lock.
 pub fn set_terminal_native_lock(locked: bool) {
     TERMINAL_NATIVE_LOCK.store(locked, Ordering::Relaxed);
-    // Cap quantization at ANSI-16 and switch syntax tokens to the dual-polarity accent map (default-fg grays and base ANSI hues)
-    // Without the polarity-safe remap, night-theme pastels collapse to White and vanish on light terminal profiles in minimal mode
-    xai_grok_markdown::set_color_level_cap(if locked {
+    sync_markdown_polarity();
+}
+
+/// Read the `terminal` theme rollout gate (see [`TERMINAL_THEME_ENABLED`]).
+#[must_use]
+pub fn terminal_theme_enabled() -> bool {
+    TERMINAL_THEME_ENABLED.load(Ordering::Relaxed)
+}
+
+/// Seed the `terminal` theme rollout gate from the resolved feature flag.
+/// A flip re-reads the auto dark/light overrides: they were parsed under the old gate, so a cached `Terminal` must neither survive the kill switch nor stay dropped after a reveal.
+pub fn set_terminal_theme_enabled(enabled: bool) {
+    let was = TERMINAL_THEME_ENABLED.swap(enabled, Ordering::Relaxed);
+    if was != enabled {
+        invalidate_auto_theme_config();
+    }
+}
+
+/// Terminal-native: cap at ANSI-16 and use the dual-polarity accent map. Night pastels otherwise collapse to White and vanish on light profiles.
+fn sync_markdown_polarity() {
+    let native = terminal_native_active();
+    xai_grok_markdown::set_color_level_cap(if native {
         xai_grok_markdown::ColorLevel::Basic
     } else {
         xai_grok_markdown::ColorLevel::TrueColor
     });
-    xai_grok_markdown::set_polarity_safe_syntax(locked);
+    xai_grok_markdown::set_polarity_safe_syntax(native);
 }
 
 // -- Auto-mode ---------------------------------------------------------------
@@ -129,12 +173,7 @@ pub fn invalidate_auto_theme_config() {
 
 // -- Theme resolution --------------------------------------------------------
 
-/// Called once at startup. Returns the concrete `ThemeKind` (never `Auto`).
-///
-/// Precedence:
-/// 1. Environment variable (`GROK_THEME` / `LC_GROK_THEME`)
-/// 2. Config file (`[ui].theme`)
-/// 3. Default: `GrokNight`
+/// Concrete kind, never `Auto`. Env (`GROK_THEME` / `LC_GROK_THEME`), then `[ui].theme`, then `GrokNight`.
 #[must_use]
 pub fn resolve_initial_theme() -> ThemeKind {
     resolve_initial_theme_from(env_theme_name().as_deref(), load_from_disk(), true)
@@ -202,11 +241,7 @@ fn resolve_from_appearance(appearance: Option<system_appearance::SystemAppearanc
         .unwrap_or(ThemeKind::GrokNight)
 }
 
-/// Resolve "auto" by detecting system appearance and mapping via config.
-///
-/// Falls back to `GrokNight` when detection fails.
-/// Uses desktop APIs and env hints (no OSC 11), so it is safe to call at runtime while crossterm's `EventStream` is active.
-/// Called from the settings modal and the `/theme auto` slash command.
+/// Desktop APIs and env hints only (no OSC 11), so it is safe while `EventStream` is active. Detection failure is `GrokNight`.
 #[must_use]
 pub fn resolve_auto() -> ThemeKind {
     resolve_from_appearance(system_appearance::detect())
@@ -258,10 +293,18 @@ fn load_auto_theme_config() -> AutoThemeConfig {
 #[cfg(any(test, feature = "test-support"))]
 pub fn reset_for_test() {
     // Tests are serialized via TEST_LOCK so the AtomicU8/AtomicBool pair is safe to reset without any cross-thread coordination
-    CURRENT.store(ThemeKind::GrokNight as u8, Ordering::Relaxed);
+    store_kind(ThemeKind::GrokNight);
     LOADED.store(false, Ordering::Release);
     AUTO_MODE.store(false, Ordering::Relaxed);
     set_terminal_native_lock(false);
+    // The test-build default; a prior gating test may have turned it off.
+    set_terminal_theme_enabled(true);
+    // Deterministic level regardless of the ambient environment (see
+    // pin_theme).
+    super::color_support::set_level_for_test(super::color_support::ColorLevel::TrueColor);
+    // A test that painted an RGB cursor must not leak the latch into the
+    // next test's zero-cursor-escape assertions.
+    super::set_cursor_color_applied_for_test(false);
     *AUTO_THEME_CONFIG.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
@@ -278,17 +321,15 @@ pub fn test_lock() -> &'static Mutex<()> {
     &TEST_LOCK
 }
 
-/// Pin a deterministic theme and color level for a test's duration so exact height and screen-position assertions are hermetic.
-/// Rendered heights are computed under the process-global `Theme::current()`, which concurrent `set_theme` tests mutate.
-/// `Theme::current()` also reads the global color level; holding the shared test lock blocks a mid-test theme change.
-/// Hold the returned guard for the whole test.
+/// Holds the shared test lock so concurrent `set_theme` cannot change `Theme::current()` mid-assertion. Keep the guard for the whole test.
 #[cfg(any(test, feature = "test-support"))]
 pub fn pin_theme() -> std::sync::MutexGuard<'static, ()> {
     let guard = test_lock().lock().unwrap_or_else(|e| e.into_inner());
     set(ThemeKind::GrokNight);
-    // Color level is a write-once `OnceLock`; tests run without a TTY so it resolves to `TrueColor` anyway
-    // Pin it explicitly (best-effort: ignore the already-initialized `Err`) so the measure path that reads it stays fixed
-    let _ = super::color_support::set(super::color_support::ColorLevel::TrueColor);
+    // Deterministic level regardless of the ambient environment (agent shells export NO_COLOR, which would otherwise win the write-once detection by scheduling)
+    super::color_support::set_level_for_test(super::color_support::ColorLevel::TrueColor);
+    // A prior gating test may have turned the rollout gate off.
+    set_terminal_theme_enabled(true);
     guard
 }
 
@@ -315,6 +356,29 @@ mod tests {
 
     // -- Terminal-native lock (minimal mode) ----------------------------------
 
+    /// `apply_kind` runs on the event-loop thread, so it must never take the stderr lock.
+    #[test]
+    fn apply_kind_never_takes_the_stderr_lock() {
+        with_test_env(|| {
+            // Best-effort TrueColor pin (as in pin_theme): under NO_COLOR the accent resolves
+            // to no RGB and even a regressed apply_kind would skip its cursor-color write.
+            let _ = super::super::color_support::set(
+                super::super::color_support::ColorLevel::TrueColor,
+            );
+            // Park a fake writer thread on the lock for the whole call.
+            let _stderr_guard = xai_grok_shared::stderr::stderr_lock();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = done_tx.send(super::super::Theme::apply_kind(ThemeKind::GrokDay));
+            });
+            let applied = done_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("apply_kind blocked on the stderr lock");
+            assert_eq!(applied, ThemeKind::GrokDay);
+            assert_eq!(current_kind(), ThemeKind::GrokDay);
+        });
+    }
+
     #[test]
     fn terminal_native_lock_pins_kind_and_blocks_apply_kind() {
         with_test_env(|| {
@@ -332,6 +396,46 @@ mod tests {
                 current_kind(),
                 ThemeKind::GrokDay,
                 "unlocking restores the cached kind"
+            );
+        });
+    }
+
+    /// The rollout kill switch reads the stored selection while `current_kind()` masks it to a nominal GrokNight under the minimal lock.
+    #[test]
+    fn selected_kind_sees_through_the_minimal_lock() {
+        with_test_env(|| {
+            set(ThemeKind::Terminal);
+            set_terminal_native_lock(true);
+            assert_eq!(current_kind(), ThemeKind::GrokNight, "masked nominal kind");
+            assert_eq!(selected_kind(), ThemeKind::Terminal, "raw stored selection");
+            set_terminal_native_lock(false);
+            assert_eq!(selected_kind(), current_kind());
+        });
+    }
+
+    /// A gate flip drops the cached auto dark/light overrides (parsed under the old gate); same-value seeding keeps the cache.
+    #[test]
+    fn terminal_gate_flip_invalidates_auto_theme_config() {
+        with_test_env(|| {
+            set_test_auto_config(AutoThemeConfig {
+                dark_theme: Some(ThemeKind::Terminal),
+                light_theme: None,
+            });
+            set_terminal_theme_enabled(true);
+            assert!(
+                AUTO_THEME_CONFIG.lock().unwrap().is_some(),
+                "same-value seed keeps the cache"
+            );
+            set_terminal_theme_enabled(false);
+            assert!(
+                AUTO_THEME_CONFIG.lock().unwrap().is_none(),
+                "kill switch drops the cached Terminal override"
+            );
+            set_test_auto_config(AutoThemeConfig::default());
+            set_terminal_theme_enabled(true);
+            assert!(
+                AUTO_THEME_CONFIG.lock().unwrap().is_none(),
+                "reveal re-reads so a dropped Terminal comes back"
             );
         });
     }
@@ -354,12 +458,53 @@ mod tests {
         });
     }
 
+    /// Chrome adaptations paint opaque backgrounds. Transparency survives only if `current()` returns `Theme::terminal()` before them.
+    #[test]
+    fn terminal_theme_serves_unadapted_terminal_palette() {
+        with_test_env(|| {
+            set(ThemeKind::Terminal);
+            assert_eq!(current_kind(), ThemeKind::Terminal, "kind is selectable");
+            assert!(
+                !terminal_native_locked(),
+                "the theme must not engage minimal mode's session lock"
+            );
+            assert!(terminal_native_active());
+            assert!(
+                xai_grok_markdown::polarity_safe_syntax(),
+                "night pastels would collapse to White on a light profile"
+            );
+            assert_eq!(
+                super::super::Theme::current(),
+                super::super::Theme::terminal(),
+                "current() must serve the palette untouched by adaptations"
+            );
+
+            set(ThemeKind::GrokNight);
+            assert!(!terminal_native_active());
+            assert!(
+                !xai_grok_markdown::polarity_safe_syntax(),
+                "switching away must restore the RGB syntax palette"
+            );
+        });
+    }
+
     #[test]
     fn reset_for_test_clears_terminal_native_lock() {
         with_test_env(|| {
             set_terminal_native_lock(true);
             reset_for_test();
             assert!(!terminal_native_locked());
+        });
+    }
+
+    /// A test that painted an RGB cursor must not leak the OSC 12 latch into
+    /// the next test's zero-cursor-escape assertions.
+    #[test]
+    fn reset_for_test_clears_cursor_color_latch() {
+        with_test_env(|| {
+            super::super::set_cursor_color_applied_for_test(true);
+            reset_for_test();
+            assert!(!super::super::cursor_color_applied_for_test());
         });
     }
 
@@ -774,13 +919,7 @@ mod tests {
 
     // -- set / current_kind --------------------------------------------------
 
-    /// `set` followed by `current_kind` returns the set value, and the `LOADED` flag flips so subsequent reads don't re-seed from disk.
-    /// This is the optimistic-update invariant the dispatcher relies on.
-    ///
-    /// Explicitly observe the `LOADED` flag
-    /// side-effect by calling `reset_for_test()` between sets — if
-    /// `set` didn't flip `LOADED = true`, the second `current_kind`
-    /// read would re-seed from disk and the assertion would fail.
+    /// Optimistic-update invariant: `set` must flip `LOADED` or the next `current_kind` re-seeds from disk.
     #[test]
     fn set_then_current_kind_round_trips() {
         with_test_env(|| {

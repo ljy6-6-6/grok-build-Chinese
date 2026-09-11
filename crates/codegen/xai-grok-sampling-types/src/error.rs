@@ -12,8 +12,11 @@ use crate::provider_error::{parse_provider_error, parse_provider_error_str};
 pub type Result<T> = std::result::Result<T, SamplingError>;
 
 /// Why the model's response was classified as "empty" by [`ConversationResponse::empty_reason`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::AsRefStr, strum::IntoStaticStr,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum EmptyReason {
     /// The model emitted reasoning tokens but produced no visible content and no tool calls.
     /// The stream completed normally (has `finish_reason`).
@@ -21,19 +24,9 @@ pub enum EmptyReason {
     /// The stream carried at least one `choice` but the final assistant message has empty `content` and no tool calls (and no reasoning).
     NoVisibleContent,
 }
-
-impl EmptyReason {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            EmptyReason::ReasoningOnly => "reasoning_only",
-            EmptyReason::NoVisibleContent => "no_visible_content",
-        }
-    }
-}
-
 impl fmt::Display for EmptyReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+        f.write_str(self.as_ref())
     }
 }
 
@@ -75,11 +68,9 @@ pub struct ResponseModelMetadata {
     pub models_etag: Option<String>,
 }
 
-/// Wire-credential provenance of a request that failed authentication.
-///
-/// A 401 for a request that went out with no credential header is not evidence against the credential itself.
-/// Such a send is fail-closed: the bearer resolver had nothing wire-valid.
-/// Retry policies use this to avoid charging credential-rejection budgets for such sends.
+/// Wire-credential provenance of a request that failed authentication. A 401 for a request that went out with no
+/// credential header is not evidence against the credential itself. Such a send is fail-closed: the bearer resolver had
+/// nothing wire-valid. Retry policies use this to avoid charging credential-rejection budgets for such sends.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -149,6 +140,9 @@ pub enum SamplingError {
     },
     #[error("invalid client configuration: {0}")]
     InvalidConfiguration(&'static str),
+    /// The model's mTLS endpoint or local client identity cannot be used safely.
+    #[error("invalid mTLS client configuration: {0}")]
+    MtlsConfiguration(String),
     #[error("request error: {0}")]
     Http(reqwest::Error),
     #[error("{prefix}{0}", prefix = SERIALIZATION_DISPLAY_PREFIX)]
@@ -160,10 +154,8 @@ pub enum SamplingError {
         model_metadata: Option<ResponseModelMetadata>,
         /// Parsed from the `Retry-After` response header (seconds).
         retry_after_secs: Option<u64>,
-        /// Parsed from the `x-should-retry` response header.
-        /// `Some(true)`: transient, retry may help.
-        /// `Some(false)`: request-content error, don't retry.
-        /// `None`: header absent (old server or non-proxy origin).
+        /// Parsed from the `x-should-retry` response header. `Some(true)`: transient, retry may help. `Some(false)`:
+        /// request-content error, don't retry. `None`: header absent (old server or non-proxy origin).
         should_retry: Option<bool>,
         /// The error envelope's `code` slot; `None` when the body has no envelope or carries no code.
         /// Dedicated code slots (nested envelopes, Responses-stream error events) pass through verbatim.
@@ -188,10 +180,9 @@ pub enum SamplingError {
     EmptyResponse { context: EmptyResponseContext },
     #[error("{text}", text = MAX_TOKENS_TRUNCATION_MESSAGE)]
     MaxTokensTruncation,
-    /// A confident server-reported doom loop on the attempt (mid-stream or on the completed response).
-    /// Retryable on the recovery loop's own budget, separate from the transport budget.
-    /// Carries the raw trigger labels (never generation content) and, for telemetry only, the stream chunk index the mid-stream abort fired at.
-    /// `aborted_at_chunk` is `None` when the signal was only seen on the completed response.
+    /// A confident server-reported doom loop on the attempt (mid-stream or on the completed response). Carries the raw
+    /// trigger labels (never generation content) and, for telemetry only, the stream chunk index the mid-stream abort fired
+    /// at. `aborted_at_chunk` is `None` when the signal was only seen on the completed response.
     #[error("doom loop detected: {}", triggers.join(", "))]
     DoomLoopDetected {
         triggers: Vec<String>,
@@ -202,20 +193,14 @@ pub enum SamplingError {
 /// Semantic `error.code` the server stamps on invalid-image rejections, on both non-stream error bodies and mid-stream SSE error events.
 pub const INVALID_IMAGE_ERROR_CODE: &str = "invalid_image";
 
-/// Content path some upstream providers key codeless image rejections on (`.image.source.base64.data`/`.url`).
-/// Those arrive as `invalid_request_error` with no `error.code`, so [`INVALID_IMAGE_ERROR_CODE`] misses them.
-/// The fragment appears only when the request carried an image, so stripping is safe recovery.
-/// Fragile to the provider renaming the wire path.
+/// Content path some upstream providers key codeless image rejections on (`.image.source.base64.data`/`.url`). Those
+/// arrive as `invalid_request_error` with no `error.code`, so [`INVALID_IMAGE_ERROR_CODE`] misses them. The fragment
+/// appears only when the request carried an image, so stripping is safe recovery.
 const IMAGE_CONTENT_PATH_MARKER: &str = ".image.source.";
 
-/// True when a wire `code` slot means the request exceeded a size limit: the 413 status as a numeric string, or a provider size slug.
-/// Structured counterpart of [`is_context_length_error`] for backends that stamp a code but an opaque message.
-///
-/// Size-error decision map for callers choosing a remedy:
-/// - 413 status or byte-size code: strip inline images and retry once.
-///   Detected by [`SamplingError::is_payload_too_large`] and [`SamplingError::is_byte_size_overflow_coded`].
-/// - Token-tier code or token/size text: fail fast via [`SamplingError::is_retry_vetoed`].
-///   Detected by [`SamplingError::is_context_length_error`]; the compaction host steps its input ladder down instead.
+/// Size-error decision map for callers choosing a remedy: 413 status or byte-size code: strip inline images and retry
+/// once. Detected by [`SamplingError::is_payload_too_large`] and [`SamplingError::is_byte_size_overflow_coded`];
+/// Token-tier code or token/size text: fail fast via [`SamplingError::is_retry_vetoed`].
 pub fn is_size_overflow_error_code(code: &str) -> bool {
     is_byte_size_overflow_error_code(code)
         // Token-tier slugs: size overflows image stripping cannot remedy.
@@ -330,11 +315,9 @@ impl SamplingError {
     }
 
     pub fn is_auth_error(&self) -> bool {
-        // Only 401 Unauthorized means the credentials themselves were rejected and warrant a token refresh / re-auth
-        // 403 Forbidden means the request was authenticated but the action is not permitted
-        // That covers content-safety blocks, ZDR-blocked operations, and other policy denials unrelated to credentials
-        // Treating 403 as an auth error triggers a pointless OIDC refresh and then surfaces as acp::Error::auth_required on the client
-        // In the desktop app that tears down the session and can race with invalid_grant_threshold to wipe auth.json
+        // Only 401 Unauthorized means the credentials themselves were rejected and warrant a token refresh / re-auth 403
+        // Forbidden means the request was authenticated but the action is not permitted. That covers content-safety blocks,
+        // ZDR-blocked operations, and other policy denials unrelated to credentials.
         matches!(
             self,
             SamplingError::Auth { .. }
@@ -393,13 +376,9 @@ impl SamplingError {
         )
     }
 
-    /// The server rejected the request because an image could not be processed.
-    /// [`INVALID_IMAGE_ERROR_CODE`] is the signal.
-    /// The legacy phrase match covers servers that predate the code and relayed provider messages carrying the same wording.
-    /// Relayed messages arrive as `Api` errors, so the phrase arm applies to them too.
-    /// Some provider passthroughs stamp neither, keying image rejections on the [`IMAGE_CONTENT_PATH_MARKER`] content path instead.
-    /// The `400 | 500` gate is deliberate insurance against a mis-stamping server.
-    /// Recovery destroys request images, so unexpected statuses (422, 415, ...) fail closed.
+    /// The server rejected the request because an image could not be processed. [`INVALID_IMAGE_ERROR_CODE`] is the signal.
+    /// Some provider passthroughs stamp neither, keying image rejections on the [`IMAGE_CONTENT_PATH_MARKER`] content path
+    /// instead. Recovery destroys request images, so unexpected statuses (422, 415,...) fail closed.
     pub fn is_image_processing_error(&self) -> bool {
         match self {
             SamplingError::Api {
@@ -417,6 +396,7 @@ impl SamplingError {
             SamplingError::Api { .. }
             | SamplingError::Auth { .. }
             | SamplingError::InvalidConfiguration(_)
+            | SamplingError::MtlsConfiguration(_)
             | SamplingError::Http(_)
             | SamplingError::Serialization(_)
             | SamplingError::EventStreamError(_)
@@ -431,6 +411,7 @@ impl SamplingError {
         match self {
             SamplingError::Auth { .. } => false,
             SamplingError::InvalidConfiguration(_) => false,
+            SamplingError::MtlsConfiguration(_) => false,
             SamplingError::Http(err) => is_retryable_reqwest(err),
             SamplingError::Serialization(_) => false,
             SamplingError::Api { status, .. } => is_retryable_api_status(*status),
@@ -467,13 +448,9 @@ impl SamplingError {
         }
     }
 
-    /// True when this error is a context-window/size overflow (deterministic; don't retry the same payload).
-    /// Structured `code` slot first, message text fallback, so size codes with opaque messages still classify.
-    ///
-    /// Exception: a 429 carrying `Retry-After` with no structured size code does not classify.
-    /// The server is promising capacity later, so size wording there is ambiguous (per-minute token budget vs a true per-request cap).
-    /// Retry loops back off instead of fast-failing, and the compaction classifier stays transient instead of stepping the input ladder.
-    /// A 429 without `Retry-After`, or with a size code, still classifies (the request exceeds the cap outright; retrying is futile).
+    /// True when this error is a context-window/size overflow (deterministic; don't retry the same payload). Exception: a 429
+    /// carrying `Retry-After` with no structured size code does not classify. Retry loops back off instead of fast-failing,
+    /// and the compaction classifier stays transient instead of stepping the input ladder.
     pub fn is_context_length_error(&self) -> bool {
         match self {
             SamplingError::Api {
@@ -501,6 +478,7 @@ impl SamplingError {
             // Explicit so a new variant must state its size classification.
             SamplingError::Auth { .. }
             | SamplingError::InvalidConfiguration(_)
+            | SamplingError::MtlsConfiguration(_)
             | SamplingError::Http(_)
             | SamplingError::Serialization(_)
             | SamplingError::EventStreamError(_)
@@ -523,6 +501,7 @@ impl SamplingError {
             // Explicit so a new variant must state its size classification.
             SamplingError::Auth { .. }
             | SamplingError::InvalidConfiguration(_)
+            | SamplingError::MtlsConfiguration(_)
             | SamplingError::Http(_)
             | SamplingError::Serialization(_)
             | SamplingError::EventStreamError(_)
@@ -533,10 +512,9 @@ impl SamplingError {
         }
     }
 
-    /// Capacity / overload: HTTP 529, a 5xx whose message clearly says overloaded, or a stream error whose parsed `error_type` is a capacity type.
-    /// Proxies wrap stream overloads in a 500; the capacity types are `overloaded_error` and `service_unavailable_error`.
-    /// Never reachable from a 4xx or a request-shaped stream error, whatever the message text.
-    /// Transient: worth a short, bounded retry at the call site.
+    /// Capacity / overload: HTTP 529, a 5xx whose message clearly says overloaded, or a stream error whose parsed
+    /// `error_type` is a capacity type. Proxies wrap stream overloads in a 500; the capacity types are `overloaded_error` and
+    /// `service_unavailable_error`. Never reachable from a 4xx or a request-shaped stream error, whatever the message text.
     pub fn is_overloaded(&self) -> bool {
         match self {
             SamplingError::Api {
@@ -556,9 +534,8 @@ impl SamplingError {
     }
 
     /// Retry vetoes shared by every retry loop: the sampler actor's `classify_error` and one-shot callers like `/btw`.
-    /// One definition so a new veto lands everywhere at once:
-    /// - `x-should-retry: false`: the server says the request content caused the failure, not something transient.
-    /// - Context-length overflow: deterministic; re-sending the same payload always fails.
+    /// `x-should-retry: false`: the server says the request content caused the failure, not something transient;
+    /// Context-length overflow: deterministic; re-sending the same payload always fails.
     pub fn is_retry_vetoed(&self) -> bool {
         self.should_retry_header() == Some(false) || self.is_context_length_error()
     }
@@ -593,10 +570,9 @@ struct ErrorBody {
     code: Option<String>,
 }
 
-/// Flat error from the Grok proxy/gateway: `{"code": "...", "error": "..."}`.
-/// The `code` slot stays strict (`Option<String>`) on purpose.
-/// Flat bodies with a non-string code (e.g. `{"code":429,"error":"... [WKE=...]"}`) must keep failing this parse so they reach the provider fallback.
-/// The fallback strips `[WKE=...]` markers and lifts slugs; routing them through the rigid path would leak raw markers to users.
+/// Flat error from the Grok proxy/gateway: `{"code": "...", "error": "..."}`. Flat bodies with a non-string code (e.g.
+/// `{"code":429,"error":"... [WKE=...]"}`) must keep failing this parse so they reach the provider fallback. The fallback
+/// strips `[WKE=...]` markers and lifts slugs; routing them through the rigid path would leak raw markers to users.
 #[derive(Debug, Deserialize)]
 struct FlatErrorResponse {
     error: String,
@@ -735,19 +711,15 @@ fn structured_error_message(bytes: &[u8]) -> Option<String> {
     rigid.map(|parsed| truncate_user_error(&parsed.message))
 }
 
-/// Parse an API error body into a short string.
-///
-/// Only structured JSON error envelopes are surfaced.
-/// Non-JSON bodies (HTML edge pages, plain text dumps) return a fixed placeholder, never the raw bytes.
-/// Prefer [`user_facing_api_error_message`] when a status code is available.
+/// Parse an API error body into a short string. Only structured JSON error envelopes are surfaced. Non-JSON bodies (HTML
+/// edge pages, plain text dumps) return a fixed placeholder, never the raw bytes. Prefer
+/// [`user_facing_api_error_message`] when a status code is available.
 pub fn parse_error_bytes(bytes: &[u8]) -> String {
     structured_error_message(bytes).unwrap_or_else(|| "upstream error".into())
 }
 
-/// User-facing message for a failed API call.
-///
-/// Structured JSON error envelopes keep their message.
-/// Everything else (including Cloudflare HTML) maps to a status-based string, with no body content matching.
+/// User-facing message for a failed API call. Structured JSON error envelopes keep their message. Everything else
+/// (including Cloudflare HTML) maps to a status-based string, with no body content matching.
 pub fn user_facing_api_error_message(status: StatusCode, bytes: &[u8]) -> String {
     structured_error_message(bytes).unwrap_or_else(|| status_user_message(status))
 }
@@ -1334,11 +1306,9 @@ mod tests {
         assert!(msg.ends_with('\u{2026}'));
     }
 
-    /// Regression test: 403 Forbidden must NOT be classified as an auth error.
-    /// The proxy returns 403 for policy denials unrelated to the caller's credentials.
-    /// Those cover content-safety blocks, ZDR-gated operations, and other usage-policy blocks.
-    /// Misclassifying these as auth errors triggers a pointless OIDC refresh and surfaces as acp::Error::auth_required on the client.
-    /// That tears down the session and risks an `invalid_grant_threshold`-triggered wipe of auth.json.
+    /// Regression test: 403 Forbidden must NOT be classified as an auth error. Those cover content-safety blocks, ZDR-gated
+    /// operations, and other usage-policy blocks. Misclassifying these as auth errors triggers a pointless OIDC refresh and
+    /// surfaces as acp::Error::auth_required on the client.
     #[test]
     fn forbidden_is_not_auth_error() {
         let err = SamplingError::Api {

@@ -345,19 +345,15 @@ impl ActivityTracker {
         self.notify.notify_waiters();
     }
 
-    /// Record a client-driven mutation RPC (file write, git commit, …).
-    /// Withholds `idle_since_ms` for [`rpc_activity_window_ms`](Self::rpc_activity_window_ms).
-    /// Wakes the status publisher so the renewed "active" status reaches the server promptly.
-    /// Read/poll RPCs deliberately never call this: an unattended tab polls but does not mutate, so it cannot pin its sandbox.
+    /// Record a client-driven mutation RPC. Withholds idle and wakes the status publisher.
+    /// Read/poll RPCs never call this: an unattended tab must not pin its sandbox.
     pub fn note_client_rpc_activity(&self) {
         self.last_client_rpc_ms.store(now_ms(), Ordering::Relaxed);
         self.notify.notify_waiters();
     }
 
-    /// Apply a presence note.
-    /// Only a visible note stamps (a hide must never cut an existing withhold short).
-    /// A note whose `seq` is not newer than the last applied one is dropped, protecting against reordering in the gateway's fire-and-forget sends.
-    /// `seq: None` (old gateway) always applies.
+    /// Apply a presence note. Only a visible note stamps; a hide must never cut a withhold short.
+    /// A non-newer `seq` is dropped (gateway reorder); `seq: None` always applies.
     pub fn apply_presence_note(&self, visible: bool, seq: Option<u64>) {
         // Gate and stamp under one lock
         // Split across two atomics, a slow older visible note racing a newer hidden one could pass the seq check and stamp after the hidden note
@@ -479,11 +475,8 @@ impl ActivityTracker {
         }
     }
 
-    /// Durability gate: returns (producers in flight, whether `idle_since_ms` must be withheld).
-    /// Idle is withheld while producers or queued uploads are outstanding, except past the bounded hold cap.
-    /// A tripped circuit breaker lifts the hold for queued items only, since they survive via disk spill and restart recovery.
-    /// An in-flight producer has nothing on disk yet, so it withholds regardless of queue health.
-    /// The hold resets when it clears.
+    /// Durability gate: producers in flight, and whether idle must be withheld while producers or queued uploads are outstanding.
+    /// A tripped breaker lifts the hold for queued items only (they survive on disk); an in-flight producer has nothing on disk yet.
     fn durability_gate(&self, queue_pending: u32, breaker_tripped: bool) -> (u32, bool) {
         let producers = self
             .producer_tasks
@@ -511,16 +504,11 @@ impl ActivityTracker {
         (producers, !hold_expired)
     }
 
-    /// Whether client activity (preview traffic or mutation RPCs) should withhold idle, and on what grounds.
-    ///
-    /// Returns `(withhold, reason, anchor)`, where the anchor is the epoch-ms the current hold is measured from.
-    /// Tiers are checked strongest first; all five withhold identically today, only the accounting differs.
+    /// Whether client activity should withhold idle. Returns `(withhold, reason, anchor)`.
+    /// Tiers are checked strongest first; all five withhold identically, only the accounting differs.
     fn client_withholds_idle(&self, now: u64) -> (bool, Option<IdleWithholdReason>, u64) {
-        // Including process start means a young or freshly-restored workspace can never look long-idle
-        // The process restarts on restore, so this covers revived sessions without a separate minimum-age rule
-        // A mutation RPC is genuine use (unlike a status poll), so it advances the anchor like routed preview traffic
-        // A continuously-mutating client is intentionally uncapped by the hub's hold ceiling; the VM TTL backstops it
-        // The ceiling bounds only a stale stamp
+        // Including process start means a young or restored workspace cannot look long-idle; restore restarts the process
+        // A mutation advances the anchor like preview traffic and is uncapped by the hold ceiling; the ceiling bounds only a stale stamp
         let anchor = self
             .last_preview_routed_ms
             .load(Ordering::Relaxed)
@@ -624,12 +612,8 @@ impl ActivityTracker {
         }
     }
 
-    /// Mark an in-flight tool call as completed.
-    ///
-    /// `session_id` is only for the caller's bookkeeping; the internal session counters key off the recorded `call_id` to session mapping.
-    /// The [`ToolCompleted`](Event::ToolCompleted) is written via the `EventWriter` captured at `ToolStarted` time.
-    /// So it lands in the right `events.jsonl` even if the session writer was evicted mid-call.
-    /// `outcome` is the truthful terminal status from the caller (`Success`/`Error` at the tool handler, `Cancelled` from the cancel paths).
+    /// Mark an in-flight tool call completed. Counters key off the recorded `call_id`, not the caller's `session_id`.
+    /// `ToolCompleted` uses the writer captured at start, so it lands even if the session writer was evicted. `outcome` is the caller's terminal status.
     pub fn tool_call_completed(
         &self,
         call_id: &str,
@@ -731,10 +715,8 @@ impl ActivityTracker {
         }
     }
 
-    /// Complete all in-flight tool calls for the given session.
-    ///
-    /// Returns the number of calls that were marked as completed.
-    /// Called when a session-wide Cancel hook arrives without a specific `call_id` (broadcast cancel from Ctrl+C).
+    /// Complete all in-flight tool calls for the session. Returns how many were marked completed.
+    /// Used when a session-wide Cancel arrives without a `call_id`.
     pub fn cancel_all_session_calls(&self, session_id: &str) -> usize {
         let call_ids: Vec<String> = self
             .call_to_session
@@ -781,10 +763,7 @@ impl ActivityTracker {
 
     pub fn set_active(&self) {
         self.lifecycle.store(LIFECYCLE_NONE, Ordering::Release);
-        // Clear the drain stamp symmetrically with `set_draining`
-        // Left set after a resume, `drain_started_ms` would mean "a drain ever began" rather than "currently draining"
-        // The server's idle gate keys its unconditional drain escape off that stamp
-        // A stale stamp would let it report idle while durable work is still outstanding
+        // Clear the drain stamp with `set_draining`. Left set after resume it means "a drain ever began", and the idle gate would report idle while work is outstanding
         self.drain_started_ms.store(0, Ordering::Release);
         self.notify.notify_waiters();
     }
@@ -811,11 +790,8 @@ impl ActivityTracker {
         self.lifecycle.load(Ordering::Acquire) >= LIFECYCLE_DRAINING
     }
 
-    /// Fully drained: draining, no active tool calls/background tasks, and the upload queue emptied (must not exit with artifacts still pending).
-    ///
-    /// In-flight artifact producers are intentionally *not* part of this gate: [`Self::durability_gate`] already withholds idle for them.
-    /// The graceful drain's producer phase (`phase 1.5` of `WorkspaceHandle::two_phase_drain`) awaits them *before* the queue flush.
-    /// So by the time the queue empties, their work is already enqueued and reflected in `upload_queue_pending`.
+    /// Fully drained: draining, no active tools/tasks, and the upload queue empty.
+    /// In-flight producers are omitted here; the drain awaits them before the queue flush, and [`Self::durability_gate`] already withholds idle for them.
     pub fn is_drained(&self) -> bool {
         self.is_draining() && self.total_active() == 0 && self.upload_queue_pending() == 0
     }

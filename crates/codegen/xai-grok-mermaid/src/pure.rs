@@ -25,9 +25,6 @@ impl MermaidEngine for PureRustEngine {
 }
 
 /// The layout half: turns Mermaid source into SVG.
-/// It is a free function (no engine state) so tests can check the SVG directly and [`MermaidEngine::render`] can reuse it.
-///
-/// The engine errors on unparseable or unsupported diagrams.
 /// The caller degrades any error to the code-block fallback (see [`crate::render_checked`]).
 fn build_svg(source: &str, theme: MermaidTheme) -> Result<String, MermaidError> {
     let engine_theme = theme_for(theme);
@@ -47,7 +44,6 @@ fn map_engine_error(e: mermaid_to_svg::MermaidError) -> MermaidError {
 }
 
 /// Map [`MermaidTheme`] to a vendored-engine [`EngineTheme`].
-///
 /// Only the background is overridden, to [`crate::LIGHT_SURFACE`] / [`crate::DARK_SURFACE`], so the SVG blends with the terminal scrollback.
 /// The rest of each preset's palette is used as-is.
 fn theme_for(theme: MermaidTheme) -> EngineTheme {

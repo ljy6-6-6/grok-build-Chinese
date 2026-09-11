@@ -4,18 +4,12 @@
 
 use std::path::Path;
 
-use super::layer::PolicySourceAuthority;
+use super::layer::{PolicyLayerOwnership, PolicySourceAuthority};
 use super::url_match::{AllowUrlMatcher, DenyUrlMatcher, argv_matches, mcp_server_name};
 
-/// What defined the server or marketplace a policy is being applied to.
-///
-/// `GrokNative` covers grok's own user/system `config.toml`, plugin-provided
-/// definitions, and admin pins — exempt from [`Advisory`]
-/// (PolicySourceAuthority::Advisory) sources. Everything else — project files
-/// (repo-checked-in `.grok/config.toml`, `.mcp.json`, `.cursor/mcp.json`),
-/// imported Claude configs, CLI overrides, client-injected connectors — is
-/// `Foreign` and subject to every policy source. Ambiguity must classify as
-/// `Foreign` (fail closed).
+/// What defined the server or marketplace a policy is applied to.
+/// `GrokNative` (user/system config, plugins, admin pins) is exempt from advisory sources; everything else is `Foreign` and subject to every source.
+/// Ambiguity classifies as `Foreign` (fail closed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PolicySubjectOrigin {
     GrokNative,
@@ -41,13 +35,19 @@ pub enum AllowedMcpServer {
 }
 
 /// MCP policy from ONE managed source; deny beats allow.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct McpServerAllowlist {
     /// Private: `new` (the only constructor) compiles each entry's matcher.
     entries: Vec<CompiledEntry<AllowUrlMatcher>>,
     deny_entries: Vec<CompiledEntry<DenyUrlMatcher>>,
     /// `allowManagedMcpServersOnly`: a positive allow-entry match is required.
     managed_only: bool,
+    /// Present-but-empty allow list (vendor managed-settings semantics) or malformed key:
+    /// every server this source binds is blocked.
+    lockdown: bool,
+    /// Who can write the layer this source came from (see
+    /// [`PolicyLayerOwnership`] for the grant rules).
+    ownership: PolicyLayerOwnership,
     pub source_path: Option<std::path::PathBuf>,
     /// Whether this source's restrictions bind grok-native servers.
     authority: PolicySourceAuthority,
@@ -119,11 +119,8 @@ fn mcp_entry_matches(entry: &AllowedMcpServer, server: &agent_client_protocol::M
     }
 }
 
-/// Whether an entry restricts `server`'s transport at all. `McpServer` is
-/// #[non_exhaustive] (acp 0.10+): a transport this build can't inspect is
-/// restricted by EVERY entry, so it can't slip a URL/command lockdown when
-/// acp grows a new variant (fail closed; neither the URL matchers nor
-/// `mcp_entry_matches` grant an unknown transport).
+/// Whether an entry restricts `server`'s transport at all.
+/// `McpServer` is `#[non_exhaustive]`: a transport this build can't inspect is restricted by every entry so a new acp variant cannot slip a lockdown.
 fn mcp_entry_restricts(
     entry: &AllowedMcpServer,
     server: &agent_client_protocol::McpServer,
@@ -150,7 +147,8 @@ fn mcp_entry_restricts(
 }
 
 impl McpServerAllowlist {
-    /// Public so tests can build policies without a file on disk.
+    /// Public so tests can build policies without a file on disk. Ownership starts
+    /// `User`: its lockdown accepts any grant; its entries lift only user-owned ones.
     pub fn new(
         entries: Vec<AllowedMcpServer>,
         deny_entries: Vec<AllowedMcpServer>,
@@ -160,6 +158,8 @@ impl McpServerAllowlist {
             entries: compile_entries(entries, AllowUrlMatcher::new),
             deny_entries: compile_entries(deny_entries, DenyUrlMatcher::new),
             managed_only: false,
+            lockdown: false,
+            ownership: PolicyLayerOwnership::User,
             source_path,
             authority: PolicySourceAuthority::default(),
         }
@@ -171,9 +171,21 @@ impl McpServerAllowlist {
         self
     }
 
+    /// Mark this source a full lockdown: nothing it binds runs.
+    pub fn with_lockdown(mut self) -> Self {
+        self.lockdown = true;
+        self
+    }
+
     /// Set how this source binds (see [`PolicySourceAuthority`]).
     pub fn with_authority(mut self, authority: PolicySourceAuthority) -> Self {
         self.authority = authority;
+        self
+    }
+
+    /// Set who can write this source's layer (see [`PolicyLayerOwnership`]).
+    pub fn with_ownership(mut self, ownership: PolicyLayerOwnership) -> Self {
+        self.ownership = ownership;
         self
     }
 
@@ -187,14 +199,30 @@ impl McpServerAllowlist {
         self.managed_only
     }
 
-    pub fn is_restricted(&self) -> bool {
-        self.managed_only || !self.entries.is_empty() || !self.deny_entries.is_empty()
+    /// Full lockdown; reporting surfaces must not render it unrestricted just
+    /// because it has zero entries.
+    pub fn is_lockdown(&self) -> bool {
+        self.lockdown
     }
 
-    /// Per-dimension allow check without the deny or managed-only checks —
-    /// [`McpServerPolicy`] applies managed-only at the policy level, since the
-    /// grant may come from a sibling source.
+    /// How this source binds (see [`PolicySourceAuthority`]).
+    pub fn authority(&self) -> PolicySourceAuthority {
+        self.authority
+    }
+
+    pub fn is_restricted(&self) -> bool {
+        self.lockdown
+            || self.managed_only
+            || !self.entries.is_empty()
+            || !self.deny_entries.is_empty()
+    }
+
+    /// Per-dimension allow check without the deny or managed-only checks (those
+    /// are policy-level). A locked-down source allows nothing; no grant punches through.
     fn allows_ignoring_managed_only(&self, server: &agent_client_protocol::McpServer) -> bool {
+        if self.lockdown {
+            return false;
+        }
         if !self.is_restricted() {
             return true;
         }
@@ -219,7 +247,7 @@ impl McpServerAllowlist {
     /// Positive grant: matches at least one allow entry (an entry-less
     /// dimension grants nothing) — the lockdown / project-exception check.
     /// URL entries hit the matcher compiled with them in `new`.
-    pub fn matches_allow_entry(&self, server: &agent_client_protocol::McpServer) -> bool {
+    pub(super) fn matches_allow_entry(&self, server: &agent_client_protocol::McpServer) -> bool {
         self.entries
             .iter()
             .any(|compiled| match &compiled.url_matcher {
@@ -275,10 +303,8 @@ pub(super) fn mcp_name_matches(pattern: &str, name: &str) -> bool {
     }
     let mut pattern_key = key(pattern);
     let mut name_key = key(name);
-    // Truncate only for the shape runtime truncation produces (a managed
-    // name at exactly the cap), so a long entry never becomes a prefix grant
-    // over decoys. Residual: a decoy spelled exactly like the truncated
-    // managed name is string-identical — no name matcher can tell them apart.
+    // Truncate only the runtime-truncated shape (managed name at exactly the cap), so a long entry never becomes a prefix grant over decoys
+    // Residual: a decoy spelled exactly like the truncated name is string-identical and no matcher can tell them apart
     if name.starts_with(MANAGED_MCP_PREFIX) && name.chars().count() == MANAGED_MCP_NAME_MAX_CHARS {
         pattern_key = truncate(pattern_key);
         name_key = truncate(name_key);
@@ -338,47 +364,42 @@ impl McpServerPolicy {
             .find(|s| s.is_server_denied(server))
     }
 
-    /// Positive allow-entry grant from any source (the lockdown /
-    /// project-exception check). Deliberately authority-blind: a grant only
-    /// widens, so an advisory source's allowlist may satisfy a native
-    /// lockdown (e.g. lockdown pinned in requirements.toml with the entry
-    /// list carried in managed-settings.json).
-    pub fn matches_allow_entry(&self, server: &agent_client_protocol::McpServer) -> bool {
-        self.sources.iter().any(|s| s.matches_allow_entry(server))
+    /// Allow-entry grant satisfying a restriction owned by `restriction_ownership`. Every
+    /// source is consulted regardless of its `authority`: a grant widens, it never binds.
+    pub fn grants_exception(
+        &self,
+        server: &agent_client_protocol::McpServer,
+        restriction_ownership: PolicyLayerOwnership,
+    ) -> bool {
+        self.sources.iter().any(|s| {
+            restriction_ownership.accepts_grant_from(s.ownership) && s.matches_allow_entry(server)
+        })
     }
 
-    /// Denied by no binding source, allowed by every binding restricted
-    /// source, and — under a binding managed-only — positively granted by
-    /// some source's allow entry.
+    /// Denied by no binding source and blocked by none: delegates to
+    /// [`Self::blocking_allow_source`] so decision and attribution never desync.
     pub fn is_server_allowed(
         &self,
         server: &agent_client_protocol::McpServer,
         origin: PolicySubjectOrigin,
     ) -> bool {
-        if self.is_server_denied(server, origin) {
-            return false;
-        }
-        if self.managed_only(origin) && !self.matches_allow_entry(server) {
-            return false;
-        }
-        self.binding_sources(origin)
-            .all(|s| s.allows_ignoring_managed_only(server))
+        !self.is_server_denied(server, origin)
+            && self.blocking_allow_source(server, origin).is_none()
     }
 
-    /// The binding source blocking a non-denied server (reason attribution).
+    /// The binding source blocking a non-denied server (reason attribution): an
+    /// unsatisfied lockdown first, else a restricted source excluding the server.
     pub fn blocking_allow_source(
         &self,
         server: &agent_client_protocol::McpServer,
         origin: PolicySubjectOrigin,
     ) -> Option<&McpServerAllowlist> {
-        if self.managed_only(origin)
-            && !self.matches_allow_entry(server)
-            && let Some(source) = self.binding_sources(origin).find(|s| s.managed_only())
-        {
-            return Some(source);
-        }
         self.binding_sources(origin)
-            .find(|s| !s.allows_ignoring_managed_only(server))
+            .find(|s| s.managed_only() && !self.grants_exception(server, s.ownership))
+            .or_else(|| {
+                self.binding_sources(origin)
+                    .find(|s| !s.allows_ignoring_managed_only(server))
+            })
     }
 
     /// Total allow/deny entry count across sources (doctor summary).

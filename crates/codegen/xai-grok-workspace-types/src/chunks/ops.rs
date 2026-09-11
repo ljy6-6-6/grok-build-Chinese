@@ -8,19 +8,11 @@ use crate::types::{
     PermissionPolicy, PluginInfo, ProjectConfig, ResolvedFile, RipgrepStats, SkillInfo,
 };
 
-/// Streaming chunk for an ops call.
-///
-/// Most variants are unary (one chunk then close); the `FuzzyMatch` and `RipgrepHit` variants stream zero-or-more times.
-/// `RipgrepHit` is followed by a single explicit `RipgrepDone` terminator.
-///
-/// `Eq` is not derived because [`MemoryChunks`](Self::MemoryChunks) carries `MemoryChunk`, which has an optional `f32` score.
-/// `PartialEq` is sufficient for round-trip and equality tests.
+/// Streaming chunk for an ops call. Most variants are unary; `FuzzyMatch` and `RipgrepHit` stream, and ripgrep ends with one `RipgrepDone`.
+/// No `Eq`: [`MemoryChunks`](Self::MemoryChunks) carries an optional `f32` score. `PartialEq` is enough for round-trip tests.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum OpsChunk {
-    // ------------------------------------------------------------------
-    // Unary VCS responses
-    // ------------------------------------------------------------------
     /// Response to `WorkspaceOpsRequest::GitStatus`.
     GitStatus(GitStatus),
     /// Response to `WorkspaceOpsRequest::GitDiff`.
@@ -31,9 +23,6 @@ pub enum OpsChunk {
     /// None if the workspace is not a git repo.
     GitMetadata(Option<GitMetadata>),
 
-    // ------------------------------------------------------------------
-    // Unary discovery / read responses
-    // ------------------------------------------------------------------
     /// Response to `WorkspaceOpsRequest::ListHunks`.
     Hunks(Vec<Hunk>),
     /// Response to `WorkspaceOpsRequest::DiscoverSkills`.
@@ -45,9 +34,7 @@ pub enum OpsChunk {
     /// Response to `WorkspaceOpsRequest::LoadPermissions`.
     Permissions(PermissionPolicy),
     /// Response to `WorkspaceOpsRequest::LoadEnvrc`.
-    ///
-    /// `BTreeMap<String, String>` rather than `HashMap` so the JSON serialization order is deterministic; see `crate::metadata` for the rationale.
-    /// The on-wire JSON shape is identical (a JSON object).
+    /// `BTreeMap` so JSON key order is deterministic; the on-wire shape is still a JSON object.
     Envrc(BTreeMap<String, String>),
     /// Response to `WorkspaceOpsRequest::ResolveFileRefs`.
     ResolvedFiles(Vec<ResolvedFile>),
@@ -59,9 +46,6 @@ pub enum OpsChunk {
     /// Acknowledgement for void ops (`ActOnHunk`, `MemoryWrite`, `RefreshPlugins` accepted, ...).
     Ack,
 
-    // ------------------------------------------------------------------
-    // Streaming responses
-    // ------------------------------------------------------------------
     /// One match for `WorkspaceOpsRequest::FuzzySearch` (zero or more).
     FuzzyMatch(FuzzyMatch),
     /// One hit for `WorkspaceOpsRequest::Ripgrep` (zero or more before `RipgrepDone`).

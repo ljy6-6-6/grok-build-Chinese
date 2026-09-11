@@ -2,13 +2,53 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum MemoryInitializationError {
+    #[error("memory storage initialization failed: {0}")]
+    Storage(#[source] std::io::Error),
+    #[error("memory storage initialization task failed: {0}")]
+    TaskJoin(#[source] tokio::task::JoinError),
+}
+
+async fn run_v2_initialization_blocking<F, T>(initialize: F) -> Result<T, MemoryInitializationError>
+where
+    F: FnOnce() -> std::io::Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(initialize)
+        .await
+        .map_err(MemoryInitializationError::TaskJoin)?
+        .map_err(MemoryInitializationError::Storage)
+}
+
+/// Initialize a session's configured memory storage without running v2's
+/// filesystem and SQLite setup on the single-threaded actor runtime.
+///
+/// Legacy initialization remains inline to preserve its existing behavior.
+pub(crate) async fn initialize_memory_storage(
+    storage: crate::session::memory::MemoryStorage,
+) -> Result<(), MemoryInitializationError> {
+    if storage.mode().is_legacy() {
+        return storage
+            .ensure_initialized()
+            .map_err(MemoryInitializationError::Storage);
+    }
+    run_v2_initialization_blocking(move || storage.ensure_initialized()).await
+}
+
 pub(crate) struct SessionMemory {
+    /// Mode resolved when the session was spawned. Kept even while memory is
+    /// disabled so toggles, telemetry, and trace uploads cannot switch roots.
+    pub configured_mode: Option<crate::config::MemoryMode>,
+    /// Storage layout resolved at spawn. Retained while disabled so re-enabling
+    /// restores the pinned mode and any configured root override.
+    pub configured_storage: Option<crate::session::memory::MemoryStorage>,
     /// Memory storage handle for writing flush output (None when memory disabled).
     /// Wrapped in `RefCell` to allow `/memory on|off` toggle from `&Arc<SessionActor>`.
     pub storage: RefCell<Option<crate::session::memory::MemoryStorage>>,
     /// Whether to write a session summary to memory on session end.
     pub save_on_end: bool,
-    /// `None` when memory is disabled.
+    /// Legacy backend parameters. `None` when memory is disabled or v2 is selected.
     pub backend_params: Option<crate::session::memory::MemoryBackendParams>,
     /// First-turn memory injection behavior resolved from local and remote config.
     pub initial_injection_config: crate::config::MemoryInitialInjectionConfig,
@@ -50,6 +90,18 @@ impl SessionMemory {
         self.storage.borrow().is_some()
     }
 
+    pub(crate) fn mode(&self) -> Option<crate::config::MemoryMode> {
+        self.configured_mode
+            .or_else(|| self.storage.borrow().as_ref().map(|storage| storage.mode()))
+    }
+
+    pub(crate) fn uses_legacy_pipeline(&self) -> bool {
+        self.is_enabled()
+            && self
+                .mode()
+                .is_some_and(crate::config::MemoryMode::is_legacy)
+    }
+
     /// Clone the storage out of the `RefCell`, dropping the borrow immediately.
     pub(crate) fn storage(&self) -> Option<crate::session::memory::MemoryStorage> {
         self.storage.borrow().clone()
@@ -73,7 +125,6 @@ impl SessionMemory {
     }
 
     /// Record a flush result and increment the appropriate counter.
-    ///
     /// "written" increments success, "error" increments error.
     /// Anything else ("nothing_to_store", "rejected") increments only the total flush count.
     pub(crate) fn record_flush_result(&self, outcome: &str) {
@@ -113,6 +164,9 @@ impl SessionMemory {
         &self,
         storage: &crate::session::memory::MemoryStorage,
     ) -> Option<crate::session::memory::MemoryIndex> {
+        if !self.uses_legacy_pipeline() {
+            return None;
+        }
         let embed_dims = self
             .backend_params
             .as_ref()
@@ -152,7 +206,6 @@ impl SessionMemory {
     }
 
     /// Remove chunks for the given file paths from the search index.
-    ///
     /// Used after dream consolidation deletes processed session files so that stale chunks don't linger in the index.
     /// Best-effort: errors are logged but don't propagate.
     pub(crate) fn delete_paths_from_index(&self, paths: &[std::path::PathBuf]) {
@@ -222,4 +275,41 @@ pub(crate) struct MemoryTelemetry {
     pub dream_count: u64,
     pub dream_success_count: u64,
     pub dream_error_count: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::run_v2_initialization_blocking;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn v2_initialization_crosses_the_blocking_boundary() {
+        let actor_thread = std::thread::current().id();
+        let initialization_thread =
+            run_v2_initialization_blocking(|| Ok(std::thread::current().id()))
+                .await
+                .unwrap();
+
+        assert_ne!(
+            initialization_thread, actor_thread,
+            "v2 filesystem initialization must not run on the actor thread"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn v2_initialization_preserves_typed_storage_failures() {
+        let error = run_v2_initialization_blocking(|| {
+            Err::<(), _>(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "denied",
+            ))
+        })
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            super::MemoryInitializationError::Storage(ref source)
+                if source.kind() == std::io::ErrorKind::PermissionDenied
+        ));
+    }
 }

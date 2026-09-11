@@ -197,6 +197,206 @@ fn open_block_viewer_uses_markdown_viewer_for_agent_message_with_image_ref() {
     assert!(agent.block_viewer.is_some());
 }
 
+fn long_agent_lines() -> String {
+    (0..40)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn push_selected_running_message(
+    app: &mut AppView,
+    text: String,
+) -> crate::scrollback::entry::EntryId {
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    let entry_id = agent
+        .scrollback
+        .push_block(RenderBlock::agent_message(text));
+    agent
+        .scrollback
+        .get_by_id_mut(entry_id)
+        .expect("just pushed")
+        .is_running = true;
+    agent.scrollback.set_selected(Some(0));
+    entry_id
+}
+
+fn follow_viewer_area() -> ratatui::layout::Rect {
+    ratatui::layout::Rect::new(0, 0, 80, 8)
+}
+
+#[test]
+fn open_block_viewer_restores_place_for_same_entry() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let entry_id = {
+        let agent = app.agents.get_mut(&id).unwrap();
+        let entry_id = agent
+            .scrollback
+            .push_block(RenderBlock::agent_message("line a\nline b\nline c"));
+        agent.scrollback.set_selected(Some(0));
+        entry_id
+    };
+    dispatch(Action::OpenBlockViewer, &mut app);
+    let (selected_id, scroll_offset) = {
+        let agent = app.agents.get_mut(&id).unwrap();
+        let viewer = agent.block_viewer.as_mut().expect("opened");
+        viewer.prepare_for_test(ratatui::layout::Rect::new(0, 0, 80, 24));
+        viewer.list_state.set_scroll_offset(12);
+        let selected_id = viewer.list_state.selected_id();
+        let scroll_offset = viewer.list_state.scroll_offset();
+        agent.dismiss_block_viewer();
+        (selected_id, scroll_offset)
+    };
+    dispatch(Action::OpenBlockViewer, &mut app);
+    let agent = app.agents.get(&id).unwrap();
+    let viewer = agent.block_viewer.as_ref().expect("reopened");
+    assert_eq!(viewer.entry_id, entry_id);
+    assert_eq!(viewer.list_state.selected_id(), selected_id);
+    assert_eq!(viewer.list_state.scroll_offset(), scroll_offset);
+}
+
+#[test]
+fn open_block_viewer_restores_place_after_follow_dismiss() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let entry_id = push_selected_running_message(&mut app, long_agent_lines());
+    dispatch(Action::OpenBlockViewer, &mut app);
+    let (selected_id, scroll_offset) = {
+        let agent = app.agents.get_mut(&id).unwrap();
+        let viewer = agent.block_viewer.as_mut().expect("opened");
+        viewer.prepare_for_test(follow_viewer_area());
+        assert!(viewer.list_state.follow_mode);
+        assert_eq!(viewer.list_state.selected_id(), None);
+        let scroll_offset = viewer.list_state.scroll_offset();
+        assert!(scroll_offset > 0);
+        agent.dismiss_block_viewer();
+        let resume = agent.block_viewer_resume.expect("resume");
+        (resume.selected_id, scroll_offset)
+    };
+    assert!(selected_id.is_some());
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .scrollback
+        .get_by_id_mut(entry_id)
+        .expect("entry")
+        .is_running = false;
+    dispatch(Action::OpenBlockViewer, &mut app);
+    let agent = app.agents.get_mut(&id).unwrap();
+    let viewer = agent.block_viewer.as_mut().expect("reopened");
+    viewer.prepare_for_test(follow_viewer_area());
+    assert!(!viewer.list_state.follow_mode);
+    assert_eq!(viewer.list_state.selected_id(), selected_id);
+    let vi = viewer.list_state.selected_index().expect("selected");
+    assert!(
+        viewer.list_state.visible_range().contains(&vi),
+        "pinned last nonempty line must stay on screen (was offset {scroll_offset})"
+    );
+}
+
+#[test]
+fn open_block_viewer_restores_scrolled_place_while_still_running() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    push_selected_running_message(&mut app, long_agent_lines());
+    dispatch(Action::OpenBlockViewer, &mut app);
+    let (selected_id, scroll_offset) = {
+        let agent = app.agents.get_mut(&id).unwrap();
+        let viewer = agent.block_viewer.as_mut().expect("opened");
+        viewer.prepare_for_test(follow_viewer_area());
+        assert!(viewer.list_state.follow_mode);
+        viewer.list_state.follow_mode = false;
+        viewer.prepare_for_test(follow_viewer_area());
+        viewer.list_state.set_scroll_offset(3);
+        viewer.prepare_for_test(follow_viewer_area());
+        let selected_id = viewer.list_state.selected_id();
+        let scroll_offset = viewer.list_state.scroll_offset();
+        assert!(!viewer.list_state.follow_mode);
+        agent.dismiss_block_viewer();
+        (selected_id, scroll_offset)
+    };
+    dispatch(Action::OpenBlockViewer, &mut app);
+    let agent = app.agents.get_mut(&id).unwrap();
+    let viewer = agent.block_viewer.as_mut().expect("reopened");
+    viewer.prepare_for_test(follow_viewer_area());
+    assert!(!viewer.list_state.follow_mode);
+    assert_eq!(viewer.list_state.selected_id(), selected_id);
+    let vi = viewer.list_state.selected_index().expect("selected");
+    assert!(
+        viewer.list_state.visible_range().contains(&vi),
+        "restored cursor must be on screen (saved offset {scroll_offset})"
+    );
+}
+
+#[test]
+fn open_block_viewer_keeps_follow_when_dismissed_while_following() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    push_selected_running_message(&mut app, long_agent_lines());
+    dispatch(Action::OpenBlockViewer, &mut app);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        let viewer = agent.block_viewer.as_mut().expect("opened");
+        viewer.prepare_for_test(follow_viewer_area());
+        assert!(viewer.list_state.follow_mode);
+        agent.dismiss_block_viewer();
+        assert!(agent.block_viewer_resume.expect("resume").follow_mode);
+    }
+    dispatch(Action::OpenBlockViewer, &mut app);
+    let agent = app.agents.get_mut(&id).unwrap();
+    let viewer = agent.block_viewer.as_mut().expect("reopened");
+    viewer.prepare_for_test(follow_viewer_area());
+    assert!(viewer.list_state.follow_mode);
+    assert_eq!(viewer.list_state.selected_id(), None);
+}
+
+#[test]
+fn open_block_viewer_pins_tail_when_follow_ids_remap() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let finished = (0..8)
+        .map(|i| format!("done {i}"))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+        + "\n\n";
+    let entry_id = push_selected_running_message(&mut app, long_agent_lines());
+    dispatch(Action::OpenBlockViewer, &mut app);
+    let stale_id = {
+        let agent = app.agents.get_mut(&id).unwrap();
+        let viewer = agent.block_viewer.as_mut().expect("opened");
+        viewer.prepare_for_test(follow_viewer_area());
+        assert!(viewer.list_state.follow_mode);
+        agent.dismiss_block_viewer();
+        let resume = agent.block_viewer_resume.expect("resume");
+        assert!(resume.follow_mode);
+        resume
+            .selected_id
+            .expect("follow dismiss snapshots last line")
+    };
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        let entry = agent.scrollback.get_by_id_mut(entry_id).expect("entry");
+        entry.block = RenderBlock::agent_message(finished);
+        entry.is_running = false;
+    }
+    let expected_last = {
+        let agent = app.agents.get(&id).unwrap();
+        let entry = agent.scrollback.get_by_id(entry_id).expect("entry");
+        crate::views::block_viewer::BlockViewerPane::for_markdown(entry_id, entry)
+            .expect("markdown")
+            .resume_selected_id()
+            .expect("finished body")
+    };
+    assert_ne!(stale_id, expected_last);
+    dispatch(Action::OpenBlockViewer, &mut app);
+    let agent = app.agents.get_mut(&id).unwrap();
+    let viewer = agent.block_viewer.as_mut().expect("reopened");
+    viewer.prepare_for_test(follow_viewer_area());
+    assert!(!viewer.list_state.follow_mode);
+    assert_eq!(viewer.list_state.selected_id(), Some(expected_last));
+}
+
 #[test]
 fn open_block_viewer_opens_image_only_blocks_natively() {
     use crate::terminal::image::{GraphicsProtocol, set_protocol_for_test};

@@ -29,23 +29,15 @@ use crate::types::requirements::{Expr, ToolRequirement};
 use crate::types::resources::{FileSystem, NotificationHandle, require_plan_file_path};
 use crate::types::tool::{ToolKind, ToolNamespace};
 
-/// Input for the `ExitPlanMode` tool.
-///
-/// Empty object — the plan is read from the plan file on disk, NOT passed as
-/// a parameter. This ensures the user sees exactly what was written to disk,
-/// preventing divergence between the model's in-context plan and the actual
-/// file content.
+/// Input for the `ExitPlanMode` tool. Empty object — the plan is read from the plan file on disk,
+/// NOT passed as a parameter. This ensures the user sees exactly what was written to disk,
+/// preventing divergence between the model's in-context plan and the actual file content.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct ExitPlanModeInput {}
 
-/// `ExitPlanMode` tool.
-///
-/// Reads the plan file from disk and signals to the orchestration layer that
-/// the agent is done planning. The client receives a `PlanModeExited`
-/// notification with the plan content and is responsible for presenting the
-/// approval UI.
-///
-/// Params: `()` — no per-tool configuration.
+/// `ExitPlanMode` tool. Reads the plan file from disk and signals to the orchestration layer that the agent is done
+/// planning. The client receives a `PlanModeExited` notification with the plan content and is responsible for
+/// presenting the approval UI. Params: `()` — no per-tool configuration.
 #[derive(Debug, Default)]
 pub struct ExitPlanModeTool;
 

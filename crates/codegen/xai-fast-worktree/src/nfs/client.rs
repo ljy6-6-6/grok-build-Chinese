@@ -31,14 +31,44 @@ const DETACH_RPC_TIMEOUT: Duration = Duration::from_secs(600);
 #[derive(Debug)]
 pub enum NfsTryError {
     StorageFull,
-    InFlight { phase: String },
+    InFlight {
+        phase: String,
+    },
     IdentityConflict(String),
+    /// Adopted dest is still a mount after HEAD failed; copy must not write it.
+    DestStillMounted,
     Other(anyhow::Error),
 }
 
 impl From<anyhow::Error> for NfsTryError {
     fn from(e: anyhow::Error) -> Self {
         Self::Other(e)
+    }
+}
+
+impl std::fmt::Display for NfsTryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StorageFull => f.write_str(crate::OUT_OF_DISK_CONTEXT),
+            Self::InFlight { phase } => write!(
+                f,
+                "CreateWorktree declined (still in flight, phase={phase}); not falling back"
+            ),
+            Self::IdentityConflict(msg) => write!(f, "{msg}; not falling back to copy"),
+            Self::DestStillMounted => f.write_str(
+                "read HEAD after grove adopt; dest still mounted; not falling back to copy",
+            ),
+            Self::Other(e) => e.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for NfsTryError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Other(e) => Some(e.as_ref()),
+            _ => None,
+        }
     }
 }
 
@@ -163,10 +193,9 @@ impl NfsWorktreeClient {
         plan: &WorktreePlan,
     ) -> Result<NfsCreateDecision, NfsTryError> {
         if !self.ping() {
-            // Same refuse-copy rule as lost-reply: require is_provably_dead
-            // plus known-unmounted dest. A busy daemon (lock held, ping fails)
-            // must not copy-fallback onto an in-flight NFS create that already
-            // mkdir'd dest. deadline_decision also refuses a non-empty leftover.
+            // Same refuse-copy rule as lost-reply: require is_provably_dead plus
+            // known-unmounted dest. A busy daemon must not copy-fallback onto an
+            // in-flight NFS create that already mkdir'd dest.
             if self.is_provably_dead() && dest_is_known_unmounted(&plan.dest) {
                 return self.deadline_decision(plan, "daemon-unreachable".into());
             }

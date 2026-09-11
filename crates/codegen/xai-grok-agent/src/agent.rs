@@ -9,12 +9,8 @@ use crate::config::{AgentDefinition, CompletionRequirement, PermissionMode};
 use crate::prompt::context::PromptContext;
 use crate::system_reminder::ReminderPolicy;
 
-/// A fully built agent: an AgentDefinition plus its session context.
-///
-/// NOT portable: tied to a specific session via its ToolBridge, rendered system prompt, and session-level policies.
-///
-/// The Agent is effectively immutable after construction.
-/// It holds Arc<ToolBridge>; mutations to tool state (MCP registration, completion tracking, retry config) go through ToolBridge's internal locks.
+/// A fully built agent: an AgentDefinition plus its session context. Not portable.
+/// Effectively immutable after construction. Tool-state mutations go through ToolBridge's internal locks.
 pub struct Agent {
     /// The definition this agent was built from.
     definition: AgentDefinition,
@@ -26,7 +22,7 @@ pub struct Agent {
     /// The rendered system prompt (cached from prompt_context.render()).
     system_prompt: String,
 
-    /// Owns the ToolRegistry, ToolState, and SessionContext.
+    /// Owns the ToolBridge (registry, Resources, session context).
     tool_bridge: Arc<ToolBridge>,
 
     /// Session-level policies.
@@ -134,9 +130,8 @@ impl Agent {
     }
 
     /// Audience this agent's prompt was rendered for (Primary or Subagent).
-    ///
-    /// Read by the runtime turn-end TodoGate together with [`crate::AgentDefinition::carries_task_completion_discipline`].
-    /// Together they decide whether the active prompt actually carries the discipline rules the gate's reminder text invokes.
+    /// Read by the runtime TodoGate with [`crate::AgentDefinition::carries_task_completion_discipline`]
+    /// to decide whether the active prompt actually carries the rules the reminder invokes.
     pub fn prompt_audience(&self) -> crate::prompt::context::PromptAudience {
         self.prompt_context.audience
     }
@@ -181,9 +176,7 @@ impl Agent {
     }
 
     /// Update completion and retry policies from a new definition.
-    ///
-    /// Does NOT rebuild the tool registry or re-render prompts.
-    /// Used for mid-session mode switching.
+    /// Does not rebuild the tool registry or re-render prompts. Used for mid-session mode switching.
     pub async fn update_policies_from_definition(&self, _def: &AgentDefinition) {
         // TODO: completion requirements and retry configs are now part of ToolServerConfig and handled at registry finalization time
         // Mid-session policy updates are not yet supported in the new architecture.

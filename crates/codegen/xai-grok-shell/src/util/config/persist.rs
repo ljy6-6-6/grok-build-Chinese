@@ -14,7 +14,8 @@ pub(crate) fn parse_existing_config_toml(s: &str) -> Result<TomlValue, toml::de:
     }
     toml::from_str(s)
 }
-/// [`save_config`] body; caller must hold [`SAVE_LOCK`].
+/// Settings-save body; caller must hold the full [`ConfigWriteGuard`] — [`SAVE_LOCK`] alone races
+/// flock-only writers and the last rename drops their edit.
 async fn save_config_locked(config: &Config) -> Result<()> {
     let path = user_config_path();
     let mut root: TomlValue = match tokio::fs::read_to_string(&path).await {
@@ -93,14 +94,53 @@ async fn save_config_locked(config: &Config) -> Result<()> {
     tokio::fs::rename(&tmp, &path).await?;
     Ok(())
 }
-/// Acquire the `config.toml` write lock used by [`save_config`].
-/// Callers that mutate the file directly (marketplace add/remove) hold it so they can't interleave with a settings save and clobber it.
-pub(crate) async fn lock_config_writes() -> tokio::sync::MutexGuard<'static, ()> {
-    SAVE_LOCK.lock().await
+/// Guard for a user `config.toml` read-modify-write: [`SAVE_LOCK`] plus the config-init flock —
+/// without the flock leg, a SAVE_LOCK writer and a flock writer silently drop each other's edits.
+pub(crate) struct ConfigWriteGuard {
+    _save: tokio::sync::MutexGuard<'static, ()>,
+    _flock: std::fs::File,
+}
+/// Acquire the user `config.toml` write guard (SAVE_LOCK ⊃ init flock) on the blocking pool;
+/// fails closed — callers must not fall back to an unguarded write.
+pub(crate) async fn lock_config_writes() -> std::io::Result<ConfigWriteGuard> {
+    let save = SAVE_LOCK.lock().await;
+    let grok_home = crate::util::grok_home::grok_home();
+    let flock = tokio::task::spawn_blocking(move || acquire_init_lock(&grok_home))
+        .await
+        .map_err(|e| std::io::Error::other(format!("config lock task failed: {e}")))??;
+    Ok(ConfigWriteGuard {
+        _save: save,
+        _flock: flock,
+    })
+}
+/// Exclusive advisory `flock` on `<grok_home>/.config-init.lock`, retried briefly, serializing
+/// `config.toml` read-modify-writes; only `WouldBlock` retries, and the file is never removed.
+pub fn acquire_init_lock(grok_home: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use fs2::FileExt;
+    let _ = std::fs::create_dir_all(grok_home);
+    let lock_path = grok_home.join(".config-init.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    for _ in 0..50 {
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(file),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::WouldBlock,
+        format!("timed out waiting for {} after 1s", lock_path.display()),
+    ))
 }
 /// Read a file, treating only `NotFound` as empty.
 /// Hard read errors (EACCES, EIO) propagate so callers don't clobber an unreadable file on the next write.
-pub(crate) fn read_to_string_or_empty(path: &std::path::Path) -> std::io::Result<String> {
+pub fn read_to_string_or_empty(path: &std::path::Path) -> std::io::Result<String> {
     match std::fs::read_to_string(path) {
         Ok(s) => Ok(s),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
@@ -109,7 +149,7 @@ pub(crate) fn read_to_string_or_empty(path: &std::path::Path) -> std::io::Result
 }
 /// Atomic write via temp file then `rename` (mirrors [`save_config`]) so a crash mid-write can't truncate `config.toml`.
 /// Preserves the dest mode on unix.
-pub(crate) fn atomic_write_string(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+pub fn atomic_write_string(path: &std::path::Path, content: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -209,7 +249,7 @@ pub async fn update_config<F>(f: F) -> Result<()>
 where
     F: FnOnce(&mut Config),
 {
-    let _guard = SAVE_LOCK.lock().await;
+    let _guard = lock_config_writes().await?;
     let root: TomlValue =
         crate::config::load_from_disk().unwrap_or_else(|_| TomlValue::Table(TomlMap::new()));
     let mut cfg = load_config_from_toml(&root);

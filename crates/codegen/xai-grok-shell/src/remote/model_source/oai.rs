@@ -1,11 +1,11 @@
 //! Reads the model list from an OpenAI-compatible `/v1/models`.
 use crate::agent::config::EndpointsConfig;
-use crate::agent::models::ModelFetchAuth;
-use crate::auth::GrokAuth;
-use crate::auth::backend::{ActiveAuthBackend, AuthBackend};
+use crate::agent::remote_config::ModelFetchAuth;
 use crate::remote::client::{BackendError, FetchModelsResult, parse_remote_model_value};
 use crate::remote::model_source::ModelSource;
 use serde::Deserialize;
+use xai_grok_login::GrokAuth;
+use xai_grok_login::backend::{ActiveAuthBackend, AuthBackend};
 #[derive(Debug, Deserialize)]
 struct ModelsResponse {
     data: Vec<serde_json::Value>,
@@ -134,7 +134,7 @@ mod tests {
     #[serial_test::serial]
     fn models_fetch_endpoint_matches_auth_mode() {
         use crate::agent::config::EndpointsConfig;
-        use crate::agent::models::ModelFetchAuth;
+        use crate::agent::remote_config::ModelFetchAuth;
         for k in [
             "GROK_CLI_CHAT_PROXY_BASE_URL",
             "GROK_XAI_API_BASE_URL",

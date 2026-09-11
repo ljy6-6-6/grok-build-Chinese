@@ -5,9 +5,6 @@
 //! Extracted move-only from `permission::resolution`, which re-exports the
 //! public surface so existing `resolution::` paths keep working.
 
-// Transitional shims for pre-origin-aware callers; deleted in the
-// enforcement PR stacked on this one.
-pub(super) mod compat;
 mod layer;
 mod marketplace;
 mod mcp;
@@ -39,11 +36,8 @@ use super::resolution::parse_managed_settings_base;
 use crate::permission::rules::DefaultPermissionMode;
 use crate::permission::types::{PermissionRule, Sourced};
 
-/// Managed MCP + plugin + marketplace policy from Claude `managed-settings.json`
-/// ([`xai_grok_config::claude_managed_settings_path`]; no `managed-settings.d/`,
-/// MDM plist, or registry delivery yet) plus every `managed_config.toml` /
-/// `requirements.toml` layer. Strictest-wins: any deny wins, every restricted
-/// source must allow, pins only tighten. Loaded once per process.
+/// Managed MCP/plugin/marketplace policy from Claude `managed-settings.json` plus every `managed_config.toml` / `requirements.toml` layer.
+/// Strictest-wins: any deny wins, every restricted source must allow, pins only tighten. Loaded once per process. No `managed-settings.d/`, MDM, or registry yet.
 #[derive(Debug, Default)]
 pub struct ManagedSettings {
     pub features: ManagedSettingsFeatures,
@@ -53,7 +47,8 @@ pub struct ManagedSettings {
     pub(in crate::permission) default_mode: Option<DefaultPermissionMode>,
     pub mcp_allowlist: McpServerPolicy,
     pub marketplace_allowlist: MarketplacePolicy,
-    /// `enableAllProjectMcpServers = false`: drop project MCP unless allowlisted.
+    /// `enableAllProjectMcpServers = false`: drop project MCP unless an
+    /// allow entry whose ownership satisfies the pin's grants it.
     pub project_mcp: PolicyPin,
     /// `plugin_auto_update = false`: no session-start plugin auto-update.
     pub plugin_auto_update: PolicyPin,
@@ -110,10 +105,8 @@ fn managed_toml_policy_layers(
     toml_layers
 }
 
-/// Pure form of [`load_managed_settings`] over pre-loaded sources (testable
-/// without on-disk config). Native TOML layers apply trust-descending (see
-/// [`PolicyLayerTier`]); the advisory Claude file applies last, so its extras
-/// and pin attributions never claim a name ahead of a grok layer.
+/// Pure form of [`load_managed_settings`] over pre-loaded sources.
+/// Native TOML layers apply trust-descending; the advisory Claude file applies last so it never claims a name ahead of an admin grok layer.
 fn resolve_managed_settings(
     claude: Option<(serde_json::Value, PathBuf)>,
     mut toml_layers: Vec<PolicyLayer>,
@@ -124,10 +117,8 @@ fn resolve_managed_settings(
     };
     toml_layers.sort_by_key(|layer| layer.tier);
     for layer in toml_layers {
-        // Only the policy keys cross TOML → JSON (one parser serves both
-        // surfaces). Filtering first keeps an unrelated exotic value elsewhere
-        // in the layer (TOML `inf`/`nan` floats have no JSON form) from
-        // discarding the layer's policy pins wholesale.
+        // Only the policy keys cross TOML → JSON (one parser serves both surfaces),
+        // so an unrelated exotic value elsewhere never affects the policy pins.
         let policy_table: toml::map::Map<String, toml::Value> = layer
             .value
             .as_table()
@@ -144,11 +135,14 @@ fn resolve_managed_settings(
         match serde_json::to_value(&policy_table) {
             Ok(json) => apply_policy_source(&mut ms, &json, &layer.path, layer.tier),
             Err(e) => {
+                // No known TOML value fails here (inf/nan become null, datetimes
+                // objects); defensive fail-closed for anything that ever does.
                 tracing::error!(
                     path = %layer.path.display(),
                     error = %e,
-                    "policy layer could not be read; its MCP/plugin/marketplace pins are NOT applied"
+                    "policy layer could not be read; treating every policy key as malformed (MCP and marketplace lockdown, project MCP and plugin auto-update pinned off)"
                 );
+                apply_unreadable_policy_source(&mut ms, &layer.path, layer.tier);
             }
         }
     }
@@ -160,10 +154,8 @@ fn resolve_managed_settings(
     ms
 }
 
-/// [`parse_managed_settings_base`] plus the file's advisory policy — the
-/// single-source (Claude-only) parse used by tests; the layered runtime path
-/// is [`resolve_managed_settings`], which applies the advisory policy after
-/// every native TOML layer.
+/// [`parse_managed_settings_base`] plus the file's advisory policy — the Claude-only parse used by tests.
+/// The layered runtime path is [`resolve_managed_settings`], which applies advisory policy after every native TOML layer.
 #[cfg(test)]
 fn parse_managed_settings_json(json: &serde_json::Value, path: &Path) -> ManagedSettings {
     let mut ms = parse_managed_settings_base(json, path);
@@ -171,20 +163,45 @@ fn parse_managed_settings_json(json: &serde_json::Value, path: &Path) -> Managed
     ms
 }
 
-/// Apply a tighten-only disable pin (first pinning layer names the source).
-fn pin_disabled(pin: &mut PolicyPin, path: &Path) {
-    if !pin.is_disabled() {
+/// Fail-closed stand-in for a layer whose policy keys could not be read: as if
+/// every key were present-but-malformed (MCP + marketplace lockdown, pins off).
+fn apply_unreadable_policy_source(ms: &mut ManagedSettings, path: &Path, tier: PolicyLayerTier) {
+    ms.mcp_allowlist.sources.push(
+        McpServerAllowlist::new(Vec::new(), Vec::new(), Some(path.to_path_buf()))
+            .with_authority(tier.authority())
+            .with_ownership(tier.ownership())
+            .with_lockdown(),
+    );
+    ms.marketplace_allowlist.sources.push(MarketplaceAllowlist {
+        allowed_urls: Vec::new(),
+        source_path: Some(path.to_path_buf()),
+        authority: tier.authority(),
+    });
+    pin_disabled(&mut ms.project_mcp, path, tier.ownership());
+    pin_disabled(&mut ms.plugin_auto_update, path, tier.ownership());
+}
+
+/// Tighten-only disable pin: the first pinning layer names the source, but an
+/// admin-owned layer upgrades (re-attributes) a user-owned pin, never the reverse.
+fn pin_disabled(pin: &mut PolicyPin, path: &Path, ownership: PolicyLayerOwnership) {
+    let upgrades = ownership == PolicyLayerOwnership::Admin
+        && matches!(
+            pin,
+            PolicyPin::Disabled {
+                ownership: PolicyLayerOwnership::User,
+                ..
+            }
+        );
+    if !pin.is_disabled() || upgrades {
         *pin = PolicyPin::Disabled {
             source: path.to_path_buf(),
+            ownership,
         };
     }
 }
 
-/// Fold one source's policy pins (Claude JSON or a JSON-ified TOML layer) into
-/// `ms` strictest-wins: sources only accumulate, so a later layer can add
-/// restrictions but never remove another layer's. The tier derives the
-/// source's authority — how its MCP/marketplace restrictions bind (pins are
-/// authority-blind) — and ownership (who can write the layer).
+/// Fold one source's pins into `ms` strictest-wins: layers only accumulate, so a later layer can add restrictions but never remove another's.
+/// The tier derives authority (how MCP/marketplace restrictions bind; pins are authority-blind) and ownership.
 fn apply_policy_source(
     ms: &mut ManagedSettings,
     json: &serde_json::Value,
@@ -197,67 +214,116 @@ fn apply_policy_source(
     let mcp_deny_entries = parse_mcp_entry_list(json, McpPolicyList::Deny);
     let managed_only = policy_bool(
         json,
-        "allowManagedMcpServersOnly",
-        "allow_managed_mcp_servers_only",
+        &[
+            "allowManagedMcpServersOnly",
+            "allow_managed_mcp_servers_only",
+        ],
+        // Block on error: an unreadable value is treated as enabled.
+        true,
+        path,
     ) == Some(true);
 
-    if !mcp_allow_entries.is_empty() || !mcp_deny_entries.is_empty() || managed_only {
+    // Full lockdown (see the lockdown field docs); an explicit empty deny list stays harmless.
+    let lockdown = mcp_allow_entries.locks_down() || mcp_deny_entries.is_malformed();
+    if lockdown {
+        // The key-level warnings above say what is wrong; this one names the file.
+        warn!(
+            path = %path.display(),
+            "MCP lockdown: the allow list has no usable entries or the deny list is unenforceable; every MCP server this source binds is blocked"
+        );
+    }
+    let allow_entries = mcp_allow_entries.entries();
+    let deny_entries = mcp_deny_entries.entries();
+
+    if lockdown || !allow_entries.is_empty() || !deny_entries.is_empty() || managed_only {
         info!(
             path = %path.display(),
-            allow = mcp_allow_entries.len(),
-            deny = mcp_deny_entries.len(),
+            allow = allow_entries.len(),
+            deny = deny_entries.len(),
             managed_only,
+            ownership = ?ownership,
+            lockdown,
             "Loaded MCP server policy"
         );
-        let mut allowlist = McpServerAllowlist::new(
-            mcp_allow_entries,
-            mcp_deny_entries,
-            Some(path.to_path_buf()),
-        )
-        .with_authority(authority);
+        let mut allowlist =
+            McpServerAllowlist::new(allow_entries, deny_entries, Some(path.to_path_buf()))
+                .with_authority(authority)
+                .with_ownership(ownership);
         if managed_only {
             allowlist = allowlist.with_managed_only();
+        }
+        if lockdown {
+            allowlist = allowlist.with_lockdown();
         }
         ms.mcp_allowlist.sources.push(allowlist);
     }
 
+    // Both boolean pins fail closed on an invalid value (`false` disables).
     if policy_bool(
         json,
-        "enableAllProjectMcpServers",
-        "enable_all_project_mcp_servers",
+        &[
+            "enableAllProjectMcpServers",
+            "enable_all_project_mcp_servers",
+        ],
+        false,
+        path,
     ) == Some(false)
     {
-        pin_disabled(&mut ms.project_mcp, path);
+        pin_disabled(&mut ms.project_mcp, path, ownership);
     }
 
-    if policy_bool(json, "pluginAutoUpdate", "plugin_auto_update") == Some(false) {
-        pin_disabled(&mut ms.plugin_auto_update, path);
+    if policy_bool(
+        json,
+        &["pluginAutoUpdate", "plugin_auto_update"],
+        false,
+        path,
+    ) == Some(false)
+    {
+        pin_disabled(&mut ms.plugin_auto_update, path, ownership);
     }
 
     let strict = parse_strict_marketplaces(json);
-    if !strict.is_empty() {
+    if !strict.is_absent() {
+        // `Malformed` yields no URLs, and a zero-URL source is a lockdown.
+        let allowed_urls = strict.entries();
+        if allowed_urls.is_empty() {
+            warn!(
+                path = %path.display(),
+                "marketplace lockdown: the strict list has no usable entries; every marketplace this source binds is blocked"
+            );
+        }
         info!(
             path = %path.display(),
-            count = strict.len(),
+            count = allowed_urls.len(),
             "Loaded marketplace allowlist"
         );
         ms.marketplace_allowlist.sources.push(MarketplaceAllowlist {
-            allowed_urls: strict,
+            allowed_urls,
             source_path: Some(path.to_path_buf()),
             authority,
         });
     }
 
-    for (extra, auto_update) in parse_extra_marketplaces(json, ownership) {
-        // Claude's per-marketplace `autoUpdate: false` has no granular grok
-        // equivalent, so it pins the GLOBAL auto-update off (tighten-only)
-        // rather than silently dropping an update opt-out.
-        if auto_update == Some(false) {
-            pin_disabled(&mut ms.plugin_auto_update, path);
-        }
-        // First pinning source wins a name (sources apply trust-descending).
-        if !ms.extra_marketplaces.iter().any(|m| m.name == extra.name) {
-            ms.extra_marketplaces.push(extra);
+    let extras = parse_extra_marketplaces(json, path, ownership);
+    if extras.pin_auto_update_off {
+        pin_disabled(&mut ms.plugin_auto_update, path, ownership);
+    }
+    for extra in extras.entries {
+        // First pinning source wins a name, except an admin-owned entry replaces
+        // a user-owned claim (a user squat must not drop an admin's Local pin).
+        match ms
+            .extra_marketplaces
+            .iter_mut()
+            .find(|m| m.name == extra.name)
+        {
+            None => ms.extra_marketplaces.push(extra),
+            Some(claimed)
+                if claimed.ownership == PolicyLayerOwnership::User
+                    && extra.ownership == PolicyLayerOwnership::Admin =>
+            {
+                *claimed = extra;
+            }
+            Some(_) => {}
         }
     }
 }

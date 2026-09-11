@@ -264,7 +264,6 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
     }
 
     /// Render to ANSI-styled string.
-    ///
     /// If `pretty` is true, syntax markers are hidden.
     /// Returns the rendered string and a source map for copy-paste support.
     pub fn render_ansi(&mut self, pretty: bool) -> (String, SourceMap) {
@@ -515,7 +514,6 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
     }
 
     /// Render to ratatui Lines.
-    ///
     /// If `pretty` is true, syntax markers are hidden.
     /// Returns rendered lines, line source map, and optional checkpoint.
     pub fn render_ratatui(&mut self, pretty: bool) -> (MarkdownRenderOutput, Option<Checkpoint>) {
@@ -587,9 +585,7 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
 
                 // Snap cp_byte to the nearest char boundary
                 // Checkpoint byte offsets come from pulldown-cmark event ranges, which should always be char-aligned
-                // In edge cases (e.g., thematic breaks followed by headings with multi-byte chars) the position can land mid-character
                 // Snapping forward is safe: it only affects where we split the text for line counting
-                // A few extra or fewer newlines in the first vs second range doesn't change the total count
                 let cp_byte = {
                     let mut b = cp_byte;
                     while b < self.text.len() && !self.text.is_char_boundary(b) {
@@ -608,8 +604,6 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
 
                 for (range_idx, &(range_start, range_end)) in ranges.iter().enumerate() {
                     // After processing the first range when splitting, capture checkpoint.
-                    // Flush any pending spans to `lines` first
-                    // Content like a thematic break (`───`) may sit in `current_spans` with no trailing newline to flush it
                     // Without this flush, the checkpoint's `output_lines` count would be too low, causing the line to vanish on re-render
                     if split_at_checkpoint && range_idx == 1 {
                         if !self.buffers.current_spans.is_empty() {
@@ -857,7 +851,6 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
                         table_replace = Some(ev.index);
                         let trepl = &self.buffers.table_replaces[ev.index];
 
-                        // Flush any in-progress inline spans first
                         // Tables always start at a line boundary, so for them this is a no-op
                         // A display-math block replacement can occur mid-paragraph (`text $$x$$ more`)
                         // Without the flush, the pending "text " spans would be emitted AFTER the block lines
@@ -1217,13 +1210,7 @@ mod tests {
         );
     }
 
-    /// Regression: `count_newlines_in_range` panics when a checkpoint byte
-    /// offset from a thematic break falls inside a multi-byte character in
-    /// subsequent content (e.g., a 4-byte emoji like 📐).
-    ///
-    /// Minimal repro: thematic break `---` followed by heading with emoji.
-    /// The checkpoint creates a byte offset that lands mid-emoji when used
-    /// to slice `self.text` in `text[from..to]`.
+    /// Regression: `count_newlines_in_range` panics when a checkpoint byte offset from a thematic break falls inside a multi-byte character in subsequent content.
     /// Nested blockquote with paragraph break and list inside inner quote.
     #[test]
     fn test_nested_blockquote_with_list() {
@@ -1891,6 +1878,76 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A bare URL wrapped across table-cell lines yields one fragment per line,
+    /// each with the full URL and a shared id.
+    #[test]
+    fn test_table_bare_url_wrapped_keeps_full_url_on_every_line() {
+        let url = "https://example.com/very/long/path/segment/that/wraps/around/the/cell";
+        let md = format!("| A | B |\n|---|---|\n| x | see {url} now |\n\n");
+
+        let mut buffers = crate::MarkdownBuffers::new();
+        let (output, _) = crate::render_markdown_ratatui_with_buffers_width(
+            &md,
+            test_style::STYLE,
+            true,
+            &mut buffers,
+            None,
+            Some(30),
+        );
+        let lines = lines_to_text(&output.lines);
+
+        let links = &output.hyperlinks;
+        assert!(
+            links.len() >= 2,
+            "URL must wrap into multiple fragments: {links:#?}\n{lines:#?}"
+        );
+        let id = links[0].id;
+        let mut covered = String::new();
+        for link in links {
+            assert_eq!(link.url, url, "every fragment must carry the full URL");
+            assert_eq!(link.id, id, "fragments must share one link id");
+            let line = &lines[link.line_index];
+            covered.extend(
+                line.chars()
+                    .skip(link.column_range.start)
+                    .take(link.column_range.len()),
+            );
+        }
+        assert_eq!(
+            covered, url,
+            "fragments must cover exactly the URL text, not the surrounding words"
+        );
+    }
+
+    /// Same for a bare email: every wrapped fragment carries the `mailto:` target.
+    #[test]
+    fn test_table_bare_email_wrapped_keeps_mailto_on_every_line() {
+        let email = "someone.with.a.long.name@subdomain.example-organisation.com";
+        let md = format!("| A | B |\n|---|---|\n| x | {email} |\n\n");
+
+        let mut buffers = crate::MarkdownBuffers::new();
+        let (output, _) = crate::render_markdown_ratatui_with_buffers_width(
+            &md,
+            test_style::STYLE,
+            true,
+            &mut buffers,
+            None,
+            Some(30),
+        );
+
+        let links = &output.hyperlinks;
+        assert!(
+            links.len() >= 2,
+            "email must wrap into fragments: {links:#?}"
+        );
+        assert!(
+            links
+                .iter()
+                .all(|l| l.url == format!("mailto:{email}") && l.id == links[0].id),
+            "every fragment must carry the full mailto target: {links:#?}"
+        );
     }
 
     /// Table source map: rendered line numbers must not exceed the table's actual source line count, and must map to the correct source lines.

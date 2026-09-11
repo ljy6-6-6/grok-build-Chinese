@@ -71,6 +71,7 @@ fn test_config(base_url: String, model: &str) -> SamplerConfig {
     SamplerConfig {
         api_key: Some("test-key".into()),
         base_url,
+        mtls_cert_dir: None,
         model: model.into(),
         max_completion_tokens: Some(1024),
         temperature: None,
@@ -85,6 +86,7 @@ fn test_config(base_url: String, model: &str) -> SamplerConfig {
         force_http1: false,
         // Keep retries minimal so tests don't take forever.
         max_retries: Some(2),
+        rate_limit_retry_threshold: None,
         stream_tool_calls: false,
         idle_timeout_secs: Some(30),
         reasoning_effort: None,
@@ -92,6 +94,7 @@ fn test_config(base_url: String, model: &str) -> SamplerConfig {
         client_identifier: None,
         deployment_id: None,
         user_id: None,
+        conversation_group_id: None,
         client_version: None,
         attribution_callback: None,
         bearer_resolver: None,
@@ -510,6 +513,84 @@ async fn invalid_image_code_strips_and_retries() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_invalid_image_strips_as_server_rejected() {
+    const IMAGE_URI: &str = "data:image/png;base64,cG9pc29uZWQ=";
+    let bodies = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let bodies_handler = Arc::clone(&bodies);
+    let app = Router::new().route(
+        "/v1/responses",
+        post(move |body: String| {
+            let bodies = Arc::clone(&bodies_handler);
+            async move {
+                let n = {
+                    let mut b = bodies.lock().unwrap();
+                    b.push(body);
+                    b.len()
+                };
+                if n == 1 {
+                    Err::<Sse<_>, (StatusCode, String)>((
+                        StatusCode::BAD_REQUEST,
+                        json!({
+                            "code": INVALID_IMAGE_ERROR_CODE,
+                            "error": "Invalid PNG image.",
+                        })
+                        .to_string(),
+                    ))
+                } else {
+                    let events = sse_events_to_axum(sse::responses_api_reasoning_and_text_events(
+                        "ok",
+                        "recovered",
+                        "test-model",
+                    ));
+                    Ok(Sse::new(stream::iter(
+                        events.into_iter().map(Ok::<_, std::convert::Infallible>),
+                    )))
+                }
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let handle = SamplerActor::spawn(
+        responses_config(server.base_url(), None),
+        RetryPolicy::default(),
+        event_tx,
+    );
+
+    let mut request = user_request("what is in this image?");
+    if let Some(ConversationItem::User(u)) = request.items.first_mut() {
+        u.add_image(IMAGE_URI);
+    }
+    handle.submit(RequestId::from("req-responses-invalid-image"), request);
+
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(15)).await;
+    server.shutdown();
+
+    assert!(
+        events.iter().any(|e| match e {
+            SamplingEvent::ImagesStripped {
+                stripped_urls,
+                reason: StripReason::ServerRejected,
+                ..
+            } => stripped_urls.len() == 1 && stripped_urls[0].as_ref() == IMAGE_URI,
+            _ => false,
+        }),
+        "Responses invalid_image must strip as ServerRejected, got {events:?}"
+    );
+    assert!(
+        matches!(events.last(), Some(SamplingEvent::Completed { .. })),
+        "expected Completed after strip-retry"
+    );
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2, "one rejection, one strip-retry");
+    assert!(bodies[0].contains(IMAGE_URI), "first attempt sends image");
+    assert!(
+        !bodies[1].contains(IMAGE_URI),
+        "strip-retry must not resend the image"
+    );
+}
+
 /// A legacy-phrase 400 with no code still strips and recovers, but the reason is `PayloadHeuristic`.
 /// Without the deterministic code the server blamed nothing specific, so the strip must stay request-local.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -874,11 +955,11 @@ async fn connect_failure_does_not_emit_images_stripped() {
 }
 
 // ---------------------------------------------------------------------------
-// Rate limit exhausts threshold
+// Rate-limit thresholds
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn rate_limit_exhausts_at_threshold_and_yields_failed() {
+async fn rate_limit_exhausts_at_default_threshold_and_yields_failed() {
     let counter = Arc::new(AtomicU32::new(0));
     let counter_handler = Arc::clone(&counter);
     let app = Router::new().route(
@@ -906,6 +987,53 @@ async fn rate_limit_exhausts_at_threshold_and_yields_failed() {
     let cfg = test_config(server.base_url(), "test-model");
     let handle = SamplerActor::spawn(cfg, RetryPolicy::default(), event_tx);
 
+    let rid = RequestId::from("req-429-default");
+    handle.submit(rid, user_request("hi"));
+
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(60)).await;
+    server.shutdown();
+
+    match events.last().unwrap() {
+        SamplingEvent::Failed { error, .. } => {
+            assert_eq!(error.kind, SamplingErrorKind::RateLimited);
+            assert_eq!(error.status_code, Some(429));
+        }
+        other => panic!("expected Failed(RateLimited), got {other:?}"),
+    }
+
+    // The request task awaits and classifies each wire attempt before starting the next, so scheduling cannot add another request.
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        2,
+        "the default threshold permits one retry after the initial request"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn configured_rate_limit_threshold_controls_total_wire_attempts() {
+    let counter = Arc::new(AtomicU32::new(0));
+    let counter_handler = Arc::clone(&counter);
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            let counter = Arc::clone(&counter_handler);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    [("retry-after", "0")],
+                    json!({ "error": { "message": "slow down" } }).to_string(),
+                )
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let mut cfg = test_config(server.base_url(), "test-model");
+    cfg.max_retries = Some(6);
+    cfg.rate_limit_retry_threshold = Some(4);
+    let handle = SamplerActor::spawn(cfg, RetryPolicy::default(), event_tx);
+
     let rid = RequestId::from("req-429");
     handle.submit(rid.clone(), user_request("hi"));
 
@@ -921,9 +1049,10 @@ async fn rate_limit_exhausts_at_threshold_and_yields_failed() {
     }
 
     let hits = counter.load(Ordering::SeqCst);
-    // RATE_LIMIT_RETRY_THRESHOLD is 2, so the actor stops after two attempts: the first attempt and one retry that also 429s
-    // Allow a small slack in case scheduling fires a third attempt before the threshold check
-    assert!((1..=3).contains(&hits), "expected 1-3 hits, got {hits}");
+    assert_eq!(
+        hits, 4,
+        "the configured threshold is a total-attempt ceiling and must override the policy default of 2"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -11,10 +11,30 @@ const NATIVE: PolicySubjectOrigin = PolicySubjectOrigin::GrokNative;
 const CLAUDE_PATH: &str = "/test/managed-settings.json";
 const SYS_REQ: &str = "/etc/grok/requirements.toml";
 const USER_REQ: &str = "/home/u/.grok/requirements.toml";
+const SYS_MANAGED: &str = "/etc/grok/managed_config.toml";
+const USER_MANAGED: &str = "/home/u/.grok/managed_config.toml";
+const MDM_REQ: &str = "ai.x.grok:requirements_toml_base64";
+/// Every admin-owned TOML tier with its path label.
+const ADMIN_TIERS: [(PolicyLayerTier, &str); 3] = [
+    (PolicyLayerTier::Mdm, MDM_REQ),
+    (PolicyLayerTier::SystemRequirements, SYS_REQ),
+    (PolicyLayerTier::SystemManaged, SYS_MANAGED),
+];
+/// Every user-owned tier: both are the server-synced `$GROK_HOME` files.
+const USER_TIERS: [(PolicyLayerTier, &str); 2] = [
+    (PolicyLayerTier::UserRequirements, USER_REQ),
+    (PolicyLayerTier::UserManaged, USER_MANAGED),
+];
 /// HTTP server named `name` at `url`.
 fn hs(name: &str, url: &str) -> agent_client_protocol::McpServer {
     agent_client_protocol::McpServer::Http(
         agent_client_protocol::McpServerHttp::new(name, url).headers(vec![]),
+    )
+}
+/// SSE server named `name` at `url`.
+fn se(name: &str, url: &str) -> agent_client_protocol::McpServer {
+    agent_client_protocol::McpServer::Sse(
+        agent_client_protocol::McpServerSse::new(name, url).headers(vec![]),
     )
 }
 /// Stdio server named `name` running `command` (no args).
@@ -37,6 +57,10 @@ fn h(url: &str) -> agent_client_protocol::McpServer {
 }
 fn allowlist_from(json: serde_json::Value) -> McpServerPolicy {
     parse_managed_settings_json(&json, std::path::Path::new(CLAUDE_PATH)).mcp_allowlist
+}
+/// Some source of `policy` is a full lockdown (what `grok inspect` lists).
+fn has_lockdown_source(policy: &McpServerPolicy) -> bool {
+    policy.sources.iter().any(McpServerAllowlist::is_lockdown)
 }
 /// Policy with URL-pattern entries in `allowedMcpServers`.
 fn allow_urls(patterns: &[&str]) -> McpServerPolicy {
@@ -189,14 +213,8 @@ fn mcp_denylist_classifies_denied_servers() {
         ],
     );
 }
-/// What this table pins: ALLOW URL patterns are a positive grant — scheme,
-/// host, port, and path match separately so a wildcard never crosses a
-/// component boundary; scheme and port stay literal (a scheme-default port
-/// matches its port-less spelling); hosts and paths canonicalize exactly like
-/// the WHATWG parser the client connects with (IDNA/punycode, IP spellings,
-/// userinfo, dot segments, percent escapes); anything unparseable or
-/// uncompilable grants nothing (fail closed). Each group is one pattern set;
-/// rows are (runtime URL, granted?, why).
+/// Pins the ALLOW URL table: scheme, host, port, and path match separately,
+/// canonicalized like the WHATWG parser; anything unparseable grants nothing.
 #[test]
 #[rustfmt::skip]
 fn allow_url_matcher_semantics() {
@@ -240,6 +258,122 @@ fn allow_url_matcher_semantics() {
                 "uppercase HTTPS:// parses to the same scheme",
             ),
             ("mcp.corp.com/mcp", false, "relative (unparseable) URL earns no grant"),
+        ],
+    );
+    allow_rows(
+        "no pattern path = any path (Claude parity)",
+        &["https://mcp.corp.com"],
+        &[
+            ("https://mcp.corp.com", true, "root, path-less spelling"),
+            ("https://mcp.corp.com/", true, "root, trailing-slash spelling"),
+            ("https://mcp.corp.com/sse", true, "one segment"),
+            ("https://mcp.corp.com/a/b/c", true, "nested path"),
+            ("https://mcp.corp.com:8080/sse", false, "port still literal"),
+        ],
+    );
+    allow_rows(
+        "explicit trailing slash = any path too",
+        &["https://mcp.corp.com/"],
+        &[
+            ("https://mcp.corp.com/", true, "root"),
+            ("https://mcp.corp.com/mcp/tool", true, "nested path"),
+        ],
+    );
+    for pattern in [
+        "https://mcp.corp.com/.",
+        "https://mcp.corp.com/mcp/..",
+        "https://mcp.corp.com/./",
+    ] {
+        allow_rows(
+            pattern,
+            &[pattern],
+            &[
+                (
+                    "https://mcp.corp.com/admin/x",
+                    true,
+                    "canonical-root pattern grants any path",
+                ),
+            ],
+        );
+    }
+    allow_rows(
+        "path-less pattern with every other component shape",
+        &[
+            "*://any.corp.com",
+            "https://port.corp.com:8443",
+            "https://*.glob.corp.com",
+            "https://[2001:db8::1]",
+        ],
+        &[
+            ("http://any.corp.com/a/b", true, "`*://` scheme"),
+            ("https://port.corp.com:8443/a/b", true, "explicit port"),
+            ("https://sub.glob.corp.com/a/b", true, "host glob"),
+            ("https://[2001:db8:0:0:0:0:0:1]/a/b", true, "bracketed IPv6"),
+        ],
+    );
+    check_allowed(
+        "SSE transport routes through the same URL matcher",
+        &allow_urls(&["https://mcp.corp.com"]),
+        &[
+            (
+                se("t", "https://mcp.corp.com/sse"),
+                true,
+                "path-less pattern grants an SSE server",
+            ),
+        ],
+    );
+    allow_rows(
+        "a pattern WITH a path stays path-scoped",
+        &["https://mcp.corp.com/mcp"],
+        &[
+            ("https://mcp.corp.com/mcp", true, "exact path"),
+            (
+                "https://mcp.corp.com/mcp?q=1#frag",
+                true,
+                "query and fragment are not part of the path",
+            ),
+            ("https://mcp.corp.com/", false, "root is outside"),
+            ("https://mcp.corp.com/mcp/tool", false, "nested path is outside"),
+            ("https://mcp.corp.com/sse", false, "sibling path is outside"),
+        ],
+    );
+    allow_rows(
+        "`*://` matches the supported remote schemes",
+        &["*://mcp.corp.com/*"],
+        &[
+            ("https://mcp.corp.com/sse", true, "https"),
+            ("http://mcp.corp.com/sse", true, "http"),
+            (
+                "ftp://mcp.corp.com/x",
+                false,
+                "ftp parses with a host but is not a supported scheme",
+            ),
+            (
+                "file://mcp.corp.com/x",
+                false,
+                "file parses with a host but is not a supported scheme",
+            ),
+            (
+                "https://evil.example/mcp.corp.com/x",
+                false,
+                "host still bounded under `*://`",
+            ),
+        ],
+    );
+    allow_rows(
+        "`*://` with an explicit default port",
+        &["*://mcp.corp.com:443/*"],
+        &[
+            ("https://mcp.corp.com/sse", true, "https elides :443"),
+            ("http://mcp.corp.com/sse", false, "http's default port is 80, not 443"),
+        ],
+    );
+    allow_rows(
+        "partial-glob or empty scheme never matches",
+        &["http*://mcp.corp.com/*", "://mcp.corp.com/*"],
+        &[
+            ("https://mcp.corp.com/sse", false, "not https"),
+            ("http://mcp.corp.com/sse", false, "not http either"),
         ],
     );
     allow_rows(
@@ -484,14 +618,8 @@ fn allow_url_matcher_semantics() {
         ],
     );
 }
-/// What this table pins: DENY URL patterns are host-normalized and
-/// scheme/port-agnostic — deliberately asymmetric with allow (an imprecise
-/// allow only over-blocks, but a deny must never fail open): IP-named entries
-/// compare parsed addresses across every alternate spelling, hosts
-/// canonicalize on both sides, a URL the connect-time parser rejects is
-/// denied outright, and broken path globs deny the matched host rather than
-/// disable the entry. Each group is one pattern set; rows are (runtime URL,
-/// denied?, why) — the allow side is pinned as the exact complement.
+/// Pins deny URL matching: host-normalized and scheme/port-agnostic, asymmetric with allow because a deny must never fail open.
+/// Alternate IP spellings, rejected URLs, and broken path globs still deny. Allow is the exact complement.
 #[test]
 #[rustfmt::skip]
 fn deny_url_matcher_semantics() {
@@ -514,6 +642,29 @@ fn deny_url_matcher_semantics() {
                 "https://mcp-gateway.staging.example.net/mcp",
                 false,
                 "deny is host-scoped",
+            ),
+            ("https://other.example.com/mcp", false, "unrelated host stays"),
+        ],
+    );
+    deny_rows(
+        "scheme-less and glob-port deny patterns block on any scheme and port",
+        &["blocked.example.com/*", "http://blocked.example.net:*/*"],
+        &[
+            (
+                "https://blocked.example.com:8443/mcp",
+                true,
+                "scheme-less pattern, https + port",
+            ),
+            ("http://blocked.example.com/mcp", true, "scheme-less pattern, http"),
+            (
+                "https://blocked.example.net/mcp",
+                true,
+                "glob-port pattern, https default port",
+            ),
+            (
+                "http://blocked.example.net:8080/mcp",
+                true,
+                "glob-port pattern, explicit port",
             ),
             ("https://other.example.com/mcp", false, "unrelated host stays"),
         ],
@@ -642,18 +793,12 @@ fn deny_url_matcher_semantics() {
         &["https://[fe80::1]/*"],
         &[("https://[fe80::1%25eth0]/mcp", true, "unparseable — denied outright")],
     );
-    deny_rows(
-        "IPv6 zone-id PATTERN (deny side)",
-        &["https://[fe80::1%eth0]/*"],
-        &[
-            ("https://[fe80::1]/mcp", false, "never matches the plain address"),
-            (
-                "https://[fe80::1%25eth0]/mcp",
-                true,
-                "still denies the unparseable zone-id URL",
-            ),
-        ],
-    );
+    let zone_id = deny_urls(&["https://[fe80::1%eth0]/*"]);
+    assert!(has_lockdown_source(&zone_id));
+    for url in ["https://[fe80::1]/mcp", "https://[fe80::1%25eth0]/mcp"] {
+        assert!(!zone_id.is_server_denied(&h(url), FOREIGN), "{url}");
+        assert!(!zone_id.is_server_allowed(&h(url), FOREIGN), "{url}");
+    }
     deny_rows(
         "IPv6 deny matches every spelling of the address",
         &["https://[2001:db8::1]/*"],
@@ -746,18 +891,12 @@ fn deny_url_matcher_semantics() {
             ),
         ],
     );
-    deny_rows(
-        "broken deny HOST glob",
-        &["https://host[x/*"],
-        &[
-            ("https://host[x/y", true, "still denies the unparseable same-text URL"),
-            (
-                "https://other.example/admin",
-                false,
-                "stays scoped: parseable hosts untouched",
-            ),
-        ],
-    );
+    let broken_host = deny_urls(&["https://host[x/*"]);
+    assert!(has_lockdown_source(&broken_host));
+    for url in ["https://host[x/y", "https://other.example/admin"] {
+        assert!(!broken_host.is_server_denied(&h(url), FOREIGN), "{url}");
+        assert!(!broken_host.is_server_allowed(&h(url), FOREIGN), "{url}");
+    }
     deny_rows(
         "unbracketed IPv6 deny pattern",
         &["https://2001:db8::1/*"],
@@ -795,15 +934,8 @@ fn deny_url_matcher_semantics() {
         ],
     );
 }
-/// What this table pins: allow dimensions union at the production chokepoint
-/// (`is_server_allowed`, where a match-guard fall-through once flipped it) —
-/// a command-only allowlist restricts stdio servers, never HTTP, and vice
-/// versa (same for denylists); a deny-only policy restricts, denying its
-/// entries (command denies exact-string) while allowing the rest; deny beats
-/// allow on every dimension; `serverName` matches transport-agnostically;
-/// `serverCommand` is exact argv (never a prefix); and
-/// `allowManagedMcpServersOnly` requires a positive grant (fail closed).
-/// Rows are (server, verdict, why).
+/// Pins allow-dimension union at `is_server_allowed`: a command allowlist never covers HTTP and vice versa; deny beats allow.
+/// `serverCommand` is exact argv, never a prefix; `allowManagedMcpServersOnly` requires a positive grant.
 #[test]
 #[rustfmt::skip]
 fn name_argv_and_lockdown_semantics() {
@@ -1151,13 +1283,8 @@ fn name_argv_and_lockdown_semantics() {
         ],
     );
 }
-/// What this table pins: policy `serverName` ↔ runtime-name identity — both
-/// sides strip `grok_com_` and normalize (lowercase, spaces → `_`), compare
-/// by exact equality (never substring, empty never matches), and legacy
-/// truncation applies only to the one shape the runtime actually truncates
-/// (a managed name at exactly the cap), so a long entry never becomes a
-/// prefix grant over attacker-chosen decoys. Rows are (pattern, name,
-/// matches?, why).
+/// Pins `serverName` identity: strip `grok_com_`, normalize, exact equality (empty never matches).
+/// Legacy truncation applies only to a managed name at exactly the cap, so a long entry is not a prefix grant.
 #[test]
 #[rustfmt::skip]
 fn mcp_name_matching_semantics() {
@@ -1231,10 +1358,8 @@ fn check_verdict(
         }
     }
 }
-/// What this matrix pins: `mcp_verdict` reason precedence — a deny wins over
-/// the lockdown's missing grant, which wins over the project pin; an allow
-/// grant exempts the pin — with each reason's `Display` string pinned as the
-/// wire/UX payload it is.
+/// Pins `mcp_verdict` precedence: deny, then lockdown missing-grant, then project pin; an allow grant exempts the pin.
+/// Each reason's `Display` is the wire/UX payload.
 #[test]
 fn mcp_verdict_matrix() {
     let foreign = McpSubject {
@@ -1254,7 +1379,7 @@ fn mcp_verdict_matrix() {
     );
     let deny_msg = format!("matches deniedMcpServers ({CLAUDE_PATH})");
     let pin_msg =
-        format!("project MCP disabled (enableAllProjectMcpServers = false, {CLAUDE_PATH})");
+        format!("project MCP disabled by enableAllProjectMcpServers = false ({CLAUDE_PATH})");
     let url = "https://mcp.corp.com/mcp";
     check_verdict(&ms, &hs("blocked", url), foreign, Some(&deny_msg), "deny");
     check_verdict(
@@ -1308,6 +1433,20 @@ fn mcp_verdict_matrix() {
         Some(&deny_msg),
         "deny wins over not-granted",
     );
+    let lockdown_msg = format!("locked down by policy ({CLAUDE_PATH})");
+    for (label, json) in [
+        (
+            "empty allowlist",
+            serde_json::json!({ "allowedMcpServers": [] }),
+        ),
+        (
+            "unenforceable deny list",
+            serde_json::json!({ "deniedMcpServers": [ { "serverTypo": "x" } ] }),
+        ),
+    ] {
+        let ms = parse_managed_settings_json(&json, std::path::Path::new(CLAUDE_PATH));
+        check_verdict(&ms, &h(url), foreign, Some(&lockdown_msg), label);
+    }
     let ms = parse_managed_settings_json(
         &serde_json::json!({
             "allowedMcpServers": [ { "serverUrl": "https://mcp.corp.com/*" } ],
@@ -1361,10 +1500,16 @@ fn mcp_block_reason_display_and_source_are_pinned() {
             "not in allowedMcpServers (/etc/grok/requirements.toml)",
         ),
         (
+            McpBlockReason::Lockdown {
+                source: src.clone(),
+            },
+            "locked down by policy (/etc/grok/requirements.toml)",
+        ),
+        (
             McpBlockReason::ProjectPin {
                 source: src.clone(),
             },
-            "project MCP disabled (enableAllProjectMcpServers = false, /etc/grok/requirements.toml)",
+            "project MCP disabled by enableAllProjectMcpServers = false (/etc/grok/requirements.toml)",
         ),
     ];
     for (reason, want) in cases {
@@ -1404,8 +1549,9 @@ impl std::io::Write for VecWriter {
 /// Serializes capture tests: `rebuild_interest_cache` is process-global, so
 /// two concurrent captures can drop each other's warns.
 static CAPTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-/// Run `f` while capturing WARN-level logs on this thread.
-fn capturing_warn_logs<T>(f: impl FnOnce() -> T) -> (T, String) {
+/// Run `f` while capturing WARN-level logs on this thread. `f` must be a pure
+/// parse: it runs once un-captured first to register its warn callsites.
+fn capturing_warn_logs<T>(f: impl Fn() -> T) -> (T, String) {
     let _guard = CAPTURE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     {
         static GLOBAL_SINK: std::sync::Once = std::sync::Once::new();
@@ -1418,6 +1564,7 @@ fn capturing_warn_logs<T>(f: impl FnOnce() -> T) -> (T, String) {
             );
         });
     }
+    f();
     let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
     let writer_buf = buf.clone();
     let subscriber = tracing_subscriber::fmt()
@@ -1432,18 +1579,16 @@ fn capturing_warn_logs<T>(f: impl FnOnce() -> T) -> (T, String) {
     let logs = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
     (value, logs)
 }
-/// Parse `key` while capturing WARN-level logs on this thread.
+/// Parse `key` while capturing WARN-level logs on this thread. A `Malformed` key
+/// yields no entries here; pin it with `is_malformed()` where that matters.
 fn parse_mcp_entries_capturing_logs(
     json: &serde_json::Value,
     list: McpPolicyList,
 ) -> (Vec<AllowedMcpServer>, String) {
-    capturing_warn_logs(|| parse_mcp_entry_list(json, list))
+    capturing_warn_logs(|| parse_mcp_entry_list(json, list).entries())
 }
-/// What this table pins: parse-time fail directions. Unenforceable DENY
-/// entries and unmatchable shapes on either list warn (a silent drop is zero
-/// enforcement on the deny side and silently lost grants on the allow side),
-/// while merely-unsupported ALLOW entries stay silent (ungranted =
-/// fail-closed).
+/// What this table pins: parse-time fail directions. An unenforceable DENY entry
+/// fails the key closed; unusable ALLOW entries warn and drop (an all-unsupported allowlist is a lockdown).
 #[test]
 fn mcp_entry_parse_fail_directions() {
     use McpPolicyList::{Allow, Deny};
@@ -1457,8 +1602,6 @@ fn mcp_entry_parse_fail_directions() {
         counts: &'static [(&'static str, usize)],
         /// Log lines that must appear at least once.
         contains: &'static [&'static str],
-        /// Log lines that must not appear.
-        absent: &'static [&'static str],
     }
     impl Default for ParseCase {
         fn default() -> Self {
@@ -1469,21 +1612,31 @@ fn mcp_entry_parse_fail_directions() {
                 want_len: 0,
                 counts: &[],
                 contains: &[],
-                absent: &[],
             }
         }
     }
     let cases = vec![
         ParseCase {
-            label: "allow: glob-scheme and scheme-less patterns fail closed but warn",
+            label: "allow: partial-glob, empty, and missing schemes fail closed but warn",
+            list: Allow,
+            entries: serde_json::json!([
+                { "serverUrl": "http*://mcp.corp.com/*" },
+                { "serverUrl": "://mcp.corp.com/*" },
+                { "serverUrl": "*.corp.com/*" }
+            ]),
+            want_len: 3,
+            counts: &[("can never match", 3)],
+            ..Default::default()
+        },
+        ParseCase {
+            label: "allow: a bare `*://` is the any-scheme wildcard — silent like a written-out scheme",
             list: Allow,
             entries: serde_json::json!([
                 { "serverUrl": "*://mcp.corp.com/*" },
-                { "serverUrl": "*.corp.com/*" },
                 { "serverUrl": "https://mcp.corp.com/*" }
             ]),
-            want_len: 3,
-            counts: &[("can never match", 2)],
+            want_len: 2,
+            counts: &[("WARN", 0)],
             ..Default::default()
         },
         ParseCase {
@@ -1511,37 +1664,44 @@ fn mcp_entry_parse_fail_directions() {
             want_len: 13,
             counts: &[("can never match", 7)],
             contains: &["has no host", "port is not a number"],
-            ..Default::default()
         },
         ParseCase {
-            label: "deny: host-less and non-compiling host globs warn (zero enforcement)",
+            label: "deny: every unmatchable serverUrl shape is reported, then the key fails closed",
             list: Deny,
             entries: serde_json::json!([
                 { "serverUrl": "/admin/*" },
                 { "serverUrl": "https://host[x/*" },
+                { "serverUrl": "https://bü*.example/*" },
                 { "serverUrl": "https://blocked.example.com/*" }
             ]),
-            want_len: 3,
-            contains: &["has no host", "host glob does not compile"],
-            ..Default::default()
+            want_len: 0,
+            counts: &[("unenforceable deniedMcpServers entry", 3)],
+            contains: &[
+                "has no host",
+                "host glob does not compile",
+                "mixes Unicode and glob characters",
+            ],
         },
         ParseCase {
-            label: "deny: unsupported entry warns and is dropped",
+            // Nothing warns before this line, so it must name the causes itself.
+            label: "deny: unsupported entry fails the key closed with a self-contained warning",
             list: Deny,
             entries: serde_json::json!([
                 { "serverTypo": "internal-only" },
                 { "serverUrl": "https://blocked.com/*" }
             ]),
-            want_len: 1,
-            contains: &["ignoring unsupported deniedMcpServers entry"],
-            ..Default::default()
+            want_len: 0,
+            counts: &[("WARN", 1)],
+            contains: &[
+                "unenforceable deniedMcpServers entry; failing closed (no recognized field",
+            ],
         },
         ParseCase {
-            label: "allow: unsupported entry stays silent (ungranted = fail closed)",
+            label: "allow: unsupported entry warns and grants nothing",
             list: Allow,
             entries: serde_json::json!([ { "serverTypo": "internal-only" } ]),
             want_len: 0,
-            absent: &["ignoring unsupported"],
+            contains: &["ignoring unusable allowedMcpServers entry"],
             ..Default::default()
         },
         ParseCase {
@@ -1549,7 +1709,7 @@ fn mcp_entry_parse_fail_directions() {
             list: Deny,
             entries: serde_json::json!([ { "serverName": "internal-only" } ]),
             want_len: 1,
-            absent: &["ignoring unsupported"],
+            counts: &[("WARN", 0)],
             ..Default::default()
         },
         ParseCase {
@@ -1557,16 +1717,32 @@ fn mcp_entry_parse_fail_directions() {
             list: Deny,
             entries: serde_json::json!([ { "serverCommand": ["npx", "evil-mcp"] } ]),
             want_len: 1,
-            absent: &["ignoring unsupported"],
+            counts: &[("WARN", 0)],
             ..Default::default()
         },
         ParseCase {
-            label: "deny: malformed serverCommand argv warn-drops (a partial argv \
-                    would match the wrong command)",
+            label: "deny: malformed serverCommand argv fails the key closed (a partial \
+                    argv would match the wrong command)",
             list: Deny,
             entries: serde_json::json!([ { "serverCommand": ["npx", 42] } ]),
             want_len: 0,
-            contains: &["ignoring unsupported"],
+            contains: &["unenforceable deniedMcpServers entry; failing closed"],
+            ..Default::default()
+        },
+        ParseCase {
+            label: "deny: empty serverCommand argv fails the key closed (matches no command)",
+            list: Deny,
+            entries: serde_json::json!([ { "serverCommand": [] } ]),
+            want_len: 0,
+            contains: &["unenforceable deniedMcpServers entry; failing closed"],
+            ..Default::default()
+        },
+        ParseCase {
+            label: "deny: string serverCommand fails the key closed (an argv array is required)",
+            list: Deny,
+            entries: serde_json::json!([ { "serverCommand": "npx evil-mcp" } ]),
+            want_len: 0,
+            contains: &["unenforceable deniedMcpServers entry; failing closed"],
             ..Default::default()
         },
     ];
@@ -1592,12 +1768,6 @@ fn mcp_entry_parse_fail_directions() {
                 "{label}: missing {needle:?} in {logs:?}"
             );
         }
-        for needle in case.absent {
-            assert!(
-                !logs.contains(needle),
-                "{label}: unexpected {needle:?} in {logs:?}"
-            );
-        }
     }
     let (entries, _) = parse_mcp_entries_capturing_logs(
         &serde_json::json!({ "deniedMcpServers": [ { "serverName": "internal-only" } ] }),
@@ -1608,12 +1778,8 @@ fn mcp_entry_parse_fail_directions() {
         "expected a Name entry, got {entries:?}"
     );
 }
-/// What this table pins: the canonical git-URL identity — scheme and host
-/// fold case, repo paths stay case-sensitive (lowercasing would widen an
-/// allow entry to sibling repos on a case-sensitive host), exactly one
-/// `.git` strips, local paths pass through, and the scp and https forms of
-/// one repo never alias each other — plus the marketplace allowlist matching
-/// built on it. Rows are (input(s), expected, why).
+/// Pins git-URL identity: scheme and host fold case, paths stay case-sensitive, exactly one `.git` strips, scp and https never alias.
+/// Local paths pass through. Marketplace allowlist matching is built on this.
 #[test]
 #[rustfmt::skip]
 fn git_url_identity_and_marketplace_matching() {
@@ -1711,6 +1877,8 @@ enum Expect {
     ManagedOnly(PolicySubjectOrigin, bool),
     /// Project-MCP pin state: `Some(path)` = disabled, attributed there.
     ProjectMcpPin(Option<&'static str>),
+    /// `mcp_project_pin_block` for a project-scoped foreign HTTP server (url, blocked?).
+    ProjectPinBlocks(&'static str, bool),
     /// Plugin auto-update pin state: `Some(path)` = disabled, attributed there.
     AutoUpdatePin(Option<&'static str>),
     MarketRestricted(bool),
@@ -1760,6 +1928,17 @@ fn assert_expects(label: &str, ms: &ManagedSettings, expects: Vec<Expect>) {
                     "{label}: project_mcp pin"
                 )
             }
+            Expect::ProjectPinBlocks(url, want) => {
+                let subject = McpSubject {
+                    origin: FOREIGN,
+                    project_scoped: true,
+                };
+                assert_eq!(
+                    ms.mcp_project_pin_block(&hs("p", url), subject).is_some(),
+                    want,
+                    "{label}: project pin blocks({url})"
+                )
+            }
             Expect::AutoUpdatePin(source) => {
                 assert_eq!(
                     ms.plugin_auto_update.source(),
@@ -1806,13 +1985,8 @@ fn assert_expects(label: &str, ms: &ManagedSettings, expects: Vec<Expect>) {
         }
     }
 }
-/// What these scenarios pin: layer resolution is strictest-wins (any deny
-/// wins, every restricted source must allow — intersection, never union),
-/// pins only tighten and are attributed to the first pinning layer in trust
-/// order, extras names resolve trust-descending regardless of load order,
-/// grok's own TOML layers bind native subjects while the vendor Claude file
-/// is advisory (foreign subjects only), and malformed values degrade
-/// per-key, never dropping a layer's healthy pins.
+/// Pins strictest-wins layer resolution: any deny wins, restricted sources intersect, pins only tighten.
+/// Grok TOML binds native subjects; vendor Claude is advisory. Malformed values degrade per-key and never drop healthy pins.
 #[test]
 fn layer_resolution_semantics() {
     assert_expects(
@@ -1933,6 +2107,18 @@ source = { source = "git", url = "https://github.com/corp/approved.git", ref = "
         ],
     );
     assert_expects(
+        "an admin-owned vendor pin upgrades a user-owned auto-update pin",
+        &layered(
+            Some(serde_json::json!({ "pluginAutoUpdate": false })),
+            &[(
+                PolicyLayerTier::UserManaged,
+                USER_MANAGED,
+                "plugin_auto_update = false\n",
+            )],
+        ),
+        vec![Expect::AutoUpdatePin(Some(CLAUDE_PATH))],
+    );
+    assert_expects(
         "non-finite float elsewhere in a layer keeps its policy pins",
         &layered(
             None,
@@ -1954,7 +2140,7 @@ server_name = "blocked"
         ],
     );
     assert_expects(
-        "wrong-typed policy lists do not drop sibling keys",
+        "wrong-typed policy lists lock down without dropping sibling keys",
         &layered(
             None,
             &[(
@@ -1969,12 +2155,31 @@ strict_known_marketplaces = "https://github.com/corp/x.git"
         ),
         vec![
             Expect::Denied("evil", "https://evil.example.com/mcp", FOREIGN, false),
-            Expect::MarketRestricted(false),
+            Expect::Allowed("evil", "https://evil.example.com/mcp", FOREIGN, false),
+            Expect::MarketRestricted(true),
+            Expect::MarketUrl("https://github.com/corp/x.git", FOREIGN, false),
             Expect::AutoUpdatePin(Some(SYS_REQ)),
         ],
     );
     assert_expects(
-        "unstringifiable values inside deny entries warn-drop those entries only",
+        "an empty strict marketplace list locks add and install down",
+        &layered(
+            None,
+            &[(
+                PolicyLayerTier::SystemRequirements,
+                SYS_REQ,
+                "strict_known_marketplaces = []\n",
+            )],
+        ),
+        vec![
+            Expect::MarketRestricted(true),
+            Expect::MarketUrl("https://github.com/any/repo.git", NATIVE, false),
+            Expect::MarketAddBlocked("https://github.com/any/repo.git", true),
+            Expect::MarketAddBlocked("/opt/local-marketplace", true),
+        ],
+    );
+    assert_expects(
+        "unstringifiable values inside deny entries fail the key closed",
         &layered(
             None,
             &[
@@ -2004,6 +2209,7 @@ server_url = inf
             Expect::AutoUpdatePin(Some(SYS_REQ)),
             Expect::ProjectMcpPin(Some(USER_REQ)),
             Expect::Denied("t", "https://x.example.com/mcp", FOREIGN, false),
+            Expect::Allowed("t", "https://x.example.com/mcp", FOREIGN, false),
         ],
     );
     assert_expects(
@@ -2149,31 +2355,221 @@ server_url = "https://user.example.com/*"
         vec![Expect::AutoUpdatePin(None)],
     );
 }
-/// A wrong-typed extras-level `autoUpdate` can't be honored as an opt-out;
-/// it must warn like every other policy bool instead of dropping silently.
+/// An admin-owned lockdown (any admin tier) accepts only admin-owned entries,
+/// wherever they are shipped; a user-owned lockdown accepts any layer's entry.
 #[test]
-fn extras_auto_update_wrong_type_warns_and_does_not_pin() {
-    let (ms, logs) = capturing_warn_logs(|| {
-        layered(
+fn user_layer_cannot_satisfy_admin_managed_only_grant() {
+    const LOCKDOWN: &str = "allow_managed_mcp_servers_only = true\n";
+    const GRANT: &str = r#"
+[[allowed_mcp_servers]]
+server_url = "https://ok.example.com/*"
+"#;
+    let allowed = |want| Expect::Allowed("ok", "https://ok.example.com/mcp", FOREIGN, want);
+    for (admin, admin_path) in ADMIN_TIERS {
+        for (user, user_path) in USER_TIERS {
+            assert_expects(
+                &format!("a {user:?} grant must not satisfy a {admin:?} lockdown"),
+                &layered(
+                    None,
+                    &[(admin, admin_path, LOCKDOWN), (user, user_path, GRANT)],
+                ),
+                vec![allowed(false)],
+            );
+        }
+    }
+    assert_expects(
+        "admin entries satisfy an admin lockdown shipped in another admin tier",
+        &layered(
+            None,
+            &[
+                (PolicyLayerTier::Mdm, MDM_REQ, LOCKDOWN),
+                (PolicyLayerTier::SystemManaged, SYS_MANAGED, GRANT),
+            ],
+        ),
+        vec![allowed(true)],
+    );
+    assert_expects(
+        "a user-pinned lockdown accepts an admin grant",
+        &layered(
+            None,
+            &[
+                (PolicyLayerTier::UserManaged, USER_MANAGED, LOCKDOWN),
+                (PolicyLayerTier::SystemRequirements, SYS_REQ, GRANT),
+            ],
+        ),
+        vec![allowed(true)],
+    );
+    assert_expects(
+        "a user-pinned lockdown accepts the same file's grant",
+        &layered(
+            None,
+            &[(
+                PolicyLayerTier::UserManaged,
+                USER_MANAGED,
+                &format!("{LOCKDOWN}{GRANT}"),
+            )],
+        ),
+        vec![allowed(true)],
+    );
+    assert_expects(
+        "vendor entries are admin-owned and satisfy an admin TOML lockdown",
+        &layered(
             Some(serde_json::json!({
-                "extraKnownMarketplaces": {
-                    "corp": {
-                        "source": { "source": "git", "url": "https://github.com/corp/approved.git" },
-                        "autoUpdate": "false"
-                    }
-                }
+                "allowedMcpServers": [ { "serverUrl": "https://ok.example.com/*" } ]
             })),
-            &[],
-        )
-    });
-    assert!(
-        !ms.plugin_auto_update.is_disabled(),
-        "a wrong-typed autoUpdate must not pin"
+            &[(PolicyLayerTier::SystemManaged, SYS_MANAGED, LOCKDOWN)],
+        ),
+        vec![allowed(true)],
     );
-    assert!(
-        logs.contains("policy key must be a boolean"),
-        "wrong-typed autoUpdate must warn, got: {logs:?}"
+}
+/// The project-MCP pin's exception grant is ownership-aware; a user-owned pin
+/// upgrades (with re-attribution) when the admin-owned vendor file also pins.
+#[test]
+fn admin_project_pin_ignores_user_layer_grants() {
+    const PIN: &str = "enable_all_project_mcp_servers = false\n";
+    const GRANT: &str = r#"
+[[allowed_mcp_servers]]
+server_url = "https://proj.example.com/*"
+"#;
+    let blocked = |want| Expect::ProjectPinBlocks("https://proj.example.com/mcp", want);
+    for (user, user_path) in USER_TIERS {
+        assert_expects(
+            &format!("an admin pin ignores a {user:?} grant"),
+            &layered(
+                None,
+                &[
+                    (PolicyLayerTier::SystemManaged, SYS_MANAGED, PIN),
+                    (user, user_path, GRANT),
+                ],
+            ),
+            vec![blocked(true)],
+        );
+    }
+    assert_expects(
+        "an admin grant carves the exception out of an admin pin",
+        &layered(
+            None,
+            &[
+                (PolicyLayerTier::SystemManaged, SYS_MANAGED, PIN),
+                (PolicyLayerTier::SystemRequirements, SYS_REQ, GRANT),
+            ],
+        ),
+        vec![blocked(false)],
     );
+    assert_expects(
+        "a user pin accepts an admin grant",
+        &layered(
+            None,
+            &[
+                (PolicyLayerTier::UserManaged, USER_MANAGED, PIN),
+                (PolicyLayerTier::SystemRequirements, SYS_REQ, GRANT),
+            ],
+        ),
+        vec![blocked(false)],
+    );
+    assert_expects(
+        "a user pin accepts the same file's grant",
+        &layered(
+            None,
+            &[(
+                PolicyLayerTier::UserManaged,
+                USER_MANAGED,
+                &format!("{PIN}{GRANT}"),
+            )],
+        ),
+        vec![blocked(false)],
+    );
+    assert_expects(
+        "the vendor file's pin upgrades a user pin: the user grant stops counting",
+        &layered(
+            Some(serde_json::json!({ "enableAllProjectMcpServers": false })),
+            &[(
+                PolicyLayerTier::UserManaged,
+                USER_MANAGED,
+                &format!("{PIN}{GRANT}"),
+            )],
+        ),
+        vec![blocked(true), Expect::ProjectMcpPin(Some(CLAUDE_PATH))],
+    );
+    assert_expects(
+        "an admin pin set first stays admin-attributed when a user layer also pins",
+        &layered(
+            None,
+            &[
+                (PolicyLayerTier::SystemManaged, SYS_MANAGED, PIN),
+                (
+                    PolicyLayerTier::UserManaged,
+                    USER_MANAGED,
+                    &format!("{PIN}{GRANT}"),
+                ),
+            ],
+        ),
+        vec![blocked(true), Expect::ProjectMcpPin(Some(SYS_MANAGED))],
+    );
+}
+/// Every auto-update pin that is not a literal `pluginAutoUpdate = false` warns with
+/// the source path and the consequence: fail-closed bools and extras entries alike.
+/// Rows are (label, source, needle, WARN lines): one defect is reported once.
+#[test]
+fn auto_update_pin_warnings_name_the_source_and_consequence() {
+    let path = std::path::Path::new(CLAUDE_PATH);
+    let git = serde_json::json!({ "source": "git", "url": "https://github.com/corp/approved.git" });
+    let cases = [
+        (
+            "wrong-typed extras autoUpdate (block on error)",
+            serde_json::json!({
+                "extraKnownMarketplaces": { "corp": { "source": git.clone(), "autoUpdate": "false" } }
+            }),
+            "policy key must be a boolean",
+            2,
+        ),
+        (
+            "conflicting spellings of a bool pin",
+            serde_json::json!({ "pluginAutoUpdate": true, "plugin_auto_update": false }),
+            "applying the fail-closed value",
+            1,
+        ),
+        (
+            "extras entry opting out (widened to the global pin)",
+            serde_json::json!({
+                "extraKnownMarketplaces": { "corp": { "source": git.clone(), "autoUpdate": false } }
+            }),
+            "pinned off",
+            1,
+        ),
+        (
+            "string-shorthand extras entry (opt-out unknowable)",
+            serde_json::json!({
+                "extraKnownMarketplaces": { "corp": "https://github.com/corp/approved.git" }
+            }),
+            "pinned off",
+            1,
+        ),
+        (
+            "conflicting spellings of the extras table (opt-outs unknowable)",
+            serde_json::json!({
+                "extraKnownMarketplaces": { "corp": { "source": git.clone() } },
+                "extra_known_marketplaces": {}
+            }),
+            "pinned off",
+            1,
+        ),
+    ];
+    for (label, json, needle, warns) in cases {
+        let (ms, logs) = capturing_warn_logs(|| parse_managed_settings_json(&json, path));
+        assert!(ms.plugin_auto_update.is_disabled(), "{label}: must pin off");
+        for needle in [needle, CLAUDE_PATH] {
+            assert!(
+                logs.contains(needle),
+                "{label}: missing {needle:?} in: {logs:?}"
+            );
+        }
+        assert_eq!(
+            logs.matches("WARN").count(),
+            warns,
+            "{label}: WARN lines in: {logs:?}"
+        );
+    }
 }
 /// The full GA fixture: all 43 allowedMcpServers entries parse — zero dropped.
 #[test]
@@ -2232,6 +2628,10 @@ fn enterprise_ga_fixture_parses_all_entries() {
         &hs("design", "https://mcp.design-tool.example/mcp"),
         FOREIGN
     ));
+    assert!(ms.mcp_allowlist.is_server_allowed(
+        &hs("kb", "https://knowledge-mcp.cloud.example/mcp"),
+        FOREIGN
+    ));
     assert!(
         !ms.mcp_allowlist
             .is_server_allowed(&ss("rogue", "python3"), FOREIGN)
@@ -2243,6 +2643,69 @@ fn enterprise_ga_fixture_parses_all_entries() {
     ));
     assert_eq!(ms.extra_marketplaces.len(), 1);
     assert_eq!(ms.extra_marketplaces[0].name, "approved-plugins");
+}
+/// A managed-only block is attributed to a lockdown source that is actually
+/// unsatisfied — never to a source whose own allowlist contains the server.
+#[test]
+fn managed_only_block_names_an_unsatisfied_lockdown_source() {
+    let ms = layered(
+        Some(serde_json::json!({ "allowManagedMcpServersOnly": true })),
+        &[(
+            PolicyLayerTier::UserManaged,
+            USER_MANAGED,
+            r#"
+allow_managed_mcp_servers_only = true
+
+[[allowed_mcp_servers]]
+server_url = "https://ok.example.com/*"
+"#,
+        )],
+    );
+    let server = hs("ok", "https://ok.example.com/mcp");
+    let subject = McpSubject {
+        origin: FOREIGN,
+        project_scoped: false,
+    };
+    let McpVerdict::Blocked(reason) = ms.mcp_verdict(&server, subject) else {
+        panic!("the admin lockdown must block the user-granted server");
+    };
+    assert!(
+        matches!(&reason, McpBlockReason::NotGranted { source } if source == Path::new(CLAUDE_PATH)),
+        "block must name the unsatisfied vendor lockdown, not the user file \
+         whose allowlist contains the server; got {reason:?}"
+    );
+}
+/// Extras name dedupe is ownership-aware: a user layer cannot claim a name ahead
+/// of the vendor file's admin-owned entry (e.g. one carrying a Local pin).
+#[test]
+fn vendor_admin_extra_wins_name_over_user_layer_squat() {
+    let ms = layered(
+        Some(serde_json::json!({
+            "extraKnownMarketplaces": {
+                "corp": { "source": { "source": "local", "path": "/opt/mp" } }
+            }
+        })),
+        &[(
+            PolicyLayerTier::UserManaged,
+            USER_MANAGED,
+            r#"
+[extra_known_marketplaces.corp]
+source = { source = "git", url = "https://github.com/user/squat.git" }
+"#,
+        )],
+    );
+    assert_eq!(ms.extra_marketplaces.len(), 1);
+    assert_eq!(
+        ms.extra_marketplaces[0].ownership,
+        PolicyLayerOwnership::Admin,
+        "the admin-owned vendor pin must win the name over the user squat"
+    );
+    assert_eq!(
+        ms.extra_marketplaces[0].kind,
+        ManagedMarketplaceKind::Local {
+            path: "/opt/mp".into()
+        }
+    );
 }
 /// Real-file fixture through `managed_config_layers_at` →
 /// `managed_toml_policy_layers` → `resolve_managed_settings`: if layer
@@ -2280,8 +2743,22 @@ source = { source = "local", path = "/tmp/mp" }
 "#,
     )
     .unwrap();
+    let user_requirements = xai_grok_config::RequirementsLayer {
+        value: toml::from_str(
+            r#"
+[[allowed_mcp_servers]]
+server_url = "https://ok.example.com/*"
+"#,
+        )
+        .unwrap(),
+        source: xai_grok_config::RequirementsSource::File(user.path().join("requirements.toml")),
+        is_system: false,
+    };
     let layers = xai_grok_config::managed_config_layers_at(Some(system.path()), Some(user.path()));
-    let ms = resolve_managed_settings(None, managed_toml_policy_layers(layers, vec![]));
+    let ms = resolve_managed_settings(
+        None,
+        managed_toml_policy_layers(layers, vec![user_requirements]),
+    );
     assert!(
         ms.mcp_allowlist
             .is_server_denied(&hs("evil", "https://evil.example.com/mcp"), NATIVE)
@@ -2298,8 +2775,13 @@ source = { source = "local", path = "/tmp/mp" }
             .is_url_allowed("https://github.com/evil/repo.git", NATIVE)
     );
     assert!(
-        ms.mcp_allowlist
+        !ms.mcp_allowlist
             .is_server_allowed(&hs("ok", "https://ok.example.com/mcp"), NATIVE)
+    );
+    assert!(
+        ms.mcp_allowlist
+            .source_paths()
+            .contains(&user.path().join("requirements.toml").as_path())
     );
     let ownership: std::collections::HashMap<&str, PolicyLayerOwnership> = ms
         .extra_marketplaces
@@ -2373,8 +2855,43 @@ fn marketplace_block_reason_names_the_actual_blocker() {
         .add_block_reason("https://github.com/extra/repo.git")
         .expect("blocked by the strict source");
     assert!(
-        reason.contains(SYS_REQ),
+        reason.contains("requirements.toml") && !reason.contains("managed-settings.json"),
         "reason must name the blocking source, got: {reason}"
+    );
+    assert!(
+        !reason.contains("/etc/grok/"),
+        "user-facing refusal must not leak the policy directory, got: {reason}"
+    );
+    assert!(
+        policy
+            .block_reason(
+                "https://github.com/extra/repo.git",
+                PolicySubjectOrigin::Foreign
+            )
+            .contains(SYS_REQ)
+    );
+}
+/// User-facing MCP refusals name the policy file only; `Display` (doctor
+/// details, `mcp list --json`, tracing logs) keeps the full path.
+#[test]
+fn mcp_block_reason_user_facing_form_names_the_file_only() {
+    let reason = McpBlockReason::Deny {
+        source: PathBuf::from("/etc/grok/managed_config.toml"),
+    };
+    assert_eq!(
+        reason.to_string(),
+        "matches deniedMcpServers (/etc/grok/managed_config.toml)"
+    );
+    assert_eq!(
+        reason.user_facing_reason(),
+        "matches deniedMcpServers (managed_config.toml)"
+    );
+    let unattributed = McpBlockReason::NotGranted {
+        source: PathBuf::new(),
+    };
+    assert_eq!(
+        unattributed.user_facing_reason(),
+        "not in allowedMcpServers ()"
     );
 }
 #[test]
@@ -2394,4 +2911,357 @@ fn parse_managed_settings_reads_nested_default_mode() {
     });
     let ms_auto = parse_managed_settings_json(&auto_json, path);
     assert_eq!(ms_auto.default_mode, Some(DefaultPermissionMode::Auto));
+}
+/// `allowedMcpServers` PRESENT but empty is a lockdown (vendor managed-settings semantics), unlike an absent key.
+#[test]
+fn present_empty_allowlist_is_lockdown() {
+    let any = || hs("any", "https://any.example.com/mcp");
+    let empty = allowlist_from(serde_json::json!({ "allowedMcpServers": [] }));
+    assert!(has_lockdown_source(&empty));
+    assert!(!empty.is_server_allowed(&any(), FOREIGN));
+    assert!(!empty.is_server_allowed(&ss("any", "npx"), FOREIGN));
+    assert!(empty.is_server_allowed(&hs("native", "https://any.example.com/mcp"), NATIVE));
+    let unsupported = allowlist_from(serde_json::json!({
+        "allowedMcpServers": [ { "serverTypo": "internal-only" } ]
+    }));
+    assert!(has_lockdown_source(&unsupported));
+    assert!(!unsupported.is_server_allowed(&any(), FOREIGN));
+    let absent = allowlist_from(serde_json::json!({}));
+    assert!(!absent.is_restricted());
+    assert!(absent.is_server_allowed(&any(), FOREIGN));
+}
+/// An explicit empty DENY list is a no-op: present-but-empty is a lockdown only
+/// for allow lists (a deny scaffold must stay harmless).
+#[test]
+fn present_empty_denylist_is_harmless() {
+    let any = || hs("any", "https://any.example.com/mcp");
+    let empty = allowlist_from(serde_json::json!({ "deniedMcpServers": [] }));
+    assert!(!empty.is_restricted());
+    assert!(empty.is_server_allowed(&any(), FOREIGN));
+    let ms = layered(
+        None,
+        &[(
+            PolicyLayerTier::SystemRequirements,
+            SYS_REQ,
+            "denied_mcp_servers = []\n",
+        )],
+    );
+    assert!(!ms.mcp_allowlist.is_restricted());
+    assert!(ms.mcp_allowlist.is_server_allowed(&any(), NATIVE));
+}
+/// `strictKnownMarketplaces: []` is a complete lockdown, as is a strict list
+/// whose every entry is unsupported (local paths).
+#[test]
+fn strict_marketplaces_present_empty_is_lockdown() {
+    let path = std::path::Path::new(CLAUDE_PATH);
+    let repo = "https://github.com/any/repo.git";
+    let ms =
+        parse_managed_settings_json(&serde_json::json!({ "strictKnownMarketplaces": [] }), path);
+    assert!(ms.marketplace_allowlist.is_restricted());
+    assert!(!ms.marketplace_allowlist.is_url_allowed(repo, FOREIGN));
+    assert!(ms.marketplace_allowlist.is_url_allowed(repo, NATIVE));
+    let ms = parse_managed_settings_json(
+        &serde_json::json!({
+            "strictKnownMarketplaces": [ { "source": "local", "path": "/opt/mp" } ]
+        }),
+        path,
+    );
+    assert!(ms.marketplace_allowlist.is_restricted());
+    assert!(!ms.marketplace_allowlist.is_url_allowed(repo, FOREIGN));
+}
+/// Present-but-wrong-typed policy keys fail closed, never open.
+#[test]
+fn malformed_policy_keys_fail_closed() {
+    let path = std::path::Path::new(CLAUDE_PATH);
+    let any = hs("any", "https://any.example.com/mcp");
+    let ms = parse_managed_settings_json(&serde_json::json!({ "allowedMcpServers": "oops" }), path);
+    assert!(has_lockdown_source(&ms.mcp_allowlist));
+    assert!(!ms.mcp_allowlist.is_server_allowed(&any, FOREIGN));
+    let ms = parse_managed_settings_json(&serde_json::json!({ "deniedMcpServers": 7 }), path);
+    assert!(has_lockdown_source(&ms.mcp_allowlist));
+    assert!(!ms.mcp_allowlist.is_server_allowed(&any, FOREIGN));
+    assert!(!ms.mcp_allowlist.is_server_denied(&any, FOREIGN));
+    let ms = parse_managed_settings_json(
+        &serde_json::json!({
+            "allowedMcpServers": [ { "serverUrl": "https://ok.example.com/*" } ],
+            "deniedMcpServers": 7
+        }),
+        path,
+    );
+    assert!(has_lockdown_source(&ms.mcp_allowlist));
+    assert!(
+        !ms.mcp_allowlist
+            .is_server_allowed(&hs("ok", "https://ok.example.com/mcp"), FOREIGN)
+    );
+    let ms = parse_managed_settings_json(
+        &serde_json::json!({ "allowManagedMcpServersOnly": "yes" }),
+        path,
+    );
+    assert!(ms.mcp_allowlist.managed_only(FOREIGN));
+    let ms =
+        parse_managed_settings_json(&serde_json::json!({ "strictKnownMarketplaces": 42 }), path);
+    assert!(ms.marketplace_allowlist.is_restricted());
+    assert!(
+        !ms.marketplace_allowlist
+            .is_url_allowed("https://github.com/any/repo.git", FOREIGN)
+    );
+    let ms = parse_managed_settings_json(
+        &serde_json::json!({
+            "enableAllProjectMcpServers": "nope",
+            "pluginAutoUpdate": 1
+        }),
+        path,
+    );
+    assert!(ms.project_mcp.is_disabled());
+    assert!(ms.plugin_auto_update.is_disabled());
+}
+/// Both spellings of a policy key in ONE source with different values must fail
+/// closed like the cross-source combination, not fail open via camel shadowing.
+#[test]
+fn conflicting_key_spellings_in_one_source_fail_closed() {
+    let ms = layered(
+        None,
+        &[(
+            PolicyLayerTier::SystemRequirements,
+            SYS_REQ,
+            r#"
+allowManagedMcpServersOnly = false
+allow_managed_mcp_servers_only = true
+
+deniedMcpServers = []
+
+[[denied_mcp_servers]]
+server_url = "https://evil.example.com/*"
+"#,
+        )],
+    );
+    assert!(ms.mcp_allowlist.managed_only(FOREIGN));
+    let evil = hs("evil", "https://evil.example.com/mcp");
+    assert!(has_lockdown_source(&ms.mcp_allowlist));
+    assert!(!ms.mcp_allowlist.is_server_allowed(&evil, FOREIGN));
+    assert!(!ms.mcp_allowlist.is_server_denied(&evil, FOREIGN));
+    let ms = layered(
+        None,
+        &[(
+            PolicyLayerTier::SystemRequirements,
+            SYS_REQ,
+            "allowManagedMcpServersOnly = true\nallow_managed_mcp_servers_only = true\n",
+        )],
+    );
+    assert!(ms.mcp_allowlist.managed_only(FOREIGN));
+    assert!(
+        !ms.mcp_allowlist
+            .is_server_allowed(&hs("any", "https://any.example.com/mcp"), FOREIGN)
+    );
+}
+/// One entry carrying both spellings of a field with different values is ambiguous:
+/// a deny entry fails the key closed (lockdown), an allow entry grants nothing.
+#[test]
+fn conflicting_entry_field_spellings_fail_closed() {
+    let conflict = serde_json::json!(
+        { "serverUrl": "https://evil.example/*", "server_url": "https://other.example/*" }
+    );
+    let deny = serde_json::json!({ "deniedMcpServers": [conflict.clone()] });
+    assert!(parse_mcp_entry_list(&deny, McpPolicyList::Deny).is_malformed());
+    let locked = allowlist_from(deny);
+    assert!(has_lockdown_source(&locked));
+    assert!(!locked.is_server_allowed(&hs("other", "https://other.example/mcp"), FOREIGN));
+    let allow = serde_json::json!({ "allowedMcpServers": [conflict] });
+    let (entries, logs) = parse_mcp_entries_capturing_logs(&allow, McpPolicyList::Allow);
+    assert!(
+        entries.is_empty(),
+        "an ambiguous allow entry grants nothing: {entries:?}"
+    );
+    assert!(!parse_mcp_entry_list(&allow, McpPolicyList::Allow).is_malformed());
+    assert!(
+        logs.contains("ambiguously spelled"),
+        "the ambiguous entry must warn, got: {logs:?}"
+    );
+    let json = serde_json::json!({
+        "deniedMcpServers": [
+            { "serverUrl": "https://evil.example/*", "server_url": "https://evil.example/*" }
+        ]
+    });
+    let (entries, logs) = parse_mcp_entries_capturing_logs(&json, McpPolicyList::Deny);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(logs.matches("WARN").count(), 0, "{logs:?}");
+}
+/// A layer whose policy keys cannot be converted fails CLOSED — as if every key
+/// were present-but-malformed — never silently unwinding its denies and pins.
+#[test]
+fn unreadable_policy_layer_locks_down() {
+    let mut ms = ManagedSettings::default();
+    apply_unreadable_policy_source(
+        &mut ms,
+        std::path::Path::new(SYS_REQ),
+        PolicyLayerTier::SystemRequirements,
+    );
+    assert!(
+        !ms.mcp_allowlist
+            .is_server_allowed(&hs("any", "https://any.example.com/mcp"), NATIVE)
+    );
+    assert!(
+        !ms.marketplace_allowlist
+            .is_url_allowed("https://github.com/any/repo.git", NATIVE)
+    );
+    assert!(ms.project_mcp.is_disabled());
+    assert!(ms.plugin_auto_update.is_disabled());
+}
+/// An unreadable `extraKnownMarketplaces` key fails closed on the auto-update
+/// pin: a lost `autoUpdate: false` opt-out must not fail open.
+#[test]
+fn unreadable_extras_fail_closed_on_auto_update_pin() {
+    let path = std::path::Path::new(CLAUDE_PATH);
+    let ms = parse_managed_settings_json(
+        &serde_json::json!({
+            "extraKnownMarketplaces": [
+                {
+                    "source": { "source": "git", "url": "https://github.com/corp/approved.git" },
+                    "autoUpdate": false
+                }
+            ]
+        }),
+        path,
+    );
+    assert!(ms.extra_marketplaces.is_empty());
+    assert!(ms.plugin_auto_update.is_disabled());
+    let ms = parse_managed_settings_json(
+        &serde_json::json!({
+            "extraKnownMarketplaces": {
+                "corp": { "source": { "source": "gti" }, "autoUpdate": false }
+            }
+        }),
+        path,
+    );
+    assert!(ms.extra_marketplaces.is_empty());
+    assert!(ms.plugin_auto_update.is_disabled());
+    let ms = parse_managed_settings_json(
+        &serde_json::json!({
+            "extraKnownMarketplaces": {
+                "corp": [ {
+                    "source": { "source": "git", "url": "https://github.com/corp/approved.git" },
+                    "autoUpdate": false
+                } ]
+            }
+        }),
+        path,
+    );
+    assert!(ms.extra_marketplaces.is_empty());
+    assert!(ms.plugin_auto_update.is_disabled());
+    let ms = parse_managed_settings_json(
+        &serde_json::json!({
+            "extraKnownMarketplaces": {
+                "corp": { "source": { "source": "gti" } }
+            }
+        }),
+        path,
+    );
+    assert!(!ms.plugin_auto_update.is_disabled());
+    let ms = parse_managed_settings_json(
+        &serde_json::json!({
+            "extraKnownMarketplaces": {
+                "corp": {
+                    "source": { "source": "git", "url": "https://github.com/corp/a.git" },
+                    "autoUpdate": false
+                }
+            },
+            "extra_known_marketplaces": {
+                "corp": {
+                    "source": { "source": "git", "url": "https://github.com/corp/b.git" }
+                }
+            }
+        }),
+        path,
+    );
+    assert!(ms.extra_marketplaces.is_empty());
+    assert!(ms.plugin_auto_update.is_disabled());
+}
+/// The TOML spelling of the present-empty lockdown (`allowed_mcp_servers = []`)
+/// locks down through the layered path; no sibling allow entry punches through.
+#[test]
+fn toml_present_empty_allowlist_locks_down_despite_sibling_grant() {
+    let ms = layered(
+        None,
+        &[
+            (
+                PolicyLayerTier::SystemManaged,
+                SYS_MANAGED,
+                "allowed_mcp_servers = []\n",
+            ),
+            (
+                PolicyLayerTier::SystemRequirements,
+                SYS_REQ,
+                "[[allowed_mcp_servers]]\nserver_url = \"https://ok.example.com/*\"\n",
+            ),
+        ],
+    );
+    assert!(ms.mcp_allowlist.is_restricted());
+    assert!(
+        !ms.mcp_allowlist
+            .is_server_allowed(&hs("ok", "https://ok.example.com/mcp"), NATIVE),
+        "an empty-allowlist lockdown is absolute; even an admin sibling's \
+         matching allow entry must not satisfy it"
+    );
+}
+/// Dropping an unenforceable deny entry would block nothing, so the key is
+/// malformed and the source is a lockdown (the warning is pinned in the parse table).
+#[test]
+fn unsupported_deny_entry_fails_the_key_closed() {
+    let json = serde_json::json!({
+        "deniedMcpServers": [
+            { "serverTypo": "internal-only" },
+            { "serverUrl": "https://blocked.com/*" }
+        ]
+    });
+    assert!(parse_mcp_entry_list(&json, McpPolicyList::Deny).is_malformed());
+    let locked = allowlist_from(json);
+    assert!(has_lockdown_source(&locked));
+    assert!(!locked.is_server_allowed(&hs("any", "https://any.example.com/mcp"), FOREIGN));
+}
+/// Every lockdown warns with the source path and the consequence, whatever the cause:
+/// wrong-typed or conflicting key, empty or all-unsupported MCP allowlist, all-local strict list.
+#[test]
+fn lockdown_warnings_name_the_source_and_consequence() {
+    let path = std::path::Path::new(CLAUDE_PATH);
+    let wrong_typed = serde_json::json!({ "allowedMcpServers": "nope" });
+    let conflicting = serde_json::json!({
+        "deniedMcpServers": [],
+        "denied_mcp_servers": [ { "serverUrl": "https://evil.example/*" } ]
+    });
+    let zero_entries = serde_json::json!({
+        "allowedMcpServers": [],
+        "strictKnownMarketplaces": [ { "source": "local", "path": "/opt/mp" } ]
+    });
+    for (label, json, needle) in [
+        (
+            "wrong-typed key",
+            &wrong_typed,
+            "policy key must be an array of entries; failing closed",
+        ),
+        (
+            "conflicting spellings",
+            &conflicting,
+            "policy key is spelled both ways with different values; failing closed",
+        ),
+    ] {
+        let (_, logs) = capturing_warn_logs(|| parse_managed_settings_json(json, path));
+        for needle in [needle, "MCP lockdown", CLAUDE_PATH] {
+            assert!(
+                logs.contains(needle),
+                "{label}: missing {needle:?} in: {logs:?}"
+            );
+        }
+        assert_eq!(logs.matches("WARN").count(), 2, "{label}: {logs:?}");
+    }
+    let (_, logs) = capturing_warn_logs(|| parse_managed_settings_json(&zero_entries, path));
+    for needle in ["MCP lockdown", "marketplace lockdown", CLAUDE_PATH] {
+        assert!(logs.contains(needle), "missing {needle:?} in: {logs:?}");
+    }
+    let (_, logs) = capturing_warn_logs(|| {
+        parse_managed_settings_json(
+            &serde_json::json!({ "allowedMcpServers": [ { "serverUrl": "https://ok.example/*" } ] }),
+            path,
+        )
+    });
+    assert!(!logs.contains("lockdown"), "unexpected warning: {logs:?}");
 }

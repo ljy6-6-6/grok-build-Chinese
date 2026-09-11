@@ -51,13 +51,8 @@ pub(super) fn sanitize_suggestion(label: &str) -> String {
 }
 
 /// Handle `x.ai/follow_ups`: render follow-up suggestion chips for the latest assistant response.
-///
-/// The keying that lets the newest response win lives in [`AgentView::apply_follow_ups`].
 /// The reserved `_meta["x.ai/replayed"] == true` marker suppresses rendering (it is absent today and treated as optional).
-/// The params carry no session id, so chips target the active agent.
 /// A background agent's follow-ups would mis-route until the shell adds a session id.
-/// Server-controlled count and label length are bounded and labels sanitized at ingestion.
-/// Malformed or partial payloads are ignored (no chip, no panic).
 pub(super) fn handle_follow_ups(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     let Ok(params) = serde_json::from_str::<FollowUpsParams>(notif.params.get()) else {
         return false;

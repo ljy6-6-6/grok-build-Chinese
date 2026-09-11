@@ -18,6 +18,15 @@ fn localized_named(
     }
     output
 }
+pub(crate) fn stamp_phase_traceparent(meta: &mut Option<agent_client_protocol::Meta>) {
+    let Some(span) = xai_grok_telemetry::startup::current_phase_span() else {
+        return;
+    };
+    if let Some(tp) = xai_grok_otel::traceparent_of_span(&span) {
+        meta.get_or_insert_with(agent_client_protocol::Meta::new)
+            .insert("traceparent".into(), serde_json::Value::String(tp));
+    }
+}
 /// Session-create intent deferred until [`AppView::session_startup_allowed`].
 ///
 /// Replaces the prior matrix of `startup_load_session`, cwd, the `startup_fork` tuple, and ad-hoc preferred-only replay.
@@ -67,11 +76,19 @@ impl DeferredStartupActions {
     pub fn take(&mut self) -> Self {
         std::mem::take(self)
     }
+    /// Startup will leave Welcome immediately (resume, CLI prompt, worktree, dashboard).
+    /// Optimistic home create must not run — it would be abandoned mid-flight.
+    pub fn leaves_home(&self) -> bool {
+        self.session.is_some()
+            || self.preferred_session_id.is_some()
+            || self.worktree
+            || self.new_session
+            || self.prompt.is_some()
+            || self.open_dashboard
+    }
 }
 /// Build `x.ai/session/fork` params shared by TUI effects and headless.
-///
-/// `new_cwd` is the write namespace for the child (parent session cwd when
-/// cross-cwd); preflight must use the same path via [`effective_fork_new_cwd`].
+/// `new_cwd` is the write namespace for the child (parent session cwd when cross-cwd); preflight must use the same path via [`effective_fork_new_cwd`].
 pub fn fork_session_params(
     parent_session_id: &str,
     parent_cwd: &Path,
@@ -548,7 +565,6 @@ pub fn validate_local_workspace_cwd(path: &std::path::Path) -> anyhow::Result<st
     Ok(canon)
 }
 /// Banner and first-run confirm for the local-workspace own and attach modes.
-///
 /// Skip confirm only with `GROK_CHAT_LOCAL_WORKSPACE_ACK=1` or a prior ack file.
 /// Non-TTY without ACK refuses (fail closed).
 #[cfg(feature = "local-workspace")]
@@ -607,9 +623,7 @@ pub fn write_local_workspace_ack() {
     }
 }
 /// Fail closed unless advertised tools are FS-only.
-///
-/// Until diag exposes a real tool catalog, attach trusts operator attestation
-/// via `GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS` (comma-separated ids).
+/// Until diag exposes a real tool catalog, attach trusts operator attestation via `GROK_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS` (comma-separated ids).
 /// Unset or empty means refuse.
 #[cfg(feature = "local-workspace")]
 pub fn ensure_attach_fs_only_toolset(_server_id: &str) -> anyhow::Result<()> {
@@ -636,10 +650,8 @@ fn local_workspace_ack_path() -> Option<std::path::PathBuf> {
     xai_grok_config::user_grok_home().map(|home| home.join("local_workspace_ack"))
 }
 /// Conservative shape check for a chat-mode `--resume <id>` passthrough.
-///
 /// The id skips disk and GCS resolution and flows to the gateway, but the local cwd-collision check also path-joins it.
 /// So reject path separators, dots, and anything outside the conversation-id alphabet before it leaves materialization.
-/// Existence is still validated by the gateway at load.
 pub fn valid_conversation_id_shape(id: &str) -> bool {
     !id.is_empty()
         && id
@@ -663,11 +675,8 @@ pub fn chat_mode_refuses_local_build(
     chat_mode && !conversation_entry && is_local_build_on_disk
 }
 /// Process-wide `--chat` must not load (or coerce) local Build disk rows.
-///
 /// `conversation_entry` is true only for picker or list rows with `source == "conversation"` (or a restore that preserved that bit).
 /// It is **not** set merely because sticky `--chat` or `chat_mode` is on.
-///
-/// Short-circuits before any disk walk when `--chat` is off or the row is a conversation entry.
 pub fn chat_mode_refuses_local_build_load(
     chat_mode: bool,
     conversation_entry: bool,
@@ -759,6 +768,28 @@ impl MaterializeCtx {
         }
     }
 }
+/// Cwd a new worktree session opens in (the interactive and headless SSOT).
+pub fn worktree_session_cwd(
+    worktree_root: &Path,
+    source_git_root: Option<&str>,
+    launch_cwd: &Path,
+) -> PathBuf {
+    let Some(git_root) = source_git_root else {
+        return worktree_root.to_path_buf();
+    };
+    let cwd_str = launch_cwd.to_string_lossy();
+    match cwd_str.strip_prefix(git_root) {
+        Some(relative) => {
+            let relative = relative.trim_start_matches('/');
+            if relative.is_empty() {
+                worktree_root.to_path_buf()
+            } else {
+                worktree_root.join(relative)
+            }
+        }
+        None => worktree_root.to_path_buf(),
+    }
+}
 /// Cwd where a forked child session is written (the interactive and headless SSOT).
 ///
 /// When the parent lives under another directory, the fork effect sets `newCwd` to that parent session cwd; preflight must use the same path.
@@ -777,7 +808,7 @@ async fn most_recent_session_id(
     let summaries = xai_grok_shell::session::persistence::list_summaries(Some(cwd)).await?;
     let first = summaries
         .iter()
-        .find(|summary| selection.admits(summary))
+        .find(|summary| selection.admits(summary) && !summary.is_unused_optimistic_husk())
         .ok_or_else(|| {
             anyhow::anyhow!(locale.named_text(
                 "session.startup.no_session_for_cwd",
@@ -791,10 +822,11 @@ async fn most_recent_session_id(
 /// Without it, environments that mint credentials via `auth_provider_command` report `NoOauth`.
 pub(crate) fn pre_acp_auth_manager(
     agent_config: &xai_grok_shell::agent::config::Config,
-) -> std::sync::Arc<xai_grok_shell::auth::AuthManager> {
-    let auth = std::sync::Arc::new(xai_grok_shell::auth::AuthManager::new(
+) -> std::sync::Arc<xai_grok_login::AuthManager> {
+    let auth = std::sync::Arc::new(xai_grok_login::AuthManager::new_with_proxy_base_url(
         &xai_grok_shell::util::grok_home::grok_home(),
         agent_config.grok_com_config.clone(),
+        agent_config.endpoints.proxy_url(),
     ));
     auth.configure_refresher(
         agent_config.grok_com_config.auth_provider_command.clone(),
@@ -812,9 +844,7 @@ const REMOTE_RESTORE_NEEDS_WORKTREE: &str = "--restore-code on a remote session 
 pub(crate) const WORKTREE_NO_RESTORE_CODE_NOTICE: &str =
     "Snapshot code will not be restored into the worktree; pass --restore-code to restore it.";
 /// Preflight: preferred id must be a UUID and not a persisted session under `cwd`.
-///
-/// Agent `session/new` rejects non-UUID `_meta.sessionId`; fail fast here so
-/// CLI users get a clear error before ACP.
+/// Agent `session/new` rejects non-UUID `_meta.sessionId`; fail fast here so CLI users get a clear error before ACP.
 pub fn ensure_session_id_available(session_id: &str, cwd: &str) -> anyhow::Result<()> {
     if uuid::Uuid::try_parse(session_id).is_err() {
         anyhow::bail!("Error: --session-id must be a valid UUID (got '{session_id}').");
@@ -1132,7 +1162,6 @@ pub(crate) enum RemoteMissPlan {
     },
 }
 /// Whether `--restore-code` may run in-place for this local hit.
-///
 /// `resolved_id != requested_id` means the CLI handle was a remote UUID that only exists as a previously restored child.
 /// That is still a remote session, so snapshot checkout requires `--worktree`.
 pub(crate) fn in_place_restore_code_allowed(
@@ -1165,11 +1194,8 @@ pub(crate) fn plan_remote_miss(ctx: MaterializeCtx, arg_is_uuid: bool) -> Remote
     RemoteMissPlan::RestoreConversation
 }
 /// Remote-restore tail of [`resolve_existing_session`], split out so non-id targets can wrap every failure with the title-miss hint.
-///
 /// Always restores session state and memory only.
 /// Codebase checkout is refused in-place ([`RemoteMissPlan::RejectInPlaceCodeRestore`]) or deferred to the worktree handler.
-///
-/// On timeout the future is cancelled; partial JSONL may already be on disk and is recovered via a local-child scan of the remote id.
 async fn restore_session_from_remote(
     session_id: &str,
     cwd: &str,
@@ -1210,13 +1236,15 @@ async fn restore_session_from_remote(
                 &[("error", &e.to_string())],
             ))
         })?;
+    use xai_grok_login::{AuthManager, ensure_authenticated_or_noninteractive};
     use xai_grok_shell::agent::session_registry_client::SessionRegistryClient;
-    use xai_grok_shell::auth::{AuthManager, ensure_authenticated_or_noninteractive};
     use xai_grok_shell::session::restore::{RestoreSessionOpts, restore_session_with_storage};
     use xai_grok_shell::util::grok_home::grok_home;
     let deployment_key = agent_config.endpoints.deployment_key.clone();
     ensure_authenticated_or_noninteractive(
         &agent_config.grok_com_config,
+        agent_config.login_device_flow,
+        agent_config.endpoints.proxy_url(),
         deployment_key.is_some(),
         None,
     )
@@ -1229,16 +1257,17 @@ async fn restore_session_from_remote(
             &[("error", &e.to_string())],
         ))
     })?;
-    let auth_manager = std::sync::Arc::new(AuthManager::new(
+    let auth_manager = std::sync::Arc::new(AuthManager::new_with_proxy_base_url(
         &grok_home(),
         agent_config.grok_com_config.clone(),
+        agent_config.endpoints.proxy_url(),
     ));
     let registry_client =
         SessionRegistryClient::new(agent_config.endpoints.proxy_url(), String::new())
             .with_deployment_key(deployment_key.clone())
             .with_alpha_test_key(agent_config.endpoints.alpha_test_key.clone())
             .with_auth(auth_manager.clone());
-    let storage_client = xai_grok_shell::auth::credential_provider::build_storage_client_for_proxy(
+    let storage_client = xai_grok_shell::credential_factory::build_storage_client_for_proxy(
         &agent_config.endpoints.proxy_url(),
         deployment_key,
         agent_config.endpoints.alpha_test_key.clone(),
@@ -1406,9 +1435,7 @@ pub(crate) fn classify_remote_restore(
     )
 }
 /// Resolve a non-id resume arg as a session title among local sessions for `cwd`.
-///
 /// Matching and disambiguation rules live in [`super::session_title_resolve`] (shared with the pre-sandbox saved-profile peek).
-/// This adds the cwd-scoped listing and the resolved-id announcement.
 /// The arg is matched in memory and never used as a filesystem path.
 async fn resolve_session_by_title(
     arg: &str,
@@ -1712,6 +1739,26 @@ mod tests {
         assert_eq!(effective_fork_new_cwd("/proj-b", None), "/proj-b");
     }
     #[test]
+    fn worktree_session_cwd_keeps_subdirectory_offset() {
+        let wt = Path::new("/wt/abc");
+        assert_eq!(
+            worktree_session_cwd(wt, Some("/repo"), Path::new("/repo/crates/pager")),
+            PathBuf::from("/wt/abc/crates/pager")
+        );
+        assert_eq!(
+            worktree_session_cwd(wt, Some("/repo"), Path::new("/repo")),
+            PathBuf::from("/wt/abc")
+        );
+        assert_eq!(
+            worktree_session_cwd(wt, Some("/repo"), Path::new("/elsewhere")),
+            PathBuf::from("/wt/abc")
+        );
+        assert_eq!(
+            worktree_session_cwd(wt, None, Path::new("/repo/crates")),
+            PathBuf::from("/wt/abc")
+        );
+    }
+    #[test]
     fn fork_session_params_sets_new_session_id_and_workspace_dir() {
         let cwd = PathBuf::from("/wt");
         let p = fork_session_params("parent-1", &cwd, Some("child-uuid"), true);
@@ -1795,6 +1842,92 @@ mod tests {
                 .recent_session_selection,
             RecentSessionSelection::Any,
         );
+    }
+    #[serial_test::serial(GROK_HOME)]
+    #[tokio::test]
+    async fn continue_skips_empty_worktree_stamped_husk() {
+        let mut fx = crate::test_util::GrokHomeFixture::new();
+        let cwd = fx.cwd_str();
+        let real_id = "aaaaaaaa-1111-2222-3333-444444444444";
+        let husk_id = "bbbbbbbb-1111-2222-3333-444444444444";
+        fx.write_summary(
+            &cwd,
+            real_id,
+            serde_json::json!({
+                "updated_at": "2026-07-01T00:00:00Z",
+                "generated_title": "real work",
+                "num_messages": 3,
+            }),
+        );
+        fx.write_summary(
+            &cwd,
+            husk_id,
+            serde_json::json!({
+                "updated_at": "2026-07-02T00:00:00Z",
+                "session_kind": "worktree",
+                "worktree_label": "fix-bug",
+                "num_messages": 0,
+                "session_summary": "",
+            }),
+        );
+        let args = parse(&["grok", "-c"]);
+        let result = materialize_startup_for_cwd(
+            MaterializeCtx::from_pager_args(&args),
+            args.session_startup_intent().unwrap(),
+            &cwd,
+        )
+        .await
+        .unwrap();
+        match result {
+            MaterializedStartup::Resume { session_id, .. } => {
+                assert_eq!(session_id, real_id)
+            }
+            other => panic!("expected Resume of the prior session, got {other:?}"),
+        }
+    }
+    #[serial_test::serial(GROK_HOME)]
+    #[tokio::test]
+    async fn continue_keeps_empty_worktree_fork() {
+        let mut fx = crate::test_util::GrokHomeFixture::new();
+        let cwd = fx.cwd_str();
+        let older_id = "aaaaaaaa-1111-2222-3333-444444444444";
+        let fork_id = "bbbbbbbb-1111-2222-3333-444444444444";
+        fx.write_summary(
+            &cwd,
+            older_id,
+            serde_json::json!({
+                "updated_at": "2026-07-01T00:00:00Z",
+                "generated_title": "older",
+                "num_messages": 3,
+            }),
+        );
+        fx.write_summary(
+            &cwd,
+            fork_id,
+            serde_json::json!({
+                "updated_at": "2026-07-02T00:00:00Z",
+                "session_kind": "worktree",
+                "worktree_label": "fix-bug",
+                "parent_session_id": older_id,
+                "forked_at": "2026-07-02T00:00:00Z",
+                "num_messages": 0,
+                "session_summary": "",
+            }),
+        );
+        let args = parse(&["grok", "-c"]);
+        let result = materialize_startup_for_cwd(
+            MaterializeCtx::from_pager_args(&args),
+            args.session_startup_intent().unwrap(),
+            &cwd,
+        )
+        .await
+        .unwrap();
+        match result {
+            MaterializedStartup::Resume { session_id, .. } => {
+                assert_eq!(session_id, fork_id)
+            }
+            other => panic!("expected Resume of the empty worktree fork, got {other:?}"),
+        }
     }
     #[serial_test::serial(GROK_HOME)]
     #[tokio::test]
@@ -2017,8 +2150,10 @@ mod tests {
         assert!(WORKTREE_NO_RESTORE_CODE_NOTICE.contains("--restore-code"));
     }
     /// `--restore-code` without `--worktree` must fail before any in-place checkout.
+    #[serial_test::serial(GROK_HOME)]
     #[tokio::test]
     async fn remote_miss_restore_code_without_worktree_errors() {
+        let _fx = crate::test_util::GrokHomeFixture::new();
         let err = materialize_startup_for_cwd(
             remote_miss_ctx(true, false),
             SessionStartupIntent::Resume {
@@ -2051,8 +2186,10 @@ mod tests {
         );
     }
     /// `--restore-code --worktree` stays on the existing defer path.
+    #[serial_test::serial(GROK_HOME)]
     #[tokio::test]
     async fn remote_miss_restore_code_with_worktree_defers() {
+        let _fx = crate::test_util::GrokHomeFixture::new();
         let id = "no such remote target";
         let out = materialize_startup_for_cwd(
             remote_miss_ctx(true, true),
@@ -2081,9 +2218,11 @@ mod tests {
             other => panic!("expected Resume, got {other:?}"),
         }
     }
+    #[serial_test::serial(GROK_HOME)]
     #[tokio::test]
     async fn remote_miss_worktree_without_restore_code_suppresses_snapshot() {
-        let id = "no such remote target";
+        let _fx = crate::test_util::GrokHomeFixture::new();
+        let id = "99999999-9999-4999-8999-999999999998";
         let out = materialize_startup_for_cwd(
             remote_miss_ctx(false, true),
             SessionStartupIntent::Resume {
@@ -2098,10 +2237,15 @@ mod tests {
             MaterializedStartup::Resume {
                 session_id,
                 suppress_code_restore,
+                deferred_local_miss,
                 ..
             } => {
                 assert_eq!(session_id, id);
                 assert!(suppress_code_restore);
+                assert!(
+                    !deferred_local_miss,
+                    "uuid miss under worktree is not a title miss"
+                );
             }
             other => panic!("expected Resume, got {other:?}"),
         }

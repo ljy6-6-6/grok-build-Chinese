@@ -5,7 +5,7 @@ use std::future::Future;
 #[derive(Debug)]
 pub(super) enum InitialChildPromptReadiness<T> {
     Cancelled,
-    Admitted,
+    Admitted(oneshot::Sender<()>),
     AttemptCompleted(T),
     TimedOut,
 }
@@ -14,7 +14,7 @@ impl<T> InitialChildPromptReadiness<T> {
     pub(super) fn unpromoted_disposition(&self) -> UnpromotedChildDisposition {
         match self {
             Self::TimedOut => UnpromotedChildDisposition::AdmissionTimedOut,
-            Self::Cancelled | Self::Admitted | Self::AttemptCompleted(_) => {
+            Self::Cancelled | Self::Admitted(_) | Self::AttemptCompleted(_) => {
                 UnpromotedChildDisposition::Cancelled
             }
         }
@@ -23,7 +23,7 @@ impl<T> InitialChildPromptReadiness<T> {
 /// Deterministic precedence: cancellation, then a successful readiness ack, then the attempt result, then the admission deadline.
 pub(super) async fn wait_initial_child_prompt_readiness<Fut, T>(
     cancelled: impl Future<Output = ()>,
-    readiness: oneshot::Receiver<()>,
+    readiness: oneshot::Receiver<oneshot::Sender<()>>,
     attempt: &mut Fut,
     timeout: std::time::Duration,
 ) -> InitialChildPromptReadiness<T>
@@ -33,22 +33,29 @@ where
     tokio::select! {
         biased;
         _ = cancelled => InitialChildPromptReadiness::Cancelled,
-        Ok(()) = readiness => InitialChildPromptReadiness::Admitted,
+        Ok(release) = readiness => InitialChildPromptReadiness::Admitted(release),
         outcome = &mut *attempt => InitialChildPromptReadiness::AttemptCompleted(outcome),
         _ = tokio::time::sleep(timeout) => InitialChildPromptReadiness::TimedOut,
     }
+}
+pub(super) fn subagent_trace_prefix(session_id: &str, turn_number: u64) -> String {
+    format!("{session_id}/turn_{turn_number}")
 }
 pub(super) struct OneTurnAttemptInput<'a> {
     pub child_handle: &'a SessionHandle,
     pub request: &'a SubagentRequest,
     pub worktree_path: Option<&'a Path>,
     pub task_prompt_text: &'a str,
+    pub prompt_id: String,
     pub inherited_tool_overrides: Option<xai_grok_sampling_types::ToolOverrides>,
     pub gcs_bucket_url: Option<&'a str>,
     pub gcs_upload_method: Option<&'a crate::session::repo_changes::UploadMethod>,
+    pub turn_number: u64,
     pub cancel_token: CancellationToken,
     pub child_run_started_at: std::time::Instant,
-    pub prompt_admitted: oneshot::Sender<()>,
+    pub prompt_admitted: oneshot::Sender<oneshot::Sender<()>>,
+    #[cfg(test)]
+    pub initial_attempt_behavior: InitialAttemptBehavior,
 }
 pub(super) struct OneTurnTraceCapture {
     pub before_copy_rx:
@@ -56,6 +63,7 @@ pub(super) struct OneTurnTraceCapture {
     pub child_prompt_id: String,
     pub turn_started_at: String,
     pub turn_token_totals: Option<(u64, u64, u64)>,
+    pub turn_number: u64,
 }
 pub(super) struct OneTurnAttemptOutcome {
     pub result: SubagentResult,
@@ -84,7 +92,27 @@ pub(super) async fn run_one_turn_attempt(
             .send(SessionCommand::SetToolOverrides { overrides });
     }
     let (prompt_tx, prompt_rx) = oneshot::channel::<SubagentPromptTurnResult>();
-    let child_prompt_id = uuid::Uuid::now_v7().to_string();
+    #[cfg(test)]
+    if input.initial_attempt_behavior == InitialAttemptBehavior::CompleteBeforeAdmission {
+        drop(prompt_tx);
+        drop(input.prompt_admitted);
+        return OneTurnAttemptOutcome {
+            result: SubagentResult {
+                success: false,
+                error: Some("injected pre-admission attempt failure".to_owned()),
+                ..base_result(input.request, input.worktree_path, 0, 1, 0)
+            },
+            trace: OneTurnTraceCapture {
+                before_copy_rx,
+                child_prompt_id: input.prompt_id,
+                turn_started_at: chrono::Utc::now().to_rfc3339(),
+                turn_token_totals: None,
+                turn_number: input.turn_number,
+            },
+            cancellation_may_hide_usage: false,
+        };
+    }
+    let child_prompt_id = input.prompt_id;
     let turn_started_at = chrono::Utc::now().to_rfc3339();
     let _ = input.child_handle.cmd_tx.send(SessionCommand::Prompt {
         prompt_id: child_prompt_id.clone(),
@@ -100,7 +128,10 @@ pub(super) async fn run_one_turn_attempt(
                         bucket_url: input.gcs_bucket_url.map(str::to_owned),
                         service_account_key: None,
                         prefix_dir: None,
-                        gcs_prefix: Some(format!("{}/turn_0", &input.request.id)),
+                        gcs_prefix: Some(subagent_trace_prefix(
+                            &input.request.id,
+                            input.turn_number,
+                        )),
                         absolute_paths: false,
                         archive_name_override: None,
                         upload_method: method.clone(),
@@ -111,7 +142,7 @@ pub(super) async fn run_one_turn_attempt(
         client_identifier: None,
         screen_mode: None,
         verbatim: true,
-        traceparent: xai_file_utils::trace_context::current_traceparent(),
+        traceparent: xai_grok_otel::current_traceparent(),
         json_schema: input.request.runtime_overrides.output_schema.clone(),
         send_now: false,
         admission: None,
@@ -244,6 +275,7 @@ pub(super) async fn run_one_turn_attempt(
             child_prompt_id,
             turn_started_at,
             turn_token_totals,
+            turn_number: input.turn_number,
         },
         cancellation_may_hide_usage,
     }
@@ -331,6 +363,16 @@ pub(super) async fn capture_and_fold_one_turn_usage(
     )
     .await
 }
+#[cfg(test)]
+mod trace_turn_tests {
+    use super::subagent_trace_prefix;
+    #[test]
+    fn child_attempts_use_toolbox_discoverable_turn_paths() {
+        assert_eq!(subagent_trace_prefix("child", 0), "child/turn_0");
+        assert_eq!(subagent_trace_prefix("child", 1), "child/turn_1");
+        assert_eq!(subagent_trace_prefix("child", 2), "child/turn_2");
+    }
+}
 fn base_result(
     request: &SubagentRequest,
     worktree_path: Option<&Path>,
@@ -359,7 +401,8 @@ mod initial_child_prompt_readiness_tests {
     #[tokio::test]
     async fn simultaneous_readiness_and_attempt_prefers_readiness() {
         let (tx, rx) = oneshot::channel();
-        tx.send(()).expect("readiness already has a waiter");
+        tx.send(oneshot::channel().0)
+            .expect("readiness already has a waiter");
         let mut attempt = Box::pin(async { "attempt" });
         let outcome = wait_initial_child_prompt_readiness(
             std::future::pending::<()>(),
@@ -368,7 +411,7 @@ mod initial_child_prompt_readiness_tests {
             std::time::Duration::from_secs(1),
         )
         .await;
-        assert!(matches!(outcome, InitialChildPromptReadiness::Admitted));
+        assert!(matches!(outcome, InitialChildPromptReadiness::Admitted(_)));
         assert_eq!(attempt.await, "attempt");
     }
     #[tokio::test]
@@ -376,7 +419,8 @@ mod initial_child_prompt_readiness_tests {
         let cancel = CancellationToken::new();
         cancel.cancel();
         let (tx, rx) = oneshot::channel();
-        tx.send(()).expect("readiness already has a waiter");
+        tx.send(oneshot::channel().0)
+            .expect("readiness already has a waiter");
         let mut attempt = Box::pin(std::future::pending::<()>());
         let outcome = wait_initial_child_prompt_readiness(
             cancel.cancelled(),
@@ -389,7 +433,7 @@ mod initial_child_prompt_readiness_tests {
     }
     #[tokio::test]
     async fn attempt_without_ack_keeps_the_real_result() {
-        let (_tx, rx) = oneshot::channel::<()>();
+        let (_tx, rx) = oneshot::channel::<oneshot::Sender<()>>();
         let mut attempt = Box::pin(async { 7u8 });
         let outcome = wait_initial_child_prompt_readiness(
             std::future::pending::<()>(),
@@ -405,7 +449,7 @@ mod initial_child_prompt_readiness_tests {
     }
     #[tokio::test]
     async fn zero_timeout_without_ready_branches_times_out() {
-        let (_tx, rx) = oneshot::channel::<()>();
+        let (_tx, rx) = oneshot::channel::<oneshot::Sender<()>>();
         let mut attempt = Box::pin(std::future::pending::<()>());
         let outcome = wait_initial_child_prompt_readiness(
             std::future::pending::<()>(),
@@ -430,7 +474,8 @@ mod initial_child_prompt_readiness_tests {
             UnpromotedChildDisposition::Cancelled
         );
         assert_eq!(
-            InitialChildPromptReadiness::<()>::Admitted.unpromoted_disposition(),
+            InitialChildPromptReadiness::<()>::Admitted(oneshot::channel().0)
+                .unpromoted_disposition(),
             UnpromotedChildDisposition::Cancelled
         );
         assert_eq!(

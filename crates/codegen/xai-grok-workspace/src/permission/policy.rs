@@ -124,10 +124,9 @@ impl CompiledPolicy {
         }
     }
 
-    /// Evaluate managed Bash/Any deny/ask command rules against every chained segment, not just the leading command.
-    /// Wrappers like `timeout`/`env` are peeled and `bash -c` scripts are recursed into.
-    /// Escalation only: returns `Reject`/`Ask`, never `Allow`.
-    /// A script that can't be decomposed fails closed to `Ask` rather than falling through.
+    /// Evaluate managed Bash/Any deny/ask rules against every chained segment, not just the leading command.
+    /// Wrappers are peeled and `bash -c` is recursed; escalation only (`Reject`/`Ask`, never `Allow`).
+    /// A script that can't be decomposed fails closed to `Ask`.
     pub fn evaluate_bash_command_policy(&self, cmd: &str) -> Option<Decision> {
         self.evaluate_bash_command_gate(cmd)
             .map(GateDecision::into_decision)
@@ -334,12 +333,9 @@ impl CompiledPolicy {
         None
     }
 
-    /// Whether *narrow* allow rules alone fully authorize this Bash command: the allow walk restricted to [`AllowRuleScope::NarrowOnly`].
-    /// Auto mode lets a deliberately scoped rule (e.g. `Bash(git push:*)`) resolve before its classifier, as ask mode already does.
-    /// A blanket `Bash(*)` or an exec-vehicle rule stays suspended into the classifier.
-    /// Checked-in project rules can decide what skips classification; untrusted directories' rules are dropped before this policy is compiled.
-    /// Bash only: non-Bash access has no static findings, so its allow rules already bypass the classifier without consulting narrowness.
-    /// Only meaningful when the full evaluation already returned `Allow` (deny/ask precedence is not re-checked here).
+    /// Whether narrow allow rules alone authorize this Bash command ([`AllowRuleScope::NarrowOnly`]).
+    /// A scoped rule may skip the classifier; a blanket `Bash(*)` or exec-vehicle rule stays suspended. Untrusted project rules are already dropped.
+    /// Meaningful only after a full `Allow`; non-Bash access has no static findings so it bypasses without this check.
     pub(crate) fn narrow_allow_authorizes(&self, access: &AccessKind) -> bool {
         let AccessKind::Bash(cmd) = access else {
             return false;
@@ -608,11 +604,8 @@ enum AllowRuleScope {
     NarrowOnly,
 }
 
-/// Program heads that execute code handed to them: interpreters, script runners, remote shells, and privilege escalators.
-/// Exact basename matches (compared lowercased, `.exe` stripped).
-/// Interpreter families with versioned spellings (`python3.13`) live in [`EXEC_VEHICLE_HEAD_FAMILIES`].
-/// Extend as new vehicles come up.
-/// Over-matching is fail-safe: a head wrongly treated as a vehicle only loses the narrow-rule classifier bypass and floors its always-allow scope.
+/// Program heads that execute code handed to them. Exact basename match, lowercased, `.exe` stripped; versioned families live in [`EXEC_VEHICLE_HEAD_FAMILIES`].
+/// Over-matching is fail-safe: a false vehicle only loses the narrow-rule classifier bypass and floors its always-allow scope.
 const EXEC_VEHICLE_HEADS: &[&str] = &[
     // Shells (their `-c` forms are also floored by `shell_dash_c_script`; listing them here additionally covers `bash script.sh`-style runs)
     "sh", "bash", "zsh", "dash", "ksh", "fish",
@@ -630,11 +623,8 @@ const EXEC_VEHICLE_HEADS: &[&str] = &[
 /// Only a version-like suffix counts; a bare prefix match would match unrelated tools (`nodemon`, `phpunit`) and cost their narrow rules the bypass.
 const EXEC_VEHICLE_HEAD_FAMILIES: &[&str] = &["python", "node", "ruby", "perl", "php", "lua"];
 
-/// Whether the command's program head executes code handed to it.
-/// Head is the basename, lowercased with a `.exe` suffix stripped.
-/// It matches [`EXEC_VEHICLE_HEADS`] or a versioned [`EXEC_VEHICLE_HEAD_FAMILIES`] spelling.
+/// Whether the program head executes code handed to it: basename, lowercased, `.exe` stripped, against [`EXEC_VEHICLE_HEADS`] or a versioned family.
 /// `pub(crate)` so [`minimum_always_allow_scope`] floors these to the full command like dangerous verbs.
-/// Normalized command basename for name matching: leading path stripped, lowercased, trailing `.exe` removed, so `/usr/bin/GH.EXE` reads as `gh`.
 pub(crate) fn normalized_command_head(words: &[String]) -> Option<String> {
     let head = words
         .first()?
@@ -661,10 +651,8 @@ pub(crate) fn head_is_exec_vehicle(words: &[String]) -> bool {
     })
 }
 
-/// Whether a bash glob pattern is universally broad: it matches every bash probe [`bash_probes`], the same set [`rule_is_catchall`] uses.
-/// Callers persisting a client-supplied glob use this to refuse `*`, `**`, `?*`, `* *`, and the like.
-/// Those "match the prompted script" only because they match anything.
-/// This is also the pattern editor's save gate, so it cannot drift from this refusal.
+/// Whether a bash glob matches every [`bash_probes`] probe (same set as [`rule_is_catchall`]), so `*`, `**`, `?*` are refused.
+/// Shared with the pattern editor's save gate so the two cannot drift.
 pub fn bash_glob_is_catchall(pattern: &str) -> bool {
     bash_probes().iter().all(|access| match access {
         AccessKind::Bash(cmd) => bash_pattern_matches_command(pattern, cmd),
@@ -677,10 +665,8 @@ fn matches_command_prefix(cmd: &str, pattern: &str) -> bool {
     cmd == pattern || (cmd.starts_with(pattern) && cmd.as_bytes().get(pattern.len()) == Some(&b' '))
 }
 
-/// Shared bash allow match: word-boundary prefix OR freeform glob.
-///
-/// Used by config `[permission]` rules, session `allowed_bash_globs`, and the pattern-editor live preview so the three paths cannot drift.
-/// `precompiled` is the matcher from [`CompiledPolicy`] when available; otherwise the pattern is compiled on the fly (session grants / preview).
+/// Shared bash allow match: word-boundary prefix or freeform glob, so config rules, session globs, and the pattern-editor preview cannot drift.
+/// `precompiled` is the [`CompiledPolicy`] matcher when available; otherwise the pattern is compiled on the fly.
 fn bash_command_matches_pattern(
     command: &str,
     pattern: &str,
@@ -776,9 +762,7 @@ fn pattern_matches(access: &AccessKind, cr: &CompiledRule<'_>, cwd: Option<&Path
 }
 
 /// Match Read/Edit/Grep after lexical normalize and cwd-join.
-/// Rooted patterns are self-containing: `..` never survives normalization, and cwd-relative spellings exist only for paths genuinely under the cwd.
-/// So `Read(./**)` / `Read(src/**)` cannot be escaped via traversal.
-/// Unrooted patterns (`*`, leading `**`) keep their documented any-depth meaning.
+/// Rooted patterns drop `..` and exist only under the cwd, so `Read(./**)` cannot be escaped by traversal; unrooted `*` / leading `**` keep any-depth meaning.
 fn path_context_matches(path: &str, cr: &CompiledRule<'_>, cwd: Option<&Path>) -> bool {
     path_match_forms(path, cwd)
         .iter()
@@ -825,10 +809,8 @@ fn absolute_normalized_path(path: &str, cwd: Option<&Path>) -> PathBuf {
     normalize_lexically(&joined)
 }
 
-/// A leading `~` component is expanded to the home directory by the tools (`resolve_model_path`) *after* this gate runs.
-/// Such a path must never be treated as cwd-relative.
-/// A manufactured `./~/…` spelling would satisfy workspace allows like `./**` while the tool escapes to the real home.
-/// Tilde paths are matched literally instead, exactly as patterns treat `~`.
+/// A leading `~` is expanded to home by the tools *after* this gate, so it must never be treated as cwd-relative.
+/// A manufactured `./~/…` would satisfy `./**` while escaping to home; tilde paths are matched literally, as patterns treat `~`.
 fn is_tilde_path(path: &Path) -> bool {
     matches!(
         path.components().next(),

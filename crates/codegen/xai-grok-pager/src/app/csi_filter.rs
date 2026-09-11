@@ -6,8 +6,6 @@ use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 
 use super::event_loop::{TimedInputEvent, is_bare_esc_press};
 
-/// Persistent filter that reassembles CSI fragments leaked by crossterm when a control sequence splits across `read()` boundaries.
-/// The fragments are SGR mouse reports `\e[<…M/m` and focus reports `\e[I`/`\e[O`.
 /// Carries state across `drain_and_process` calls so a mouse report split across batches is caught (its `\x1b` in batch N, `[<…M` in batch N+1).
 /// A fragmented focus report becomes `Event::FocusGained`/`Event::FocusLost` only when its bare `\e` and `[I`/`[O` arrive in the same batch.
 /// A lone `\e` can't be held across batches (a lone `[` must render at once), so a focus report whose `\e` was isolated in a prior batch still leaks.
@@ -108,9 +106,7 @@ impl CsiFragmentFilter {
             tracing::debug!(filtered_count, "filtered CSI fragments");
         }
 
-        // A lone typed `[` is indistinguishable from the start of a CSI fragment (an SGR mouse report `[<…M` or a focus report `[I`/`[O`)
         // User input must render immediately
-        // Real leaked fragments arrive with the byte after `[` in the same read()
         // Carrying only `Bracket` across batches is therefore unnecessary and holds the key until the next keystroke
         // Deeper partial states (`[<…`) still persist for cross-batch continuation
         if matches!(self.state, CsiFragmentState::Bracket) {
@@ -410,7 +406,6 @@ mod tests {
         // The `[` starts a potential SGR match but `;` rejects at LessThan.
         // After rejection, `;` doesn't restart, so it and remaining chars pass through
         // The leading `[<` is flushed on reject; `[` was held in tentative while matching
-        // Verify all 7 events come out (some from this call, the rest flushed on the follow-up)
         let result2 = f.filter(vec![]);
         let total = result.len() + result2.len();
         assert_eq!(total, 7);

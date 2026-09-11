@@ -20,6 +20,7 @@ use crate::app::agent::{
     AgentId, AgentSession, AgentState, BgTaskState, BgTaskStatus, GoalDisplayPhase,
     GoalDisplayState, GoalDisplayStatus,
 };
+use crate::app::command_catalog::CommandCatalogSource;
 use crate::notifications::{NotificationEvent, NotificationEventKind};
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::SessionEvent;
@@ -69,8 +70,7 @@ pub(crate) use prompt_origin::{
 pub(crate) use subagent_activity::finalize_killed_subagent;
 use subagent_activity::{subagent_activity_label, sync_subagent_activity};
 use subagent_lifecycle::{
-    LifecycleDelivery, LifecycleOrigin, classify_subagent_lifecycle, gate_subagent_lifecycle,
-    redispatched_subagent_finish, take_deferred_subagent_finish,
+    LifecycleOrigin, classify_subagent_lifecycle, prepare_tui_subagent_lifecycle,
 };
 
 use workflow_ingest::ingest_workflow_update;
@@ -80,7 +80,7 @@ pub(crate) use session_notification::apply_child_view_session_event;
 pub(crate) use session_notification::apply_session_event_for_test;
 pub(crate) use session_notification::drop_unexpected_replay;
 use session_notification::{
-    advance_reconnect_cursor, confirm_context_used, detect_plan_mode_change,
+    PlanModeTransition, advance_reconnect_cursor, confirm_context_used, detect_plan_mode_change,
     handle_session_notification, handle_session_notification_with_origin,
 };
 
@@ -89,9 +89,8 @@ use queue::{handle_prompt_complete, handle_queue_changed};
 
 use background::{
     derive_child_cwd, handle_git_head_changed, handle_monitor_event, handle_scheduled_task_created,
-    handle_scheduled_task_deleted, handle_scheduled_task_fired,
-    handle_scheduled_task_inject_prompt, handle_task_backgrounded, handle_task_completed,
-    route_bg_task_stdout,
+    handle_scheduled_task_deleted, handle_scheduled_task_fired, handle_task_backgrounded,
+    handle_task_completed, route_bg_task_stdout,
 };
 use follow_ups::handle_follow_ups;
 pub(crate) use interactions::handle_ask_user_question;
@@ -150,6 +149,17 @@ fn is_replay_bash_execute(update: &acp::SessionUpdate) -> bool {
         == Some(true)
 }
 
+/// Any live update stamped with the awaited prompt id proves the shell accepted it, whichever branch applies it.
+fn ack_prompt_from_update(view: &mut AgentView, meta: &NotificationMeta) {
+    if !meta.is_replay {
+        view.ack_prompt_if_named(
+            meta.prompt_id.as_deref(),
+            crate::app::prompt_ack::AckSignal::SessionUpdate,
+            std::time::Instant::now(),
+        );
+    }
+}
+
 pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
     match msg {
         AcpClientMessage::SessionNotification(notif) => {
@@ -177,6 +187,7 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                     {
                         agent.last_applied_event_seq = Some(seq);
                     }
+                    ack_prompt_from_update(agent, &meta);
 
                     if drop_unexpected_replay(
                         agent,
@@ -299,8 +310,19 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                             agent.note_streaming_wake_turn(notif_pid);
                         }
 
-                        plan_mode_modal_refresh_needed |=
-                            detect_plan_mode_change(&notif.request.update, agent);
+                        let plan_transition = detect_plan_mode_change(&notif.request.update, agent);
+                        plan_mode_modal_refresh_needed |= plan_transition.is_some();
+                        // User-driven entries already got a banner or toast; a replay must not duplicate the row
+                        if plan_transition == Some(PlanModeTransition::EnteredByAgent)
+                            && !meta.is_replay
+                            && !agent.session.loading_replay
+                        {
+                            agent.scrollback.push_block(RenderBlock::session_event(
+                                SessionEvent::PlanModeEnteredByAgent {
+                                    permission: agent.session.permission_label(),
+                                },
+                            ));
+                        }
 
                         let had_activity_before = agent.session.tracker.activity().is_some();
                         let update = notif.request.update;
@@ -342,8 +364,10 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         if let Some(commands) = agent.session.tracker.take_pending_acp_commands() {
                             let workflows_changed = workflow_commands(&commands)
                                 != workflow_commands(&agent.session.available_commands);
-                            agent.session.available_commands = commands;
-                            agent.session.available_commands_generation += 1;
+                            agent.session.replace_available_commands(
+                                commands,
+                                CommandCatalogSource::SessionUpdate,
+                            );
                             refresh_workflow_run_capabilities(agent);
                             workflows_modal_refresh =
                                 workflows_changed && agent.extensions_modal.is_some();
@@ -395,6 +419,8 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         let child_view = parent
                             .child_view_for_live_update_mut(child_key)
                             .expect("find_session_match returned an existing subagent_views key");
+                        // An overlay prompt arms the watch on this child, so the child's own updates must disarm it
+                        ack_prompt_from_update(child_view, &meta);
                         if let Some(tokens) = meta.total_tokens {
                             confirm_context_used(child_view, tokens);
                         }
@@ -568,7 +594,6 @@ fn handle_ext_notification(notif: &acp::ExtNotification, app: &mut AppView) -> b
         "x.ai/scheduled_task_created" => handle_scheduled_task_created(notif, app),
         "x.ai/scheduled_task_fired" => handle_scheduled_task_fired(notif, app),
         "x.ai/scheduled_task_deleted" => handle_scheduled_task_deleted(notif, app),
-        "x.ai/scheduled_task_inject_prompt" => handle_scheduled_task_inject_prompt(notif, app),
         "x.ai/announcements/update" => handle_announcements_update(notif, app),
         "x.ai/git_head_changed" => handle_git_head_changed(notif, app),
         "x.ai/leader/version_mismatch" => handle_version_mismatch(notif, app),

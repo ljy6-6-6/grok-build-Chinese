@@ -38,11 +38,8 @@ pub fn finalize_and_exit(code: i32) -> ! {
     std::process::exit(code);
 }
 
-/// Time a block under the instrumentation target.
-///
-/// The macro stays in shell so `$crate` continues to resolve to `xai_grok_shell` for the 12+ existing call sites.
-/// Those sites spell it `crate::instrumentation_timer!(...)` or `xai_grok_shell::instrumentation_timer!(...)`.
-/// The macro body delegates to types and functions in `xai_grok_telemetry::instrumentation`.
+/// Time a block under the instrumentation target. The macro stays in shell so `$crate` continues to resolve to `xai_grok_shell` for the 12+ existing call sites.
+/// Those sites spell it `crate::instrumentation_timer!(...)` or `xai_grok_shell::instrumentation_timer!(...)`. The macro body delegates to types and functions in `xai_grok_telemetry::instrumentation`.
 #[macro_export]
 macro_rules! instrumentation_timer {
     ($name:literal) => {{

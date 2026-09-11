@@ -1548,3 +1548,30 @@ async fn checkout_commit_with_fetch_repairs_missing_head_object() {
     let resp = checkout_commit_with_fetch(tmp.path(), MISSING_OID, /*stash_if_dirty*/ false).await;
     assert!(!resp.checked_out);
 }
+
+#[test]
+fn git_cli_pin_scan_cwd_follows_c() {
+    let base = std::path::Path::new("/repo-a");
+    let other = std::path::Path::new("/repo-b");
+    assert_eq!(
+        git_cli_pin_scan_cwd(base, &["-C", "/repo-b", "status"]).unwrap(),
+        other
+    );
+    assert!(git_cli_pin_scan_cwd(base, &["--git-dir", "/x", "status"]).is_err());
+}
+
+#[test]
+fn git_cli_filter_pin_plan_cases() {
+    assert_eq!(
+        super::git_cli_filter_pin_plan(&["status"]),
+        GitCliFilterPinPlan::NeedPins
+    );
+    assert_eq!(
+        super::git_cli_filter_pin_plan(&["worktree", "remove", "x"]),
+        GitCliFilterPinPlan::NoPins
+    );
+    assert_eq!(
+        super::git_cli_filter_pin_plan(&["--weird", "status"]),
+        GitCliFilterPinPlan::Refuse
+    );
+}

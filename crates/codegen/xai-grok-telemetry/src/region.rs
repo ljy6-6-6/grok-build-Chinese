@@ -75,6 +75,13 @@ macro_rules! instrument_task {
     };
 }
 
+#[macro_export]
+macro_rules! event_span {
+    ($($args:tt)+) => {
+        tracing::info_span!($($args)+).in_scope(|| {})
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

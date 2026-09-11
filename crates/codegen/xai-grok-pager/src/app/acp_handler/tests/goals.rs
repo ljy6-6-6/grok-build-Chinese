@@ -3,14 +3,9 @@
 
     #[test]
     fn goal_updated_ignores_unknown_json_fields_via_serde() {
-        // Serde-side half of forward compatibility
         // A payload can carry an extra JSON field absent on today's `SessionUpdate::GoalUpdated` (no `deny_unknown_fields` on the variant)
         // It must still deserialize and drive a full `GoalDisplayState`
-        // This guards against someone later adding `#[serde(deny_unknown_fields)]` to the variant
         // That would silently break wire compatibility with older shells
-        //
-        // The complementary Rust-level half is exercised by `goal_updated_absent_optional_fields_deserialize_to_none`
-        // There the destructure with trailing `..` keeps absent additive `Option<T>` fields landing as `None` in the mapped `GoalDisplayState`
         let mut app = make_app_with_agent("sess-A");
 
         let raw_payload = serde_json::json!({
@@ -321,8 +316,6 @@
         // Rust-level forward-compat half
         // Every additive `Option<T>` field on `SessionUpdate::GoalUpdated` may be omitted from the wire payload
         // Each must land as `None` in the destructured arm
-        // The pager keeps mapping the known subset cleanly when the shell-side struct grows or when an older shell omits newer optional fields
-        // Drop a handful of optional keys from the payload and assert they land as `None` on the resulting `GoalDisplayState`
         let mut app = make_app_with_agent("sess-A");
 
         let raw_payload = serde_json::json!({
@@ -345,14 +338,7 @@
                 "total_verify_rounds": 0,
                 "token_baseline": 0,
                 "finished_subagent_tokens": 0,
-                // live_subagent_tokens omitted: Option<u64> defaults to None
-                // live_context_pct omitted: Option<u8> defaults to None
-                // live_turn_count omitted: Option<u32> defaults to None
-                // live_tool_call_count omitted: Option<u32> defaults to None
-                // last_event omitted: Option<String> defaults to None
-                // last_event_detail omitted: Option<String> defaults to None
-                // last_event_timestamp omitted: Option<String> defaults to None
-                // pause_message omitted: Option<String> defaults to None
+                // live_subagent_tokens omitted: Option<u64> defaults to None live_context_pct omitted: Option<u8> defaults to None live_turn_count omitted: Option<u32> defaults to None live_tool_call_count omitted: Option<u32> defaults to None last_event omitted: Option<String> defaults to None last_event_detail omitted: Option<String> defaults to None last_event_timestamp omitted: Option<String> defaults to None pause_message omitted: Option<String> defaults to None
             }
         });
         let raw = serde_json::value::to_raw_value(&raw_payload).unwrap();

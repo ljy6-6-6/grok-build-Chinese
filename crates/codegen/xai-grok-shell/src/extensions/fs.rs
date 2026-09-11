@@ -92,9 +92,7 @@ pub(crate) struct FsReadFileRequest {
     /// Otherwise the whole file is read (legacy behavior).
     #[serde(default)]
     pub offset: Option<u64>,
-    /// Bytes to read for a ranged read.
-    /// Absent means "to EOF", but the effective read is always capped at `max_bytes` (default 1 MiB) and the server's hard limit.
-    /// An unset `length` therefore still yields at most `max_bytes`.
+    /// Bytes to read for a ranged read. Absent means "to EOF", but the effective read is always capped at `max_bytes` (default 1 MiB) and the server's hard limit. An unset `length` therefore still yields at most `max_bytes`.
     /// Detect "more data" by comparing the returned bytes (from `offset`) against the response `size`.
     #[serde(default)]
     pub length: Option<u64>,

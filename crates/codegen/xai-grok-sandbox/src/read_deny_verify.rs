@@ -15,9 +15,16 @@ const SENTINEL_DIR_NAME: &str = "sandbox-bwrap-sentinel";
 #[cfg(target_os = "linux")]
 const MOUNTINFO_MAX_BYTES: u64 = 8 * 1024 * 1024;
 #[cfg(target_os = "linux")]
-const STATX_MOUNT_ID_MASK: u32 = 0x1000;
+const STATX_REQUIRED_MASK: u32 = 0x1003;
 #[cfg(target_os = "linux")]
-const AT_EMPTY_PATH_FLAG: libc::c_int = 0x1000;
+const FILE_TYPE_MASK: u16 = 0o170000;
+#[cfg(target_os = "linux")]
+const FILE_TYPE_SYMLINK: u16 = 0o120000;
+// Read only by the enforce-gated `verify_path_masked`.
+#[cfg(all(feature = "enforce", target_os = "linux"))]
+const FILE_TYPE_SOCKET: u16 = 0o140000;
+#[cfg(all(feature = "enforce", target_os = "linux"))]
+const PERMISSION_MASK: u16 = 0o7777;
 
 #[cfg(target_os = "linux")]
 #[derive(Debug, PartialEq, Eq)]
@@ -29,11 +36,19 @@ struct MountInfoEntry {
 
 #[cfg(target_os = "linux")]
 #[repr(C)]
-struct LinuxStatxMountId {
+struct LinuxStatx {
     stx_mask: u32,
-    _before_mount_id: [u8; 140],
+    _before_mode: [u8; 24],
+    stx_mode: u16,
+    _before_mount_id: [u8; 114],
     stx_mnt_id: u64,
     _after_mount_id: [u8; 104],
+}
+
+#[cfg(target_os = "linux")]
+struct PathStatus {
+    mount_id: u64,
+    mode: u16,
 }
 
 /// Create the sentinel directory on the host before the re-exec, replacing a hostile non-directory or symlink entry.
@@ -84,12 +99,9 @@ fn ensure_sentinel_dir_under(parent: &Path) -> Result<PathBuf, String> {
     }
 }
 
-/// Verify the sentinel's expected read-only self-bind shape.
-///
-/// This is an empty-set fail-closed gate, not an identity proof: an unprivileged caller can reproduce it with a mount namespace.
-/// `statvfs` on the path would also follow a symlink, so this opens the writable parent and the child relative to it with `O_NOFOLLOW`.
-/// It then requires `ST_RDONLY` and a shared `st_dev`.
-/// Strict deny targets carry the durable containment proof.
+/// Verify the sentinel's expected read-only self-bind shape. This is an empty-set fail-closed gate, not an identity
+/// proof: an unprivileged caller can reproduce it with a mount namespace. `statvfs` on the path would also follow a
+/// symlink, so this opens the writable parent and the child relative to it with `O_NOFOLLOW`.
 #[cfg(all(feature = "enforce", target_os = "linux"))]
 pub(crate) fn verify_bwrap_sentinel() -> Result<(), String> {
     verify_sentinel_under(&crate::paths::grok_home())
@@ -263,62 +275,63 @@ fn read_mountinfo() -> Result<Vec<MountInfoEntry>, String> {
     text.lines().map(parse_mountinfo_entry).collect()
 }
 
+/// Read mode and visible mount ID without an `O_PATH` open, which access controls may reject.
 #[cfg(target_os = "linux")]
-fn fd_mount_id(fd: std::os::fd::RawFd, path: &Path) -> Result<u64, String> {
-    let empty = c"";
-    // Linux statx is a fixed 256-byte ABI structure
-    // This private definition keeps the fd-pinned query available on older musl libc headers
+fn path_status(path: &Path) -> Result<PathStatus, std::io::Error> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "path contains interior NUL",
+        )
+    })?;
+    // Linux statx is a fixed 256-byte ABI structure.
+    // This private definition keeps the query available on older musl libc headers.
     // SAFETY: all-zero bytes are a valid initial state for the kernel output struct.
-    let mut statx: LinuxStatxMountId = unsafe { std::mem::zeroed() };
-    // SAFETY: fd is open, AT_EMPTY_PATH addresses that fd, and statx is a valid
+    let mut statx: LinuxStatx = unsafe { std::mem::zeroed() };
+    // SAFETY: c_path is a valid NUL-terminated path and statx is a valid
     // fixed-size output buffer for the kernel statx ABI.
     let rc = unsafe {
         libc::syscall(
             libc::SYS_statx,
-            fd,
-            empty.as_ptr(),
-            AT_EMPTY_PATH_FLAG | libc::AT_SYMLINK_NOFOLLOW,
-            STATX_MOUNT_ID_MASK,
+            libc::AT_FDCWD,
+            c_path.as_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+            STATX_REQUIRED_MASK,
             &raw mut statx,
         )
     };
     if rc != 0 {
-        return Err(format!(
-            "read-deny path {} mount ID query failed: {}",
-            path.display(),
-            std::io::Error::last_os_error()
+        return Err(std::io::Error::last_os_error());
+    }
+    if statx.stx_mask & STATX_REQUIRED_MASK != STATX_REQUIRED_MASK {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "mount ID or mode is unavailable",
         ));
     }
-    if statx.stx_mask & STATX_MOUNT_ID_MASK == 0 {
-        return Err(format!(
-            "read-deny path {} mount ID is unavailable",
-            path.display()
-        ));
-    }
-    Ok(statx.stx_mnt_id)
+    Ok(PathStatus {
+        mount_id: statx.stx_mnt_id,
+        mode: statx.stx_mode,
+    })
 }
 
 #[cfg(target_os = "linux")]
 fn verify_exact_read_only_mount(path: &Path) -> Result<(), String> {
-    use std::os::fd::AsRawFd;
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let target = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)
-        .map_err(|e| format!("read-deny path {} could not be opened: {e}", path.display()))?;
-    let metadata = target
-        .metadata()
-        .map_err(|e| format!("read-deny path {} metadata failed: {e}", path.display()))?;
-    if metadata.file_type().is_symlink() {
+    let status = path_status(path).map_err(|error| {
+        format!(
+            "read-deny path {} status query failed: {error}",
+            path.display()
+        )
+    })?;
+    if status.mode & FILE_TYPE_MASK == FILE_TYPE_SYMLINK {
         return Err(format!(
             "read-deny path {} is a symlink, not a mountpoint",
             path.display()
         ));
     }
-    let mount_id = fd_mount_id(target.as_raw_fd(), path)?;
-    verify_exact_read_only_mount_entry(path, mount_id, &read_mountinfo()?)
+    verify_exact_read_only_mount_entry(path, status.mount_id, &read_mountinfo()?)
 }
 
 #[cfg(target_os = "linux")]
@@ -346,14 +359,9 @@ fn verify_exact_read_only_mount_entry(
     Ok(())
 }
 
-/// Verify read-deny enforcement is durable in the current namespace.
-///
-/// Installs namespace lockdown before inspecting mounts and requires the unconditional sentinel so an empty deny set fails closed.
-/// Then it checks every resolved strict deny path via [`verify_resolved_read_deny_masks`].
-///
-/// # Errors
-/// Returns a message naming the missing sentinel, the first unmasked path, or the resolve/expansion failure when the deny set cannot be recomputed.
-/// All of them must refuse startup.
+/// Installs namespace lockdown before inspecting mounts and requires the unconditional sentinel so an empty deny set
+/// fails closed. Returns a message naming the missing sentinel, the first unmasked path, or the resolve/expansion failure
+/// when the deny set cannot be recomputed. All of them must refuse startup.
 #[cfg(all(feature = "enforce", target_os = "linux"))]
 pub fn verify_read_deny_enforced(
     profile: &crate::ProfileName,
@@ -364,12 +372,9 @@ pub fn verify_read_deny_enforced(
     verify_resolved_read_deny_masks(profile, workspace)
 }
 
-/// Verify an applicable Devbox `/data` write-deny in the current namespace.
-///
-/// This does not require the read-deny sentinel: profiles without read-deny only need the exact read-only `/data` mount plus namespace lockdown.
-///
-/// # Errors
-/// Returns a message when namespace lockdown fails or `/data` is not an exact read-only mountpoint while the profile requires that bind.
+/// Verify an applicable Devbox `/data` write-deny in the current namespace. This does not require the read-deny sentinel:
+/// profiles without read-deny only need the exact read-only `/data` mount plus namespace lockdown. Returns a message when
+/// namespace lockdown fails or `/data` is not an exact read-only mountpoint while the profile requires that bind.
 #[cfg(target_os = "linux")]
 pub fn verify_data_write_deny_enforced(
     profile: &crate::ProfileName,
@@ -383,11 +388,9 @@ pub fn verify_data_write_deny_enforced(
         .map_err(|error| format!("devbox /data write-deny could not be verified: {error}"))
 }
 
-/// Verify every resolved read-deny path is durably masked in this namespace.
-///
-/// Recomputes the read-deny arm of the bwrap deny plan and requires each strict path to be a no-access, read-only mountpoint.
-/// The hook write-deny mounts have their own verification, and their plan cannot be rebuilt inside the read-only mounts.
-/// Devbox `/data` is verified independently without forcing the read-deny sentinel onto profiles that do not otherwise need it.
+/// Verify every resolved read-deny path is durably masked in this namespace. The hook write-deny mounts have their own
+/// verification, and their plan cannot be rebuilt inside the read-only mounts. Devbox `/data` is verified independently
+/// without forcing the read-deny sentinel onto profiles that do not otherwise need it.
 #[cfg(all(feature = "enforce", target_os = "linux"))]
 fn verify_resolved_read_deny_masks(
     profile: &crate::ProfileName,
@@ -419,11 +422,9 @@ fn verify_resolved_read_deny_masks(
     Ok(())
 }
 
-/// Auto runtime-socket denials are existence-gated at launch.
-/// A live socket here can have appeared after the plan (daemon start or unlink/recreate).
-/// The per-spawn child network filter is the session-long control; refusing startup would not add protection.
-/// A vanished endpoint is likewise safe.
-/// Only exposed non-socket content at these paths still fails.
+/// Auto runtime-socket denials are existence-gated at launch. A live socket here can have appeared after the plan (daemon
+/// start or unlink/recreate). The per-spawn child network filter is the session-long control; refusing startup would not
+/// add protection. A vanished endpoint is likewise safe. Only exposed non-socket content at these paths still fails.
 #[cfg(all(feature = "enforce", target_os = "linux"))]
 fn verify_runtime_socket_deny(path: &Path) -> Result<(), String> {
     use std::os::unix::fs::{FileTypeExt, PermissionsExt};
@@ -451,33 +452,32 @@ fn verify_runtime_socket_deny(path: &Path) -> Result<(), String> {
 /// Type/mode checks are defense in depth; the mountpoint and per-mount `ro` flag make chmod unable to restore access after startup.
 #[cfg(all(feature = "enforce", target_os = "linux"))]
 fn verify_path_masked(path: &Path) -> Result<(), String> {
-    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
-
-    let meta = std::fs::symlink_metadata(path).map_err(|e| {
+    let status = path_status(path).map_err(|error| {
         format!(
-            "read-deny path {} has no placeholder mount: {e}",
+            "read-deny path {} has no placeholder mount: {error}",
             path.display()
         )
     })?;
-    if meta.file_type().is_symlink() {
+    let file_type = status.mode & FILE_TYPE_MASK;
+    if file_type == FILE_TYPE_SYMLINK {
         return Err(format!(
             "read-deny path {} is a symlink, not a placeholder mount",
             path.display()
         ));
     }
-    if meta.file_type().is_socket() {
+    if file_type == FILE_TYPE_SOCKET {
         return Err(format!(
             "read-deny path {} is still a live socket",
             path.display()
         ));
     }
-    if meta.permissions().mode() & 0o7777 != 0 {
+    if status.mode & PERMISSION_MASK != 0 {
         return Err(format!(
             "read-deny path {} is not a no-access placeholder",
             path.display()
         ));
     }
-    verify_exact_read_only_mount(path)
+    verify_exact_read_only_mount_entry(path, status.mount_id, &read_mountinfo()?)
 }
 
 /// Without `enforce` on Linux nothing is kernel-read-denied (and the shell never requires read-deny).

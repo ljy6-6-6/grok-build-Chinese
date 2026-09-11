@@ -6,7 +6,6 @@
 use xai_grok_tools::types::tool::ToolKind;
 
 /// Resolved client-facing tool names for a role's prompt placeholders.
-///
 /// Built parent-side from the role's resolved toolset, with one literal fallback per placeholder.
 /// Every resolved name is run through [`sanitized_tool_name`] before it is stored; an unsafe name falls back to the literal default.
 #[derive(Debug, Clone)]
@@ -114,11 +113,8 @@ impl RoleToolNames {
     }
 
     /// Substitute the role-prompt tool placeholders in `template` in a SINGLE left-to-right pass.
-    ///
     /// A substituted value is never re-scanned, so a resolved name can never be re-expanded into another placeholder (order-independence).
-    /// Unknown `{…}` tokens (e.g. the render-time `{KIND_LENS}` / `{SCRATCH}` placeholders resolved elsewhere) are passed through untouched.
     /// Replacing a placeholder a template does not contain is a no-op.
-    /// So all three role templates share one call even though each names only the subset it uses.
     pub(crate) fn apply(&self, template: &str) -> String {
         let resolve = |token: &str| -> Option<&str> {
             Some(match token {

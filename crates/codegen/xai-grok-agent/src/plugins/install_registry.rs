@@ -141,6 +141,8 @@ impl InstallRegistry {
         }
     }
 
+    /// Save the registry to disk. Every writer holds the registry flock across load→mutate→save
+    /// (shell `lock_install_registry`, agent [`lock_registry`] — same lock file).
     pub fn save(&self) -> Result<(), InstallError> {
         self.save_atomic()
     }
@@ -259,10 +261,6 @@ impl InstallRegistry {
     }
 
     /// Format: `<basename>-<hash8>` where hash8 is the first 8 hex chars of SHA-256(normalized source).
-    ///
-    /// Examples:
-    /// - `https://github.com/org-a/tools` → `tools-a1b2c3d4`
-    /// - `/Users/me/projects/my-plugin` → `my-plugin-e5f6g7h8`
     pub fn repo_key(source: &str) -> String {
         let basename = source
             .trim_end_matches('/')
@@ -293,6 +291,71 @@ impl InstallRegistry {
         let hash8 = format!("{:08x}", hash & 0xFFFFFFFF);
 
         format!("{trimmed}-{hash8}")
+    }
+}
+
+/// Exclusive advisory flock over `<install_dir>/registry.lock` (drop releases it) — the same lock
+/// file and [`acquire_file_lock`] as the shell's `plugin::acquire::lock_install_registry`.
+#[derive(Debug)]
+pub struct RegistryLockGuard {
+    _file: std::fs::File,
+}
+
+/// Take the registry flock, polling up to `timeout`. The error string names
+/// the lock path; "timeout" means another plugin operation is in progress.
+pub fn lock_registry(
+    install_dir: &Path,
+    timeout: std::time::Duration,
+) -> Result<RegistryLockGuard, String> {
+    std::fs::create_dir_all(install_dir).map_err(|e| {
+        format!(
+            "failed to create install dir {}: {e}",
+            install_dir.display()
+        )
+    })?;
+    acquire_file_lock("registry", &install_dir.join("registry.lock"), timeout)
+        .map(|file| RegistryLockGuard { _file: file })
+}
+
+/// How often lock acquisition retries while polling toward its timeout.
+const LOCK_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Exclusive advisory flock on `lock_path`, polled until `timeout`; per open file description,
+/// so it conflicts in-process too. The ONE flock helper for every plugin lock site.
+pub fn acquire_file_lock(
+    label: &str,
+    lock_path: &Path,
+    timeout: std::time::Duration,
+) -> Result<std::fs::File, String> {
+    use fs2::FileExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)
+        .map_err(|e| format!("failed to open {label} lock {}: {e}", lock_path.display()))?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(file),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(format!(
+                        "{label} lock timeout after {}s for {}",
+                        timeout.as_secs(),
+                        lock_path.display()
+                    ));
+                }
+                std::thread::sleep(LOCK_POLL_INTERVAL);
+            }
+            Err(e) => {
+                return Err(format!(
+                    "failed to lock {label} {}: {e}",
+                    lock_path.display()
+                ));
+            }
+        }
     }
 }
 
@@ -600,5 +663,24 @@ mod tests {
             }
             _ => panic!("expected Local"),
         }
+    }
+
+    /// Writer exclusion (per-OFD flock, so in-process too): a second holder times out while held, then acquires after release.
+    #[test]
+    fn lock_registry_excludes_second_holder_until_released() {
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let held =
+            lock_registry(dir.path(), Duration::from_millis(50)).expect("first lock acquires");
+        let detail = lock_registry(dir.path(), Duration::from_millis(150))
+            .expect_err("second holder must time out while the lock is held");
+        assert!(
+            detail.contains("registry lock timeout"),
+            "timeout must name the registry lock, got: {detail}"
+        );
+        drop(held);
+        lock_registry(dir.path(), Duration::from_millis(50))
+            .expect("lock re-acquirable after release");
     }
 }

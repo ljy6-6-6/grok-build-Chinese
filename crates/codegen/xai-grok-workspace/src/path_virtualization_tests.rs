@@ -32,6 +32,56 @@ fn session_root_must_be_safe_absolute() {
 }
 
 #[test]
+fn try_new_normalizes_both_roots_and_has_no_alias() {
+    let v = PathVirtualization::try_new(
+        "/home/dev/repo/",
+        "/home//dev/.grok/worktrees/repo/cursor-1",
+    )
+    .expect("distinct roots");
+    assert_eq!("/home/dev/repo", v.visible_root());
+    assert_eq!("/home/dev/.grok/worktrees/repo/cursor-1", v.real_root());
+    assert_eq!(
+        "/home/dev/.grok/worktrees/repo/cursor-1/src/main.rs",
+        v.to_guest("/home/dev/repo/src/main.rs")
+    );
+    assert_eq!(
+        "/home/dev/repo/src/main.rs",
+        v.to_model_visible("/home/dev/.grok/worktrees/repo/cursor-1/src/main.rs")
+    );
+    assert_eq!(
+        "/workspace/artifacts/foo",
+        v.to_guest("/workspace/artifacts/foo"),
+        "alias: None must not map the legacy artifacts alias"
+    );
+    assert_eq!(
+        "/workspace/conv-abc/foo",
+        mapping().to_guest("/workspace/artifacts/foo"),
+        "try_from_session_root keeps the alias"
+    );
+}
+
+#[test]
+fn try_new_rejects_a_real_root_inside_the_visible_root() {
+    assert_eq!(None, PathVirtualization::try_new("/home/dev", "/home/dev"));
+    assert_eq!(
+        None,
+        PathVirtualization::try_new("/home/dev", "/home/dev/.grok/worktrees/repo/cursor-1")
+    );
+    assert!(
+        PathVirtualization::try_new("/home/dev/repo", "/home/dev/repo-2").is_some(),
+        "a sibling with a shared string prefix is not nested"
+    );
+    assert!(
+        PathVirtualization::try_new("/home/dev/.grok/worktrees/repo/cursor-1", "/home/dev")
+            .is_some(),
+        "the visible root under the real root is allowed"
+    );
+    assert_eq!(None, PathVirtualization::try_new("relative", "/real"));
+    assert_eq!(None, PathVirtualization::try_new("/visible", "/real/../x"));
+    assert_eq!(None, PathVirtualization::try_new("/", "/real"));
+}
+
+#[test]
 fn outbound_rewrites_real_root_prefix() {
     let v = mapping();
     assert_eq!(v.to_model_visible("/workspace/conv-abc"), "/workspace");

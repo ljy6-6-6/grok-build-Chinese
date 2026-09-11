@@ -122,6 +122,7 @@ impl SessionActor {
     ) {
         // Fast path under the lock: nothing to promote.
         let may_combine;
+        let queued_wake_ids: Vec<String>;
         {
             let state = self.state.lock().await;
             if state.running_task.is_some() || state.finalization_gate.is_active() {
@@ -156,6 +157,16 @@ impl SessionActor {
             }
             // A merge needs at least two queued prompts; sample here so the common single-prompt promote skips the config disk read below
             may_combine = state.pending_inputs.len() >= 2;
+            queued_wake_ids = state
+                .pending_inputs
+                .iter()
+                .filter_map(|item| match item.input_origin.as_prompt_origin() {
+                    super::PromptOrigin::SubagentCompleted { subagent_id } => {
+                        Some(subagent_id.clone())
+                    }
+                    _ => None,
+                })
+                .collect();
         }
 
         // Config I/O outside the state lock, and only when a merge is even possible; keeps the single-prompt promote (the common case) off disk
@@ -165,6 +176,14 @@ impl SessionActor {
                 .ui
                 .combine_queued_prompts
                 .unwrap_or(false);
+        // The resources mutex is never taken under `state`; a wake queued after this snapshot is still caught at turn start
+        let mut reported_wake_ids = queued_wake_ids;
+        if !reported_wake_ids.is_empty() {
+            self.with_reported_completions(|reported| {
+                reported_wake_ids.retain(|id| reported.is_reported(id))
+            })
+            .await;
+        }
 
         let mut state = self.state.lock().await;
         // Re-check after the await gap.
@@ -198,7 +217,7 @@ impl SessionActor {
         // Auto-compact is handled inline by process_conversation_turn, so there is no queued auto-compact to check here
 
         // Drop stale synthetic fronts before promoting
-        // Stale means already-reported workflow completions, and goal continuations whose goal is no longer Active
+        // Stale means already-reported workflow or subagent completions, and goal continuations whose goal is no longer Active
         // An Active goal queues a fresh continuation at turn end, so a leftover one here would jump ahead of the user's queue
         loop {
             let stale = match state
@@ -206,6 +225,16 @@ impl SessionActor {
                 .front()
                 .map(|item| item.input_origin.as_prompt_origin())
             {
+                Some(super::PromptOrigin::SubagentCompleted { subagent_id }) => {
+                    let reported = reported_wake_ids.contains(subagent_id);
+                    if reported {
+                        tracing::info!(
+                            subagent_id,
+                            "dropping queued wake: completion already reported"
+                        );
+                    }
+                    reported
+                }
                 Some(super::PromptOrigin::WorkflowCompleted { completion_id }) => {
                     match completion_id
                         .rsplit_once('-')
@@ -376,6 +405,12 @@ impl SessionActor {
         // Bump the epoch here rather than in `handle_prompt`: a cancel reads the slot as soon as
         // `running_task` is set on the next line.
         let epoch = self.turn_report.start_next_turn();
+        let (publication_release, start_gate) = if initial_child_prompt_ready.is_some() {
+            let (release, released) = oneshot::channel();
+            (Some(release), Some(released))
+        } else {
+            (None, None)
+        };
         state.running_task = Some(AgentTask::new_prompt(
             self.clone(),
             TurnInputRequest {
@@ -393,12 +428,15 @@ impl SessionActor {
                 persist_ack,
                 parsed_prompt_tx,
                 traceparent,
+                start_gate,
             },
             epoch,
             completion_tx,
         ));
-        if let Some(initial_child_prompt_ready) = initial_child_prompt_ready {
-            let _ = initial_child_prompt_ready.send(());
+        if let (Some(initial_child_prompt_ready), Some(publication_release)) =
+            (initial_child_prompt_ready, publication_release)
+        {
+            let _ = initial_child_prompt_ready.send(publication_release);
         }
     }
 
@@ -446,14 +484,8 @@ impl SessionActor {
             .await
     }
 
-    /// Drain pending notifications into a single batched turn, if idle and not suppressed.
-    ///
-    /// Guards:
-    /// - No turn is running (`running_task` is `None`)
-    /// - No user prompts are pending (user prompts always take priority)
-    /// - Notifications are NOT suppressed (cleared on next user prompt)
-    ///
-    /// All notifications are taken and merged into a single `InputItem` with `---` separators between content blocks.
+    /// No turn is running (`running_task` is `None`).
+    /// No user prompts are pending (user prompts always take priority).
     /// The take and push happen in a single lock acquisition to avoid interleaving.
     pub(super) async fn maybe_drain_notifications(
         self: Arc<Self>,
@@ -469,11 +501,9 @@ impl SessionActor {
             self.reconcile_live_orphaned_subagents().await;
         }
 
-        // Auto-wake notification turns are DROPPED both while the goal loop is active AND after the goal completes
-        // While active, a task or monitor completion turn would pull a weak model off the goal continuation (e.g. relaunch a killed server).
-        // After the goal completes the autonomous run is over; late dev-server completions should leave the session idle, not spawn post-goal turns
-        // Separately, completions whose source task originated during the goal turn are dropped regardless of status (see `split_goal_suppressed`)
-        // Dropped notifications are still marked reported below so nothing resurfaces later
+        // Auto-wake notification turns are DROPPED both while the goal loop is active AND after the goal completes.
+        // While active, a task or monitor completion turn would pull a weak model off the goal continuation.
+        // After the goal completes the autonomous run is over; late dev-server completions should leave the session idle, not spawn post-goal turns.
         let suppress_all = self.goal_harness_enabled()
             && matches!(
                 self.goal_tracker.lock().status(),
@@ -543,9 +573,7 @@ impl SessionActor {
 
     /// Notifies extensions when the session settles idle (nothing running, nothing queued).
     /// The idle check stays host-side; extensions only get the event.
-    ///
     /// Ignores `notifications_suppressed`, unlike [`is_session_idle_for_injection`].
-    /// After an interrupt the session really is idle, and that is the ping a host waits for.
     pub(super) async fn emit_session_idle_if_idle(&self) {
         let suppressed = {
             let state = self.state.lock().await;
@@ -603,9 +631,8 @@ impl SessionActor {
     }
 
     /// Partition drained notifications into `(to_surface, dropped_count)`.
-    ///
     /// `suppress_all` mirrors the goal Active/Complete blanket gate (drop everything).
-    /// Independently, notifications whose source task is in `goal_turn_task_ids` are always dropped (see that field).
+    /// Independently, notifications whose source task is in `goal_turn_task_ids` are always dropped.
     pub(super) fn split_goal_suppressed(
         suppress_all: bool,
         goal_turn_task_ids: &std::collections::HashSet<String>,
@@ -771,6 +798,7 @@ mod live_orphan_hook_tests {
     fn running_meta(id: &str, parent: &str) -> SubagentMeta {
         SubagentMeta {
             subagent_id: id.into(),
+            attempt_id: None,
             parent_session_id: parent.into(),
             child_session_id: format!("child-{id}"),
             subagent_type: "explore".into(),

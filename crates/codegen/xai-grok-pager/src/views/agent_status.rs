@@ -113,11 +113,9 @@ impl<'a> AgentStatusBar<'a> {
         )
     }
 
-    /// Render all items right-aligned into the given area.
-    ///
-    /// Layout: `··· item0 │ item1 │ item2`; separators appear only *between* items, never before the first or after the last.
-    ///
-    /// Returns a map from item ID to screen `Rect` for hit-testing.
+    /// Render all items right-aligned into the given area. Layout: `··· item0 │ item1 │ item2`;
+    /// separators appear only between items, never before the first or after the last. Returns a map
+    /// from item ID to screen `Rect` for hit-testing.
     pub fn render(self, buf: &mut Buffer, area: Rect) -> HashMap<&'static str, Rect> {
         if area.height == 0 || area.width == 0 || self.items.is_empty() {
             return HashMap::new();
@@ -319,12 +317,9 @@ pub fn classifier_attempts_label(goal: &GoalDisplayState) -> String {
     format!("{attempt}/{max}")
 }
 
-/// Build a compact goal status `Line` for the agent status bar.
-///
-/// Format: `[Goal: {label}]  {tokens}  {elapsed}`
-///
-/// When `hovered` is true the label is bolded/underlined to signal clickability.
-/// When the goal is `Active`, a braille spinner driven by `tick` is prepended.
+/// Build a compact goal status `Line` for the agent status bar. Format: `[Goal: {label}] {tokens}
+/// {elapsed}`. When `hovered` is true the label is bolded/underlined to signal clickability. When
+/// the goal is `Active`, a braille spinner driven by `tick` is prepended.
 pub fn goal_status_line(
     goal: &GoalDisplayState,
     theme: &Theme,
@@ -421,14 +416,9 @@ pub fn goal_status_line_with_locale(
 // MCP connecting indicator
 // ---------------------------------------------------------------------------
 
-/// Build the compact MCP-connecting indicator for the agent status bar.
-///
-/// Format: `⠋ MCP (1/4)`: a braille spinner (driven by `tick`, same cadence as the turn-status spinner) followed by the connected/total server count.
-/// Rendered in `theme.gray_dim` so it reads as dim, matching the directory path shown on the same row.
-///
-/// Returns `None` while `progress.total == 0` (a startup seed).
-/// That state renders `⠋ Starting session…` above the prompt (see [`crate::views::turn_status`]) rather than as a chip here.
-/// The top-bar chip only shows real server counts once the shell reports `total > 0`.
+/// That state renders `⠋ Starting session…` above the prompt (see [`crate::views::turn_status`])
+/// rather than as a chip here. The top-bar chip only shows real server counts once the shell
+/// reports `total > 0`.
 pub fn mcp_status_line(
     progress: &McpInitProgress,
     tick: u64,
@@ -766,11 +756,7 @@ mod tests {
 
     #[test]
     fn goal_line_paused_chip_uses_warning_background() {
-        // Paused chips render with the `theme.warning` background to visually warn the user
-        // Pin the background colour on the label span so a regression that drops the chip-vs-modal colour alignment gets caught
-        //
-        // Use the unquantized `groknight()` theme directly so warning and bg_base remain distinguishable in the test env
-        // `Theme::current()` collapses both to ANSI `Reset` on 16-colour terminals, which would defeat the assertion
+        // Paused chips render with the `theme.warning` background to visually warn the user.
         let g = make_goal(
             GoalDisplayStatus::UserPaused,
             GoalDisplayPhase::Executing,

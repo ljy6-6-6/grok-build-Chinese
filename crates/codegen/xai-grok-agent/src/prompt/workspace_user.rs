@@ -14,9 +14,8 @@ pub fn optional_workspace_user_dir() -> Option<PathBuf> {
 }
 
 /// Map `$XAI_USER` to a path relative to the workspace root.
-///
-/// A bare username is nested one level under `x/` so it cannot collide with an unrelated same-named directory at the workspace root.
-/// Values that already contain a path separator are used as-is (explicit relative path).
+/// A bare username is nested under `x/` so it cannot collide with an unrelated same-named directory.
+/// Values that already contain a path separator are used as-is.
 fn workspace_user_relpath(user: &str) -> String {
     if user.contains('/') || user.contains('\\') {
         user.to_string()
@@ -25,11 +24,8 @@ fn workspace_user_relpath(user: &str) -> String {
     }
 }
 
-/// Pure logic: join `root` with a relative `user` path and return it if the directory exists on disk.
-///
-/// Returns `None` if either argument is empty or the resulting path is not a directory.
-///
-/// Example: `resolve_workspace_user_dir("/workspace", "users/alice")` returns `Some("/workspace/users/alice")` if that directory exists.
+/// Join `root` with a relative `user` path and return it if the directory exists.
+/// `None` if either argument is empty or the result is not a directory.
 pub fn resolve_workspace_user_dir(root: &str, user: &str) -> Option<PathBuf> {
     if root.is_empty() || user.is_empty() {
         return None;

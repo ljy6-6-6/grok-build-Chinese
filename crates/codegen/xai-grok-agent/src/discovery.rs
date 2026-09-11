@@ -27,10 +27,8 @@ pub fn project_agent_dirs(cwd: Option<&Path>) -> (Vec<PathBuf>, Option<PathBuf>)
     (project_agent_dirs_in(&chain.dirs), chain.git_root)
 }
 
-/// Existing project agent dirs (`.grok/agents` / `.claude/agents`) under each dir of a cwd-to-git-root chain ([`crate::repo::RepoDirChain`]).
-///
-/// This is the only place that walks `PROJECT_AGENT_SUBDIRS`.
-/// The folder-trust detector (`repo_configs_present`) reuses it, so trust detection can never drift from discovery.
+/// Existing project agent dirs under each dir of a cwd-to-git-root chain.
+/// The only place that walks `PROJECT_AGENT_SUBDIRS`. The folder-trust detector reuses it so detection cannot drift from discovery.
 pub fn project_agent_dirs_in(chain_dirs: &[PathBuf]) -> Vec<PathBuf> {
     crate::repo::existing_subdirs_along(chain_dirs, PROJECT_AGENT_SUBDIRS)
 }
@@ -58,10 +56,8 @@ pub enum SubagentSource {
 
 // ── all_subagents ────────────────────────────────────────────────────
 
-/// Build the complete list of enabled subagents: built-ins, then discovered user agents, minus any toggled off via `[subagents.toggle]`.
-///
-/// Project-level agents shadow built-ins with the same name.
-/// User-level and bundled agents with built-in names are skipped, keeping `visible == callable`.
+/// Build the complete list of enabled subagents: built-ins, then discovered user agents, minus toggles.
+/// Project-level agents shadow built-ins. User-level and bundled agents with built-in names are skipped, keeping `visible == callable`.
 pub fn all_subagents(cwd: &Path, toggle: &HashMap<String, bool>) -> Vec<SubagentEntry> {
     let grok = xai_grok_config::user_grok_home();
     all_subagents_with_home(
@@ -113,15 +109,8 @@ fn merge_subagents(
         })
         .collect();
 
-    // 2. Merge in discovered user-defined agents.
-    //
-    // IMPORTANT: Only project-level agents can shadow built-ins
-    // This matches the runtime spawn precedence in by_name_in_cwd():
-    //   project > built-in > user > bundled
-    //
-    // A user-level ~/.grok/agents/explore.md does NOT shadow built-in explore
-    // at spawn time, so it must not shadow it in the visible list either.
-    // Otherwise the `visible == callable` guarantee breaks
+    // Only project-level agents can shadow built-ins. Matches spawn precedence: project > built-in > user > bundled.
+    // A user-level explore.md must not shadow built-in explore in the visible list, or `visible == callable` breaks.
     for def in discovered {
         if def.scope == AgentScope::BuiltIn {
             continue;
@@ -333,9 +322,8 @@ pub struct PluginAgent {
 }
 
 /// Enumerate all agents provided by enabled plugins.
-///
 /// Loads every `*.md` in each enabled plugin's agent dirs.
-/// Untrusted plugins are parsed frontmatter-only (see [`load_plugin_agent_definition`]).
+/// Untrusted plugins are parsed frontmatter-only.
 pub fn plugin_agents(registry: &crate::plugins::PluginRegistry) -> Vec<PluginAgent> {
     let mut agents = Vec::new();
     for plugin in registry.enabled_plugins() {
@@ -500,9 +488,8 @@ fn by_name_in_cwd_with_plugins_and_home(
 }
 
 /// Load one plugin-provided agent file, tagged with its owning plugin.
-///
-/// Untrusted plugins are parsed frontmatter-only so their prompt body never reaches the model before the plugin is trusted.
-/// A parse failure drops the agent from discovery entirely, so it is logged rather than swallowed.
+/// Untrusted plugins are parsed frontmatter-only so their prompt body never reaches the model before trust.
+/// A parse failure drops the agent from discovery, so it is logged rather than swallowed.
 fn load_plugin_agent_definition(
     plugin: &crate::plugins::LoadedPlugin,
     path: &Path,

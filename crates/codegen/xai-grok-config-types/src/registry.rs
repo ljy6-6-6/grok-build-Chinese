@@ -48,6 +48,8 @@ pub enum Feature {
     RepoStatusInSystemPrompt,
     /// Consolidated panel dock above the prompt (Subagents / Tasks / Watchers / Queued).
     Dock,
+    /// The terminal-native `terminal` color theme (staged rollout).
+    TerminalTheme,
 }
 
 /// How one feature is written on each surface it can be set from.
@@ -236,6 +238,14 @@ pub const FEATURES: &[FeatureSpec] = &[
         env: "GROK_DOCK",
         default_enabled: false,
         remote: Some(|settings| settings.dock_enabled),
+    },
+    FeatureSpec {
+        id: Feature::TerminalTheme,
+        key: "terminal_theme",
+        path: "features.terminal_theme",
+        env: "GROK_TERMINAL_THEME",
+        default_enabled: false,
+        remote: Some(|settings| settings.terminal_theme_enabled),
     },
 ];
 

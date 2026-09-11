@@ -235,10 +235,9 @@ async fn blitz_parallel_path_matrix() {
     // Right-length garbage reassembled from range chunks; the smoke-test catches it
     run_one(&server, Mode::Garbage, "0.1.181", None).await;
 
-    // Short chunk inside the range / set_len zero region
-    // With Content-Length present (the blitz server always sends it), a premature close surfaces as a reqwest stream error that rejects the chunk
-    // The download_range byte-count check covers the rarer close-delimited (Content-Length-absent) case
-    // The parallel path falls back to single-connection, which classifies the same truncation as DownloadIncomplete
+    // With Content-Length present (the blitz server always sends it), a premature close surfaces as a reqwest stream error
+    // that rejects the chunk. The download_range byte-count check covers the rarer close-delimited (Content-Length-absent)
+    // case. The parallel path falls back to single-connection, which classifies the same truncation as DownloadIncomplete
     for k in [0usize, 1024, len / 3, len - 4096] {
         run_one(&server, Mode::Truncate(k), "0.1.181", None).await;
     }

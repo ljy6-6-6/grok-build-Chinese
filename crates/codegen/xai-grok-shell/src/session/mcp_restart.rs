@@ -112,6 +112,8 @@ pub(crate) enum SkipReason {
     /// A restart task for this server is already in flight ([`RestartActions::begin_restart`] returned `false`).
     /// A second `TransportClosed` / `HandshakeFailed` can arrive while the first respawn is still sleeping or mid-handshake.
     InProgress,
+    /// The server moved on under a newer owner (a sign-in, a fresh init pass, a removal) during the respawn.
+    Superseded,
 }
 
 impl SkipReason {
@@ -121,20 +123,20 @@ impl SkipReason {
             Self::NotConfigured => "not_configured",
             Self::Disabled => "disabled",
             Self::InProgress => "in_progress",
+            Self::Superseded => "superseded",
         }
     }
 }
 
-/// Side effects that the auto-restart task needs.
-/// Abstracted as a trait so unit tests can plug in a mock.
-/// The production binding lives next to the dispatcher wiring in `acp_session.rs::SessionRestartActions`.
-///
-/// ## Threading contract
-///
-/// `?Send` matches the session actor's LocalSet.
+/// How a respawn ended when it did not fail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Respawn {
+    Installed,
+    /// The server moved on under a newer owner, which reports its status; nothing was installed.
+    Superseded,
+}
+
 /// The production impl holds `Arc<SessionActor>` (!Send) and the dispatcher's `AcpAgentGatewaySender` (!Send via `acp::AgentSideConnection`).
-/// Both [`maybe_schedule_restart`] and [`auto_restart_stdio`] call `tokio::task::spawn_local` directly.
-/// That call **panics** at runtime if invoked outside a `LocalSet`.
 /// Callers MUST drive these functions from a future running inside a `LocalSet` (the session-actor pattern).
 /// Any future `RestartActions` impl that claims `Send + Sync` does NOT relax this requirement.
 #[async_trait(?Send)]
@@ -147,17 +149,9 @@ pub(crate) trait RestartActions {
     /// The set is populated by `flush_window` when it observes an `McpClientEventKind::ConfigRemoved` event (see `mcp_dispatcher.rs`).
     fn is_in_shutting_down(&self, server: &str) -> bool;
 
-    /// Re-run `start_mcp_server` for `server` against its current `McpState::configs` entry.
     /// Drive the handshake to completion, start the liveness watcher, and atomically swap the new `Arc<McpClient>` into `McpState::owned_clients`.
-    ///
-    /// **Stdio-only.** Callers gate on [`Self::is_stdio_server_configured`]; HTTP / HttpAuth never reach this method.
-    /// Failure modes (returned as a sanitized `Err`) are:
-    /// 1. No matching stdio config entry: a concurrent removal raced this call.
-    /// 2. `start_mcp_server` failed: spawn / OAuth-discovery / transport-build error.
-    /// 3. `ensure_initialized` failed: handshake error.
-    /// 4. The post-handshake re-check of the configured set found the server disabled/removed during the (multi-second) handshake window.
-    ///    The new `Arc<McpClient>` is dropped, `kill_on_drop` SIGKILLs the spawned child, and a "raced with config change" error bubbles up.
-    async fn respawn_stdio(&self, server: &str) -> Result<(), String>;
+    /// Stdio-only. Callers gate on [`Self::is_stdio_server_configured`]; HTTP / HttpAuth never reach this method.
+    async fn respawn_stdio(&self, server: &str) -> Result<Respawn, String>;
 
     /// Push an already-built `x.ai/mcp/server_status` payload to the pager.
     /// The production impl wraps the dispatcher's gateway sender via [`forward_status`].
@@ -165,8 +159,6 @@ pub(crate) trait RestartActions {
 
     /// Atomically claim the single in-flight restart slot for `server`.
     /// Returns `true` if the claim succeeded (no other restart task is running for this server) and `false` if a restart task is already in flight.
-    ///
-    /// Paired with [`Self::end_restart`] (released via an RAII guard on every exit path).
     /// Default impl is a no-op claim so mocks keep compiling; production backs it with a `HashSet` beside `ShutdownState`.
     fn begin_restart(&self, _server: &str) -> bool {
         true
@@ -176,8 +168,7 @@ pub(crate) trait RestartActions {
     /// Default impl is a no-op (pairs with the default `begin_restart`).
     fn end_restart(&self, _server: &str) {}
 
-    /// Returns `true` iff the server still has an **HTTP / SSE** entry in `McpState::configs` AND is enabled (not on the disabled list).
-    ///
+    /// Returns `true` iff the server still has an HTTP / SSE entry in `McpState::configs` AND is enabled (not on the disabled list).
     /// HTTP analog of [`Self::is_stdio_server_configured`]; gates [`maybe_schedule_http_recovery`].
     /// Default `false` for mocks.
     async fn is_http_server_configured(&self, _server: &str) -> bool {
@@ -187,7 +178,6 @@ pub(crate) trait RestartActions {
     /// Recover a dead HTTP client in place: reset transport, re-handshake, restart the liveness watcher.
     /// The `Arc<McpClient>` stays in `owned_clients` (tools stay valid).
     /// Status is emitted by `ensure_initialized`, not here.
-    /// Default `Err` for mocks.
     async fn reset_http_client(&self, _server: &str) -> Result<(), String> {
         Err("reset_http_client not implemented".to_string())
     }
@@ -198,9 +188,7 @@ pub(crate) trait RestartActions {
 }
 
 /// Decide whether to schedule an [`auto_restart_stdio`] task for the given event.
-/// Applies the guard rails (see the module doc and the inline `Guard N` comments below).
 /// Returns `true` iff a task was spawned; `false` for any guard-rail rejection or non-restart kind.
-///
 /// Calls `tokio::task::spawn_local`, so it MUST run inside a `LocalSet`; in production the dispatcher's `run_dispatcher` task is.
 pub(crate) async fn maybe_schedule_restart(
     actions: Rc<dyn RestartActions>,
@@ -231,10 +219,9 @@ pub(crate) async fn maybe_schedule_restart(
         return false;
     }
 
-    // Guard 4: dedup against an already-in-flight restart
-    // Two tasks would each `start_mcp_server` and race on `owned_clients.insert`, orphaning a stdio child
-    // The claim is atomic: no `.await` between here and the `spawn_local` below
-    // Released by the RAII guard on every exit path.
+    // Guard 4: dedup against an already-in-flight restart.
+    // Two tasks would each `start_mcp_server` and race on `owned_clients.insert`, orphaning a stdio child.
+    // The claim is atomic: no `.await` between here and the `spawn_local` below.
     if !actions.begin_restart(&server) {
         record_skipped(&server, SkipReason::InProgress);
         return false;
@@ -268,14 +255,7 @@ impl Drop for RestartInFlightGuard {
 
 /// One-shot task: sleep, re-check guard rails, respawn, repeat (at most 3 attempts), emitting the `mcp.auto_restart.*` metrics.
 /// Must run inside a `LocalSet` (the production `RestartActions` holds `!Send` types).
-///
-/// Each iteration re-checks the guards in the inverse order of [`maybe_schedule_restart`] (see "Check-order difference" in the module doc).
-/// `is_stdio_server_configured` runs first; a mid-backoff removal emits a final `Reason::Disabled` push.
-/// `is_in_shutting_down` runs second (no push; the `ConfigRemoved` flush already emitted one).
-///
-/// On `Ok` it emits `Reason::RestartSucceeded`, and it is the SOLE success emitter.
 /// `respawn_stdio` wires `set_event_tx` AFTER `ensure_initialized`, so the dispatcher's mapping from `Ready` to `Initialized` does not fire.
-/// On `Err` it emits `Reason::RestartFailed` and continues; after three failures the server is parked (recovery is via explicit Refresh).
 pub(crate) async fn auto_restart_stdio(
     actions: Rc<dyn RestartActions>,
     session_id: String,
@@ -341,7 +321,11 @@ pub(crate) async fn auto_restart_stdio(
         record_attempted(&server, attempt);
 
         match actions.respawn_stdio(&server).await {
-            Ok(()) => {
+            Ok(Respawn::Superseded) => {
+                record_skipped(&server, SkipReason::Superseded);
+                return;
+            }
+            Ok(Respawn::Installed) => {
                 tracing::info!(
                     server = %server,
                     attempt,
@@ -397,9 +381,7 @@ pub(crate) async fn auto_restart_stdio(
 }
 
 /// HTTP counterpart to [`maybe_schedule_restart`]: retries `reset_http_client` on the [`HTTP_RECOVERY_BACKOFF`] ladder.
-/// That lets a dropped HTTP client self-heal.
 /// Pushes no status (`ensure_initialized` owns it).
-/// Same guard rails as [`maybe_schedule_restart`] (shutting-down / configured / in-flight dedup).
 /// Returns `true` iff a task was spawned; must run inside a `LocalSet`.
 pub(crate) async fn maybe_schedule_http_recovery(
     actions: Rc<dyn RestartActions>,
@@ -439,7 +421,6 @@ pub(crate) async fn maybe_schedule_http_recovery(
 
 /// Retry loop backing [`maybe_schedule_http_recovery`]: immediate attempt, then back off on [`HTTP_RECOVERY_BACKOFF`], re-checking guards each time.
 /// Returns on success, a tripped guard, or cancellation; parks the server (metric only) once exhausted.
-/// Emits no status pushes; `ensure_initialized` owns the server's status.
 /// Must run in a `LocalSet`.
 async fn http_recovery_loop(
     actions: Rc<dyn RestartActions>,
@@ -530,9 +511,7 @@ fn push(
 
 /// Serialize a [`McpServerStatusPayload`] and send it to the gateway as an ACP `x.ai/mcp/server_status` notification.
 /// Failures are logged and dropped; restart-task pushes must not block the session actor.
-///
 /// Public so production impls and tests can wrap a gateway sender without reaching into private dispatcher internals.
-/// Uses [`crate::session::mcp_dispatcher::SERVER_STATUS_METHOD`] so pushes share the dispatcher's wire method name.
 pub(crate) fn forward_status(
     gateway: &xai_acp_lib::AcpAgentGatewaySender,
     payload: &McpServerStatusPayload,
@@ -611,7 +590,7 @@ mod tests {
         /// Scripted respawn outcomes, one `pop_front` per attempt.
         /// If the deque empties before the loop completes, attempts past the scripted ones return `Err("not scripted")`.
         /// That surfaces a test bug rather than silently passing.
-        respawn_outcomes: RefCell<std::collections::VecDeque<Result<(), String>>>,
+        respawn_outcomes: RefCell<std::collections::VecDeque<Result<Respawn, String>>>,
         respawn_calls: RefCell<Vec<String>>,
         pushes: RefCell<Vec<McpServerStatusPayload>>,
         /// Servers with an in-flight restart claim (mirrors the production `ShutdownState::in_flight_restart` set).
@@ -640,7 +619,7 @@ mod tests {
         fn mark_shutting_down(&self, name: &str) {
             self.shutting_down.borrow_mut().insert(name.to_string());
         }
-        fn script_outcome(&self, outcome: Result<(), String>) {
+        fn script_outcome(&self, outcome: Result<Respawn, String>) {
             self.respawn_outcomes.borrow_mut().push_back(outcome);
         }
         fn respawn_call_count(&self) -> usize {
@@ -675,7 +654,7 @@ mod tests {
         fn is_in_shutting_down(&self, server: &str) -> bool {
             self.shutting_down.borrow().contains(server)
         }
-        async fn respawn_stdio(&self, server: &str) -> Result<(), String> {
+        async fn respawn_stdio(&self, server: &str) -> Result<Respawn, String> {
             self.respawn_calls.borrow_mut().push(server.to_string());
             self.respawn_outcomes
                 .borrow_mut()
@@ -852,10 +831,8 @@ mod tests {
     }
 
     /// Contract: HTTP-only servers never schedule a restart.
-    /// We simulate the "not stdio" case by leaving the server **unconfigured**.
-    /// Production `is_stdio_server_configured` already returns `false` for HTTP/HttpAuth entries (see the `acp_session.rs` impl).
+    /// Production `is_stdio_server_configured` already returns `false` for HTTP/HttpAuth entries.
     /// The dispatcher's TransportClosed event reaches `maybe_schedule_restart` and fails the stdio gate.
-    /// It emits `mcp.auto_restart.skipped{reason="not_configured"}` and does NOT spawn the task.
     #[tokio::test(start_paused = true)]
     async fn http_event_does_not_trigger_restart() {
         run_in_local(async {
@@ -915,7 +892,7 @@ mod tests {
         run_in_local(async {
             let mock = Rc::new(MockActions::new());
             mock.configure("svr");
-            mock.script_outcome(Ok(()));
+            mock.script_outcome(Ok(Respawn::Installed));
             let cancel = tokio_util::sync::CancellationToken::new();
 
             let task = tokio::task::spawn_local(auto_restart_stdio(
@@ -952,7 +929,7 @@ mod tests {
         run_in_local(async {
             let mock = Rc::new(MockActions::new());
             mock.configure("svr");
-            mock.script_outcome(Ok(()));
+            mock.script_outcome(Ok(Respawn::Installed));
 
             let task = tokio::task::spawn_local(auto_restart_stdio(
                 dyn_actions(mock.clone()),
@@ -979,14 +956,37 @@ mod tests {
         .await;
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn superseded_respawn_reports_nothing_and_stops() {
+        run_in_local(async {
+            let mock = Rc::new(MockActions::new());
+            mock.configure("svr");
+            mock.script_outcome(Ok(Respawn::Superseded));
+
+            let task = tokio::task::spawn_local(auto_restart_stdio(
+                dyn_actions(mock.clone()),
+                "sess-1".to_string(),
+                "svr".to_string(),
+                never_cancel(),
+            ));
+            tokio::time::advance(StdDuration::from_secs(120)).await;
+            tokio::task::yield_now().await;
+            task.await.unwrap();
+
+            assert_eq!(
+                mock.respawn_call_count(),
+                1,
+                "a newer owner's client is not retried over"
+            );
+            assert!(
+                mock.pushes().is_empty(),
+                "the newer owner reports the server's status, not the respawn"
+            );
+        })
+        .await;
+    }
+
     /// Contract: three failed attempts produce three intermediate `Reason::RestartFailed` pushes (attempt 1, 2, 3).
-    /// One final `Reason::RestartFailed` carrying `detail="exhausted after 3 attempts"` follows.
-    ///
-    /// ## Telemetry coverage caveat
-    ///
-    /// The `mcp.auto_restart.exhausted` and `mcp.auto_restart.attempted` counters are emitted via `tracing::info!` with metric-name `target:`s.
-    /// This test does NOT install a `tracing` subscriber.
-    /// If a future refactor accidentally deletes the `record_exhausted` / `record_attempted` calls, the wire-push assertion below still passes.
     /// The counters would silently disappear from telemetry.
     /// Acceptable because both call sites are right next to the wire push and likely to be deleted/edited together.
     #[tokio::test(start_paused = true)]
@@ -1082,7 +1082,7 @@ mod tests {
         run_in_local(async {
             let mock = Rc::new(MockActions::new());
             mock.configure("svr");
-            mock.script_outcome(Ok(()));
+            mock.script_outcome(Ok(Respawn::Installed));
 
             let task = tokio::task::spawn_local(auto_restart_stdio(
                 dyn_actions(mock.clone()),

@@ -8,7 +8,7 @@ use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use xai_grok_shell::extensions::notification::HookAnnotationKind;
 
-use super::tool::HookRunEntry;
+use crate::app::actions::PermissionLabel;
 use crate::appearance::AppearanceConfig;
 use crate::render::wrapping::word_wrap_lines;
 use crate::scrollback::block::BlockContent;
@@ -17,12 +17,12 @@ use crate::scrollback::types::{
 };
 use crate::theme::Theme;
 use crate::util::format_duration;
+use crate::views::plan_approval_view::PlanReviewOutcome;
 
 /// Shared text-selection range id for recap body lines (header is excluded).
 const RECAP_BODY_RANGE: u16 = 0;
 
 /// A session-level event with structured data.
-///
 /// Each variant carries the information needed to render a concise, informational message in the scrollback.
 /// These are non-interactive: unselectable, unfoldable, no accent.
 #[derive(Debug, Clone)]
@@ -125,6 +125,8 @@ pub enum SessionEvent {
         /// arbitrary hook text and is always rendered verbatim.
         kind: Option<HookAnnotationKind>,
     },
+    /// A hook's verdict on the tool call above it (deny, failure, timeout); this block draws the tool-row bullet.
+    HookOutcome { message: String },
     /// The session's persisted model is no longer available after re-auth.
     /// Both IDs are empty when re-shown on blocked prompt attempts.
     ModelUnavailable {
@@ -152,6 +154,12 @@ pub enum SessionEvent {
         summary: String,
         /// `true` for the automatic return-from-away recap, `false` for `/recap`.
         auto: bool,
+    },
+    /// Not persisted: a resumed session shows only the `Plan: Enter` tool row.
+    PlanModeEnteredByAgent { permission: PermissionLabel },
+    PlanReviewClosed {
+        outcome: PlanReviewOutcome,
+        permission: PermissionLabel,
     },
 }
 
@@ -259,7 +267,8 @@ impl SessionEvent {
             SessionEvent::CompactCompleted { elapsed } => {
                 format!("Compaction completed in {}.", format_duration(*elapsed))
             }
-            SessionEvent::HookAnnotation { message, .. } => message.clone(),
+            SessionEvent::HookAnnotation { message, .. }
+            | SessionEvent::HookOutcome { message } => message.clone(),
             SessionEvent::ModelUnavailable {
                 new_model_id,
                 reason,
@@ -281,6 +290,21 @@ impl SessionEvent {
             SessionEvent::Recap { summary, auto: _ } => {
                 // Always "Recap:" (manual `/recap` and auto return-from-away).
                 format!("Recap: {summary}")
+            }
+            SessionEvent::PlanModeEnteredByAgent { permission } => {
+                format!(
+                    "Agent entered plan mode · active permission mode: {permission} · file edits outside session plan.md blocked until plan mode exits"
+                )
+            }
+            SessionEvent::PlanReviewClosed {
+                outcome,
+                permission,
+            } => {
+                let verdict = match outcome {
+                    PlanReviewOutcome::Approved => "approved",
+                    PlanReviewOutcome::Abandoned => "abandoned",
+                };
+                format!("Plan {verdict} · plan mode off · active permission mode: {permission}")
             }
         }
     }
@@ -464,7 +488,6 @@ impl SessionEvent {
     }
 
     /// The recap summary text when this is a [`SessionEvent::Recap`].
-    ///
     /// Recap events render in the tool-call visual style (bullet, bold "Recap" header, muted body); other variants stay plain informational lines.
     /// This accessor is the single branch point the `SessionEventBlock` trait methods use to opt the recap into that style.
     fn recap_summary(&self) -> Option<&str> {
@@ -488,12 +511,8 @@ impl SessionEvent {
         )
     }
 
-    /// Whether this event marks the end of an agent turn (the "Turn completed/cancelled/failed" markers).
-    /// These are the only events that can carry the turn's stop-family hook runs inline.
-    ///
-    /// [`SessionEvent::RequestFailed`] is intentionally excluded, same as [`SessionEvent::ReAuthRequired`].
-    /// RetryState may push it before PromptResponse; treating it as terminal would change stop-hook attribution.
-    /// Dedicated banners skip the TurnFailed marker and flush hooks standalone.
+    /// Whether this event ends an agent turn. [`SessionEvent::RequestFailed`] and [`SessionEvent::ReAuthRequired`] are
+    /// excluded: RetryState may push them before PromptResponse, and dedicated banners skip the TurnFailed marker.
     pub fn is_turn_terminal(&self) -> bool {
         matches!(
             self,
@@ -692,7 +711,7 @@ fn localized_hook_annotation(
                 )
                 .replace("{count}", count)
             }),
-        Some(HookAnnotationKind::Unknown) | None => None,
+        Some(HookAnnotationKind::Unknown | HookAnnotationKind::Note | HookAnnotationKind::ToolOutcome) | None => None,
     }
     .unwrap_or_else(|| message.to_owned())
 }
@@ -734,14 +753,6 @@ fn format_tokens(tokens: u64) -> String {
 #[derive(Debug, Clone)]
 pub struct SessionEventBlock {
     pub event: SessionEvent,
-    /// Stop-family hook runs folded into a turn-terminal marker (`(event_name, runs)` per hook batch).
-    /// Rendered as a right-justified `stop  [hooks: N]` summary on the marker line, with per-hook detail on expand.
-    /// Always empty for non-terminal events.
-    pub stop_hooks: Vec<(String, Vec<HookRunEntry>)>,
-    /// The prompt turn a terminal marker belongs to, when known.
-    /// Gates which stop-hook batches may merge into it.
-    pub prompt_id: Option<String>,
-    /// Render-time locale; structured event data remains canonical.
     locale: crate::locale::LocaleContext,
 }
 
@@ -749,39 +760,12 @@ impl SessionEventBlock {
     pub fn new(event: SessionEvent) -> Self {
         Self {
             event,
-            stop_hooks: Vec::new(),
-            prompt_id: None,
-            locale: crate::locale::LocaleContext::default(),
-        }
-    }
-
-    /// A turn-terminal marker carrying the turn's stop-hook runs and prompt id.
-    pub fn with_stop_hooks(
-        event: SessionEvent,
-        stop_hooks: Vec<(String, Vec<HookRunEntry>)>,
-        prompt_id: Option<String>,
-    ) -> Self {
-        debug_assert!(stop_hooks.is_empty() || event.is_turn_terminal());
-        Self {
-            event,
-            stop_hooks,
-            prompt_id,
             locale: crate::locale::LocaleContext::default(),
         }
     }
 
     pub(crate) fn set_locale(&mut self, locale: crate::locale::LocaleContext) {
         self.locale = locale;
-    }
-
-    /// Whether any attached stop hook actually ran (non-skipped). Gates the
-    /// fold/selection affordances and the inline summary, mirroring
-    /// [`ToolCallHookData::has_content`](super::tool::ToolCallHookData::has_content).
-    pub fn has_stop_hook_content(&self) -> bool {
-        self.stop_hooks.iter().any(|(_, runs)| {
-            runs.iter()
-                .any(|r| !matches!(r.status, super::tool::HookRunStatus::Skipped))
-        })
     }
 
     /// A recap with real body content, i.e. not the empty loading spinner or a stray empty recap.
@@ -792,80 +776,9 @@ impl SessionEventBlock {
             .is_some_and(|s| !s.trim().is_empty())
     }
 
-    /// Merge the stop-hook runs into the marker's output: a right-justified `stop  [hooks: N]` summary plus per-hook detail lines when expanded.
-    /// The summary lands on the marker line, or on its own right-justified line when the marker text leaves no room or wraps.
-    ///
-    /// The summary spans are decoration: [`Selectable::Spans`] keeps drag-copy on the marker text only.
-    /// A copied "Worked for 4.4s" never drags the padding and hook counts along.
-    fn append_stop_hooks(&self, lines: &mut Vec<BlockLine>, ctx: &BlockContext) {
-        use super::tool::hook::{
-            render_hooks_detail_with_locale, render_hooks_for_mode_with_locale,
-            render_stop_hooks_summary_with_locale,
-        };
-
-        if !self.has_stop_hook_content() {
-            return;
-        }
-        let Some(summary) =
-            render_stop_hooks_summary_with_locale(&self.stop_hooks, Some(&ctx.locale))
-        else {
-            return;
-        };
-
-        let avail = ctx.width as usize;
-        let summary_width: usize = summary
-            .iter()
-            .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
-            .sum();
-        // Inline attach is for single-line markers only: on a wrapped marker (a long TurnFailed error) the summary would land mid-paragraph
-        let single_line = lines.len() == 1;
-        if let Some(first) = lines.first_mut() {
-            let text = crate::scrollback::types::line_plain_text(&first.content);
-            let text_width = unicode_width::UnicodeWidthStr::width(text.as_str());
-            // Restrict drag-copy to the marker text span(s) before padding.
-            let text_spans = first.content.spans.len();
-            if single_line && text_width + 2 + summary_width <= avail {
-                let pad = avail - text_width - summary_width;
-                first.content.spans.push(Span::raw(" ".repeat(pad)));
-                first.content.spans.extend(summary);
-                first.selectable = Selectable::Spans(0..text_spans);
-                first.selection_text = Some(text);
-            } else {
-                // No room on the marker line (or a wrapped marker): right-justify on its own line below the text
-                let pad = avail.saturating_sub(summary_width);
-                let mut spans = vec![Span::raw(" ".repeat(pad))];
-                spans.extend(summary);
-                lines.push(BlockLine::separator(Line::from(spans)));
-            }
-        }
-
-        // Expanded: per-hook detail below the marker line
-        // The section header ("stop") is redundant with the inline summary for a single batch
-        // Keep it when both stop_failure and stop ran so the groups read apart
-        if !matches!(ctx.mode, DisplayMode::Collapsed) {
-            let multiple = self.stop_hooks.len() > 1;
-            for (event_name, runs) in &self.stop_hooks {
-                let detail = if multiple {
-                    render_hooks_for_mode_with_locale(event_name, runs, ctx.mode, Some(&ctx.locale))
-                } else {
-                    render_hooks_detail_with_locale(runs, ctx.mode, Some(&ctx.locale))
-                };
-                lines.extend(detail);
-            }
-        }
-    }
-
-    /// Render a recap event in the tool-call visual style.
-    ///
-    /// Mirrors [`OtherToolCallBlock`](super::OtherToolCallBlock): a bold "Recap" header with the summary as muted body text below when expanded.
-    /// The dot bullet is prepended later by `RenderBlock::output` via [`has_bullet`](BlockContent::has_bullet).
-    /// When collapsed, the summary's first line trails the header as a preview.
-    ///
-    /// While the recap is still being generated the entry is `is_running`, so only the header is shown.
-    /// The animated accent sidebar (see [`accent`](BlockContent::accent)) signals progress.
-    ///
-    /// Text selection mirrors [`ThinkingBlock`](super::ThinkingBlock): the "Recap" label (and the blank separator under it) are decoration.
-    /// [`BlockLine::separator`] / [`Selectable::None`] keep drag-highlight and copy on the summary body, never the chrome label.
+    /// Render a recap event in the tool-call visual style. While the recap is still being generated the entry is
+    /// `is_running`, so only the header is shown. [`BlockLine::separator`] / [`Selectable::None`] keep drag-highlight
+    /// and copy on the summary body, never the chrome label.
     fn recap_output(&self, ctx: &BlockContext, summary: &str) -> BlockOutput {
         let theme = Theme::current();
         let muted_collapsed =
@@ -980,7 +893,6 @@ impl BlockContent for SessionEventBlock {
         if lines.is_empty() {
             lines.push(BlockLine::styled(Line::from("")).with_selection_range(Some(0)));
         }
-        self.append_stop_hooks(&mut lines, ctx);
         BlockOutput { lines }
     }
 
@@ -1005,10 +917,11 @@ impl BlockContent for SessionEventBlock {
 
     fn bullet(&self, ctx: &BlockContext) -> Option<AccentStyle> {
         // Recap: animated dot while loading; default gray dot when collapsed-idle; accent color when expanded
-        // Other events never show a bullet
-        if self.event.recap_summary().is_some()
-            && !ctx.is_running
-            && ctx.mode == DisplayMode::Collapsed
+        // A hook outcome keeps the default gray, matching its muted text; other events never show a bullet
+        if matches!(self.event, SessionEvent::HookOutcome { .. })
+            || (self.event.recap_summary().is_some()
+                && !ctx.is_running
+                && ctx.mode == DisplayMode::Collapsed)
         {
             return None;
         }
@@ -1024,30 +937,24 @@ impl BlockContent for SessionEventBlock {
     }
 
     fn is_foldable(&self) -> bool {
-        // A recap with body content folds, as does a turn marker carrying stop-hook runs (the fold reveals per-hook detail)
-        // Other events are single informational lines with nothing to collapse
-        self.recap_has_body() || self.has_stop_hook_content()
+        // A recap with body content folds; other events are single informational lines with nothing to collapse
+        self.recap_has_body()
     }
 
     fn is_selectable(&self) -> bool {
         // Recap is tool-like: navigable so it can be folded, but only once it has body content (mirrors `is_foldable`)
-        // That way j/k never lands on the loading spinner or an empty recap
-        // A turn marker with stop hooks is navigable for the same reason. Other events stay non-interactive.
-        self.recap_has_body() || self.has_stop_hook_content()
+        // That way j/k never lands on the loading spinner or an empty recap. Other events stay non-interactive.
+        self.recap_has_body()
     }
 
     fn default_display_mode(&self) -> DisplayMode {
-        // A marker with stop hooks starts collapsed: the right-justified summary is the resting state; detail is opt-in via fold
-        if self.has_stop_hook_content() {
-            DisplayMode::Collapsed
-        } else {
-            DisplayMode::Expanded
-        }
+        DisplayMode::Expanded
     }
 
     fn has_bullet(&self, ctx: &BlockContext) -> bool {
-        // Recap only, and only when the shared tool bullet is configured, so it tracks the same appearance setting as real tool calls
-        self.event.recap_summary().is_some()
+        // Recap and hook outcomes only, gated on the shared tool bullet so they track the tool rows' appearance setting
+        (self.event.recap_summary().is_some()
+            || matches!(self.event, SessionEvent::HookOutcome { .. }))
             && ctx
                 .appearance
                 .scrollback
@@ -1555,6 +1462,35 @@ mod tests {
     }
 
     #[test]
+    fn plan_mode_row_messages() {
+        let cases = [
+            (
+                SessionEvent::PlanModeEnteredByAgent {
+                    permission: PermissionLabel::Ask,
+                },
+                "Agent entered plan mode · active permission mode: ask · file edits outside session plan.md blocked until plan mode exits",
+            ),
+            (
+                SessionEvent::PlanReviewClosed {
+                    outcome: PlanReviewOutcome::Approved,
+                    permission: PermissionLabel::Auto,
+                },
+                "Plan approved · plan mode off · active permission mode: auto",
+            ),
+            (
+                SessionEvent::PlanReviewClosed {
+                    outcome: PlanReviewOutcome::Abandoned,
+                    permission: PermissionLabel::AlwaysApprove,
+                },
+                "Plan abandoned · plan mode off · active permission mode: always-approve",
+            ),
+        ];
+        for (event, expected) in cases {
+            assert_eq!(event.message(), expected);
+        }
+    }
+
+    #[test]
     fn recap_manual_and_auto_use_same_label() {
         let manual = SessionEvent::Recap {
             summary: "refactored the parser".into(),
@@ -1606,6 +1542,36 @@ mod tests {
         assert!(
             body.contains("Refactored the parser and added tests."),
             "summary is shown as body text: {body}"
+        );
+    }
+
+    /// The deny / failure line takes the tool rows' bullet (config-gated like theirs); a plain hook note stays unbulleted.
+    #[test]
+    fn hook_outcome_takes_the_tool_bullet_and_a_note_does_not() {
+        let outcome = SessionEventBlock::new(SessionEvent::HookOutcome {
+            message: "`web_fetch` blocked by global/qa: no".into(),
+        });
+        let note = SessionEventBlock::new(SessionEvent::HookAnnotation {
+            message: "`web_fetch` blocked by global/qa: no".into(),
+            kind: None,
+        });
+        assert!(outcome.has_bullet(&ctx()));
+        assert!(!note.has_bullet(&ctx()));
+        assert!(
+            outcome.bullet(&ctx()).is_none(),
+            "default gray, matching the muted text"
+        );
+
+        let mut no_bullet = ctx();
+        no_bullet.appearance.scrollback.blocks.tool.bullet = crate::appearance::ToolBullet::None;
+        assert!(
+            !outcome.has_bullet(&no_bullet),
+            "a user who turned tool bullets off gets none on hook lines either"
+        );
+        assert_eq!(
+            outcome.output(&ctx()).lines[0].content.to_string(),
+            "`web_fetch` blocked by global/qa: no",
+            "the message itself carries no glyph"
         );
     }
 
@@ -1784,224 +1750,5 @@ mod tests {
         assert!(!block.is_selectable());
         assert!(!block.has_bullet(&ctx()));
         assert_eq!(block.accent(&ctx()), None);
-    }
-
-    fn stop_group(name: &str) -> (String, Vec<HookRunEntry>) {
-        use super::super::tool::HookRunStatus;
-        (
-            name.to_string(),
-            vec![HookRunEntry {
-                name: "global/notify".into(),
-                status: HookRunStatus::Success {
-                    elapsed: Duration::from_millis(12),
-                },
-                output: None,
-            }],
-        )
-    }
-
-    fn completed_with_stop_hooks() -> SessionEventBlock {
-        SessionEventBlock::with_stop_hooks(
-            SessionEvent::TurnCompleted {
-                elapsed: Some(Duration::from_secs(5)),
-            },
-            vec![stop_group("stop")],
-            None,
-        )
-    }
-
-    #[test]
-    fn stop_hooks_summary_is_right_justified_on_marker_line() {
-        let block = completed_with_stop_hooks();
-        let out = block.output(&BlockContext {
-            mode: DisplayMode::Collapsed,
-            ..ctx()
-        });
-        assert_eq!(out.lines.len(), 1, "collapsed marker stays a single line");
-        let text = plain(&out.lines[0]);
-        assert!(
-            text.starts_with("Worked for 5.0s"),
-            "marker text keeps the left edge: {text}"
-        );
-        assert!(
-            text.ends_with("stop  [hooks: 1]"),
-            "summary sits at the right edge: {text}"
-        );
-        assert_eq!(
-            unicode_width::UnicodeWidthStr::width(text.as_str()),
-            80,
-            "padding right-justifies the summary to the content width"
-        );
-        // Drag-copy stays on the marker text, never the padding or counts.
-        assert!(
-            matches!(&out.lines[0].selectable, Selectable::Spans(r) if *r == (0..1)),
-            "only the marker text span is selectable: {:?}",
-            out.lines[0].selectable
-        );
-        assert_eq!(
-            out.lines[0].selection_text.as_deref(),
-            Some("Worked for 5.0s")
-        );
-    }
-
-    #[test]
-    fn stop_hooks_summary_wraps_to_own_line_when_narrow() {
-        let block = completed_with_stop_hooks();
-        // "Worked for 5.0s" is 15 cols and the summary is 16, so at width 30 there is no room and the summary right-justifies on its own line
-        let out = block.output(&BlockContext {
-            mode: DisplayMode::Collapsed,
-            width: 30,
-            ..ctx()
-        });
-        assert_eq!(out.lines.len(), 2);
-        let summary_line = plain(&out.lines[1]);
-        assert!(summary_line.ends_with("stop  [hooks: 1]"));
-        assert_eq!(
-            unicode_width::UnicodeWidthStr::width(summary_line.as_str()),
-            30
-        );
-        assert!(
-            matches!(out.lines[1].selectable, Selectable::None),
-            "the overflow summary line is decoration"
-        );
-    }
-
-    #[test]
-    fn stop_hooks_summary_goes_below_wrapped_multi_line_marker() {
-        // This wrapped TurnFailed marker's first line has room for the summary
-        // Attaching there would read mid-paragraph, so the summary right-justifies on its own line below the text instead
-        let block = SessionEventBlock::with_stop_hooks(
-            SessionEvent::TurnFailed {
-                error: format!("boom {}", "x".repeat(70)),
-                elapsed: Some(Duration::from_secs(3)),
-            },
-            vec![stop_group("stop")],
-            None,
-        );
-        let out = block.output(&BlockContext {
-            mode: DisplayMode::Collapsed,
-            ..ctx()
-        });
-        assert_eq!(out.lines.len(), 3, "two wrapped text lines + summary line");
-        assert!(
-            !plain(&out.lines[0]).contains("[hooks:"),
-            "no summary interleaved with the wrapped text: {}",
-            plain(&out.lines[0])
-        );
-        let summary_line = plain(&out.lines[2]);
-        assert!(summary_line.ends_with("stop  [hooks: 1]"));
-        assert!(
-            matches!(out.lines[2].selectable, Selectable::None),
-            "the summary line is decoration"
-        );
-    }
-
-    #[test]
-    fn stop_hooks_detail_only_when_expanded() {
-        let block = completed_with_stop_hooks();
-        let collapsed = block.output(&BlockContext {
-            mode: DisplayMode::Collapsed,
-            ..ctx()
-        });
-        let collapsed_text = collapsed
-            .lines
-            .iter()
-            .map(plain)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(
-            !collapsed_text.contains("global/notify"),
-            "collapsed marker hides per-hook detail: {collapsed_text}"
-        );
-
-        let expanded = block.output(&ctx());
-        let expanded_text = expanded
-            .lines
-            .iter()
-            .map(plain)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(
-            expanded_text.contains("global/notify (12ms)"),
-            "expanded marker shows per-hook detail: {expanded_text}"
-        );
-    }
-
-    #[test]
-    fn marker_with_stop_hooks_is_interactive_and_starts_collapsed() {
-        let block = completed_with_stop_hooks();
-        assert!(block.is_foldable(), "fold reveals per-hook detail");
-        assert!(block.is_selectable(), "navigable so it can be folded");
-        assert_eq!(block.default_display_mode(), DisplayMode::Collapsed);
-
-        // All-skipped batches change nothing (mirrors has_content()).
-        use super::super::tool::HookRunStatus;
-        let skipped = SessionEventBlock::with_stop_hooks(
-            SessionEvent::TurnCompleted {
-                elapsed: Some(Duration::from_secs(5)),
-            },
-            vec![(
-                "stop".into(),
-                vec![HookRunEntry {
-                    name: "h".into(),
-                    status: HookRunStatus::Skipped,
-                    output: None,
-                }],
-            )],
-            None,
-        );
-        assert!(!skipped.is_foldable());
-        assert!(!skipped.is_selectable());
-        let out = skipped.output(&BlockContext {
-            mode: DisplayMode::Collapsed,
-            ..ctx()
-        });
-        assert_eq!(plain(&out.lines[0]), "Worked for 5.0s");
-    }
-
-    #[test]
-    fn stop_and_stop_failure_groups_render_labeled_sections() {
-        let block = SessionEventBlock::with_stop_hooks(
-            SessionEvent::TurnFailed {
-                error: "boom".into(),
-                elapsed: Some(Duration::from_secs(3)),
-            },
-            vec![stop_group("stop_failure"), stop_group("stop")],
-            None,
-        );
-        let out = block.output(&BlockContext {
-            mode: DisplayMode::Collapsed,
-            ..ctx()
-        });
-        let text = plain(&out.lines[0]);
-        assert!(
-            text.ends_with("stop_failure  [hooks: 1]  stop  [hooks: 1]"),
-            "both groups summarized: {text}"
-        );
-
-        let expanded = block.output(&ctx());
-        let expanded_text = expanded
-            .lines
-            .iter()
-            .map(plain)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(
-            expanded_text.contains("stop_failure") && expanded_text.contains("global/notify"),
-            "multi-group detail keeps section headers: {expanded_text}"
-        );
-    }
-
-    #[test]
-    fn only_turn_terminal_events_accept_stop_hooks() {
-        let settled = SessionEventBlock::new(SessionEvent::TurnCompleted {
-            elapsed: Some(Duration::from_secs(24)),
-        });
-        assert!(settled.event.is_turn_terminal());
-        let recap = SessionEventBlock::new(SessionEvent::Recap {
-            summary: "did stuff".into(),
-            auto: false,
-        });
-        assert!(!recap.event.is_turn_terminal());
     }
 }

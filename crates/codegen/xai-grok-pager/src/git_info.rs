@@ -10,16 +10,9 @@ use xai_grok_telemetry::region::Parent;
 use crate::host::HostOs;
 use crate::terminal::{TerminalName, terminal_context};
 
-/// Per-cwd git cache: the single source of truth for every git display in the pager.
-/// Those displays are the welcome top bar / dashboard header (process cwd), each agent's status bar, and the dashboard row subtitles.
-/// Keyed per directory so one directory's branch never leaks onto another's.
-/// Maps each cwd to its last-computed [`CwdGitInfo`] (`None` for a non-repo) plus the time of the last refresh attempt (for throttling).
-///
-/// Fed from three places, all off the render path:
-///   - [`cwd_git_info_lazy`]: a lazy, throttled refresh when a view reads a cwd.
-///   - [`populate_from_cwd_async`]: an eager warm at startup / on a cwd change.
-///   - [`update_from_notification`]: the `x.ai/git_head_changed` ACP notification.
-///     A branch switch inside an agent thus reflects immediately instead of waiting out [`CWD_GIT_REFRESH_TTL`].
+/// Per-cwd git cache: the single source of truth for every git display in the pager. Keyed per directory so one
+/// directory's branch never leaks onto another's. A branch switch inside an agent thus reflects immediately instead
+/// of waiting out [`CWD_GIT_REFRESH_TTL`].
 type CwdCacheEntry = (Option<CwdGitInfo>, Instant);
 static CWD_GIT_CACHE: LazyLock<Mutex<HashMap<PathBuf, CwdCacheEntry>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -27,19 +20,14 @@ static CWD_GIT_CACHE: LazyLock<Mutex<HashMap<PathBuf, CwdCacheEntry>>> =
 /// Minimum interval between off-thread refreshes for the same cwd, so a per-frame caller can't spawn a storm of git lookups.
 const CWD_GIT_REFRESH_TTL: Duration = Duration::from_secs(5);
 
-/// Upper bound on [`CWD_GIT_CACHE`] entries.
-/// The pager only displays a handful of directories at once (the process cwd and one per live agent).
-/// A long session that navigates many locations would otherwise grow the map without bound.
-/// When full, the least-recently-refreshed entry is evicted on insert (see [`cwd_cache_insert`]).
+/// Upper bound on [`CWD_GIT_CACHE`] entries. The pager only displays a handful of directories at once (the process
+/// cwd and one per live agent). A long session that navigates many locations would otherwise grow the map without
+/// bound.
 const CWD_GIT_CACHE_CAP: usize = 64;
 
-/// Refresh [`CWD_GIT_CACHE`] for `dir` from a `git_head_changed` notification.
-/// A branch switch inside an agent's session thus reflects in every view immediately instead of waiting out [`CWD_GIT_REFRESH_TTL`].
-///
-/// Called from [`crate::app::acp_handler::handle_git_head_changed`].
-/// That handler also updates the agent's own `current_branch` / `is_worktree` / `main_repo` fields directly.
-/// The worktree label isn't carried by the notification (and is immutable for a path), so any previously-resolved label is preserved.
-/// `is_worktree` matches [`compute_cwd_git_info`]: notification flag, `main_repo`, or a cached non-empty label.
+/// A branch switch inside an agent's session thus reflects in every view immediately instead of waiting out
+/// [`CWD_GIT_REFRESH_TTL`]. The worktree label isn't carried by the notification (and is immutable for a path), so
+/// any previously-resolved label is preserved.
 pub fn update_from_notification(
     dir: &Path,
     branch: Option<&str>,
@@ -65,7 +53,6 @@ pub fn update_from_notification(
 
 /// Eagerly warm [`CWD_GIT_CACHE`] for `cwd` off-thread, e.g. at pager startup and after a dashboard location change.
 /// The header / top bar then show the branch and worktree on the next frame instead of waiting for the first lazy refresh.
-///
 /// No subprocess (libgit2 is filesystem-based) and a no-op when there is no tokio runtime, so callers stay infallible.
 pub fn populate_from_cwd_async(cwd: PathBuf) {
     spawn_cwd_git_refresh(cwd);
@@ -95,11 +82,8 @@ pub struct CwdGitInfo {
     pub worktree_label: Option<String>,
 }
 
-/// Synchronously compute fresh git context (branch and worktree info) for `cwd`.
-/// Spawns no subprocess (uses `git2`) but does touch the filesystem and worktree DB.
-/// Call it off the render path (e.g. once when a view opens), never per frame.
-/// Returns `None` when `cwd` is not inside a git repository.
-/// Callers can then leave existing cached values untouched rather than clobbering them with empties.
+/// Synchronously compute fresh git context (branch and worktree info) for `cwd`. Call it off the render path, never
+/// per frame. Callers can then leave existing cached values untouched rather than clobbering them with empties.
 pub fn compute_cwd_git_info(cwd: &Path) -> Option<CwdGitInfo> {
     let snap = compute_snapshot(cwd);
     // `repo_root_display` is `Some` only when repo discovery succeeded; a `None` here means `cwd` is not a repo (or discovery failed)
@@ -119,12 +103,9 @@ fn is_cwd_worktree(main_repo: Option<&str>, worktree_label: Option<&str>) -> boo
     main_repo.is_some() || worktree_label.is_some_and(|s| !s.is_empty())
 }
 
-/// Per-cwd git info for render paths that display many directories (the dashboard agent list, each agent's status bar).
-/// Returns the cached value for `cwd` (possibly `None` on the very first call).
-/// Kicks off a throttled off-thread refresh when the entry is missing or older than [`CWD_GIT_REFRESH_TTL`].
-/// Never blocks and never spawns `git` subprocesses (uses `git2`); safe to call every frame for many cwds.
-///
-/// Keyed per directory, so each agent shows the branch/worktree of its own location rather than the process cwd's.
+/// Per-cwd git info for render paths that display many directories (the dashboard agent list, each agent's status
+/// bar). Never blocks and never spawns `git` subprocesses (uses `git2`). Keyed per directory, so each agent shows
+/// the branch/worktree of its own location rather than the process cwd's.
 pub fn cwd_git_info_lazy(cwd: &Path) -> Option<CwdGitInfo> {
     let mut cache = CWD_GIT_CACHE.lock().ok()?;
     let (cached, needs_refresh) = match cache.get(cwd) {
@@ -164,13 +145,8 @@ fn spawn_cwd_git_refresh(cwd: PathBuf) {
     });
 }
 
-/// Apply an off-thread refresh result to [`CWD_GIT_CACHE`].
-///
-/// A successful probe (`Some`) replaces the entry.
-/// A `None` means either "not a git repo" or a transient libgit2 discovery failure, and the two are indistinguishable here.
-/// We therefore preserve any previously-resolved value rather than clobbering it with an empty (honoring [`compute_cwd_git_info`]'s contract).
-/// A fresh `cwd` with no prior entry still records the `None`, which is correct for a genuine non-repo.
-/// The timestamp always advances so the throttle resets either way.
+/// A `None` means either "not a git repo" or a transient libgit2 discovery failure, and the two are
+/// indistinguishable here. The timestamp always advances so the throttle resets either way.
 fn apply_cwd_git_refresh(
     cache: &mut HashMap<PathBuf, CwdCacheEntry>,
     cwd: PathBuf,
@@ -255,11 +231,9 @@ fn compute_snapshot(cwd: &Path) -> GitSnapshot {
     }
 }
 
-/// Map of worktree root path to human label for every managed worktree that has a non-empty label.
-/// Opens the worktree metadata DB once and returns an empty map on any error.
-/// Keys are canonicalized so callers can match against `dunce::canonicalize`d candidate paths.
-///
-/// Intended to be built once (e.g. when a directory picker opens) and reused for many path lookups, avoiding a DB open per candidate.
+/// Map of worktree root path to human label for every managed worktree that has a non-empty label. Opens the
+/// worktree metadata DB once and returns an empty map on any error. Keys are canonicalized so callers can match
+/// against `dunce::canonicalize`d candidate paths.
 pub fn worktree_label_index() -> std::collections::HashMap<PathBuf, String> {
     let mut map = std::collections::HashMap::new();
     let Ok(db) = xai_fast_worktree::db::WorktreeDb::open_default() else {
@@ -280,7 +254,6 @@ pub fn worktree_label_index() -> std::collections::HashMap<PathBuf, String> {
 }
 
 /// Look up the worktree label and source repo from the metadata DB.
-///
 /// Returns `(None, None)` silently on any error (missing DB, no record).
 /// Called from `spawn_blocking` so DB I/O is fine.
 fn lookup_worktree_record(cwd: &Path) -> (Option<String>, Option<PathBuf>) {
@@ -328,12 +301,9 @@ fn collapse_home_path(path: &Path, home: Option<&Path>) -> String {
         .unwrap_or_else(|_| path.display().to_string())
 }
 
-/// Branch glyph for the git display, cached for process lifetime.
-///
-/// The Powerline glyph (`\u{e0a0}`) is a Nerd Font-only Private Use Area codepoint, so it renders as "tofu" without a patched font.
-/// Where one can't be assumed we fall back to a glyph the platform's stock fonts cover.
-///
-/// `GROK_NERD_FONTS=1` forces Powerline; `GROK_NERD_FONTS=0` forces the fallback.
+/// Branch glyph for the git display, cached for process lifetime. The Powerline glyph (`\u{e0a0}`) is a Nerd
+/// Font-only Private Use Area codepoint, so it renders as "tofu" without a patched font. Where one can't be assumed
+/// we fall back to a glyph the platform's stock fonts cover.
 pub(crate) fn branch_icon() -> &'static str {
     static ICON: OnceLock<&str> = OnceLock::new();
     ICON.get_or_init(|| {
@@ -362,12 +332,9 @@ fn decide_branch_icon(nerd_fonts: Option<&str>, host: HostOs, brand: TerminalNam
     }
 }
 
-/// Whether a Nerd Font (Private Use Area glyphs) is plausible for this host/terminal.
-/// Used by [`decide_branch_icon`] to pick a Powerline glyph.
-///
-/// An explicit `GROK_NERD_FONTS` override always wins: `0`/`false` means off, anything else means on.
-/// Otherwise PUA glyphs are assumed everywhere except Windows consoles and the macOS terminals that ship stock fonts (Apple Terminal, iTerm2).
-/// Those terminals render PUA glyphs as tofu.
+/// Whether a Nerd Font (Private Use Area glyphs) is plausible for this host/terminal. An explicit `GROK_NERD_FONTS`
+/// override always wins: `0`/`false` means off, anything else means on. Otherwise PUA glyphs are assumed everywhere
+/// except Windows consoles and the macOS terminals that ship stock fonts (Apple Terminal, iTerm2).
 fn decide_nerd_fonts(nerd_fonts: Option<&str>, host: HostOs, brand: TerminalName) -> bool {
     if let Some(val) = nerd_fonts {
         return !matches!(val, "0" | "false");

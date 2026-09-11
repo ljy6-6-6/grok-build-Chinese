@@ -12,21 +12,13 @@ pub(crate) enum ArtifactStatus {
     Skipped,
     Enqueued,
 }
-#[derive(serde::Serialize, Clone, Copy)]
+#[derive(serde::Serialize, Clone, Copy, strum::AsRefStr, strum::IntoStaticStr)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub(crate) enum ManifestUploadMethod {
     Proxy,
     Direct,
     S3,
-}
-impl ManifestUploadMethod {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Proxy => "proxy",
-            Self::Direct => "direct",
-            Self::S3 => "s3",
-        }
-    }
 }
 #[derive(Debug, serde::Serialize, Clone)]
 pub(crate) struct FailureDetail {
@@ -126,10 +118,8 @@ pub(crate) fn skip_artifact(tracker: &ArtifactTracker, filename: &str, reason: &
     inner.statuses.insert(key.clone(), ArtifactStatus::Skipped);
     inner.skips.insert(key, reason.to_owned());
 }
-/// `fully_uploaded` is `true` iff no artifact has status `Failed`.
-/// `Enqueued` counts as non-failure: it is only written after the upload queue accepted the artifact (see [`ArtifactStatus::Enqueued`]).
-/// Timeouts before the queue accepts record `Failed` instead.
-/// Treating an accepted artifact as failed would permanently park a turn whose artifacts land moments later.
+/// `fully_uploaded` is `true` iff no artifact has status `Failed`. `Enqueued` counts as non-failure: it is only written after the upload queue accepted the artifact (see [`ArtifactStatus::Enqueued`]).
+/// Timeouts before the queue accepts record `Failed` instead. Treating an accepted artifact as failed would permanently park a turn whose artifacts land moments later.
 pub(crate) fn build_manifest(
     tracker: &ArtifactTracker,
     upload_method: ManifestUploadMethod,
@@ -193,12 +183,13 @@ pub(crate) async fn write_upload_manifest(ctx: &PromptTraceContext, manifest: &U
         "{}/upload_manifest.json",
         ctx.gcs_config.gcs_prefix.as_deref().unwrap_or("")
     );
-    super::trace::upload_artifact_to_gcs(
+    let _ = super::trace::upload_trace_artifact_blocking(
         ctx,
-        &gcs_path,
         &bytes,
+        &gcs_path,
         "application/json",
         "upload_manifest",
+        None,
     )
     .await;
 }
@@ -430,7 +421,7 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .to_owned();
-            assert_eq!(method.as_str(), serde_str);
+            assert_eq!(method.as_ref(), serde_str);
         }
     }
 }

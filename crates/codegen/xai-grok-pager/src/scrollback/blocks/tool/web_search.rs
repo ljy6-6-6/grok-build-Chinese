@@ -190,7 +190,6 @@ impl WebSearchToolCallBlock {
     }
 
     /// Build the sources summary line from citations.
-    ///
     /// Extracts domain names from URLs and renders a compact one-liner:
     /// `Sources: stripe.com, react.dev, stackoverflow.com (+2 more)`
     fn sources_line(

@@ -11,15 +11,21 @@ use crate::render::color::{indexed_to_rgb, nearest_indexed};
 use crate::terminal::{TerminalName, terminal_context};
 
 /// Terminal color support level (ordered low to high).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, strum::AsRefStr, strum::IntoStaticStr,
+)]
 pub enum ColorLevel {
     /// No color support (monochrome).
+    #[strum(serialize = "none")]
     None,
     /// Basic 16-color ANSI (SGR 30–37 / 90–97).
+    #[strum(serialize = "basic")]
     Basic,
     /// 256-color indexed palette (SGR 38;5;N).
+    #[strum(serialize = "256")]
     Ansi256,
     /// 24-bit truecolor RGB (SGR 38;2;R;G;B).
+    #[strum(serialize = "truecolor")]
     TrueColor,
 }
 
@@ -35,22 +41,11 @@ impl ColorLevel {
     pub fn has_truecolor(self) -> bool {
         self >= Self::TrueColor
     }
-
-    /// Canonical lowercase spelling that round-trips through the `GROK_FORCE_COLOR_LEVEL` parser.
-    /// Use this in user-facing diagnostics (not `{:?}` Debug, which yields `Basic` / `Ansi256` / `TrueColor` / `None`).
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::None => "none",
-            Self::Basic => "basic",
-            Self::Ansi256 => "256",
-            Self::TrueColor => "truecolor",
-        }
-    }
 }
 
 impl std::fmt::Display for ColorLevel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
+        f.write_str(self.as_ref())
     }
 }
 
@@ -58,14 +53,32 @@ impl std::fmt::Display for ColorLevel {
 
 static COLOR_LEVEL: OnceLock<ColorLevel> = OnceLock::new();
 
-/// Detect the terminal's color support and cache the result.
-///
-/// The `supports-color` crate checks `COLORTERM`, `TERM`, terminal-specific env vars (`ITERM_SESSION_ID`, etc.) and whether stdout is a TTY.
-///
-/// If `NO_COLOR` is set the result is [`ColorLevel::None`].
-/// If stdout is not a TTY (test runner, piped output) and `NO_COLOR` is absent, the result defaults to [`ColorLevel::TrueColor`].
-/// That is the safe assumption for a TUI app that always runs inside a terminal.
-///
+/// Test override before the write-once `OnceLock`. Ambient `NO_COLOR` would otherwise win by scheduling luck. `u8::MAX` means unset.
+#[cfg(any(test, feature = "test-support"))]
+static TEST_LEVEL_OVERRIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(u8::MAX);
+
+/// Pin the detected color level for the test process (see
+/// [`TEST_LEVEL_OVERRIDE`]). The terminal-native lock cap still applies on
+/// top, so minimal-mode tests keep their Basic cap.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_level_for_test(level: ColorLevel) {
+    TEST_LEVEL_OVERRIDE.store(level as u8, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn test_level_override() -> Option<ColorLevel> {
+    let v = TEST_LEVEL_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed);
+    [
+        ColorLevel::None,
+        ColorLevel::Basic,
+        ColorLevel::Ansi256,
+        ColorLevel::TrueColor,
+    ]
+    .into_iter()
+    .find(|l| *l as u8 == v)
+}
+
+/// `NO_COLOR` forces [`ColorLevel::None`]. Non-TTY without it defaults to TrueColor (a TUI always runs in a terminal).
 /// Capped at [`ColorLevel::Basic`] while the terminal-native lock is engaged.
 pub fn detect() -> ColorLevel {
     let raw = detect_raw();
@@ -77,6 +90,10 @@ pub fn detect() -> ColorLevel {
 
 /// The raw cached detection, without the terminal-native lock cap.
 fn detect_raw() -> ColorLevel {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(level) = test_level_override() {
+        return level;
+    }
     *COLOR_LEVEL.get_or_init(|| {
         // Explicit opt-out via NO_COLOR takes priority.
         if std::env::var_os("NO_COLOR").is_some() {
@@ -199,14 +216,7 @@ pub fn set(level: ColorLevel) -> Result<(), ColorLevel> {
 
 // ── Color quantization ──────────────────────────────────────────────────
 
-/// Downgrade a [`Color`] to the highest representation the terminal supports.
-///
-/// | Terminal level | `Rgb`            | `Indexed`         | Named (`Red`…) |
-/// |----------------|------------------|--------------------|----------------|
-/// | TrueColor      | pass-through     | pass-through       | pass-through   |
-/// | Ansi256        | → nearest idx    | pass-through       | pass-through   |
-/// | Basic          | → nearest ANSI16 | → nearest ANSI16   | pass-through   |
-/// | None           | → `Reset`        | → `Reset`          | → `Reset`      |
+/// Downgrade to what the terminal can show: Ansi256 nearest-index, Basic nearest ANSI16, None to `Reset`.
 pub fn quantize_color(color: Color, level: ColorLevel) -> Color {
     match level {
         ColorLevel::TrueColor => color,
@@ -288,10 +298,7 @@ fn indexed_to_ansi16(n: u8) -> Color {
     }
 }
 
-/// Find the nearest ANSI 16 color for an RGB triplet.
-///
-/// Uses a simple squared-Euclidean distance over the standard xterm ANSI 16 palette.
-/// That is good enough for a fallback; 16-color terminals are very rare.
+/// Nearest xterm ANSI 16 by squared-Euclidean distance. Fallback only; 16-color terminals are rare.
 fn rgb_to_ansi16(r: u8, g: u8, b: u8) -> Color {
     // Standard xterm ANSI 16 palette (same values used by indexed_to_rgb for 0–15).
     const PALETTE: [(u8, u8, u8, Color); 16] = [

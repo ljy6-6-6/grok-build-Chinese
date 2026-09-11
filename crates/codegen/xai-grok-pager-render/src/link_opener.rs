@@ -18,11 +18,8 @@ pub enum OpenUrlResult {
     BrowserUnavailable,
 }
 
-/// Whether the environment looks capable of opening a GUI browser.
-///
-/// Pure so tests can drive it with a fixed env map.
-/// On Linux/BSD this needs a non-empty `DISPLAY` or `WAYLAND_DISPLAY`, or a non-empty `BROWSER` override.
-/// macOS and Windows always count as available here; [`open_url`] still reports a failed spawn.
+/// Linux/BSD needs non-empty `DISPLAY`, `WAYLAND_DISPLAY`, or `BROWSER`; macOS/Windows always return true.
+/// Pure for a fixed env map. A true result is not a successful spawn.
 pub fn browser_open_likely_available_from_env(env: &HashMap<String, String>) -> bool {
     if cfg!(any(target_os = "macos", target_os = "windows")) {
         return true;
@@ -58,15 +55,8 @@ pub fn browser_unavailable_line(url: &str, copied: bool) -> String {
     }
 }
 
-/// Open a URL in the system's default browser/handler.
-///
-/// Uses the native opener: `open` on macOS, `xdg-open` on Linux (with detached stdio so it cannot block the pager), and `ShellExecuteW` on Windows.
-///
-/// Returns `true` when the opener was launched (or `GROK_TEST_OPEN_URL_FILE` recorded the URL).
-/// Returns `false` when the environment looks headless or the spawn fails.
-/// Callers should then show the URL via [`browser_unavailable_message`] (scrollback) or [`browser_unavailable_line`] (welcome toast).
-///
-/// **Callers handling untrusted input** should call [`is_safe_to_open`] first, or use [`open_url_if_safe`] or [`try_open_url`], which combine both.
+/// Native opener with detached stdio so a GUI helper cannot block the pager.
+/// `false` on headless or spawn failure — show the URL. Untrusted input must use [`is_safe_to_open`] or [`try_open_url`].
 pub fn open_url(url: &str) -> bool {
     // PTY e2e tests must see the open without launching a real browser
     // When this env var is set, append the URL to the file and skip the OS opener
@@ -120,11 +110,9 @@ fn spawn_url_opener(url: &str) -> bool {
     }
     let verb = wide("open");
     let target = wide(url);
-    // SAFETY: `verb` and `target` are NUL-terminated UTF-16 buffers that
-    // outlive the call; `hwnd`, `lpparameters`, and `lpdirectory` are
-    // documented as optional and passed null. Per the ShellExecuteW
-    // contract the returned pseudo-HINSTANCE is only compared (> 32 means
-    // success), never dereferenced.
+    // SAFETY: `verb` and `target` are NUL-terminated UTF-16 buffers that outlive the call;
+    // optional hwnd/params/directory are null. The pseudo-HINSTANCE is only compared
+    // (>32 means success), never dereferenced.
     let result = unsafe {
         ShellExecuteW(
             std::ptr::null_mut(),
@@ -162,11 +150,8 @@ fn spawn_url_opener(url: &str) -> bool {
     }
 }
 
-/// Build the `open`/`xdg-open` opener command (macOS, Linux, BSD); Windows uses [`reveal_in_explorer`] instead.
-///
-/// [`xai_tty_utils::detach_std_command`] (`setsid`/`setpgid`) keeps the spawned GUI helper and its children from grabbing the TUI's `/dev/tty`.
-/// Split from [`open_path`] so it can be unit-tested without spawning.
-/// The path is passed as a single argument, never interpolated into a shell string.
+/// `detach_std_command` keeps the GUI helper off the TUI's `/dev/tty`. Path is one argv, never a shell string.
+/// Windows uses [`reveal_in_explorer`]. Split out so tests can inspect the command without spawning.
 #[cfg(not(target_os = "windows"))]
 fn build_open_path_command(path: &std::path::Path) -> std::process::Command {
     #[cfg(target_os = "macos")]
@@ -182,14 +167,8 @@ fn build_open_path_command(path: &std::path::Path) -> std::process::Command {
     command
 }
 
-/// Reveal/open a local file in the OS file manager or default application.
-///
-/// Returns `true` on success.
-/// Takes a trusted filesystem path (no scheme validation, unlike [`open_url`]).
-///
-/// - **Windows**: `explorer.exe /select,<path>` reveals and highlights the file in Explorer.
-///   We avoid `cmd /c start`: its `%VAR%` expansion would corrupt the percent-encoded session-directory segment in imagine media paths.
-/// - **macOS / Linux**: `open` / `xdg-open` open the file in its default app.
+/// Trusted filesystem path (no scheme check, unlike [`open_url`]).
+/// Windows avoids `cmd /c start`: `%VAR%` expansion corrupts percent-encoded session paths.
 #[allow(clippy::disallowed_methods)] // fire and forget; the child is reaped when this process exits
 pub fn open_path(path: &std::path::Path) -> bool {
     // Never launch a real GUI app in tests.
@@ -213,15 +192,8 @@ pub fn open_path(path: &std::path::Path) -> bool {
     }
 }
 
-/// Reveal `path` in a new Explorer window with the file selected.
-///
-/// Uses `raw_arg` so Explorer's required `/select,"<path>"` quoting reaches it verbatim.
-/// The default arg quoting wraps the whole token and breaks the switch.
-/// Launched directly (not via `cmd`), so percent characters in the path are not expanded by the shell.
-/// Session dirs embed a urlencoded cwd segment (`C%3A%5CUsers…`); those `%` chars must reach Explorer intact.
-///
-/// Prefer the on-disk path as-is.
-/// When the file is missing, open the parent folder (no `/select`) so the user lands near the media instead of Home.
+/// `raw_arg` keeps Explorer's `/select,"<path>"` quoting; no `cmd`, so `%` in urlencoded paths is not expanded.
+/// A missing file opens the parent folder (no `/select`) instead of Home.
 #[cfg(all(not(test), target_os = "windows"))]
 #[allow(clippy::disallowed_methods)] // fire and forget; the child is reaped when this process exits
 fn reveal_in_explorer(path: &std::path::Path) -> bool {
@@ -289,10 +261,8 @@ pub fn is_safe_to_open(url: &str, filter: SchemeFilter) -> bool {
     false
 }
 
-/// Validate scheme and open a URL if permitted.
-///
-/// Returns `true` only when the scheme is allowed **and** the opener was launched.
-/// Use [`try_open_url`] to distinguish scheme rejection from browser unavailability.
+/// `true` only when the scheme is allowed and the opener launched.
+/// Use [`try_open_url`] to tell scheme rejection from a missing browser.
 pub fn open_url_if_safe(url: &str, filter: SchemeFilter) -> bool {
     matches!(try_open_url(url, filter), OpenUrlResult::Opened)
 }
@@ -311,13 +281,8 @@ pub fn try_open_url(url: &str, filter: SchemeFilter) -> OpenUrlResult {
     }
 }
 
-/// Ensure `url` carries the given query parameter, returning the rewritten URL.
-///
-/// If the URL already contains a parameter with that name, its value is left untouched (the caller upstream may have intentionally set one).
-/// On parse failure, the original string is returned unchanged so this is safe to apply to opener input from untrusted sources.
-///
-/// Used by the SuperGrok upsell flow to attribute clicks to `referrer=grok-build`, matching the OAuth consent screen and x.ai/cli marketing links.
-/// The parameter is added whatever the remote settings `gate_url` value happens to be.
+/// Leave an existing parameter untouched; on parse failure return the original so untrusted opener input stays safe.
+/// SuperGrok upsell stamps the param regardless of the remote `gate_url`.
 pub fn ensure_query_param(url: &str, key: &str, value: &str) -> String {
     let Ok(mut parsed) = url::Url::parse(url) else {
         return url.to_string();

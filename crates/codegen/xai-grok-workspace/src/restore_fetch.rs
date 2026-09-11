@@ -96,10 +96,8 @@ fn is_abbreviated_object_id(value: &str) -> bool {
     plausible_abbrev && value.as_bytes().iter().all(u8::is_ascii_hexdigit)
 }
 
-/// Local remote-tracking names (`origin/foo`, `refs/remotes/origin/foo`) are valid `git checkout` targets but not origin fetch sources.
-/// Fetch the corresponding remote branch instead.
-/// Full object ids and other simple refs (`main`, `refs/heads/…`, `refs/tags/…`) pass through unchanged.
-/// Abbreviated SHAs are rejected: they checkout locally when present but cannot be fetched.
+/// Remote-tracking names checkout locally but are not origin fetch sources; fetch the remote branch instead.
+/// Full oids and simple refs pass through. Abbreviated SHAs are rejected: they cannot be fetched.
 pub(crate) fn origin_fetch_spec_for_checkout_target(target: &str) -> Option<&str> {
     if is_full_object_id(target) {
         return Some(target);
@@ -135,15 +133,8 @@ impl RestoreGit for LocalGit {
     }
 }
 
-/// Fetch `head`, then `public_base` if it is still missing, from `origin`.
-///
-/// Invalid oids are not passed to git.
-/// Fetch failures are returned after both attempts so the caller can log and continue; missing objects are left for checkout-strategy selection.
-///
-/// # Errors
-///
-/// Spawn failure, timeout/teardown, or non-zero git exit.
-/// An error does **not** imply the objects are unreachable; re-check before aborting restore.
+/// Fetch `head`, then `public_base` if still missing. Invalid oids are not passed to git.
+/// Failures return after both attempts; an error does not mean the objects are unreachable — re-check before aborting restore.
 pub fn ensure_commits_reachable(
     repo: &Path,
     head: &str,
@@ -154,10 +145,7 @@ pub fn ensure_commits_reachable(
 }
 
 /// Fetch `oid` from origin if it is a full object id and not already local.
-///
-/// # Errors
-///
-/// Same as [`ensure_commits_reachable`].
+/// Errors match [`ensure_commits_reachable`].
 pub(crate) fn fetch_commit_if_missing(repo: &Path, oid: &str) -> Result<FetchCommitOutcome> {
     fetch_if_missing(repo, oid, &LocalGit, RESTORE_FETCH_BUDGET)
 }
@@ -247,10 +235,7 @@ pub fn git_object_exists(repo: &Path, spec: &str) -> bool {
 }
 
 /// Fetch a checkout target (full oid or simple ref) if it is not already local.
-///
-/// # Errors
-///
-/// Unsafe/unsupported spec, spawn failure, timeout, or non-zero git exit.
+/// Errors: unsafe spec, spawn failure, timeout, or non-zero git exit.
 pub(crate) fn fetch_checkout_target_if_missing(
     repo: &Path,
     target: &str,

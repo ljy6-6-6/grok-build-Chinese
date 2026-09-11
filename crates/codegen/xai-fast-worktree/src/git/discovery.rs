@@ -4,10 +4,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-/// Find the worktree's git directory from its `.git` file.
-///
-/// Worktrees have a `.git` file (not directory) that points to the actual git dir.
-/// For regular repos, returns the `.git` directory.
+/// Git dir from a worktree's `.git` file (a pointer, not a directory). Regular
+/// repos return the `.git` directory itself.
 pub(crate) fn find_worktree_git_dir(worktree_path: &Path) -> Result<PathBuf> {
     let git_path = worktree_path.join(".git");
 
@@ -21,9 +19,8 @@ pub(crate) fn find_worktree_git_dir(worktree_path: &Path) -> Result<PathBuf> {
             .ok_or_else(|| anyhow::anyhow!("invalid .git file format: {}", content.trim()))?
             .trim();
 
-        // git may write a RELATIVE pointer (worktrees added with a relative
-        // path). Resolve it against the worktree dir — otherwise downstream
-        // index lookups join it against the CWD and break (mirrors
+        // git may write a relative pointer. Resolve against the worktree dir —
+        // otherwise index lookups join it against the CWD and break (mirrors
         // `read_worktree_gitdir` in api.rs).
         let raw_path = Path::new(raw);
         let resolved = if raw_path.is_relative() {
@@ -43,12 +40,8 @@ pub(crate) fn find_worktree_git_dir(worktree_path: &Path) -> Result<PathBuf> {
     }
 }
 
-/// Find the worktree root (working directory root) for a path.
-///
-/// This handles both regular repositories and worktrees correctly.
-/// For a regular repo at `/repo`, returns `/repo`.
-/// For a worktree at `/worktrees/wt1`, returns `/worktrees/wt1`.
-/// For a subdirectory `/repo/subdir`, returns `/repo`.
+/// Working-directory root for a path, for both regular repos and worktrees.
+/// A subdirectory resolves to its repo or worktree root, not itself.
 pub(crate) fn find_worktree_root(path: &Path) -> Result<PathBuf> {
     let repo = gix::discover(path)
         .with_context(|| format!("failed to discover git repo at {}", path.display()))?;

@@ -230,11 +230,9 @@ mod links {
 
     #[test]
     fn grow_viewport_scrolls_committed_lines_into_history() {
-        // A small inline viewport near the bottom of the screen, grown to full
-        // height, must scroll the rows it will cover up into native scrollback
-        // (append_lines) instead of overwriting them. Regression guard for the
-        // previously-commented-out scroll_up in set_viewport_height's grow path
-        // (the overlay host depends on this in minimal mode).
+        // A small inline viewport near the bottom of the screen, grown to full height, must scroll the rows it will cover up
+        // into native scrollback (append_lines) instead of overwriting them. Regression guard for the previously-commented-out
+        // scroll_up in set_viewport_height's grow path (the overlay host depends on this in minimal mode).
         let mut t = Terminal::with_options(
             RecordingBackend::default(),
             TerminalOptions {
@@ -254,17 +252,8 @@ mod links {
         );
     }
 
-    /// Regression: `set_viewport_height` must judge grow-vs-shrink against the
-    /// live `viewport_area.height`, not the stored `Viewport::Inline(height)`.
-    ///
-    /// Minimal mode resizes the viewport out-of-band via `set_viewport_area`
-    /// (its content-anchored commit path shrinks the region before
-    /// `insert_before`), which leaves the stored `Inline` height STALE. If the
-    /// next `set_viewport_height` compared against that stale (larger) height, a
-    /// genuine grow would be misread as a shrink: the grow-time `scroll_up`
-    /// would be skipped and the viewport's top would not move up, so the taller
-    /// viewport would run off the bottom of the screen (dropdown items rendered
-    /// off-screen — the "empty dropdown over a full screen" bug).
+    /// Regression: `set_viewport_height` must judge grow-vs-shrink against the live `viewport_area.height`, not the stored
+    /// `Viewport::Inline(height)`.
     #[test]
     fn grow_after_out_of_band_area_shrink_still_scrolls() {
         let mut t = Terminal::with_options(
@@ -282,10 +271,8 @@ mod links {
         t.set_viewport_area(Rect::new(0, 21, 80, 3));
 
         let before = t.backend().appended_lines;
-        // Grow to 10 rows. Against the real height (3) this is a GROW that
-        // overflows the bottom by (21 + 10) - 24 = 7 rows, which must scroll up.
-        // Against the stale stored height (21) it would look like a shrink and
-        // scroll nothing.
+        // Against the real height (3) this is a GROW that overflows the bottom by (21 + 10) - 24 = 7 rows, which must scroll up.
+        // Against the stale stored height (21) it would look like a shrink and scroll nothing.
         t.set_viewport_height(10).unwrap();
 
         let scrolled = t.backend().appended_lines - before;

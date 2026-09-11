@@ -82,6 +82,7 @@ async fn run_turn(
             None,
             None,
             &mut length_salvage::LengthSalvage::new(None),
+            &mut Default::default(),
         ),
     )
     .await
@@ -223,6 +224,7 @@ fn prompt_budget_spans_turn_loop_reentries() {
                         None,
                         None,
                         &mut length_salvage::LengthSalvage::new(None),
+                        &mut Default::default(),
                     ),
                 )
                 .await
@@ -236,6 +238,72 @@ fn prompt_budget_spans_turn_loop_reentries() {
                 submissions, 15,
                 "5 re-entries share one 10-resubmit prompt budget \
                  (4+4+4+2+1); 20 means the counter regressed to a loop-local"
+            );
+        })
+    });
+}
+
+#[test]
+fn turn_phase_prompt_latency_invariants() {
+    on_session_stack(|| {
+        run_paused(|| async {
+            let server = MockInferenceServer::start_with_models(vec![MockModelEntry::new("test")])
+                .await
+                .expect("mock inference server");
+            server.enqueue_response("/v1/responses", overloaded_503());
+            server.enqueue_response(
+                "/v1/responses",
+                ScriptedResponse::sse(xai_grok_test_support::sse::responses_api_script_exact(
+                    "final answer",
+                    "test",
+                )),
+            );
+
+            let (actor, _retries) =
+                actor_under_test(&server, SessionKind::Main, sampler_surfaces_5xx(), true).await;
+
+            let outcome = tokio::time::timeout(
+                Duration::from_secs(300),
+                actor.process_conversation_turn_with_recovery(
+                    "req-turn-phase-invariant",
+                    None,
+                    None,
+                    None,
+                    &mut length_salvage::LengthSalvage::new(None),
+                    &mut Default::default(),
+                ),
+            )
+            .await
+            .expect("turn must finish within timeout");
+            assert!(
+                outcome.is_ok(),
+                "one 503 then a streamed answer completes the turn"
+            );
+            pump_local_tasks().await;
+
+            let phases = actor.turn_phases.complete();
+
+            assert_eq!(phases.sampling_request_count, 2);
+            assert_eq!(phases.sampling_retry_count, 1);
+            assert_eq!(phases.tool_blocking_ms, 0);
+            assert_eq!(phases.compaction_ms, 0);
+
+            let accounted_ms = phases.before_first_model_ms
+                + phases.sampling_ms
+                + phases.tool_blocking_ms
+                + phases.compaction_ms
+                + phases.between_sampling_overhead_ms
+                + phases.after_last_sampling_ms;
+            let turn_total_ms = phases.turn_total_ms;
+            assert_eq!(
+                accounted_ms, turn_total_ms,
+                "six phase buckets must partition turn_total_ms"
+            );
+
+            let ttfm_ms = phases.ttfm_ms.expect("a streamed answer stamps ttfm");
+            assert!(
+                ttfm_ms <= turn_total_ms,
+                "ttfm {ttfm_ms}ms exceeds turn_total_ms {turn_total_ms}ms"
             );
         })
     });

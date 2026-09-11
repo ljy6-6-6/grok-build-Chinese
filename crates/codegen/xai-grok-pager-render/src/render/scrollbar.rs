@@ -63,15 +63,8 @@ const SCROLLBAR_TRACK_COLS: u16 = 1;
 /// Total columns reserved for scrollbar UI (gap + track).
 pub const SCROLLBAR_TOTAL_COLS: u16 = SCROLLBAR_GAP_COLS + SCROLLBAR_TRACK_COLS;
 
-/// Layout:
-/// - `content_area`: original area minus [`SCROLLBAR_TOTAL_COLS`] on the right
-/// - `scrollbar_area`: the last column of the original area (1 cell wide)
-/// - The column between them is the "gap" (left intentionally blank)
-///
-/// Returns `(content_area, None)` when the terminal is too narrow.
-///
-/// This always reserves space for scrollbar.
-/// Use [`maybe_split_for_scrollbar`] to only reserve space when the scrollbar will actually be shown.
+/// Always reserves the track plus a blank gap. `(content_area, None)` when too narrow.
+/// Use [`maybe_split_for_scrollbar`] to reserve only when the bar will be shown.
 pub fn split_area_for_scrollbar(area: Rect) -> (Rect, Option<Rect>) {
     if area.width <= SCROLLBAR_TOTAL_COLS {
         return (area, None);
@@ -110,10 +103,7 @@ pub fn needs_scrollbar(total_lines: u16, viewport_lines: u16) -> bool {
     total_lines > viewport_lines
 }
 
-/// The scrollbar's mouse grab zone: the track plus one column of slop on each side.
-///
-/// Users read a thumb drawn flush against a modal border as one two-column widget and press the border half.
-/// This happens on macOS Terminal.app and ghostty over SSH, so near-miss presses must still grab the thumb.
+/// Track plus one column of slop: a thumb flush against a border is read as a two-column widget, so near-miss presses must still grab.
 pub fn scrollbar_grab_zone(track: Rect) -> Rect {
     let x = track.x.saturating_sub(SCROLLBAR_GAP_COLS);
     Rect {
@@ -135,18 +125,8 @@ pub enum ScrollbarClickResult {
     Offset(usize),
 }
 
-/// Map a click on the scrollbar gutter to a scroll offset.
-///
-/// Uses the same `tui_scrollbar::ScrollMetrics` that the renderer uses to position the thumb, so the click is the exact inverse of the rendering.
-/// Emulates `JumpToClick` behavior: centers the thumb on the click position.
-///
-/// # Arguments
-///
-/// * `cell_index`: 0-based row within the scrollbar area (screen_y - sb.y)
-/// * `track_cells`: height of the scrollbar area (sb.height)
-/// * `total_lines`: total content height (pre-scaled)
-///
-/// Returns `Top`/`Bottom` for clicks on the first/last row, otherwise an offset that places the thumb centered on the click.
+/// Inverse of the renderer's `ScrollMetrics`, so a click lands where the thumb is drawn.
+/// First/last row is Top/Bottom; otherwise the thumb is centered on the click.
 pub fn scrollbar_click_to_offset(
     cell_index: u16,
     track_cells: u16,
@@ -181,11 +161,7 @@ pub fn scrollbar_click_to_offset(
     ScrollbarClickResult::Offset(offset)
 }
 
-/// Render a scrollbar with follow-mode aware styling.
-///
-/// The scrollbar is always rendered when content overflows, but styled differently based on follow state:
-/// - Following: very dim (subtle indicator)
-/// - Not following: brighter (draws attention)
+/// Always drawn on overflow. Dim while following; brighter when detached so the user notices they left the tail.
 pub fn render_scrollbar(
     buf: &mut Buffer,
     scrollbar_area: Option<Rect>,
@@ -391,6 +367,9 @@ mod tests {
 
     #[test]
     fn test_render_scrollbar_following_vs_not() {
+        // Pinned: asserts distinct RGB thumb bgs, which the ambient terminal
+        // theme (all-Reset bgs) legitimately doesn't produce.
+        let _guard = crate::theme::cache::pin_theme();
         let area = Rect::new(0, 0, 10, 10);
         let (_, scrollbar_area) = split_area_for_scrollbar(area);
 

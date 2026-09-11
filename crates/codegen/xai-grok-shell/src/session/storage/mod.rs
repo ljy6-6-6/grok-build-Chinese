@@ -230,11 +230,9 @@ pub(crate) fn create_dir_all_durable_with(
         cursor = parent;
     }
     create(dir)?;
-    // A retry after a create whose parent sync failed sees the whole chain present and would otherwise sync nothing
-    // Re-sync a bounded ancestor list so the new direntry is durable, but only when `dir` is still empty
-    // `init_session` calls this on every open
-    // A populated resume must not fsync ancestors (permissions, a network home, or macOS F_FULLFSYNC can fail a normal open)
-    // Never the filesystem root (fsync("/") can fail or stall)
+    // A retry after a create whose parent sync failed sees the whole chain present and would otherwise sync nothing.
+    // Re-sync a bounded ancestor list so the new direntry is durable, but only when `dir` is still empty.
+    // `init_session` calls this on every open.
     let retry_ancestors;
     let to_sync: &[&Path] = if !gaining_an_entry.is_empty() {
         &gaining_an_entry
@@ -324,7 +322,9 @@ pub(crate) mod chat_rebuild {
     use agent_client_protocol as acp;
 
     use super::{CHAT_HISTORY_FILE, SessionUpdate, UPDATES_FILE, UpdatesIterator, replace_file};
-    use crate::sampling::{AssistantItem, ContentPart, ConversationItem, ToolCall};
+    use crate::sampling::{
+        AssistantItem, ContentPart, ConversationItem, SyntheticReason, ToolCall, UserItem,
+    };
 
     /// Rebuild `chat_history.jsonl` from `updates.jsonl` alone. Builds a temp file and renames it over the target.
     /// A failed rebuild leaves the existing cache intact rather than a truncated partial that load would trust.
@@ -387,6 +387,7 @@ pub(crate) mod chat_rebuild {
     /// Tool completion flushes the agent item before emitting the result.
     struct ChatReducer {
         user_parts: Vec<ContentPart>,
+        user_is_interjection: bool,
         agent_text: String,
         agent_tool_calls: Vec<ToolCall>,
 
@@ -403,6 +404,7 @@ pub(crate) mod chat_rebuild {
         fn new() -> Self {
             Self {
                 user_parts: Vec::new(),
+                user_is_interjection: false,
                 agent_text: String::new(),
                 agent_tool_calls: Vec::new(),
                 in_user_turn: false,
@@ -457,6 +459,15 @@ pub(crate) mod chat_rebuild {
                 out.extend(self.flush_agent());
                 self.in_user_turn = true;
             }
+            // Interjections never merge with an adjacent prompt run (tool-only first response, drain right after the
+            // echo), and each interjection's text chunk opens its own item, as the live drain pushed them
+            let interjection = super::is_interjection_chunk(chunk);
+            let opens_interjection =
+                interjection && matches!(chunk.content, acp::ContentBlock::Text(_));
+            if interjection != self.user_is_interjection || opens_interjection {
+                out.extend(self.flush_user());
+            }
+            self.user_is_interjection = interjection;
 
             match &chunk.content {
                 acp::ContentBlock::Text(t) => {
@@ -576,10 +587,16 @@ pub(crate) mod chat_rebuild {
         }
 
         fn flush_user(&mut self) -> Option<ConversationItem> {
+            let interjection = std::mem::take(&mut self.user_is_interjection);
             if self.user_parts.is_empty() {
                 return None;
             }
-            let item = ConversationItem::user_with_parts(std::mem::take(&mut self.user_parts));
+            let content = std::mem::take(&mut self.user_parts);
+            let item = ConversationItem::User(UserItem {
+                content,
+                synthetic_reason: interjection.then_some(SyntheticReason::Interjection),
+                ..Default::default()
+            });
             self.item_count += 1;
             Some(item)
         }
@@ -609,6 +626,7 @@ pub(crate) mod chat_rebuild {
 
         fn reset(&mut self) {
             self.user_parts.clear();
+            self.user_is_interjection = false;
             self.agent_text.clear();
             self.agent_tool_calls.clear();
             self.tool_args.clear();
@@ -776,7 +794,7 @@ impl serde::Serialize for SessionUpdate {
             }
             SessionUpdate::Xai(notification) => {
                 map.serialize_entry("method", XAI_SESSION_UPDATE_METHOD)?;
-                map.serialize_entry("params", notification)?;
+                map.serialize_entry("params", &*notification.without_live_agent_address())?;
             }
         }
         map.end()
@@ -824,7 +842,7 @@ impl SessionUpdateEnvelope {
             SessionUpdate::Xai(notification) => Ok(Self {
                 timestamp,
                 method: XAI_SESSION_UPDATE_METHOD.to_string(),
-                params: serde_json::to_value(notification)?,
+                params: notification.to_durable_value()?,
             }),
         }
     }
@@ -920,6 +938,8 @@ pub struct PersistedDataLight {
 #[derive(Debug, Clone)]
 pub struct CopySessionResult {
     pub chat_messages_copied: usize,
+    /// Logical agent minted into the fork summary, if any.
+    pub agent_id: Option<String>,
     pub updates_copied: usize,
     pub plan_state_copied: bool,
     /// Whether `plan_mode.json` (plan mode lifecycle state) was copied.
@@ -940,6 +960,9 @@ pub struct CopySessionResult {
 /// Options for copying session data during fork
 #[derive(Debug, Clone)]
 pub struct CopySessionOptions {
+    /// Root-session forks mint a durable identity during the copy.
+    /// Generic and subagent copies leave identity ownership to their caller.
+    pub mint_session_identity: bool,
     /// Parent session ID to set in the forked session's summary.
     pub parent_session_id: Option<String>,
     /// Model ID override for the forked session (None keeps the source model).
@@ -947,8 +970,7 @@ pub struct CopySessionOptions {
     /// Truncate copied history to this prompt index (0-based, inclusive).
     pub target_prompt_index: Option<usize>,
     /// When true, skip `transform_conversation_cwd` during copy.
-    ///
-    /// Set for forks where the child should see the original project path (e.g. worktree forks with a persisted `display_cwd`).
+    /// Set for forks where the child should see the original project path.
     /// Non-worktree forks should keep this false so conversation paths are rewritten to the new cwd.
     pub skip_cwd_transform: bool,
     /// Stable display path for fork sessions.
@@ -980,10 +1002,9 @@ pub struct CopySessionOptions {
     /// Defaults to `false`: these can be large and most copy paths don't need them.
     /// Forks enable it so the child retains the parent's pre-compaction history.
     pub copy_compaction_segments: bool,
-    /// When true, apply fork-safety filtering to copied chat history:
-    /// - Strip synthetic user messages (doom loop warnings, compaction metadata)
-    /// - Truncate at the last complete turn boundary
-    /// - Remove trailing incomplete assistant responses
+    /// When true, apply fork-safety filtering to copied chat history.
+    /// Strip synthetic user messages (doom loop warnings, compaction metadata).
+    /// Truncate at the last complete turn boundary.
     pub fork_filter: bool,
     /// Number of inherited parent conversation items.
     /// Stored in the child's summary so compaction can preserve the inherited prefix.
@@ -999,6 +1020,7 @@ pub struct CopySessionOptions {
 impl Default for CopySessionOptions {
     fn default() -> Self {
         Self {
+            mint_session_identity: false,
             parent_session_id: None,
             new_model_id: None,
             target_prompt_index: None,
@@ -1041,10 +1063,23 @@ fn acp_user_chunk_prompt_index(update: &SessionUpdate) -> Option<usize> {
 pub(crate) const HOST_TURN_META_KEY: &str = "hostTurn";
 
 pub(crate) fn is_host_turn_chunk(chunk: &acp::ContentChunk) -> bool {
+    chunk_meta_flag(chunk, HOST_TURN_META_KEY)
+}
+
+/// `ContentChunk._meta` flag on a persisted mid-turn interjection's user chunks. The text block keeps the
+/// model-facing frame and carries the typed text in `displayText`; the pager and the chat rebuilders key on this.
+pub const INTERJECTION_META_KEY: &str = "interjection";
+
+pub fn is_interjection_chunk(chunk: &acp::ContentChunk) -> bool {
+    chunk_meta_flag(chunk, INTERJECTION_META_KEY)
+}
+
+/// Boolean `ContentChunk._meta` flag; anything but a literal `true` reads as `false`.
+pub fn chunk_meta_flag(chunk: &acp::ContentChunk, key: &str) -> bool {
     chunk
         .meta
         .as_ref()
-        .and_then(|m| m.get(HOST_TURN_META_KEY))
+        .and_then(|m| m.get(key))
         .and_then(|v| v.as_bool())
         == Some(true)
 }
@@ -1067,10 +1102,8 @@ fn is_acp_user_message_chunk(update: &SessionUpdate) -> bool {
 }
 
 /// Tracks user-message runs for turn counting (updates truncate / filter_rewind).
-///
 /// Progressive: every user run counts until the first `promptIndex` appears; after that only marked runs count (mid-turn phantoms omit the marker).
 /// A change of `promptIndex` (including between unmarked and marked) opens a new run.
-/// This matches replay's split so back-to-back cancelled prompts stay distinct.
 struct UserRunTurnTracker {
     seen_marker: bool,
     in_user: bool,
@@ -1239,7 +1272,6 @@ pub trait StorageAdapter: Send + Sync {
     /// Set the session title only if the session has no title yet, used by automatic LLM title generation so it never overwrites a manual `/rename`.
     /// Never marks the title manual.
     /// Returns `true` if the title was written, `false` if an existing title was preserved.
-    /// The check and write are atomic under the summary lock, so a concurrent manual rename always wins.
     async fn set_generated_title_if_absent(
         &self,
         info: &Info,
@@ -1261,7 +1293,6 @@ pub trait StorageAdapter: Send + Sync {
 
     /// Clear a manual `/rename` pin (`/rename --auto`).
     /// Sets `title_is_manual = false` and, when a pin was present, blanks `generated_title` and `session_summary` so `display_title()` is empty.
-    /// Returns `true` iff a manual pin was actually cleared.
     /// Idempotent when the title is not manual.
     async fn reset_title_to_auto(&self, info: &Info) -> io::Result<bool>;
 
@@ -1365,6 +1396,19 @@ pub trait StorageAdapter: Send + Sync {
         request_id: Option<&str>,
     ) -> io::Result<()>;
 
+    async fn update_wake_start(
+        &self,
+        info: &Info,
+        start: crate::session::persistence::WakeStart,
+        abort: tokio_util::sync::CancellationToken,
+    ) -> io::Result<()>;
+
+    async fn restore_wake_summary(
+        &self,
+        info: &Info,
+        prior: crate::session::persistence::WakeSummaryState,
+    ) -> io::Result<()>;
+
     async fn write_plan_state(&self, info: &Info, state: &TodoState) -> io::Result<()>;
 
     async fn write_plan_mode_state(
@@ -1444,7 +1488,6 @@ pub trait StorageAdapter: Send + Sync {
     /// Merge rewind points at indices `>= target_index` into the point at `target_index - 1` and drop the folded points.
     /// Runs as a read-modify-write on disk (used after a ConversationOnly rewind).
     /// Reading the current on-disk set makes this authoritative.
-    /// It never relies on a (possibly partially loaded) in-memory tracker, so historical points can't be lost.
     async fn merge_rewind_points_from(&self, info: &Info, target_index: usize) -> io::Result<()>;
 
     /// Replace the entire chat history (used for compaction and rewind)
@@ -1473,11 +1516,9 @@ pub trait StorageAdapter: Send + Sync {
     /// Returns assistant responses in chronological order, extracted from ContentChunk text.
     async fn load_assistant_text(&self, info: &Info) -> io::Result<Vec<String>>;
 
-    /// Load tool metadata from a session's updates file.
-    /// Per the ACP data model:
-    /// - Tool name: from `ToolCall.title` (display name; acp::ToolCall has no .name field)
-    /// - File paths: from `ToolCall.locations[].path` (ACP stores locations, not parsed arguments)
-    /// - Errors: skipped (no is_error field on acp::SessionUpdate::ToolCallUpdate)
+    /// Tool name: from `ToolCall.title` (display name; acp::ToolCall has no .name field).
+    /// File paths: from `ToolCall.locations[].path` (ACP stores locations, not parsed arguments).
+    /// Errors: skipped (no is_error field on acp::SessionUpdate::ToolCallUpdate).
     async fn load_tool_metadata(&self, info: &Info) -> io::Result<Vec<String>>;
 
     /// Get the path to the updates file for streaming reads.
@@ -1563,7 +1604,7 @@ pub use replay::{
     load_updates_for_replay, prepare_replay_lines, replay_would_emit, stream_replay_updates_at,
     stream_replay_updates_at_hinted,
 };
-pub(crate) use replay::{ReplayToolCollapser, filter_delta_replay_lines};
+pub(crate) use replay::{ReplayToolCollapser, UnfinishedSubagent, filter_delta_replay_lines};
 
 /// Extracts `method` and raw `params` from an updates.jsonl envelope without parsing the notification payload.
 #[derive(serde::Deserialize)]
@@ -1764,7 +1805,6 @@ pub(crate) fn replay_updates_path_in_dir(
 #[derive(Debug, PartialEq)]
 pub enum PromptExtractEvent {
     /// A text chunk from a `UserMessageChunk` ACP update.
-    ///
     /// Multiple consecutive `UserTextChunk` events belong to the same user message and should be concatenated by the caller.
     /// `prompt_index` is the chunk `_meta.promptIndex` when the turn pipeline stamped one.
     UserTextChunk {
@@ -1798,17 +1838,8 @@ impl PromptExtractEvent {
 }
 
 /// Iterator that streams [`PromptExtractEvent`]s from a `updates.jsonl` file.
-///
 /// Unlike [`UpdatesIterator`], this never builds a full `acp::SessionNotification` or `SessionNotification`.
 /// Instead it uses zero-copy `serde_json` deserialization with `&RawValue` to peek at the discriminant field.
-/// It only extracts the one or two fields actually needed for prompt reconstruction:
-///
-/// - ACP `"user_message_chunk"` → `update.content.text`
-/// - xAI `"rewind_marker"`      → `update.target_prompt_index`
-/// - everything else             → [`PromptExtractEvent::NotUserMessage`]
-///
-/// Parse errors on individual lines are treated conservatively as `NotUserMessage`.
-/// It also safely terminates any in-progress user-message accumulation.
 pub struct PromptExtractIterator {
     reader: std::io::BufReader<std::fs::File>,
     line_buffer: String,
@@ -1850,18 +1881,9 @@ impl Iterator for PromptExtractIterator {
     }
 }
 
-/// Assemble accumulated user-prompt strings from a stream of [`PromptExtractEvent`]s.
-///
-/// Every caller, whether reading from disk or from an in-memory iterator, applies these rules identically:
-///
-/// - Consecutive `UserTextChunk` events are concatenated into one prompt until a non-user event or a `promptIndex` change opens a new run.
-/// - Progressive counting (same as [`UserRunTurnTracker`]): every user run counts until the first `_meta.promptIndex`.
-///   After that only marked runs count (mid-turn phantoms are dropped from the list).
-/// - `NotUserMessage` flushes any in-progress prompt.
-/// - `RewindTo(n)` flushes then truncates the list to `n` **counted** prompts.
-///
-/// The resulting `Vec` is the index space shared by resume `prompt_texts` and the rewind picker.
-/// `prompt_index == prompts.len()` after load, matching live turn stamping (not raw user-message count).
+/// Consecutive `UserTextChunk` events are concatenated into one prompt until a non-user event or a `promptIndex` change opens a new run.
+/// Progressive counting (same as [`UserRunTurnTracker`]): every user run counts until the first `_meta.promptIndex`.
+/// After that only marked runs count (mid-turn phantoms are dropped from the list).
 pub fn collect_prompts_from_events(iter: impl Iterator<Item = PromptExtractEvent>) -> Vec<String> {
     let mut prompts: Vec<String> = Vec::new();
     let mut current = String::new();
@@ -1964,9 +1986,6 @@ pub fn collect_prompts_from_events(iter: impl Iterator<Item = PromptExtractEvent
     prompts
 }
 /// Extracts `ContentChunk.text` from `AgentMessageChunk` updates.
-/// Capped at 100k chars total.
-///
-/// This collector does not honor rewind markers (unlike PromptExtractIterator).
 /// Rewound-away branches may still contribute to FTS index.
 pub fn collect_assistant_text(
     iter: impl Iterator<Item = io::Result<SessionUpdate>>,
@@ -2049,17 +2068,9 @@ pub fn collect_assistant_text(
     texts
 }
 
-/// Per the ACP data model:
-/// - Tool name: from `ToolCall.title` (display name; acp::ToolCall has no .name)
-/// - File paths: from `ToolCall.locations[].path` (ACP stores locations, not raw arguments)
-/// - Errors: skipped (no is_error on acp::ToolCallUpdate)
-///
-/// Bounds:
-/// - Max 200 tool calls per session
-/// - Each extraction capped at 100k chars before final join
-///
-/// This collector does not honor rewind markers (unlike PromptExtractIterator).
-/// Rewound-away branches may still contribute to FTS index.
+/// Tool name: from `ToolCall.title` (display name; acp::ToolCall has no .name).
+/// Errors: skipped (no is_error on acp::ToolCallUpdate).
+/// Each extraction capped at 100k chars before final join.
 pub fn collect_tool_metadata(iter: impl Iterator<Item = io::Result<SessionUpdate>>) -> Vec<String> {
     let mut meta: Vec<String> = Vec::new();
     let mut tool_call_count = 0usize;
@@ -2151,7 +2162,6 @@ struct UpdatePeek<'a> {
 }
 
 /// Selective peek at a `user_message_chunk` content object.
-///
 /// Shared with the search collectors in [`search`].
 /// The peeked fields and their escape-tolerance therefore cannot drift between the prompt-extraction and indexing paths.
 #[derive(serde::Deserialize)]
@@ -2172,13 +2182,8 @@ pub(crate) struct ContentMetaPeek<'a> {
 }
 
 /// Parse one `updates.jsonl` line into a [`PromptExtractEvent`].
-///
 /// Always returns an event: `NotUserMessage` for every line that is not a user-message chunk or rewind marker (including unparseable ones).
-/// So an in-progress prompt is always flushed conservatively.
-///
 /// Fast path: only those two kinds can produce a non-`NotUserMessage` event, and their discriminant appears verbatim.
-/// So a cheap substring pre-check skips the serde peeks for the vast majority of lines.
-/// A line merely embedding the discriminant in its content still falls through to the full parse.
 pub(crate) fn parse_prompt_extract_event(line: &str) -> PromptExtractEvent {
     if !line.contains(&*USER_MESSAGE_CHUNK) && !line.contains(&*REWIND_MARKER) {
         return PromptExtractEvent::NotUserMessage;
@@ -2254,6 +2259,178 @@ pub(crate) fn parse_prompt_extract_event(line: &str) -> PromptExtractEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod rebuild_interjections {
+        use super::*;
+        use crate::sampling::{ContentPart, ConversationItem, SyntheticReason};
+        use std::sync::Arc;
+
+        fn text_chunk(text: &str) -> acp::ContentChunk {
+            acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(text)))
+        }
+
+        fn user(text: &str) -> acp::SessionUpdate {
+            acp::SessionUpdate::UserMessageChunk(text_chunk(text))
+        }
+
+        fn agent(text: &str) -> acp::SessionUpdate {
+            acp::SessionUpdate::AgentMessageChunk(text_chunk(text))
+        }
+
+        /// A persisted interjection chunk as the shell writes it: framed text plus the `interjection` flag.
+        fn interjection(typed: &str) -> acp::SessionUpdate {
+            let mut meta = serde_json::Map::new();
+            meta.insert(INTERJECTION_META_KEY.into(), serde_json::json!(true));
+            acp::SessionUpdate::UserMessageChunk(
+                text_chunk(&xai_interjection_core::format_interjection(
+                    typed.to_string(),
+                ))
+                .meta(Some(meta)),
+            )
+        }
+
+        fn tool_call(id: &str) -> acp::SessionUpdate {
+            acp::SessionUpdate::ToolCall(acp::ToolCall::new(acp::ToolCallId::new(id), "run"))
+        }
+
+        fn tool_done(id: &str) -> acp::SessionUpdate {
+            acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                acp::ToolCallId::new(id),
+                acp::ToolCallUpdateFields::new().status(Some(acp::ToolCallStatus::Completed)),
+            ))
+        }
+
+        fn rebuild(updates: Vec<acp::SessionUpdate>) -> Vec<ConversationItem> {
+            let sid = acp::SessionId::new(Arc::from("s"));
+            let dir = tempfile::tempdir().unwrap();
+            let envelopes: Vec<SessionUpdateEnvelope> = updates
+                .into_iter()
+                .map(|update| {
+                    SessionUpdate::Acp(Box::new(acp::SessionNotification::new(sid.clone(), update)))
+                })
+                .map(|u| SessionUpdateEnvelope::from_update(&u).unwrap())
+                .collect();
+            write_jsonl_atomic(&dir.path().join(UPDATES_FILE), &envelopes).unwrap();
+            chat_rebuild::rebuild_chat_history(dir.path()).unwrap();
+            std::fs::read_to_string(dir.path().join(CHAT_HISTORY_FILE))
+                .unwrap()
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(|l| serde_json::from_str(l).unwrap())
+                .collect()
+        }
+
+        /// `(text, is_interjection)` of every user item, in order.
+        fn users(items: &[ConversationItem]) -> Vec<(String, bool)> {
+            items
+                .iter()
+                .filter_map(|item| match item {
+                    ConversationItem::User(u) => Some((
+                        u.content
+                            .iter()
+                            .filter_map(|p| match p {
+                                ContentPart::Text { text } => Some(text.as_ref()),
+                                _ => None,
+                            })
+                            .collect(),
+                        u.synthetic_reason == Some(SyntheticReason::Interjection),
+                    )),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn framed(typed: &str) -> String {
+            xai_interjection_core::format_interjection(typed.to_string())
+        }
+
+        #[test]
+        fn interjection_keeps_persisted_frame_and_is_tagged() {
+            let items = rebuild(vec![
+                user("start the build"),
+                agent("building"),
+                interjection("ok run the stop for me"),
+                agent("stopping"),
+            ]);
+            assert_eq!(
+                users(&items),
+                [
+                    ("start the build".to_string(), false),
+                    (framed("ok run the stop for me"), true),
+                ]
+            );
+        }
+
+        /// Tool-only first response: no agent text closes the prompt run before the interjection lands.
+        #[test]
+        fn interjection_adjacent_to_prompt_run_is_a_separate_item() {
+            let items = rebuild(vec![
+                user("start the build"),
+                tool_call("c1"),
+                tool_done("c1"),
+                interjection("ok run the stop for me"),
+                agent("stopping"),
+            ]);
+            assert_eq!(
+                users(&items),
+                [
+                    ("start the build".to_string(), false),
+                    (framed("ok run the stop for me"), true),
+                ]
+            );
+        }
+
+        /// A batch drain pushes one item per interjection; a following prompt echo must not join the last one.
+        #[test]
+        fn consecutive_interjections_stay_distinct_and_next_prompt_is_plain() {
+            let items = rebuild(vec![
+                user("start"),
+                agent("working"),
+                interjection("first"),
+                interjection("second"),
+                user("next prompt"),
+                agent("done"),
+            ]);
+            assert_eq!(
+                users(&items),
+                [
+                    ("start".to_string(), false),
+                    (framed("first"), true),
+                    (framed("second"), true),
+                    ("next prompt".to_string(), false),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn chunk_meta_flag_requires_literal_true() {
+        let chunk = |meta: Option<serde_json::Value>| {
+            acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new("x")))
+                .meta(meta.map(|m| m.as_object().cloned().unwrap()))
+        };
+        assert!(chunk_meta_flag(
+            &chunk(Some(serde_json::json!({"k": true}))),
+            "k"
+        ));
+        assert!(!chunk_meta_flag(
+            &chunk(Some(serde_json::json!({"k": false}))),
+            "k"
+        ));
+        assert!(!chunk_meta_flag(
+            &chunk(Some(serde_json::json!({"k": "true"}))),
+            "k"
+        ));
+        assert!(!chunk_meta_flag(
+            &chunk(Some(serde_json::json!({"k": 1}))),
+            "k"
+        ));
+        assert!(!chunk_meta_flag(
+            &chunk(Some(serde_json::json!({"other": true}))),
+            "k"
+        ));
+        assert!(!chunk_meta_flag(&chunk(None), "k"));
+    }
 
     #[test]
     fn atomic_write_runs_file_sync_barrier_before_rename_replaces_target() {

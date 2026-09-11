@@ -20,12 +20,9 @@ pub fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
     }
 }
 
-/// RAII guard for a single environment variable in `#[serial]` tests.
-/// It snapshots the prior value, applies the change, and restores the prior value (or unsets it) on drop, even if an assertion panics.
-/// Restoring rather than always unsetting avoids clobbering vars a parent process/harness set (e.g. `RUST_LOG`).
-///
-/// Callers MUST be `#[serial_test::serial]`.
-/// The `unsafe` `set_var`/`remove_var` are sound only when no other thread accesses the environment concurrently.
+/// RAII guard for a single environment variable in `#[serial]` tests. Restoring rather than always unsetting avoids
+/// clobbering vars a parent process/harness set (e.g. `RUST_LOG`). Callers MUST be `#[serial_test::serial]`. The `unsafe`
+/// `set_var`/`remove_var` are sound only when no other thread accesses the environment concurrently.
 pub struct EnvGuard {
     key: &'static str,
     prior: Option<OsString>,
@@ -66,9 +63,15 @@ pub unsafe fn isolate_grok_env(home: &Path) {
     unsafe {
         std::env::set_var("GROK_HOME", home);
         std::env::set_var("GROK_TELEMETRY_ENABLED", "false");
+        std::env::set_var("GROK_TELEMETRY_MIXPANEL_ENABLED", "false");
+        std::env::set_var("GROK_TELEMETRY_MIXPANEL_TOKEN", "");
+        std::env::set_var("GROK_TELEMETRY_EVENTS_URL", "");
+        std::env::set_var("GROK_TELEMETRY_EVENTS_API_KEY", "");
         std::env::set_var("GROK_FEEDBACK_ENABLED", "false");
         std::env::set_var("GROK_TRACE_UPLOAD", "false");
         for var in [
+            "GROK_AUTH",
+            "GROK_AUTH_PATH",
             "GROK_DEPLOYMENT_KEY",
             "GROK_MANAGED_CONFIG",
             "GROK_CONFIG",

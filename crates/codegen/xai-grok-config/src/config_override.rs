@@ -98,13 +98,8 @@ pub const CAMPAIGN_STRIP_KEYS: &[&str] = &[
 ];
 
 /// Dotted paths the `GROK_CONFIG` / `GROK_CONFIG_PATH` overlay may set.
-/// They are applied at [`crate::env_overlay`]'s finalize step by [`retain_overlay_allowed`].
-/// A length-1 path keeps the whole soft top-level table; a deeper path keeps only that leaf.
 /// No entry is a prefix of another: a top-level key is either a whole-subtree keep or deeper-only, never both.
-/// That makes the choice in `retain_allowed_paths` between keeping a whole subtree and recursing unambiguous.
-/// Its deeper whole-subtree case is defensive.
 /// Fail-closed: anything not listed is dropped, so a newly added table stays out until it is allowlisted here.
-/// The overlay's reach and the security gates that read it overlay-free are documented on [`crate::config_layers::ConfigLayers::env_overlay`].
 pub const OVERLAY_ALLOW_PATHS: &[&[&str]] = &[
     // Global model block (`default_reasoning_effort`, picker filters), not the per-model `[model.<id>]` block; and the soft `[features]` toggles
     &["models"],
@@ -116,8 +111,6 @@ pub const OVERLAY_ALLOW_PATHS: &[&[&str]] = &[
     &["toolset", "web_search", "allowed_domains"],
     &["toolset", "web_search", "excluded_domains"],
     // `[shell_environment_policy]` cannot inject an env value
-    // `set` adds env values (`LD_PRELOAD`, `BASH_ENV`, `PATH`), an indirect way to run code in a tool subprocess, so it is dropped
-    // The remaining fields only select among env names the launcher already controls
     // Relative to a lower layer they may loosen or tighten what a subprocess inherits but never introduce a value
     // A launcher that must add an env var sets it on the process directly
     &["shell_environment_policy", "inherit"],
@@ -134,7 +127,6 @@ pub fn retain_overlay_allowed(overlay: &mut toml::Table) {
 /// Retain only `paths` (nested dotted leaves) in `table`, pruning every other key and any table left empty.
 /// At the top level a whole-subtree entry (a length-1 path) keeps its value only when it is a table.
 /// A scalar or array there would clobber the subtree on deep-merge, so it is dropped.
-/// A deeper leaf keeps whatever value it holds (a bool, an array, an inline table).
 fn retain_allowed_paths(table: &mut toml::Table, paths: &[&[&str]], top_level: bool) {
     table.retain(|key, value| {
         let nested: Vec<&[&str]> = paths
@@ -161,9 +153,6 @@ fn retain_allowed_paths(table: &mut toml::Table, paths: &[&[&str]], top_level: b
 }
 
 /// Deep-merge each patch in iteration order (later wins on a leaf), stripping `strip_keys` (top level) and [`PATCH_STRIP_PATHS`] first.
-/// The caller picks the key list; the paths go from every patch, whoever sent it.
-///
-/// A patch is another input to the same merge as the disk layers, so it gets the same normalization ([`crate::loader::normalize_config_layer`]).
 /// Otherwise a patch that flips `[toolset.web_search]` from an allowlist to a blocklist would leave both keys set.
 /// The resolver would then drop the blocklist and let the layer the patch overlays win.
 pub fn apply_patches(
@@ -174,6 +163,24 @@ pub fn apply_patches(
     for mut patch in patches {
         for key in strip_keys {
             patch.remove(*key);
+        }
+        let config_models = config.get("model").and_then(toml::Value::as_table);
+        if let Some(patch_models) = patch.get_mut("model").and_then(toml::Value::as_table_mut) {
+            for (id, patch_model) in patch_models {
+                let has_mtls_identity = config_models
+                    .and_then(|models| models.get(id))
+                    .and_then(toml::Value::as_table)
+                    .is_some_and(|model| model.contains_key("mtls_cert_dir"));
+                if let Some(patch_model) = patch_model.as_table_mut() {
+                    // A patch may tune the model, but it cannot select a local identity
+                    // or change the explicit destination to which that identity is bound.
+                    patch_model.remove("mtls_cert_dir");
+                    if has_mtls_identity {
+                        patch_model.remove("base_url");
+                        patch_model.remove("api_base_url");
+                    }
+                }
+            }
         }
         for path in PATCH_STRIP_PATHS {
             strip_path(&mut patch, path);
@@ -347,6 +354,59 @@ mod tests {
             cfg["ui"]["notifications"]["enabled"].as_bool(),
             Some(false),
             "siblings still apply"
+        );
+    }
+
+    #[test]
+    fn apply_patches_cannot_inject_or_retarget_mtls_identities() {
+        let mut cfg = toml::Value::Table(table(
+            "[model.secure]\n\
+             base_url = \"https://trusted.example\"\n\
+             mtls_cert_dir = \"/trusted/identity\"\n\
+             temperature = 0.1\n",
+        ));
+        let patch = table(
+            "[model.secure]\n\
+             base_url = \"https://retargeted.example\"\n\
+             api_base_url = \"https://retargeted-api.example\"\n\
+             mtls_cert_dir = \"/tmp/replacement\"\n\
+             temperature = 0.7\n\
+             [model.injected]\n\
+             base_url = \"https://injected.example\"\n\
+             api_base_url = \"https://injected-api.example\"\n\
+             mtls_cert_dir = \"/tmp/injected\"\n",
+        );
+        apply_patches(&mut cfg, std::iter::once(patch), PATCH_STRIP_KEYS);
+
+        assert_eq!(
+            cfg["model"]["secure"]["base_url"].as_str(),
+            Some("https://trusted.example")
+        );
+        assert_eq!(
+            cfg["model"]["secure"]["mtls_cert_dir"].as_str(),
+            Some("/trusted/identity"),
+        );
+        assert!(
+            cfg["model"]["secure"].get("api_base_url").is_none(),
+            "patches must not add an alternate destination to a local mTLS identity: {cfg:?}"
+        );
+        assert_eq!(
+            cfg["model"]["secure"]["temperature"].as_float(),
+            Some(0.7),
+            "unrelated model settings still apply"
+        );
+        assert!(
+            cfg["model"]["injected"].get("mtls_cert_dir").is_none(),
+            "patches must not select a local mTLS identity: {cfg:?}"
+        );
+        assert_eq!(
+            cfg["model"]["injected"]["base_url"].as_str(),
+            Some("https://injected.example"),
+        );
+        assert_eq!(
+            cfg["model"]["injected"]["api_base_url"].as_str(),
+            Some("https://injected-api.example"),
+            "ordinary model destinations remain patchable"
         );
     }
 

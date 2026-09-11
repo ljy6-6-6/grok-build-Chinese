@@ -1,0 +1,7 @@
+[
+  {
+    "category": "fixes",
+    "description": "**Esc** 不再取消正在运行的本轮任务，而是提示使用 Ctrl+C。",
+    "breaking_change": false
+  }
+]

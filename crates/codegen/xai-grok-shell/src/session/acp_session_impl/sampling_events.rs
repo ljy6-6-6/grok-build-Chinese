@@ -11,10 +11,96 @@ impl SessionActor {
         .await;
     }
 
+    /// Stamp ttft on the first token of any channel (reasoning, text, or tool call).
+    pub(crate) fn record_turn_first_token(&self, request_id: Option<&xai_grok_sampler::RequestId>) {
+        let Some(generation) = self.turn_generation(request_id) else {
+            return;
+        };
+        self.turn_phases.record_first_token(generation);
+    }
+
+    /// Stamp ttfm on the first assistant text; reasoning and tool calls are excluded.
+    pub(crate) fn record_turn_first_meaningful_output(
+        &self,
+        request_id: Option<&xai_grok_sampler::RequestId>,
+    ) {
+        let Some(generation) = self.turn_generation(request_id) else {
+            return;
+        };
+        self.turn_phases.record_first_meaningful_output(generation);
+    }
+
+    fn turn_generation(&self, request_id: Option<&xai_grok_sampler::RequestId>) -> Option<u64> {
+        match request_id {
+            Some(id) => self
+                .turn_stream_drained
+                .lock()
+                .get(id)
+                .map(|ownership| ownership.generation),
+            None => Some(self.turn_phases.current_generation()),
+        }
+    }
+
+    fn open_stream_apply_span(&self, request_id: &xai_grok_sampler::RequestId) {
+        let parent_id = self.current_turn_span_id.lock().clone();
+        let span = match parent_id {
+            Some(id) => tracing::info_span!(
+                parent: id,
+                "turn.stream_apply",
+                chunk_count = tracing::field::Empty,
+                bytes = tracing::field::Empty,
+            ),
+            None => tracing::info_span!(
+                "turn.stream_apply",
+                chunk_count = tracing::field::Empty,
+                bytes = tracing::field::Empty,
+            ),
+        };
+        let region = xai_grok_telemetry::region::Region::from_span(span);
+        let prior = self.stream_apply_span.lock().replace(StreamApplySpan {
+            request_id: request_id.clone(),
+            region,
+            chunk_count: 0,
+            bytes: 0,
+        });
+        if let Some(prior) = prior {
+            prior.record_and_close();
+        }
+    }
+
+    fn bump_stream_apply_span(&self, request_id: &xai_grok_sampler::RequestId, bytes: usize) {
+        let mut guard = self.stream_apply_span.lock();
+        if let Some(span) = guard.as_mut()
+            && &span.request_id == request_id
+        {
+            span.chunk_count += 1;
+            span.bytes += bytes as i64;
+        }
+    }
+
+    fn close_stream_apply_span(&self, request_id: &xai_grok_sampler::RequestId) {
+        let ended = {
+            let mut guard = self.stream_apply_span.lock();
+            if guard.as_ref().is_some_and(|s| &s.request_id == request_id) {
+                guard.take()
+            } else {
+                None
+            }
+        };
+        if let Some(ended) = ended {
+            ended.record_and_close();
+        }
+    }
+
+    pub(crate) fn close_stream_apply_span_any(&self) {
+        let ended = self.stream_apply_span.lock().take();
+        if let Some(ended) = ended {
+            ended.record_and_close();
+        }
+    }
+
     /// Translate one [`xai_grok_sampler::SamplingEvent`] from the per-session sampler actor into the corresponding ACP / shell side-effects.
-    ///
     /// Called from the drainer task spawned in `spawn_session_actor`, which loops `while let Some(event) = sampler_event_rx.recv().await`.
-    /// This function only maps events; recovery (compaction, friendly errors) lives in [`Self::handle_sampling_failure`] in the turn loop.
     /// Recovery runs there because it needs per-turn state and may call back into `sampler_handle.update_config` or resubmit.
     pub(crate) async fn handle_sampling_event(
         self: &Arc<Self>,
@@ -30,10 +116,9 @@ impl SessionActor {
             .pending_image_strip
             .lock()
             .contains_key(event.request_id());
-        // Presence in `turn_stream_drained` means the turn still owns every FIFO event for this request
-        // `None` only means the ordering waiter timed out; queued chunks stay valid until the terminal event or a turn boundary removes the entry
-        // A pending image strip admits only its own strip and terminal events
-        // A late backend-tool completion may still close a visible tool card
+        // Presence in `turn_stream_drained` means the turn still owns every FIFO event for this request.
+        // `None` only means the ordering waiter timed out; queued chunks stay valid until the terminal event or a turn boundary removes the entry.
+        // A pending image strip admits only its own strip and terminal events.
         let closes_backend_tool = matches!(event, SamplingEvent::BackendToolCallCompleted { .. });
         let resolves_pending_strip = match &event {
             SamplingEvent::ImagesStripped {
@@ -44,6 +129,14 @@ impl SessionActor {
             SamplingEvent::Completed { .. } | SamplingEvent::Failed { .. } => owns_pending_strip,
             _ => false,
         };
+        if matches!(
+            event,
+            SamplingEvent::Completed { .. }
+                | SamplingEvent::Failed { .. }
+                | SamplingEvent::Retrying { .. }
+        ) {
+            self.close_stream_apply_span(event.request_id());
+        }
         if !request_owned && !closes_backend_tool && !resolves_pending_strip {
             return;
         }
@@ -53,12 +146,9 @@ impl SessionActor {
                 request_id,
                 timestamp_ms,
             } => {
-                // Begin a fresh per-generation segment
-                // A new turn (the prompt id changed) resets the whole accumulator, so a capture from an earlier turn cannot leak into this trace
-                // A same-turn restart, a doomloop's next reasoning-only generation, keeps the collected segments and just opens a new one
-                // That way every generation survives instead of only the last
-                // `current_prompt_id` / `current_turn_number` are set by the prompt handler before any sampler events arrive
-                // Panic on lock poison to match the file convention
+                // Begin a fresh per-generation segment A new turn (the prompt id changed) resets the whole accumulator, so a capture from an earlier turn cannot leak into this trace A same-turn restart, a doomloop's next.
+                // That way every generation survives instead of only the last `current_prompt_id` / `current_turn_number` are set by the prompt handler before any sampler events arrive.
+                // Panic on lock poison to match the file convention.
                 {
                     let prompt_id = self
                         .current_prompt_id
@@ -72,6 +162,7 @@ impl SessionActor {
                     cap.start_request_stream(request_id.as_str(), timestamp_ms);
                 }
                 self.chat_state_handle.record_stream_start(timestamp_ms);
+                self.open_stream_apply_span(&request_id);
             }
             SamplingEvent::FirstToken { .. } => {
                 self.emit_event(crate::session::events::Event::FirstToken);
@@ -83,6 +174,7 @@ impl SessionActor {
                 chunk_index,
             } => match channel {
                 SamplingChannel::Text => {
+                    self.bump_stream_apply_span(&request_id, text.len());
                     // Append to the out-of-band trace accumulator; it never enters chat_state
                     // See `StreamingTurnCapture` for how the capture begins and ends
                     {
@@ -102,6 +194,9 @@ impl SessionActor {
                         cap.append(false, &text);
                     }
 
+                    self.record_turn_first_token(Some(&request_id));
+                    self.record_turn_first_meaningful_output(Some(&request_id));
+
                     // The phase change is emitted alongside each text delta so the UI flips to "streaming text" the moment content starts arriving
                     // The `PhaseChanged` event itself is idempotent on the consumer side
                     self.emit_event(crate::session::events::Event::PhaseChanged {
@@ -116,6 +211,7 @@ impl SessionActor {
                     .await;
                 }
                 SamplingChannel::Reasoning => {
+                    self.bump_stream_apply_span(&request_id, text.len());
                     // Append to the out-of-band trace accumulator; it never enters chat_state
                     {
                         let mut cap = self.streaming_turn_capture.lock();
@@ -133,6 +229,9 @@ impl SessionActor {
                         cap.claim_current_request(request_id.as_str());
                         cap.append(true, &text);
                     }
+
+                    // Reasoning is a token (ttft) but not meaningful output (ttfm).
+                    self.record_turn_first_token(Some(&request_id));
 
                     self.emit_event(crate::session::events::Event::PhaseChanged {
                         phase: crate::session::events::Phase::StreamingReasoning,
@@ -157,9 +256,9 @@ impl SessionActor {
                     }
                 }
 
-                // Forward to clients as a `tool_call_delta_chunk` xAI session update through the buffered path
-                // This mirrors how AgentMessageChunk and AgentThoughtChunk are routed: no per-chunk hook dispatch, no persistence
-                // The canonical acp::SessionUpdate::ToolCall is the source of truth for replay
+                // A tool call is a token (ttft) but not meaningful text output (ttfm).
+                self.record_turn_first_token(Some(&request_id));
+
                 self.send_buffered_xai_update(XaiSessionUpdate::ToolCallDeltaChunk {
                     tool_call_id: id,
                     tool_index,
@@ -213,15 +312,9 @@ impl SessionActor {
             } => {
                 let request_updates_turn = request_owned;
 
-                // Retry succeeded: the detached persistence task acquires rewrite ownership before it claims URLs
-                // Rewind either clears queued work first, or waits until the durable strip finishes
-                if self.pending_image_strip.lock().contains_key(&request_id) {
-                    let session = Arc::clone(self);
-                    let rid = request_id.clone();
-                    tokio::task::spawn_local(async move {
-                        session.apply_pending_image_strip(&rid).await;
-                    });
-                }
+                // Persist before the drain waiter is released so the next prompt cannot
+                // reread the rejected image, and LocalSet shutdown cannot abort the write.
+                self.apply_pending_image_strip(&request_id).await;
                 // The awaited result is the authoritative source for which doom-loop signals fired
                 // This merge on the event side keeps direct-event tests working, and it is request-bound so a late event cannot enter the next turn
                 if request_updates_turn {
@@ -275,27 +368,23 @@ impl SessionActor {
                     }
                 }
 
-                // The canonical assistant response is being committed via `record_assistant_response` in `process_conversation_turn`
-                // Discard the in-progress generation rather than wiping the whole capture
-                // A same-turn doomloop generation must not erase earlier uncommitted ones
-                // This committed generation is already in afterStateHistory
-                // Its reasoning must not enter `segments` or count against the byte cap of later ones
-                // A terminal event admitted only for a pending strip owns no stream and must not touch the partial capture kept for turn reporting
+                // The canonical assistant response is being committed via `record_assistant_response` in `process_conversation_turn`.
+                // Discard the in-progress generation rather than wiping the whole capture A same-turn doomloop generation must not erase earlier uncommitted ones.
+                // Its reasoning must not enter `segments` or count against the byte cap of later ones A terminal event admitted only for a pending strip owns no stream and must not touch the partial capture kept for turn reporting.
                 if request_updates_turn {
                     self.streaming_turn_capture
                         .lock()
                         .clear_request_segment(request_id.as_str());
                 }
 
-                // Timing and inference metrics for a successful request are recorded from the awaited result
-                // This ordered rail only mutates the capture and releases the terminal barrier
+                // This ordered rail only mutates the capture and releases the terminal barrier.
                 // Release only after the terminal event is fully processed.
-                // FIFO ordering then guarantees all preceding chunks and detector signals are visible before turn teardown proceeds
+                // FIFO ordering then guarantees all preceding chunks and detector signals are visible before turn teardown proceeds.
                 let sender = self
                     .turn_stream_drained
                     .lock()
                     .remove(&request_id)
-                    .flatten();
+                    .and_then(|ownership| ownership.waiter);
                 if let Some(tx) = sender {
                     let _ = tx.send(());
                 }
@@ -360,7 +449,7 @@ impl SessionActor {
                         "sampler_request_id": request_id.as_str(),
                         "attempt": attempt,
                         "max_retries": max_retries,
-                        "kind": kind.as_str(),
+                        "kind": kind.as_ref(),
                         "reason": crate::util::truncate(&reason, 300),
                     })),
                 );
@@ -369,15 +458,14 @@ impl SessionActor {
                         attempt,
                         max_retries,
                         reason,
-                        error_type: Some(kind.as_str().to_string()),
+                        error_type: Some(kind.as_ref().to_string()),
                     },
                 ))
                 .await;
             }
             SamplingEvent::Failed { request_id, error } => {
-                // The stripped retry (if any) did not rescue the turn: nothing durable may come of it
-                // A timeout-owned failure may drop only this request's strip and record its terminal metric; fully unowned failures remain stale
-                self.drop_pending_image_strip(&request_id);
+                // Persist before releasing the drain waiter / waking the turn.
+                self.apply_pending_image_strip(&request_id).await;
                 if !request_owned {
                     self.turn_stream_drained.lock().remove(&request_id);
                     return;
@@ -390,18 +478,18 @@ impl SessionActor {
                     Some(self.session_info.id.0.as_ref()),
                     Some(serde_json::json!({
                         "sampler_request_id": request_id.as_str(),
-                        "kind": error.kind.as_str(),
+                        "kind": error.kind.as_ref(),
                         "status_code": error.status_code,
                         "is_retryable": error.is_retryable,
                         "message": crate::util::truncate(&error.message, 300),
                     })),
                 );
                 self.signals_handle()
-                    .record_error_typed(error.kind.as_str());
+                    .record_error_typed(error.kind.as_ref());
                 if let Some(ref ctx) = error.empty_response_context {
                     tracing::info!(
                         empty_response = true,
-                        empty_reason = ctx.reason.as_str(),
+                        empty_reason = ctx.reason.as_ref(),
                         had_reasoning = ctx.had_reasoning,
                         finish_reason = ctx.finish_reason_str(),
                         model = %ctx.model,
@@ -414,7 +502,7 @@ impl SessionActor {
                     .turn_stream_drained
                     .lock()
                     .remove(&request_id)
-                    .flatten();
+                    .and_then(|ownership| ownership.waiter);
                 if let Some(tx) = sender {
                     let _ = tx.send(());
                 }
@@ -422,8 +510,14 @@ impl SessionActor {
             // ── Backend-hosted tool progress ─────────────────────
             // These tools are executed server-side by the agentic sampler
             // We emit ACP ToolCall/ToolCallUpdate so the pager can show progress (e.g., "Searching the web…")
-            SamplingEvent::BackendToolCallStarted { call_id, name, .. } => {
+            SamplingEvent::BackendToolCallStarted {
+                request_id,
+                call_id,
+                name,
+            } => {
                 self.signals_handle().record_tool_call(&name);
+                // A backend tool start is a token (ttft) but not meaningful text output (ttfm).
+                self.record_turn_first_token(Some(&request_id));
                 let (title, kind, raw_input) = backend_tool_display(&name);
                 self.send_update(
                     acp::SessionUpdate::ToolCall(

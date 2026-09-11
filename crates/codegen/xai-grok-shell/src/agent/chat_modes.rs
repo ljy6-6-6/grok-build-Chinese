@@ -1,7 +1,6 @@
 //! grok.com chat-product model catalog: caches `/rest/modes` and maps modes to the `SessionModelState` returned by `load_chat_session`
-//! (the chat analogue of [`crate::agent::models::ModelsManager`]).
+//! (the chat analogue of [`crate::agent::remote_config::ModelsManager`]).
 //! These "modes" populate the desktop MODEL picker, not the ACP session plan-modes in `LoadSessionResponse.modes`.
-use crate::auth::AuthManager;
 use crate::remote::chat_models_client::{
     ChatModelsClient, ChatModelsError, ListModesResponse, Mode,
 };
@@ -9,6 +8,7 @@ use agent_client_protocol as acp;
 use parking_lot::RwLock;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use xai_grok_login::AuthManager;
 /// ~54 min, matching grok-web's refetch cadence.
 const CACHE_TTL: Duration = Duration::from_secs(54 * 60);
 /// Cold-miss budget on the `session/load` critical path (warm/stale served instantly).

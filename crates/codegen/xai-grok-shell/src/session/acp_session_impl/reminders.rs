@@ -1,4 +1,5 @@
 use super::*;
+use xai_grok_tools::reminders::task_completion::ReportedTaskCompletions;
 pub(super) fn escape_reminder_close_tag(content: &str, tag: &str) -> String {
     content.replace(&format!("</{tag}>"), &format!("<\\/{tag}>"))
 }
@@ -7,14 +8,17 @@ pub(super) fn escape_reminder_tags(content: &str, tag: &str) -> String {
         .replace(&format!("</{tag}"), &format!("<\\/{tag}"))
         .replace(&format!("<{tag}"), &format!("<\\{tag}"))
 }
-fn reminder_item(content: &str, tag: &str) -> ConversationItem {
-    ConversationItem::system_reminder(format!("<{tag}>\n{content}\n</{tag}>"))
+fn reminder_text(content: &str, tag: &str) -> String {
+    xai_grok_tools::reminders::wrap_reminder_with_tag(&escape_reminder_close_tag(content, tag), tag)
 }
 pub(super) fn wrap_in_reminder_tag(content: &str, tag: &str) -> ConversationItem {
-    reminder_item(&escape_reminder_close_tag(content, tag), tag)
+    ConversationItem::system_reminder(reminder_text(content, tag))
 }
 pub(super) fn wrap_untrusted_in_reminder_tag(content: &str, tag: &str) -> ConversationItem {
-    reminder_item(&escape_reminder_tags(content, tag), tag)
+    ConversationItem::system_reminder(xai_grok_tools::reminders::wrap_reminder_with_tag(
+        &escape_reminder_tags(content, tag),
+        tag,
+    ))
 }
 #[derive(Debug, Clone, Copy)]
 pub(super) enum HookNoteKind {
@@ -28,6 +32,16 @@ impl HookNoteKind {
             Self::Feedback => "Feedback",
         }
     }
+}
+#[derive(Debug)]
+pub(super) enum WakeTurnMessage {
+    /// `ids` are marked reported when this message commits.
+    Digest {
+        text: String,
+        ids: Vec<String>,
+    },
+    KeepBody,
+    Silent,
 }
 /// Owned snapshot returned by [`SessionActor::collect_todo_gate_input`].
 ///
@@ -66,7 +80,6 @@ impl CollectedTodoGateInput {
     }
 }
 /// All fields deliberately borrow data the gate's call site owns, so the helper is a pure function.
-///
 /// The struct itself is `pub` (with `#[doc(hidden)]`) only for the replay-trace integration test in `tests/trace_replay.rs`.
 /// Fields stay crate-private: the test never constructs the struct directly; it obtains an instance via `CollectedTodoGateInput::as_input()`.
 #[doc(hidden)]
@@ -85,9 +98,7 @@ impl TodoGateReason {
     }
 }
 /// Pure decision function: does the gate fire, and with what reminder?
-///
 /// The function does NOT consult the cap; the caller folds the cap check in around this function.
-///
 /// Exposed as `pub` solely so the replay-trace integration test in `tests/trace_replay.rs` can call the gate directly.
 #[doc(hidden)]
 pub fn evaluate_todo_gate(input: &TodoGateInput<'_>) -> TodoGateDecision {
@@ -100,7 +111,6 @@ pub fn evaluate_todo_gate(input: &TodoGateInput<'_>) -> TodoGateDecision {
     }
 }
 /// Build the in-flight TodoGate reminder text.
-///
 /// Uses the doubled-`${{{{ tools.by_kind.* }}}}` convention, so the caller's `format!` pass leaves a single `${{ tools.by_kind.* }}`.
 /// `TemplateRenderer` / `render_prompt` then resolves that into the model-facing tool name.
 pub(super) fn build_todo_gate_reminder(pending: &[&str], unbacked_in_progress: &[&str]) -> String {
@@ -214,9 +224,11 @@ impl SessionActor {
             "\nIt runs in the background: status snapshots and the final result arrive as \
              reminders at turn starts, and the user can watch it in /workflow runs. If it pauses, \
              it can be resumed by calling the workflow tool with source: \
-             {{ type: \"resume\", resume_from_run_id: \"{run_id}\" }}. Keep run ids internal — \
-             the user knows runs by display name. No \
-             action needed unless the user asks."
+             {{ type: \"resume\", resume_from_run_id: \"{run_id}\" }}; to stop or pause it \
+             yourself, call the workflow tool with source: {{ type: \"stop\", run_id: \
+             \"{run_id}\" }} or {{ type: \"pause\", run_id: \"{run_id}\" }}. Keep run ids \
+             internal — the user knows runs by display name. No action needed unless the user \
+             asks."
         ));
         self.push_system_reminder(&body);
     }
@@ -249,7 +261,7 @@ fn format_workflow_status_reminder(
             "\n- Workflow '{}' (run id {}) — status: {}",
             run.name,
             run.run_id,
-            run.status.as_str()
+            run.status.as_ref()
         );
         let objective = run
             .objective
@@ -371,7 +383,6 @@ pub(super) fn format_workflow_elapsed(ms: u64) -> String {
 fn format_workflow_completion_reminder(
     runs: &[crate::session::workflow::tracker::WorkflowRunState],
     session_dir: &std::path::Path,
-    before_resume: bool,
     read_tool_name: Option<&str>,
 ) -> String {
     use std::fmt::Write as _;
@@ -386,18 +397,14 @@ fn format_workflow_completion_reminder(
     } else {
         "finished"
     };
-    let mut buf = if before_resume {
-        format!("This session was resumed. {n} {noun} {verb} before the resume:\n")
-    } else {
-        format!("While you were idle, {n} {noun} {verb}:\n")
-    };
+    let mut buf = format!("While you were idle, {n} {noun} {verb}:\n");
     for run in runs {
         let _ = write!(
             buf,
             "\n- Workflow '{}' (run id {}) — status: {}",
             run.name,
             run.run_id,
-            run.status.as_str()
+            run.status.as_ref()
         );
         let objective = run
             .objective
@@ -567,31 +574,53 @@ impl SessionActor {
     /// Mark completion IDs as reported in the shared `ReportedTaskCompletions` state.
     /// The per-tool-call `TaskCompletionReminder` then won't (re-)surface them.
     /// Used to dedupe completions the model actually saw (notification-drain / started auto-wake prompts).
-    /// Also used to drop them during the goal loop (between-turn drain).
     pub(super) async fn mark_completions_reported(&self, ids: &[&str]) {
         if ids.is_empty() {
             return;
         }
-        use xai_grok_tools::reminders::task_completion::ReportedTaskCompletions;
+        self.with_reported_completions(|reported| {
+            for id in ids {
+                reported.mark_reported(id);
+            }
+        })
+        .await;
+    }
+    /// Callers never hold the resources guard across an await.
+    pub(super) async fn with_reported_completions(
+        &self,
+        f: impl FnOnce(&mut ReportedTaskCompletions),
+    ) {
         use xai_grok_tools::types::resources::State;
         let bridge = self.agent.borrow().tool_bridge().clone();
         let resources = bridge.shared_resources().await;
         let mut res = resources.lock().await;
-        let reported = res.get_or_default::<State<ReportedTaskCompletions>>();
-        for id in ids {
-            reported.mark_reported(id);
-        }
+        f(res.get_or_default::<State<ReportedTaskCompletions>>());
     }
-    pub(super) async fn drain_between_turn_completions(&self) {
+    pub(super) async fn drain_between_turn_completions(&self, commit_ids: &[String]) {
         let goal_loop_active = self.goal_loop_active();
+        self.drain_between_turn_bash_completions(commit_ids, goal_loop_active)
+            .await;
+        self.drain_between_turn_workflow_completions(goal_loop_active)
+            .await;
+        self.drain_between_turn_subagent_completions(commit_ids, goal_loop_active)
+            .await;
+    }
+    async fn drain_between_turn_bash_completions(
+        &self,
+        commit_ids: &[String],
+        goal_loop_active: bool,
+    ) {
         let bridge = self.agent.borrow().tool_bridge().clone();
-        let reserved = self
+        let mut suppress_ids = self
             .tool_context
             .task_completion_reservations
             .as_ref()
             .map(|reservations| reservations.snapshot())
             .unwrap_or_default();
-        let bash_completions = bridge.drain_between_turn_bash_completions(&reserved).await;
+        suppress_ids.extend(commit_ids.iter().cloned());
+        let bash_completions = bridge
+            .drain_between_turn_bash_completions(&suppress_ids)
+            .await;
         if !bash_completions.is_empty() {
             let ids: Vec<&str> = bash_completions
                 .iter()
@@ -626,46 +655,49 @@ impl SessionActor {
                 self.push_system_reminder(&reminder);
             }
         }
-        self.drain_between_turn_workflow_completions(goal_loop_active)
-            .await;
+    }
+    async fn drain_between_turn_subagent_completions(
+        &self,
+        commit_ids: &[String],
+        goal_loop_active: bool,
+    ) {
         let Some(tx) = &self.tool_context.subagent_event_tx else {
             return;
         };
         use xai_grok_tools::implementations::grok_build::task::types::{
             SubagentCompletionsRequest, SubagentEvent,
         };
-        let suppress_ids = self
-            .tool_context
-            .task_completion_reservations
-            .as_ref()
-            .map(|reservations| reservations.snapshot())
-            .unwrap_or_default();
-        let parent_session_id = Some(self.session_id_string());
         let (respond_to, rx) = tokio::sync::oneshot::channel();
         if tx
             .send(SubagentEvent::Completions(SubagentCompletionsRequest {
-                parent_session_id,
-                suppress_ids,
+                parent_session_id: Some(self.session_id_string()),
+                suppress_ids: commit_ids.to_vec(),
                 respond_to,
             }))
             .is_err()
         {
             return;
         }
-        let Ok(completions) = rx.await else {
+        let Ok(mut completions) = rx.await else {
             return;
         };
         if completions.is_empty() {
             return;
         }
-        let ids: Vec<&str> = completions.iter().map(|c| c.subagent_id.as_str()).collect();
+        self.with_reported_completions(|reported| {
+            completions.retain(|c| reported.mark_reported(c.subagent_id()))
+        })
+        .await;
+        if completions.is_empty() {
+            return;
+        }
+        let ids: Vec<&str> = completions.iter().map(|c| c.subagent_id()).collect();
         if goal_loop_active {
             tracing::info!(
                 count = completions.len(),
                 subagent_ids = ?ids,
                 "dropping between-turn subagent completions (goal loop active)"
             );
-            self.mark_completions_reported(&ids).await;
             return;
         }
         tracing::info!(
@@ -673,6 +705,7 @@ impl SessionActor {
             subagent_ids = ?ids,
             "draining between-turn subagent completions"
         );
+        let bridge = self.agent.borrow().tool_bridge().clone();
         let reminder =
             xai_grok_tools::reminders::task_completion::format_between_turn_completion_reminder(
                 &completions,
@@ -680,6 +713,77 @@ impl SessionActor {
             )
             .await;
         self.push_system_reminder(&reminder);
+    }
+    /// Reads the coordinator buffer without draining it, so nothing is lost if the turn never commits.
+    pub(super) async fn build_wake_turn_message(&self, subagent_id: &str) -> WakeTurnMessage {
+        use xai_grok_tools::implementations::grok_build::task::types::{
+            SubagentCompletionsRequest, SubagentEvent,
+        };
+        let mut completions = Vec::new();
+        if let Some(tx) = &self.tool_context.subagent_event_tx {
+            let (respond_to, rx) = tokio::sync::oneshot::channel();
+            if tx
+                .send(SubagentEvent::PeekCompletions(SubagentCompletionsRequest {
+                    parent_session_id: Some(self.session_id_string()),
+                    suppress_ids: Vec::new(),
+                    respond_to,
+                }))
+                .is_ok()
+            {
+                completions = rx.await.unwrap_or_default();
+            }
+        }
+        if self.goal_loop_active() {
+            let ids: Vec<&str> = completions
+                .iter()
+                .map(|c| c.subagent_id())
+                .chain(std::iter::once(subagent_id))
+                .collect();
+            tracing::info!(
+                subagent_id,
+                subagent_ids = ?ids,
+                "dropping wake turn (goal loop active)"
+            );
+            self.mark_completions_reported(&ids).await;
+            return WakeTurnMessage::Silent;
+        }
+        let mut own_reported = false;
+        self.with_reported_completions(|reported| {
+            own_reported = reported.is_reported(subagent_id);
+            completions.retain(|c| !reported.is_reported(c.subagent_id()));
+        })
+        .await;
+        if own_reported {
+            tracing::info!(
+                subagent_id,
+                "dropping wake turn: completion already reported"
+            );
+            return WakeTurnMessage::Silent;
+        }
+        if !completions.iter().any(|c| c.subagent_id() == subagent_id) {
+            return WakeTurnMessage::KeepBody;
+        }
+        let ids: Vec<String> = completions
+            .iter()
+            .map(|c| c.subagent_id().to_owned())
+            .collect();
+        tracing::info!(
+            subagent_id,
+            count = ids.len(),
+            subagent_ids = ?ids,
+            "wake turn digests buffered subagent completions"
+        );
+        let bridge = self.agent.borrow().tool_bridge().clone();
+        let reminder =
+            xai_grok_tools::reminders::task_completion::format_between_turn_completion_reminder(
+                &completions,
+                &bridge,
+            )
+            .await;
+        WakeTurnMessage::Digest {
+            text: reminder_text(&reminder, self.reminder_wrapper_tag()),
+            ids,
+        }
     }
     pub(super) async fn drain_between_turn_workflow_completions(&self, goal_loop_active: bool) {
         if goal_loop_active {
@@ -701,73 +805,174 @@ impl SessionActor {
             fresh = ?names(&fresh),
             "draining between-turn workflow completions"
         );
+        let restored: Vec<_> = restored
+            .into_iter()
+            .filter(|r| {
+                r.status.is_terminal()
+                    && r.status != crate::session::workflow::tracker::WorkflowRunStatus::Interrupted
+            })
+            .collect();
+        if restored.is_empty() && fresh.is_empty() {
+            return;
+        }
         let session_dir = crate::session::persistence::session_dir(&self.session_info);
         let bridge = self.tool_bridge_handle();
         let read_tool_name =
             xai_grok_tools::reminders::task_completion::resolve_read_tool_name(&bridge).await;
-        if !restored.is_empty() {
+        for runs in [&restored, &fresh] {
+            if runs.is_empty() {
+                continue;
+            }
             self.push_system_reminder(&format_workflow_completion_reminder(
-                &restored,
+                runs,
                 &session_dir,
-                true,
-                read_tool_name.as_deref(),
-            ));
-        }
-        if !fresh.is_empty() {
-            self.push_system_reminder(&format_workflow_completion_reminder(
-                &fresh,
-                &session_dir,
-                false,
                 read_tool_name.as_deref(),
             ));
         }
     }
-    /// Called during session shutdown (both explicit and channel-closed paths).
-    /// A resumed session can then inform the model about processes that were still alive when the session ended.
-    pub(super) async fn persist_background_task_manifest(&self) {
-        let tasks = self
-            .agent
-            .borrow()
-            .tool_bridge()
-            .list_background_tasks()
-            .await;
-        let entries: Vec<crate::terminal::BackgroundTaskManifestEntry> = tasks
-            .into_iter()
-            .filter(|t| !t.completed)
-            .map(|t| crate::terminal::BackgroundTaskManifestEntry {
-                task_id: t.task_id,
-                command: t.command,
-                display_command: t.display_command,
-                output_file: t.output_file,
-                start_time: t.start_time,
-                cwd: t.cwd,
-                kind: t.kind,
-            })
-            .collect();
-        if !entries.is_empty() {
-            tracing::info!(
-                count = entries.len(),
-                "persisting background task manifest for session resume"
-            );
+    pub(super) async fn persist_resume_status(&self) {
+        if self.startup_hints.is_subagent {
+            return;
         }
         let session_dir = crate::session::persistence::session_dir(&self.session_info);
-        crate::terminal::persist_manifest(&session_dir, entries);
-    }
-    /// Load the background task manifest from a prior session and inject a system-reminder so the model knows about orphaned tasks.
-    ///
-    /// The manifest file is deleted after loading so it is only shown once.
-    pub(super) fn inject_resumed_tasks_reminder(&self) {
-        let session_dir = crate::session::persistence::session_dir(&self.session_info);
-        let entries = crate::terminal::load_and_clear_manifest(&session_dir);
-        if entries.is_empty() {
+        let snapshot = self.collect_resume_status().await;
+        if snapshot.is_empty() {
             return;
         }
         tracing::info!(
-            count = entries.len(),
-            "injecting resumed background tasks reminder"
+            loops = snapshot.loops.len(),
+            background = snapshot.background.len(),
+            monitors = snapshot.monitors.len(),
+            subagents = snapshot.subagents.len(),
+            workflows = snapshot.workflows.len(),
+            goal = snapshot.goal.is_some(),
+            "persisting resume status snapshot"
         );
-        let reminder = crate::terminal::format_resumed_tasks_reminder(&entries);
-        self.push_system_reminder(&reminder);
+        let _ = tokio::task::spawn_blocking({
+            let session_dir = session_dir.clone();
+            let snapshot = snapshot.clone();
+            move || crate::session::resume_status::persist(&session_dir, &snapshot)
+        })
+        .await;
+    }
+    async fn collect_resume_status(&self) -> crate::session::resume_status::ResumeStatusSnapshot {
+        use crate::session::resume_status::{ResumeGoal, ResumeLoop, ResumeTask, ResumeWorkflow};
+        use xai_grok_tools::computer::types::TaskKind;
+        let bridge = self.agent.borrow().tool_bridge().clone();
+        let oneshot = crate::session::resume_status::ONESHOT_TIMEOUT;
+        let tasks = tokio::time::timeout(oneshot, bridge.list_background_tasks())
+            .await
+            .unwrap_or_default();
+        let mut background = Vec::new();
+        let mut monitors = Vec::new();
+        for t in tasks.into_iter().filter(|t| !t.completed) {
+            let task = ResumeTask {
+                task_id: t.task_id,
+                command: t.display_command.unwrap_or(t.command),
+            };
+            match t.kind {
+                TaskKind::Monitor => monitors.push(task),
+                TaskKind::Bash => background.push(task),
+            }
+        }
+        let session_dir = crate::session::persistence::session_dir(&self.session_info);
+        let now = chrono::Utc::now();
+        let loops = match tokio::time::timeout(oneshot, bridge.list_scheduled_tasks()).await {
+            Ok(tasks) => tasks
+                .into_iter()
+                .filter(|t| t.pending_fire_at(now).is_some())
+                .map(|t| ResumeLoop {
+                    id: t.id,
+                    interval_secs: t.interval_secs,
+                    prompt: t.prompt,
+                })
+                .collect(),
+            Err(_) => crate::session::resume_status::loops_from_resources_state(&session_dir),
+        };
+        let subagents = {
+            let session_dir = session_dir.clone();
+            let sid = self.session_info.id.0.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::session::resume_status::running_subagent_metas(&session_dir, &sid)
+            })
+            .await
+            .unwrap_or_default()
+        };
+        let workflows = match tokio::time::timeout(oneshot, self.workflow_tracker()).await {
+            Ok(tracker) => tracker
+                .lock()
+                .list()
+                .into_iter()
+                .filter(|w| {
+                    use crate::session::workflow::tracker::WorkflowRunStatus;
+                    w.status == WorkflowRunStatus::Active
+                        || w.status == WorkflowRunStatus::Interrupted
+                        || w.status.is_paused()
+                })
+                .map(|w| ResumeWorkflow {
+                    run_id: w.run_id,
+                    objective: w.objective,
+                })
+                .collect(),
+            Err(_) => {
+                crate::session::resume_status::reconstruct_from_disk(
+                    &session_dir,
+                    self.session_info.id.0.as_ref(),
+                    std::iter::empty(),
+                    None,
+                )
+                .workflows
+            }
+        };
+        let goal = self.goal_tracker.lock().snapshot().and_then(|g| {
+            use crate::session::goal_tracker::GoalStatus;
+            if matches!(g.status, GoalStatus::Complete | GoalStatus::BudgetLimited) {
+                return None;
+            }
+            Some(ResumeGoal {
+                objective: g.objective.clone(),
+            })
+        });
+        crate::session::resume_status::ResumeStatusSnapshot {
+            loops,
+            background,
+            monitors,
+            subagents,
+            workflows,
+            goal,
+        }
+    }
+    pub(super) async fn inject_fork_reminder(&self) {
+        let session_dir = crate::session::persistence::session_dir(&self.session_info);
+        let Some(status) = crate::session::fork_status::claim(&session_dir) else {
+            return;
+        };
+        let reminder = crate::session::fork_status::format_reminder(&status);
+        tracing::info!(kind = %status.kind, "injecting fork status reminder");
+        let delivered = self
+            .chat_state_handle
+            .push_user_message_and_ack(wrap_untrusted_in_reminder_tag(
+                &reminder,
+                self.reminder_wrapper_tag(),
+            ))
+            .await
+            .is_some();
+        if !delivered {
+            crate::session::fork_status::release_claim(&session_dir);
+        }
+    }
+    pub(super) fn inject_resumed_tasks_reminder(&self) {
+        let session_dir = crate::session::persistence::session_dir(&self.session_info);
+        let snapshot = crate::session::resume_status::load_and_clear(&session_dir);
+        let Some(reminder) = crate::session::resume_status::format_reminder(&snapshot) else {
+            return;
+        };
+        tracing::info!("injecting resume status reminder");
+        self.chat_state_handle
+            .push_user_message(wrap_untrusted_in_reminder_tag(
+                &reminder,
+                self.reminder_wrapper_tag(),
+            ));
     }
     /// Turn-end TodoGate config, or `None` when [`todo_gate_active`] is false.
     pub(super) fn todo_gate_policy(
@@ -864,7 +1069,7 @@ mod workflow_reminder_tests {
         );
         let run = failed_run(detail);
         let session_dir = tempfile::tempdir().unwrap();
-        let reminder = format_workflow_completion_reminder(&[run], session_dir.path(), false, None);
+        let reminder = format_workflow_completion_reminder(&[run], session_dir.path(), None);
         let rendered_detail = reminder
             .split_once("  Detail: ")
             .unwrap()

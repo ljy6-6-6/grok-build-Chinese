@@ -11,10 +11,8 @@ use agent_client_protocol as acp;
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
 use xai_grok_tools::computer::types::{AsyncFileSystem, ComputerError};
 
-/// Wraps xai-grok-shell's ACP gateway to satisfy xai-grok-tools' AsyncFileSystem.
-///
-/// When a client advertises `clientCapabilities.fs.readTextFile` and `writeTextFile`, tools stop hitting the local disk directly.
-/// File operations (read_file, search_replace, etc.) are routed through the ACP gateway back to the client.
+/// Wraps the ACP gateway as `AsyncFileSystem`.
+/// When the client advertises `fs.readTextFile` and `writeTextFile`, tools stop hitting local disk and route through the gateway.
 pub struct AcpFsAdapter {
     gateway: GatewaySender,
     session_id: acp::SessionId,

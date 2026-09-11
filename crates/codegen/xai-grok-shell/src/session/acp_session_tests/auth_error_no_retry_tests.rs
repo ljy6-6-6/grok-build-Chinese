@@ -1,9 +1,9 @@
 use super::support::*;
 use super::*;
-use crate::auth::{AuthManager, AuthMode, GrokAuth, GrokComConfig};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
+use xai_grok_login::{AuthManager, AuthMode, GrokAuth, GrokComConfig};
 
 /// Test refresher that returns a fresh token and records that it was invoked.
 /// Used to drive the auth-arm success path.
@@ -11,13 +11,13 @@ struct AlwaysSucceedRefresher {
     called: Arc<AtomicBool>,
 }
 #[async_trait::async_trait]
-impl crate::auth::refresh::TokenRefresher for AlwaysSucceedRefresher {
+impl xai_grok_login::refresh::TokenRefresher for AlwaysSucceedRefresher {
     async fn refresh(
         &self,
-        _reason: crate::auth::refresh::RefreshReason,
-    ) -> crate::auth::refresh::RefreshOutcome {
+        _reason: xai_grok_login::refresh::RefreshReason,
+    ) -> xai_grok_login::refresh::RefreshOutcome {
         self.called.store(true, Ordering::SeqCst);
-        crate::auth::refresh::RefreshOutcome::Success(Box::new(GrokAuth {
+        xai_grok_login::refresh::RefreshOutcome::Success(Box::new(GrokAuth {
             key: "refreshed-test-token".to_string(),
             auth_mode: AuthMode::Oidc,
             refresh_token: Some("rt-new".into()),
@@ -27,10 +27,28 @@ impl crate::auth::refresh::TokenRefresher for AlwaysSucceedRefresher {
     }
 }
 
+/// Test refresher that always fails transiently — the shape of a sleep-gate
+/// deferral ("refresh deferred: system sleep imminent") or a network blip.
+struct AlwaysTransientFailRefresher {
+    called: Arc<AtomicBool>,
+}
+#[async_trait::async_trait]
+impl xai_grok_login::refresh::TokenRefresher for AlwaysTransientFailRefresher {
+    async fn refresh(
+        &self,
+        _reason: xai_grok_login::refresh::RefreshReason,
+    ) -> xai_grok_login::refresh::RefreshOutcome {
+        self.called.store(true, Ordering::SeqCst);
+        xai_grok_login::refresh::RefreshOutcome::TransientFailure {
+            message: "refresh deferred: system sleep imminent".to_string(),
+        }
+    }
+}
+
 /// `(tempdir, manager)` with an expired OIDC token loaded so `unauthorized_recovery()` actually dispatches to the refresher.
 /// Tempdir must outlive the manager (auth.json path).
 fn auth_manager_with_refresher(
-    refresher: Arc<dyn crate::auth::refresh::TokenRefresher>,
+    refresher: Arc<dyn xai_grok_login::refresh::TokenRefresher>,
 ) -> (tempfile::TempDir, Arc<AuthManager>) {
     let dir = tempfile::tempdir().expect("tempdir");
     let am = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
@@ -63,13 +81,33 @@ fn auth_error() -> xai_grok_sampler::SamplingErrorInfo {
     }
 }
 
+/// [`auth_error`] with the wire-credential provenance pinned.
+fn auth_error_with_credential(
+    credential: xai_grok_sampling_types::SentCredential,
+) -> xai_grok_sampler::SamplingErrorInfo {
+    xai_grok_sampler::SamplingErrorInfo {
+        credential,
+        ..auth_error()
+    }
+}
+
 /// Construct a test actor with the supplied `auth_manager` and session-token credentials wired in.
 /// Wraps the actor in `Arc` ready for `handle_sampling_failure`.
 async fn make_actor_with_auth_manager(
     auth_manager: Option<Arc<AuthManager>>,
 ) -> (Arc<SessionActor>, mpsc::UnboundedReceiver<PersistenceMsg>) {
-    make_actor_with_auth_and_credentials(
+    let (actor, rx) = make_actor_parts_with_auth_manager(auth_manager).await;
+    (Arc::new(actor), rx)
+}
+
+/// [`make_actor_with_auth_manager`] before the `Arc` wrap, for tests that
+/// pin actor fields (e.g. the park kill switch).
+async fn make_actor_parts_with_auth_manager(
+    auth_manager: Option<Arc<AuthManager>>,
+) -> (SessionActor, mpsc::UnboundedReceiver<PersistenceMsg>) {
+    make_actor_parts_with_method_and_credentials(
         auth_manager,
+        "cached_token",
         xai_chat_state::AuthType::SessionToken,
         "initial-test-key".to_string(),
     )
@@ -99,6 +137,23 @@ async fn make_actor_with_method_and_credentials(
     auth_type: xai_chat_state::AuthType,
     api_key: String,
 ) -> (Arc<SessionActor>, mpsc::UnboundedReceiver<PersistenceMsg>) {
+    let (actor, rx) = make_actor_parts_with_method_and_credentials(
+        auth_manager,
+        auth_method_id,
+        auth_type,
+        api_key,
+    )
+    .await;
+    (Arc::new(actor), rx)
+}
+
+/// [`make_actor_with_method_and_credentials`] before the `Arc` wrap.
+async fn make_actor_parts_with_method_and_credentials(
+    auth_manager: Option<Arc<AuthManager>>,
+    auth_method_id: &str,
+    auth_type: xai_chat_state::AuthType,
+    api_key: String,
+) -> (SessionActor, mpsc::UnboundedReceiver<PersistenceMsg>) {
     let (gateway_tx, _) = mpsc::unbounded_channel();
     let (persistence_tx, persistence_rx) = mpsc::unbounded_channel();
     let mut actor = create_test_actor(50_000, 100_000, 85, gateway_tx, persistence_tx).await;
@@ -111,7 +166,7 @@ async fn make_actor_with_method_and_credentials(
             auth_type,
             ..Default::default()
         });
-    (Arc::new(actor), persistence_rx)
+    (actor, persistence_rx)
 }
 
 /// `(tempdir, manager)` holding a valid OIDC token (so `get_valid_token()` is a cache hit).
@@ -137,12 +192,18 @@ async fn no_emit_when_auth_manager_is_none() {
     local
         .run_until(async {
             let (actor, _rx) = make_actor_with_auth_manager(None).await;
-            crate::auth::attribution::reset_test_emit_count();
+            xai_grok_login::attribution::reset_test_emit_count();
             let _ = actor
-                .handle_sampling_failure(auth_error(), 0, transient_state(0, true), false)
+                .handle_sampling_failure(
+                    auth_error(),
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Fresh,
+                )
                 .await;
             assert_eq!(
-                crate::auth::attribution::test_emit_count(),
+                xai_grok_login::attribution::test_emit_count(),
                 0,
                 "auth arm must not emit attribution when no auth_manager is wired"
             );
@@ -164,16 +225,22 @@ async fn no_recovery_without_auth_manager() {
                 "xai-byok-key".to_string(),
             )
             .await;
-            crate::auth::attribution::reset_test_emit_count();
+            xai_grok_login::attribution::reset_test_emit_count();
             let result = actor
-                .handle_sampling_failure(auth_error(), 0, transient_state(0, true), false)
+                .handle_sampling_failure(
+                    auth_error(),
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Fresh,
+                )
                 .await;
             assert!(
                 result.is_err(),
                 "no auth manager must fall through to terminal error"
             );
             assert_eq!(
-                crate::auth::attribution::test_emit_count(),
+                xai_grok_login::attribution::test_emit_count(),
                 0,
                 "auth arm must not emit attribution without auth manager"
             );
@@ -188,14 +255,20 @@ async fn sampler_401_recovery_returns_refresh_and_retry() {
     local
         .run_until(async {
             let called = Arc::new(AtomicBool::new(false));
-            let refresher: Arc<dyn crate::auth::refresh::TokenRefresher> =
+            let refresher: Arc<dyn xai_grok_login::refresh::TokenRefresher> =
                 Arc::new(AlwaysSucceedRefresher {
                     called: called.clone(),
                 });
             let (_dir, am) = auth_manager_with_refresher(refresher);
             let (actor, _rx) = make_actor_with_auth_manager(Some(am)).await;
             let result = actor
-                .handle_sampling_failure(auth_error(), 0, transient_state(0, true), false)
+                .handle_sampling_failure(
+                    auth_error(),
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Fresh,
+                )
                 .await;
             assert!(
                 matches!(
@@ -212,9 +285,286 @@ async fn sampler_401_recovery_returns_refresh_and_retry() {
         .await;
 }
 
+/// Rule: a credential-less 401 with transiently-failed recovery parks on the
+/// uncharged path instead of failing the turn.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(attribution_emit_count)]
+async fn credential_less_401_with_deferred_refresh_parks_on_uncharged_resubmit() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let called = Arc::new(AtomicBool::new(false));
+            let refresher: Arc<dyn xai_grok_login::refresh::TokenRefresher> =
+                Arc::new(AlwaysTransientFailRefresher {
+                    called: called.clone(),
+                });
+            let (_dir, am) = auth_manager_with_refresher(refresher);
+            let (actor, _rx) = make_actor_with_auth_manager(Some(am)).await;
+            let result = actor
+                .handle_sampling_failure(
+                    auth_error_with_credential(xai_grok_sampling_types::SentCredential::Missing),
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Fresh,
+                )
+                .await;
+            assert!(
+                matches!(
+                    result,
+                    Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
+                        credential: xai_grok_sampling_types::SentCredential::Missing,
+                        store: RecoveredStore::SessionToken,
+                    })
+                ),
+                "credential-less 401 with self-healing deferred refresh must park on \
+                 the uncharged resubmit path"
+            );
+            assert!(called.load(Ordering::SeqCst), "refresher must be consulted");
+        })
+        .await;
+}
+
+/// Rule: an already-parked credential-less 401 re-parks without touching the
+/// refresher — parked cycles must not consume the shared escalation budget.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(attribution_emit_count)]
+async fn parked_credential_less_401_reparks_without_recovery_dispatch() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let called = Arc::new(AtomicBool::new(false));
+            let refresher: Arc<dyn xai_grok_login::refresh::TokenRefresher> =
+                Arc::new(AlwaysTransientFailRefresher {
+                    called: called.clone(),
+                });
+            let (_dir, am) = auth_manager_with_refresher(refresher);
+            let (actor, _rx) = make_actor_with_auth_manager(Some(am)).await;
+            let result = actor
+                .handle_sampling_failure(
+                    auth_error_with_credential(xai_grok_sampling_types::SentCredential::Missing),
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Parked,
+                )
+                .await;
+            assert!(
+                matches!(
+                    result,
+                    Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
+                        credential: xai_grok_sampling_types::SentCredential::Missing,
+                        store: RecoveredStore::SessionToken,
+                    })
+                ),
+                "an already-parked credential-less 401 must re-park"
+            );
+            assert!(
+                !called.load(Ordering::SeqCst),
+                "a parked cycle must not dispatch a recovery refresh"
+            );
+        })
+        .await;
+}
+
+/// Rule: a credential-less 401 on a Length-salvage continuation still parks, fresh or
+/// parked — the quiet truncated-complete arm excludes `Auth` kinds, so it neither
+/// completes the turn truncated nor goes terminal.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(attribution_emit_count)]
+async fn mid_salvage_credential_less_401_still_parks() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            for park in [TurnParkState::Fresh, TurnParkState::Parked] {
+                let called = Arc::new(AtomicBool::new(false));
+                let refresher: Arc<dyn xai_grok_login::refresh::TokenRefresher> =
+                    Arc::new(AlwaysTransientFailRefresher {
+                        called: called.clone(),
+                    });
+                let (_dir, am) = auth_manager_with_refresher(refresher);
+                let (actor, _rx) = make_actor_with_auth_manager(Some(am)).await;
+                // A window the seeded estimate exceeds: only the quiet arm's
+                // `Auth` exclusion keeps this 401 out of it.
+                let error = xai_grok_sampler::SamplingErrorInfo {
+                    model_metadata: Some(xai_grok_sampling_types::ResponseModelMetadata {
+                        context_window: Some(1),
+                        max_completion_tokens: None,
+                        models_etag: None,
+                    }),
+                    ..auth_error_with_credential(xai_grok_sampling_types::SentCredential::Missing)
+                };
+                let result = actor
+                    .handle_sampling_failure(error, 0, transient_state(0, true), true, park)
+                    .await;
+                assert!(
+                    matches!(
+                        result,
+                        Ok(SamplerFailureRecovery::RefreshAuthAndResubmit {
+                            credential: xai_grok_sampling_types::SentCredential::Missing,
+                            store: RecoveredStore::SessionToken,
+                        })
+                    ),
+                    "a mid-salvage credential-less 401 must park ({park:?})"
+                );
+                assert_eq!(
+                    called.load(Ordering::SeqCst),
+                    !park.is_parked(),
+                    "one recovery dispatch when fresh, none when already parked ({park:?})"
+                );
+            }
+        })
+        .await;
+}
+
+/// Rule: a credentialed (or `Unknown` — fails closed) 401 stays terminal when recovery fails.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(attribution_emit_count)]
+async fn credentialed_401_with_deferred_refresh_stays_terminal() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            for credential in [
+                xai_grok_sampling_types::SentCredential::Sent,
+                xai_grok_sampling_types::SentCredential::Unknown,
+            ] {
+                let refresher: Arc<dyn xai_grok_login::refresh::TokenRefresher> =
+                    Arc::new(AlwaysTransientFailRefresher {
+                        called: Arc::new(AtomicBool::new(false)),
+                    });
+                let (_dir, am) = auth_manager_with_refresher(refresher);
+                let (actor, _rx) = make_actor_with_auth_manager(Some(am)).await;
+                let result = actor
+                    .handle_sampling_failure(
+                        auth_error_with_credential(credential),
+                        0,
+                        transient_state(0, true),
+                        false,
+                        TurnParkState::Fresh,
+                    )
+                    .await;
+                assert!(
+                    result.is_err(),
+                    "{credential:?} 401 with failed recovery must stay terminal"
+                );
+            }
+        })
+        .await;
+}
+
+/// Rule: kill switch off restores terminal behavior for the exact input that otherwise parks.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(attribution_emit_count)]
+async fn credential_less_401_with_park_kill_switch_stays_terminal() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let refresher: Arc<dyn xai_grok_login::refresh::TokenRefresher> =
+                Arc::new(AlwaysTransientFailRefresher {
+                    called: Arc::new(AtomicBool::new(false)),
+                });
+            let (_dir, am) = auth_manager_with_refresher(refresher);
+            let (mut actor, _rx) = make_actor_parts_with_auth_manager(Some(am)).await;
+            actor.uncharged_401_park_enabled = false;
+            let actor = Arc::new(actor);
+            let result = actor
+                .handle_sampling_failure(
+                    auth_error_with_credential(xai_grok_sampling_types::SentCredential::Missing),
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Fresh,
+                )
+                .await;
+            assert!(
+                result.is_err(),
+                "kill switch off: the otherwise-parking input must stay terminal"
+            );
+        })
+        .await;
+}
+
+/// Rule: a credential-less 401 stays terminal under a provider refresh authority —
+/// parking would loop on a token only an interactive flow can mint.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(attribution_emit_count)]
+async fn credential_less_401_with_provider_authority_stays_terminal() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let am = Arc::new(AuthManager::new(
+                dir.path(),
+                GrokComConfig {
+                    auth_provider_command: Some("acme-auth".to_owned()),
+                    auth_provider_label: Some("Acme SSO".to_owned()),
+                    ..GrokComConfig::default()
+                },
+            ));
+            am.hot_swap(GrokAuth {
+                key: "expired-external".into(),
+                auth_mode: AuthMode::External,
+                expires_at: Some(chrono::Utc::now() - chrono::Duration::hours(1)),
+                ..GrokAuth::test_default()
+            });
+            am.set_refresher(Arc::new(AlwaysTransientFailRefresher {
+                called: Arc::new(AtomicBool::new(false)),
+            }));
+            let (actor, _rx) = make_actor_with_auth_manager(Some(am)).await;
+            let result = actor
+                .handle_sampling_failure(
+                    auth_error_with_credential(xai_grok_sampling_types::SentCredential::Missing),
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Fresh,
+                )
+                .await;
+            assert!(
+                result.is_err(),
+                "credential-less 401 under a provider refresh authority must stay terminal"
+            );
+        })
+        .await;
+}
+
+/// Rule: a credential-less 401 stays terminal when the remedy is a manual re-login —
+/// resubmits would loop on a credential no refresh can mint.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(attribution_emit_count)]
+async fn credential_less_401_with_permanent_failure_stays_terminal() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let refresher: Arc<dyn xai_grok_login::refresh::TokenRefresher> =
+                Arc::new(AlwaysTransientFailRefresher {
+                    called: Arc::new(AtomicBool::new(false)),
+                });
+            let (_dir, am) = auth_manager_with_refresher(refresher);
+            am.record_permanent_failure(
+                "initial-test-key".to_string(),
+                xai_grok_login::error::RefreshTokenFailedReason::RefreshTokenRejected.into(),
+            );
+            let (actor, _rx) = make_actor_with_auth_manager(Some(am)).await;
+            let result = actor
+                .handle_sampling_failure(
+                    auth_error_with_credential(xai_grok_sampling_types::SentCredential::Missing),
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Fresh,
+                )
+                .await;
+            assert!(
+                result.is_err(),
+                "credential-less 401 with a permanent refresh failure must stay terminal"
+            );
+        })
+        .await;
+}
+
 /// Regression: sampler 401 with API-key auth (BYOK `env_key` / `XAI_API_KEY`) must NOT attempt an OIDC session-token refresh.
 /// The bearer on the wire is the static API key, so refreshing the session token reports success but the retry re-sends the same rejected key.
-/// That makes an invisible 401 loop that hangs the turn.
 /// Recovery is skipped and the 401 surfaces as a terminal error.
 #[tokio::test(flavor = "current_thread")]
 #[serial_test::serial(attribution_emit_count)]
@@ -223,7 +573,7 @@ async fn sampler_401_with_api_key_auth_skips_refresh_and_surfaces_error() {
     local
         .run_until(async {
             let called = Arc::new(AtomicBool::new(false));
-            let refresher: Arc<dyn crate::auth::refresh::TokenRefresher> =
+            let refresher: Arc<dyn xai_grok_login::refresh::TokenRefresher> =
                 Arc::new(AlwaysSucceedRefresher {
                     called: called.clone(),
                 });
@@ -236,7 +586,13 @@ async fn sampler_401_with_api_key_auth_skips_refresh_and_surfaces_error() {
             .await;
 
             let result = actor
-                .handle_sampling_failure(auth_error(), 0, transient_state(0, true), false)
+                .handle_sampling_failure(
+                    auth_error(),
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Fresh,
+                )
                 .await;
 
             assert!(
@@ -260,7 +616,7 @@ async fn pre_flight_refresh_skips_api_key_auth_type() {
     local
         .run_until(async {
             let called = Arc::new(AtomicBool::new(false));
-            let refresher: Arc<dyn crate::auth::refresh::TokenRefresher> =
+            let refresher: Arc<dyn xai_grok_login::refresh::TokenRefresher> =
                 Arc::new(AlwaysSucceedRefresher {
                     called: called.clone(),
                 });
@@ -298,7 +654,7 @@ async fn pre_flight_refreshes_hard_expired_session_token() {
     local
         .run_until(async {
             let called = Arc::new(AtomicBool::new(false));
-            let refresher: Arc<dyn crate::auth::refresh::TokenRefresher> =
+            let refresher: Arc<dyn xai_grok_login::refresh::TokenRefresher> =
                 Arc::new(AlwaysSucceedRefresher {
                     called: called.clone(),
                 });
@@ -339,16 +695,16 @@ async fn pre_flight_hard_expired_refresh_failure_skips_jwt_fallthrough() {
     local
         .run_until(async {
             let call_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
-            let refresher: Arc<dyn crate::auth::refresh::TokenRefresher> = Arc::new({
+            let refresher: Arc<dyn xai_grok_login::refresh::TokenRefresher> = Arc::new({
                 struct AlwaysFail(Arc<std::sync::atomic::AtomicU32>);
                 #[async_trait::async_trait]
-                impl crate::auth::refresh::TokenRefresher for AlwaysFail {
+                impl xai_grok_login::refresh::TokenRefresher for AlwaysFail {
                     async fn refresh(
                         &self,
-                        _: crate::auth::refresh::RefreshReason,
-                    ) -> crate::auth::refresh::RefreshOutcome {
+                        _: xai_grok_login::refresh::RefreshReason,
+                    ) -> xai_grok_login::refresh::RefreshOutcome {
                         self.0.fetch_add(1, Ordering::SeqCst);
-                        crate::auth::refresh::RefreshOutcome::transient("refresh failed")
+                        xai_grok_login::refresh::RefreshOutcome::transient("refresh failed")
                     }
                 }
                 AlwaysFail(call_count.clone())
@@ -393,16 +749,16 @@ async fn pre_flight_soft_expired_transient_fail_retains_seed() {
     local
         .run_until(async {
             let call_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
-            let refresher: Arc<dyn crate::auth::refresh::TokenRefresher> = Arc::new({
+            let refresher: Arc<dyn xai_grok_login::refresh::TokenRefresher> = Arc::new({
                 struct AlwaysFail(Arc<std::sync::atomic::AtomicU32>);
                 #[async_trait::async_trait]
-                impl crate::auth::refresh::TokenRefresher for AlwaysFail {
+                impl xai_grok_login::refresh::TokenRefresher for AlwaysFail {
                     async fn refresh(
                         &self,
-                        _: crate::auth::refresh::RefreshReason,
-                    ) -> crate::auth::refresh::RefreshOutcome {
+                        _: xai_grok_login::refresh::RefreshReason,
+                    ) -> xai_grok_login::refresh::RefreshOutcome {
                         self.0.fetch_add(1, Ordering::SeqCst);
-                        crate::auth::refresh::RefreshOutcome::transient("refresh failed")
+                        xai_grok_login::refresh::RefreshOutcome::transient("refresh failed")
                     }
                 }
                 AlwaysFail(call_count.clone())
@@ -458,16 +814,16 @@ async fn proactive_refresh_makes_per_turn_refresh_a_cache_hit() {
     local
         .run_until(async {
             let call_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
-            let refresher: Arc<dyn crate::auth::refresh::TokenRefresher> = Arc::new({
+            let refresher: Arc<dyn xai_grok_login::refresh::TokenRefresher> = Arc::new({
                 struct Counting(Arc<std::sync::atomic::AtomicU32>);
                 #[async_trait::async_trait]
-                impl crate::auth::refresh::TokenRefresher for Counting {
+                impl xai_grok_login::refresh::TokenRefresher for Counting {
                     async fn refresh(
                         &self,
-                        _: crate::auth::refresh::RefreshReason,
-                    ) -> crate::auth::refresh::RefreshOutcome {
+                        _: xai_grok_login::refresh::RefreshReason,
+                    ) -> xai_grok_login::refresh::RefreshOutcome {
                         self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        crate::auth::refresh::RefreshOutcome::Success(Box::new(GrokAuth {
+                        xai_grok_login::refresh::RefreshOutcome::Success(Box::new(GrokAuth {
                             key: "proactive-fresh".into(),
                             auth_mode: AuthMode::Oidc,
                             refresh_token: Some("rt-new".into()),
@@ -485,7 +841,8 @@ async fn proactive_refresh_makes_per_turn_refresh_a_cache_hit() {
 
             // Wait for the proactive task to fire; its first pass runs after PROACTIVE_MIN_SLEEP, so the window must exceed the floor
             tokio::time::sleep(
-                crate::auth::manager::PROACTIVE_MIN_SLEEP + std::time::Duration::from_millis(1000),
+                xai_grok_login::manager::PROACTIVE_MIN_SLEEP
+                    + std::time::Duration::from_millis(1000),
             )
             .await;
             assert!(
@@ -557,6 +914,7 @@ async fn legacy_auth_hint_on_404_model_not_found() {
                     0,
                     transient_state(0, true),
                     false,
+                    TurnParkState::Fresh,
                 )
                 .await;
             let err = match result {
@@ -595,14 +953,9 @@ async fn legacy_auth_hint_on_404_model_not_found() {
         .await;
 }
 
-/// Build a 401-shaped error that bypasses step 4b's auth recovery.
-///
 /// In production, 401s arrive as `SamplingErrorKind::Auth` with `status_code: None`.
 /// Step 4b intercepts `Auth`-kind errors and runs the full recovery chain.
-/// On devbox/CI that chain succeeds by minting a service-account token, masking the hint.
-///
 /// Using `Api` kind with `status_code: Some(401)` exercises the hint condition (`status_code == Some(401)`) without triggering recovery.
-/// This makes the test environment-independent.
 fn unauthorized_401_error() -> xai_grok_sampler::SamplingErrorInfo {
     xai_grok_sampler::SamplingErrorInfo {
             kind: xai_grok_sampler::SamplingErrorKind::Api,
@@ -641,6 +994,7 @@ async fn legacy_auth_hint_on_401_unauthorized() {
                     0,
                     transient_state(0, true),
                     false,
+                    TurnParkState::Fresh,
                 )
                 .await;
             let err = match result {
@@ -698,6 +1052,7 @@ async fn no_legacy_hint_on_401_for_oidc_auth() {
                     0,
                     transient_state(0, true),
                     false,
+                    TurnParkState::Fresh,
                 )
                 .await;
             let err = match result {
@@ -745,6 +1100,7 @@ async fn no_legacy_hint_for_oidc_auth() {
                     0,
                     transient_state(0, true),
                     false,
+                    TurnParkState::Fresh,
                 )
                 .await;
             let err = match result {
@@ -788,10 +1144,9 @@ fn session_token_auth_gate_truth_table() {
         assert!(gate(true, ModelByok::NotByok, fp));
         assert!(!gate(true, ModelByok::Byok, fp));
     }
-    // Session method and Unknown BYOK: refresh only against a first-party xAI host
-    // That way a transiently-unclassifiable config can't demote a live session (the stale-token 401 regression)
-    // The session token still never leaks to a third-party BYOK endpoint
-    // This arm was unconditionally `false` before the fix
+    // Unknown BYOK: refresh only against a first-party xAI host.
+    // That way a transiently-unclassifiable config can't demote a live session (the stale-token 401 regression).
+    // The session token still never leaks to a third-party BYOK endpoint.
     assert!(gate(true, ModelByok::Unknown, true));
     assert!(!gate(true, ModelByok::Unknown, false));
 }
@@ -803,7 +1158,7 @@ async fn sampler_401_session_method_with_stale_api_key_auth_type_still_recovers(
     local
         .run_until(async {
             let called = Arc::new(AtomicBool::new(false));
-            let refresher: Arc<dyn crate::auth::refresh::TokenRefresher> =
+            let refresher: Arc<dyn xai_grok_login::refresh::TokenRefresher> =
                 Arc::new(AlwaysSucceedRefresher {
                     called: called.clone(),
                 });
@@ -817,7 +1172,13 @@ async fn sampler_401_session_method_with_stale_api_key_auth_type_still_recovers(
             .await;
 
             let result = actor
-                .handle_sampling_failure(auth_error(), 0, transient_state(0, true), false)
+                .handle_sampling_failure(
+                    auth_error(),
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Fresh,
+                )
                 .await;
 
             assert!(
@@ -842,7 +1203,7 @@ async fn sampler_401_oidc_method_with_stale_api_key_auth_type_still_recovers() {
     local
         .run_until(async {
             let called = Arc::new(AtomicBool::new(false));
-            let refresher: Arc<dyn crate::auth::refresh::TokenRefresher> =
+            let refresher: Arc<dyn xai_grok_login::refresh::TokenRefresher> =
                 Arc::new(AlwaysSucceedRefresher {
                     called: called.clone(),
                 });
@@ -856,7 +1217,13 @@ async fn sampler_401_oidc_method_with_stale_api_key_auth_type_still_recovers() {
             .await;
 
             let result = actor
-                .handle_sampling_failure(auth_error(), 0, transient_state(0, true), false)
+                .handle_sampling_failure(
+                    auth_error(),
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Fresh,
+                )
                 .await;
 
             assert!(
@@ -1097,6 +1464,49 @@ async fn reconstruct_full_config_no_bearer_resolver_for_byok_model_on_session_me
         .await;
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn model_switch_preserves_existing_conversation_group() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                None,
+                "cached_token",
+                xai_chat_state::AuthType::SessionToken,
+                "k".to_string(),
+            )
+            .await;
+            let expected_group: crate::sampling::ConversationGroupId =
+                "111fc242-925b-5a7d-826e-2974daad239f".into();
+            let mut current = actor
+                .chat_state_handle
+                .get_sampling_config()
+                .await
+                .expect("test actor has sampling config");
+            current.conversation_group_id = Some(expected_group.clone());
+            actor.chat_state_handle.update_sampling_config(current);
+
+            let mut incoming = actor.reconstruct_full_config().await;
+            incoming.conversation_group_id = None;
+            actor
+                .handle_set_session_model(incoming, false, false, false, true, 85)
+                .await
+                .expect("model switch succeeds");
+
+            let switched = actor
+                .chat_state_handle
+                .get_sampling_config()
+                .await
+                .expect("model switch keeps sampling config");
+            assert_eq!(
+                switched.conversation_group_id,
+                Some(expected_group),
+                "a model config without a group must not erase the session's existing group",
+            );
+        })
+        .await;
+}
+
 /// Regression: `handle_set_session_model` must invalidate the memo even when `model_id` is unchanged.
 /// Otherwise a config edit that turns the current model into a per-model BYOK model on a third-party `base_url` keeps serving the stale `NotByok`.
 /// That leaves the gate active and leaks the OIDC token to the third-party host.
@@ -1137,6 +1547,7 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
             let cfg = xai_grok_sampler::SamplerConfig {
                 api_key: Some("byok-key".to_string()),
                 base_url: "https://third-party.example/v1".to_string(),
+                mtls_cert_dir: None,
                 model: model.clone(),
                 max_completion_tokens: None,
                 temperature: None,
@@ -1150,13 +1561,15 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
                 context_window: 256_000,
                 client_version: None,
                 force_http1: false,
-                max_retries: None,
+                max_retries: Some(6),
+                rate_limit_retry_threshold: Some(4),
                 stream_tool_calls: false,
                 idle_timeout_secs: None,
                 client_identifier: None,
                 reasoning_effort: None,
                 deployment_id: None,
                 user_id: None,
+                conversation_group_id: None,
                 origin_client: None,
                 attribution_callback: None,
                 bearer_resolver: None,
@@ -1170,19 +1583,30 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
                 .handle_set_session_model(cfg, false, false, false, true, 85)
                 .await;
 
+            let expected_max_retries = xai_grok_sampler::resolve_max_retries(Some(6));
+            let stored = actor
+                .chat_state_handle
+                .get_sampling_config()
+                .await
+                .expect("model switch stores sampling config");
+            assert_eq!(stored.max_retries, Some(expected_max_retries));
+            assert_eq!(stored.rate_limit_retry_threshold, Some(4));
             assert!(
                 actor.model_auth_memo.borrow().is_none(),
                 "a model switch must invalidate the per-model BYOK memo so the next \
                  reconstruct recomputes under the current config"
             );
+            let reconstructed = actor.reconstruct_full_config().await;
+            assert_eq!(reconstructed.max_retries, Some(expected_max_retries));
+            assert_eq!(reconstructed.rate_limit_retry_threshold, Some(4));
         })
         .await;
 }
 
-use crate::auth::test_counting_provider as counting_provider;
+use xai_grok_login::test_counting_provider as counting_provider;
 
 /// Seed the per-model memo so `model_auth_provider` resolves without a config load.
-async fn seed_provider_memo(actor: &Arc<SessionActor>, provider: crate::auth::AuthProviderRef) {
+async fn seed_provider_memo(actor: &Arc<SessionActor>, provider: xai_grok_login::AuthProviderRef) {
     let model = actor
         .chat_state_handle
         .get_sampling_config()
@@ -1229,6 +1653,7 @@ async fn switch_to_first_party_model_drops_minted_provider_token() {
             let cfg = xai_grok_sampler::SamplerConfig {
                 api_key: Some("session-jwt".to_string()),
                 base_url: "https://api.x.ai/v1".to_string(),
+                mtls_cert_dir: None,
                 model,
                 max_completion_tokens: None,
                 temperature: None,
@@ -1243,12 +1668,14 @@ async fn switch_to_first_party_model_drops_minted_provider_token() {
                 client_version: None,
                 force_http1: false,
                 max_retries: None,
+                rate_limit_retry_threshold: None,
                 stream_tool_calls: false,
                 idle_timeout_secs: None,
                 client_identifier: None,
                 reasoning_effort: None,
                 deployment_id: None,
                 user_id: None,
+                conversation_group_id: None,
                 origin_client: None,
                 attribution_callback: None,
                 bearer_resolver: None,
@@ -1288,13 +1715,19 @@ async fn sampler_401_on_provider_model_remints_and_resubmits() {
                 make_actor_with_auth_and_credentials(None, xai_chat_state::AuthType::ApiKey, token)
                     .await;
             seed_provider_memo(&actor, provider).await;
-            crate::auth::test_backdate_provider_mint(
+            xai_grok_login::test_backdate_provider_mint(
                 "test-4c-recover",
                 std::time::Duration::from_secs(60),
             );
 
             let result = actor
-                .handle_sampling_failure(auth_error(), 0, transient_state(0, true), false)
+                .handle_sampling_failure(
+                    auth_error(),
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Fresh,
+                )
                 .await;
             assert!(
                 matches!(
@@ -1330,7 +1763,7 @@ async fn sampler_non_auth_kind_401_on_provider_model_still_recovers() {
                 make_actor_with_auth_and_credentials(None, xai_chat_state::AuthType::ApiKey, token)
                     .await;
             seed_provider_memo(&actor, provider).await;
-            crate::auth::test_backdate_provider_mint(
+            xai_grok_login::test_backdate_provider_mint(
                 "test-4c-non-auth-kind",
                 std::time::Duration::from_secs(60),
             );
@@ -1338,7 +1771,13 @@ async fn sampler_non_auth_kind_401_on_provider_model_still_recovers() {
             let mut error = auth_error();
             error.kind = xai_grok_sampler::SamplingErrorKind::Api;
             let result = actor
-                .handle_sampling_failure(error, 0, transient_state(0, true), false)
+                .handle_sampling_failure(
+                    error,
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Fresh,
+                )
                 .await;
             assert!(
                 matches!(
@@ -1374,7 +1813,13 @@ async fn sampler_401_with_no_key_on_provider_model_mints_and_resubmits() {
             seed_provider_memo(&actor, provider).await;
 
             let result = actor
-                .handle_sampling_failure(auth_error(), 0, transient_state(0, true), false)
+                .handle_sampling_failure(
+                    auth_error(),
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Fresh,
+                )
                 .await;
             assert!(
                 matches!(
@@ -1402,7 +1847,7 @@ async fn sampler_401_on_provider_model_never_refreshes_session() {
             let token = provider.ensure_fresh_token(None).await.rotated().unwrap();
 
             let called = Arc::new(AtomicBool::new(false));
-            let refresher: Arc<dyn crate::auth::refresh::TokenRefresher> =
+            let refresher: Arc<dyn xai_grok_login::refresh::TokenRefresher> =
                 Arc::new(AlwaysSucceedRefresher {
                     called: called.clone(),
                 });
@@ -1415,13 +1860,19 @@ async fn sampler_401_on_provider_model_never_refreshes_session() {
             )
             .await;
             seed_provider_memo(&actor, provider).await;
-            crate::auth::test_backdate_provider_mint(
+            xai_grok_login::test_backdate_provider_mint(
                 "test-4c-exclusive",
                 std::time::Duration::from_secs(60),
             );
 
             let result = actor
-                .handle_sampling_failure(auth_error(), 0, transient_state(0, true), false)
+                .handle_sampling_failure(
+                    auth_error(),
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Fresh,
+                )
                 .await;
             assert!(
                 matches!(
@@ -1451,7 +1902,7 @@ async fn pre_turn_on_provider_model_never_installs_session_token() {
             let provider = counting_provider("test-preturn-exclusive", dir.path());
 
             let called = Arc::new(AtomicBool::new(false));
-            let refresher: Arc<dyn crate::auth::refresh::TokenRefresher> =
+            let refresher: Arc<dyn xai_grok_login::refresh::TokenRefresher> =
                 Arc::new(AlwaysSucceedRefresher {
                     called: called.clone(),
                 });
@@ -1504,7 +1955,13 @@ async fn sampler_401_on_fresh_provider_token_surfaces_error() {
             seed_provider_memo(&actor, provider).await;
 
             let result = actor
-                .handle_sampling_failure(auth_error(), 0, transient_state(0, true), false)
+                .handle_sampling_failure(
+                    auth_error(),
+                    0,
+                    transient_state(0, true),
+                    false,
+                    TurnParkState::Fresh,
+                )
                 .await;
             assert!(
                 result.is_err(),

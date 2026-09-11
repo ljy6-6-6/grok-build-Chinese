@@ -394,8 +394,6 @@ impl<'de> Deserialize<'de> for MapEntryCount {
 }
 
 /// Cheaply scan `rewind_points.jsonl` for per-point metadata, streaming without allocating file-content `String`s.
-/// `MapEntryCount` just counts `file_snapshots`; serde skips the other fields.
-/// `file_snapshots` is required, mirroring `RewindPoint`, so the picker rejects exactly the lines the on-rewind full load would.
 /// It never advertises a rewind target that won't materialize.
 fn scan_rewind_point_metas(path: &Path) -> io::Result<Vec<RewindPointMeta>> {
     #[derive(Deserialize)]
@@ -415,9 +413,6 @@ fn scan_rewind_point_metas(path: &Path) -> io::Result<Vec<RewindPointMeta>> {
 }
 
 /// Fold rewind points at indices `>= target_index` into the point at `target_index - 1`, drop the folded points, and return the survivors.
-/// Before-snapshots keep the earliest (via `or_insert`), after-snapshots the latest.
-/// `target_index == 0` clears everything (no predecessor).
-///
 /// Pure (no I/O), so the in-memory tracker and the persistence path that treats the disk as authoritative share it and can't diverge.
 pub fn merge_rewind_points_from(
     mut points: Vec<RewindPoint>,
@@ -451,17 +446,8 @@ pub fn merge_rewind_points_from(
     points
 }
 
-/// The tracker maintains a list of rewind points, one per user prompt.
-/// Each rewind point captures the state of files BEFORE they are read or modified during that prompt's processing.
-///
-/// A tracker built via [`with_lazy_source`] does NOT read the (potentially huge) persisted rewind points up front, so resuming a session is cheap.
-/// They load on demand the first time a rewind *operation* needs them (see [`ensure_historical_loaded`]).
-/// Live capture and persisting the current prompt's point (`get_rewind_point`) deliberately skip the load, so "resume then keep working" stays fast.
+/// The tracker maintains a list of rewind points, one per user prompt. A tracker built via [`with_lazy_source`] does NOT read the (potentially huge) persisted rewind points up front, so resuming a session is cheap.
 /// The picker uses the metadata-only [`get_rewind_point_metas`].
-///
-/// [`with_lazy_source`]: FileStateTracker::with_lazy_source
-/// [`ensure_historical_loaded`]: FileStateTracker::ensure_historical_loaded
-/// [`get_rewind_point_metas`]: FileStateTracker::get_rewind_point_metas
 #[derive(Debug)]
 pub struct FileStateTracker {
     /// All rewind points for this session, indexed by prompt_index
@@ -496,14 +482,8 @@ impl FileStateTracker {
         }
     }
 
-    /// Materialize the deferred historical rewind points (no-op if already loaded or no lazy source).
-    /// Triggered by rewind *operations* that need full file contents.
-    /// In-memory points win over disk via `or_insert`, so concurrent live captures are never lost.
-    ///
-    /// The `lazy_source` lock is held across the (large, blocking) read and merge.
-    /// Releasing it early would let a concurrent rewind observe `lazy_source == None` mid-merge and skip/truncate historical points.
+    /// Materialize the deferred historical rewind points (no-op if already loaded or no lazy source). In-memory points win over disk via `or_insert`, so concurrent live captures are never lost.
     /// The source is consumed only on a SUCCESSFUL read.
-    /// A transient error leaves it set to retry (never operating on or persisting a partial set).
     async fn ensure_historical_loaded(&self) {
         let mut source = self.lazy_source.lock().await;
         // Clone the path so we can clear `source` after a successful read.
@@ -584,14 +564,7 @@ impl FileStateTracker {
         }
     }
 
-    /// This should be called BEFORE reading or writing a file.
-    ///
-    /// `path` is the absolute path to the file. It will be converted to a `RelPathBuf` (using `cwd`) for storage.
-    /// Files outside the CWD are silently skipped (they don't need rewind tracking since the agent shouldn't modify them).
-    ///
-    /// NOTE: This method is similar to `capture_file_state_with_fs`.
-    /// They are kept separate due to type system constraints (`AsyncFileSystem` trait vs `AsyncFsWrapper` concrete type).
-    /// Keep them in sync when making changes.
+    /// This should be called BEFORE reading or writing a file. Files outside the CWD are silently skipped (they don't need rewind tracking since the agent shouldn't modify them).
     pub async fn capture_file_state<F: AsyncFileSystem + ?Sized>(
         &self,
         fs: &F,
@@ -627,13 +600,7 @@ impl FileStateTracker {
         Ok(())
     }
 
-    /// Capture a file's current state before an operation using `AsyncFsWrapper`.
-    ///
-    /// Files outside the CWD are silently skipped (they don't need rewind tracking).
-    ///
-    /// NOTE: This method is similar to `capture_file_state`.
-    /// They are kept separate due to type system constraints (`AsyncFsWrapper` concrete type vs generic `AsyncFileSystem` trait).
-    /// Keep them in sync when making changes.
+    /// Capture a file's current state before an operation using `AsyncFsWrapper`. Files outside the CWD are silently skipped (they don't need rewind tracking).
     pub async fn capture_file_state_with_fs(
         &self,
         fs: &AsyncFsWrapper,
@@ -669,11 +636,8 @@ impl FileStateTracker {
         Ok(())
     }
 
-    /// Unlike `capture_file_state`, this does NOT read from the filesystem.
-    /// The caller provides the content directly (e.g., from a `FileWritten` notification that already carries `previous_content`).
-    ///
-    /// `path` is the absolute path. `cwd` is used to convert it to a relative path.
-    /// Files outside the CWD are silently skipped.
+    /// Unlike `capture_file_state`, this does NOT read from the filesystem. The caller provides the content directly (e.g., from a `FileWritten` notification that already carries `previous_content`).
+    /// `path` is the absolute path.
     pub async fn add_before_snapshot_for_prompt(
         &self,
         prompt_index: usize,
@@ -704,14 +668,8 @@ impl FileStateTracker {
         result
     }
 
-    /// Lightweight metadata for every known rewind point, for the rewind picker.
-    /// Combines in-memory points with a metadata-only scan of the lazy disk source.
+    /// Lightweight metadata for every known rewind point, for the rewind picker. Combines in-memory points with a metadata-only scan of the lazy disk source.
     /// It never materializes file contents and never consumes the source, so a later rewind still does the full load.
-    /// In-memory points win on conflict.
-    ///
-    /// Lock order mirrors [`ensure_historical_loaded`] (`lazy_source` outer, `rewind_points` inner).
-    /// Holding `lazy_source` across both the in-memory snapshot and the disk scan stops a concurrent rewind's load from interleaving.
-    /// An interleaved load could make the picker miss points.
     pub async fn get_rewind_point_metas(&self) -> Vec<RewindPointMeta> {
         let source = self.lazy_source.lock().await;
         let mut metas: HashMap<usize, RewindPointMeta> = {
@@ -769,14 +727,7 @@ impl FileStateTracker {
     }
 
     /// Merge rewind points at indices >= `target_index` into the previous point (`target_index - 1`), then remove the merged points.
-    ///
-    /// Used by ConversationOnly rewind: the conversation is rewound but files are untouched.
     /// The file effects of the discarded prompts must therefore be folded into the last surviving prompt's rewind point.
-    /// This ensures:
-    /// - `/rewind 0` can still undo all file effects (merged into point N-1)
-    /// - A new prompt at `target_index` gets a fresh rewind point with correct before-snapshots (the current disk state)
-    ///
-    /// For `target_index == 0` there is no previous point to merge into, so all points are cleared.
     pub async fn merge_and_remove_from(&self, target_index: usize) {
         self.ensure_historical_loaded().await;
         let mut points = self.rewind_points.lock().await;
@@ -824,13 +775,8 @@ pub use xai_grok_workspace_types::rpc::session::{
     ConflictType, FileRewindConflict, FileRewindResponse,
 };
 
-/// Rewind files to the state before `target_prompt_index`.
-///
-/// Shared implementation used by both `hub_server.rs` (workspace-side) and potentially `acp_session.rs` (shell-side). Performs:
-/// 1. Gather earliest before-snapshot per file from points >= target
-/// 2. Detect conflicts (external modifications since the agent's writes)
-/// 3. Revert files to their before-snapshot state
-/// 4. Truncate rewind points from the target onward
+/// Rewind files to the state before `target_prompt_index`. Shared implementation used by both `hub_server.rs` (workspace-side) and potentially `acp_session.rs` (shell-side).
+/// Performs: 1.
 pub async fn rewind_files(
     tracker: &FileStateTracker,
     fs: &crate::file_system::AsyncFsWrapper,
@@ -943,10 +889,7 @@ impl FileStateHandle {
         Self { tracker }
     }
 
-    /// Capture file state before an operation.
-    ///
-    /// `path` is the absolute path to the file.
-    /// `cwd` is used to convert it to a relative path for portable storage.
+    /// Capture file state before an operation. `path` is the absolute path to the file. `cwd` is used to convert it to a relative path for portable storage.
     pub async fn capture<F: AsyncFileSystem + ?Sized>(
         &self,
         fs: &F,
@@ -956,10 +899,7 @@ impl FileStateHandle {
         self.tracker.capture_file_state(fs, path, cwd).await
     }
 
-    /// Capture file state before an operation using `AsyncFsWrapper`.
-    ///
-    /// `path` is the absolute path to the file.
-    /// `cwd` is used to convert it to a relative path for portable storage.
+    /// Capture file state before an operation using `AsyncFsWrapper`. `path` is the absolute path to the file. `cwd` is used to convert it to a relative path for portable storage.
     pub async fn capture_with_fs(
         &self,
         fs: &AsyncFsWrapper,

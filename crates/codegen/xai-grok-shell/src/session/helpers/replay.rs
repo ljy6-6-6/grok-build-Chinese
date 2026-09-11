@@ -75,12 +75,8 @@ pub fn find_latest_compaction_checkpoint(
 }
 
 /// Replay `updates.jsonl` to reconstruct the conversation at `target_prompt_index`.
-///
-/// This handles:
-/// - `RewindMarker`: discards accumulated state beyond the marker's target.
-/// - `CompactionCheckpoint`: loads/ignores checkpoints based on whether the target is before or after the compaction boundary.
-///
-/// `session_dir` is the path to the session directory (for reading checkpoint files).
+/// `RewindMarker`: discards accumulated state beyond the marker's target.
+/// `CompactionCheckpoint`: loads/ignores checkpoints based on whether the target is before or after the compaction boundary.
 pub fn replay_to_prompt(
     updates_path: &Path,
     session_dir: &Path,
@@ -181,6 +177,9 @@ struct ReplayState {
 
     current_user_prompt_index: Option<usize>,
 
+    /// The current user run is a persisted mid-turn interjection (`_meta.interjection`).
+    current_user_is_interjection: bool,
+
     /// True once any user chunk with `_meta.promptIndex` has been seen.
     /// Unnumbered user runs after that are mid-turn phantoms (not turns).
     seen_prompt_index_marker: bool,
@@ -214,6 +213,7 @@ impl ReplayState {
             in_user_message: false,
             current_user_text: String::new(),
             current_user_prompt_index: None,
+            current_user_is_interjection: false,
             seen_prompt_index_marker: false,
             current_agent_text: String::new(),
             has_pending_agent: false,
@@ -269,10 +269,9 @@ impl ReplayState {
         session_dir: &Path,
     ) -> io::Result<ReplayAction> {
         if self.target < info.prompt_index_at_compaction {
-            // Target is before this compaction, so don't load the compacted history (we'll reconstruct from raw updates)
-            // But the checkpoint is still required for original_user_info
-            // That is the historical User(user_info) the model saw for these pre-compaction turns
-            // Without it we'd use the post-compaction rebuilt user_info, which is wrong data
+            // Target is before this compaction, so don't load the compacted history (we'll reconstruct from raw updates).
+            // But the checkpoint is still required for original_user_info.
+            // Without it we'd use the post-compaction rebuilt user_info, which is wrong data.
             let checkpoint_path = session_dir.join(&info.checkpoint_file);
             let bytes = match std::fs::read(&checkpoint_path) {
                 Ok(b) => b,
@@ -401,6 +400,7 @@ impl ReplayState {
             self.in_user_message = false;
             self.current_user_text.clear();
             self.current_user_prompt_index = None;
+            self.current_user_is_interjection = false;
             self.current_agent_text.clear();
             self.has_pending_agent = false;
 
@@ -429,6 +429,7 @@ impl ReplayState {
         // Discard any in-progress partial messages: they belong to the timeline being discarded, so we drop them rather than flushing
         self.current_user_text.clear();
         self.current_user_prompt_index = None;
+        self.current_user_is_interjection = false;
         self.current_agent_text.clear();
         self.has_pending_agent = false;
         self.in_user_message = false;
@@ -492,20 +493,28 @@ impl ReplayState {
         if chunk_prompt_index.is_some() {
             self.seen_prompt_index_marker = true;
         }
+        let interjection = crate::session::storage::is_interjection_chunk(chunk);
+        // Each interjection's text chunk is its own item; an interjection never merges with a neighbouring prompt run
+        let opens_interjection =
+            interjection && matches!(chunk.content, agent_client_protocol::ContentBlock::Text(_));
 
         if !self.in_user_message {
             self.flush_pending_agent();
             self.in_user_message = true;
             self.current_user_text.clear();
             self.current_user_prompt_index = chunk_prompt_index;
-        } else if chunk_prompt_index != self.current_user_prompt_index
-            && (chunk_prompt_index.is_some() || self.current_user_prompt_index.is_some())
+            self.current_user_is_interjection = interjection;
+        } else if (chunk_prompt_index != self.current_user_prompt_index
+            && (chunk_prompt_index.is_some() || self.current_user_prompt_index.is_some()))
+            || interjection != self.current_user_is_interjection
+            || opens_interjection
         {
-            // New run: promptIndex changed, or transition between marked/unmarked.
+            // New run: promptIndex changed, transition between marked/unmarked, or an interjection boundary.
             self.flush_pending_user();
             self.in_user_message = true;
             self.current_user_text.clear();
             self.current_user_prompt_index = chunk_prompt_index;
+            self.current_user_is_interjection = interjection;
         } else if self.current_user_prompt_index.is_none() {
             self.current_user_prompt_index = chunk_prompt_index;
         }
@@ -563,12 +572,18 @@ impl ReplayState {
     }
 
     fn flush_pending_user(&mut self) {
+        let interjection = std::mem::take(&mut self.current_user_is_interjection);
         if self.current_user_text.is_empty() {
             self.current_user_prompt_index = None;
             return;
         }
         let text = std::mem::take(&mut self.current_user_text);
         let pi = self.current_user_prompt_index.take();
+        if interjection {
+            // Tagged like the live drain's item; never a counted turn
+            self.conversation.push(ConversationItem::interjection(text));
+            return;
+        }
         if let Some(pi) = pi {
             let mut item = ConversationItem::user(text);
             item.set_prompt_index(pi);
@@ -790,6 +805,65 @@ mod tests {
         }
         std::fs::write(&updates_path, content).unwrap();
         replay_to_prompt(&updates_path, session_dir, target).unwrap()
+    }
+
+    /// A persisted interjection chunk as the shell writes it: framed text plus the `interjection` flag.
+    fn make_interjection_update(session_id: &str, typed: &str) -> SessionUpdate {
+        SessionUpdate::Acp(Box::new(acp::SessionNotification::new(
+            acp::SessionId::new(session_id),
+            acp::SessionUpdate::UserMessageChunk(
+                acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(
+                    xai_interjection_core::format_interjection(typed.to_string()),
+                )))
+                .meta(
+                    serde_json::json!({ crate::session::storage::INTERJECTION_META_KEY: true })
+                        .as_object()
+                        .cloned(),
+                ),
+            ),
+        )))
+    }
+
+    /// Interjections come back tagged and framed as the live drain pushed them, one item each, and never
+    /// merge with a neighbouring prompt run (here: no agent text between the prompt echo and the drain).
+    #[test]
+    fn test_replay_tags_interjections_and_keeps_them_distinct() {
+        let tmp = TempDir::new().unwrap();
+        let updates = vec![
+            make_user_update_pi("s1", "P0", 0),
+            make_interjection_update("s1", "first"),
+            make_interjection_update("s1", "second"),
+            make_agent_update("s1", "A0"),
+            make_user_update_pi("s1", "P1", 1),
+            make_agent_update("s1", "A1"),
+        ];
+        let result = replay_updates(&updates, tmp.path(), 2);
+        let users: Vec<(String, bool, Option<usize>)> = result
+            .conversation
+            .iter()
+            .filter_map(|c| match c {
+                ConversationItem::User(u) => Some((
+                    c.text_content(),
+                    u.synthetic_reason == Some(crate::sampling::SyntheticReason::Interjection),
+                    u.prompt_index,
+                )),
+                _ => None,
+            })
+            .collect();
+        let framed = |t: &str| xai_interjection_core::format_interjection(t.to_string());
+        assert_eq!(
+            users,
+            vec![
+                ("P0".to_string(), false, Some(0)),
+                (framed("first"), true, None),
+                (framed("second"), true, None),
+                ("P1".to_string(), false, Some(1)),
+            ]
+        );
+        assert_eq!(
+            result.prompt_index_reached, 2,
+            "interjections are never counted as turns"
+        );
     }
 
     #[test]
@@ -1208,10 +1282,9 @@ mod tests {
             make_agent_update("s1", "R3"),
         ];
 
-        // Replay to prompt 3: keep prompts 0..2 via ckpt1
-        // ckpt1 loaded (target 3 >= 2), ckpt2 also loaded (target 3 >= 3).
+        // Replay to prompt 3: keep prompts 0..2 via ckpt1 ckpt1 loaded (target 3 >= 2), ckpt2 also loaded (target 3 >= 3).
         // ckpt2 replaces ckpt1. Then P3 is the first post-ckpt2 prompt.
-        // Keep 3 - 3 = 0 post-ckpt2 prompts, so just the ckpt2 blob
+        // Keep 3 - 3 = 0 post-ckpt2 prompts, so just the ckpt2 blob.
         let result = replay_updates(&updates, tmp.path(), 3);
         assert_eq!(result.conversation.len(), 2);
         assert_eq!(result.conversation[0].text_content(), "sys");

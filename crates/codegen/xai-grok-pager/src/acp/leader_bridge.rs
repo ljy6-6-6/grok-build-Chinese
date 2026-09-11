@@ -36,16 +36,9 @@ enum ForwardOutcome {
     Cancelled,
 }
 
-/// Send one outbound line to the (swappable) leader tx.
-///
-/// A failed send means the connection is dead.
-/// The line is held (blocking the lines queued behind it) until the reader task installs a fresh tx, then dropped.
-/// Replaying it would be worse: a stale `session/load` re-delivered on the new connection triggers a second full replay into the same reload window.
-/// That duplicates the transcript; the reconnect re-init re-establishes state explicitly instead.
-///
-/// Scoping is by FIRST OBSERVED send failure, a best-effort heuristic.
-/// A pre-disconnect line whose first send happens after the swap never fails and goes out on the new connection.
-/// Lines queued behind a held one are forwarded post-swap regardless of when they were composed.
+/// A failed send means the connection is dead. That duplicates the transcript; the reconnect re-init re-establishes
+/// state explicitly instead. Scoping is by FIRST OBSERVED send failure, a best-effort heuristic. A pre-disconnect
+/// line whose first send happens after the swap never fails and goes out on the new connection.
 async fn forward_outbound_line(
     leader_tx: &TokioMutex<mpsc::UnboundedSender<String>>,
     cancel: &CancellationToken,
@@ -78,7 +71,6 @@ async fn forward_outbound_line(
 }
 
 /// Bridge a `LeaderConnection` into an `AcpClientChannel`.
-///
 /// When `reconnector` is `Some`, the bridge automatically attempts to reconnect on leader disconnect using the given `policy`.
 /// On reconnection failure (or if `reconnector` is `None`), the cancel token fires so the caller can exit.
 pub fn bridge_leader_connection(
@@ -92,7 +84,6 @@ pub fn bridge_leader_connection(
 }
 
 /// Bridge raw IPC channels into an `AcpClientChannel`.
-///
 /// Spawns a dedicated thread with a `LocalSet` because `ClientSideConnection` uses `spawn_local` internally.
 /// On leader disconnect, reconnects via `reconnector` (if provided) or fires the cancel token.
 pub(crate) fn bridge_channels(
@@ -195,10 +186,9 @@ pub(crate) fn bridge_channels(
                                         {
                                             ForwardOutcome::Sent => {}
                                             ForwardOutcome::DroppedStale => {
-                                                // Unified-log marker: this drop is deliberate
-                                                // Replaying a stale `session/load` would double-replay the transcript
-                                                // But the drop can eat one-shot notifications like `session/cancel`, a known stuck-cancel failure
-                                                // Record WHAT was dropped so the next investigation sees it in the unified log
+                                                // Unified-log marker: this drop is deliberate. Replaying a stale `session/load` would double-replay the
+                                                // transcript. But the drop can eat one-shot notifications like `session/cancel`, a known stuck-cancel failure.
+                                                // Record WHAT was dropped so the next investigation sees it in the unified log.
                                                 let method = serde_json::from_str::<serde_json::Value>(pending)
                                                     .ok()
                                                     .and_then(|j| {
@@ -272,10 +262,9 @@ mod tests {
         assert_eq!(rx.recv().await.as_deref(), Some("hello"));
     }
 
-    /// A line whose send failed is HELD (blocking later lines) until the reader swaps in a fresh tx, then DROPPED.
-    /// It is neither discarded at first failure (silent outbound loss) nor replayed onto the new connection.
-    /// Replaying a stale `session/load` would double-replay the transcript.
-    /// Lines queued behind it flow onto the new connection.
+    /// A line whose send failed is HELD (blocking later lines) until the reader swaps in a fresh tx, then DROPPED. It
+    /// is neither discarded at first failure (silent outbound loss) nor replayed onto the new connection. Replaying a
+    /// stale `session/load` would double-replay the transcript.
     #[tokio::test]
     async fn forward_outbound_line_drops_stale_line_after_swap_and_sends_next() {
         let (dead_tx, dead_rx) = mpsc::unbounded_channel::<String>();

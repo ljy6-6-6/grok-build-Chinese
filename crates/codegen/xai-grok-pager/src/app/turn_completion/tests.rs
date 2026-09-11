@@ -58,158 +58,6 @@ fn viewer_finalize_idles_and_pushes_completed_marker() {
     ));
 }
 
-fn one_stop_group() -> Vec<(String, Vec<crate::scrollback::blocks::tool::HookRunEntry>)> {
-    use crate::scrollback::blocks::tool::{HookRunEntry, HookRunStatus};
-    vec![(
-        "stop".to_string(),
-        vec![HookRunEntry {
-            name: "global/notify".into(),
-            status: HookRunStatus::Success {
-                elapsed: std::time::Duration::from_millis(12),
-            },
-            output: None,
-        }],
-    )]
-}
-
-/// Stop-hook groups attached to the last session-event marker.
-fn last_marker_groups(sb: &ScrollbackState) -> Option<usize> {
-    (0..sb.len())
-        .rev()
-        .find_map(|i| match sb.get(i).map(|e| &e.block) {
-            Some(RenderBlock::SessionEvent(b)) => Some(b.stop_hooks.len()),
-            _ => None,
-        })
-}
-
-fn count_lifecycle_blocks(sb: &ScrollbackState) -> usize {
-    use crate::scrollback::blocks::tool::ToolCallBlock;
-    (0..sb.len())
-        .filter(|i| {
-            matches!(
-                sb.get(*i).map(|e| &e.block),
-                Some(RenderBlock::ToolCall(ToolCallBlock::Lifecycle(_)))
-            )
-        })
-        .count()
-}
-
-#[test]
-fn marker_push_consumes_matching_stop_hook_stash() {
-    let mut agent = running_driver("p1");
-    agent.pending_stop_hooks = Some(super::super::agent_view::PendingStopHooks {
-        prompt_id: Some("p1".into()),
-        groups: one_stop_group(),
-    });
-
-    push_turn_terminal_marker(
-        &mut agent,
-        Some(SessionEvent::TurnCompleted {
-            elapsed: Some(std::time::Duration::from_secs(2)),
-        }),
-        Some("p1"),
-    );
-
-    assert_eq!(
-        last_marker_groups(&agent.scrollback),
-        Some(1),
-        "the stash must fold into the marker"
-    );
-    assert!(agent.pending_stop_hooks.is_none());
-    assert_eq!(count_lifecycle_blocks(&agent.scrollback), 0);
-}
-
-#[test]
-fn marker_push_flushes_stale_stash_standalone() {
-    // A stash stamped with another turn's prompt id must not attach to this marker; it flushes as the legacy standalone block
-    let mut agent = running_driver("p2");
-    agent.pending_stop_hooks = Some(super::super::agent_view::PendingStopHooks {
-        prompt_id: Some("p1".into()),
-        groups: one_stop_group(),
-    });
-
-    push_turn_terminal_marker(
-        &mut agent,
-        Some(SessionEvent::TurnCompleted {
-            elapsed: Some(std::time::Duration::from_secs(2)),
-        }),
-        Some("p2"),
-    );
-
-    assert_eq!(
-        last_marker_groups(&agent.scrollback),
-        Some(0),
-        "a stale stash must not attach to the new marker"
-    );
-    assert_eq!(count_lifecycle_blocks(&agent.scrollback), 1);
-    assert!(agent.pending_stop_hooks.is_none());
-}
-
-#[test]
-fn marker_without_ending_pid_flushes_stamped_stash_standalone() {
-    // A stamped stash can't be confirmed against a marker whose ending turn id is missing
-    // It flushes standalone instead of folding into a marker it may not belong to
-    let mut agent = running_driver("p1");
-    agent.pending_stop_hooks = Some(super::super::agent_view::PendingStopHooks {
-        prompt_id: Some("p1".into()),
-        groups: one_stop_group(),
-    });
-
-    push_turn_terminal_marker(
-        &mut agent,
-        Some(SessionEvent::TurnCompleted {
-            elapsed: Some(std::time::Duration::from_secs(2)),
-        }),
-        None,
-    );
-
-    assert_eq!(
-        last_marker_groups(&agent.scrollback),
-        Some(0),
-        "an unconfirmable stamped stash must not attach to the marker"
-    );
-    assert_eq!(count_lifecycle_blocks(&agent.scrollback), 1);
-    assert!(agent.pending_stop_hooks.is_none());
-}
-
-#[test]
-fn no_marker_flushes_stash_as_standalone_block() {
-    // The turn ends without a marker (a bash turn, or a rate limit): the held hooks still render, in the legacy standalone form
-    let mut agent = running_driver("p1");
-    agent.pending_stop_hooks = Some(super::super::agent_view::PendingStopHooks {
-        prompt_id: Some("p1".into()),
-        groups: one_stop_group(),
-    });
-
-    push_turn_terminal_marker(&mut agent, None, Some("p1"));
-
-    assert_eq!(count_lifecycle_blocks(&agent.scrollback), 1);
-    assert!(agent.pending_stop_hooks.is_none());
-}
-
-#[test]
-fn viewer_finalize_consumes_stop_hook_stash() {
-    // A viewer that stashed hooks mid-turn folds them into the marker the finalize pushes
-    let mut agent = running_viewer("p1");
-    agent.pending_stop_hooks = Some(super::super::agent_view::PendingStopHooks {
-        prompt_id: Some("p1".into()),
-        groups: one_stop_group(),
-    });
-
-    let _ = finalize_turn_from_terminal(
-        &mut agent,
-        "s1",
-        TerminalSignal {
-            prompt_id: Some("p1"),
-            stop_reason: Some("end_turn"),
-            ..Default::default()
-        },
-    );
-
-    assert_eq!(last_marker_groups(&agent.scrollback), Some(1));
-    assert!(agent.pending_stop_hooks.is_none());
-}
-
 #[test]
 fn viewer_finalize_duplicate_terminal_is_noop() {
     let mut agent = running_viewer("p1");
@@ -354,6 +202,27 @@ fn zh_locale() -> crate::locale::LocaleContext {
         locale: crate::locale::UiLocale::ZhCn,
         source: crate::locale::LocaleSource::Cli,
     })
+}
+
+#[test]
+fn hook_denied_finalize_displaces_feedback_before_opening_the_card() {
+    let mut agent = running_viewer("p1");
+    stash_in_flight(&mut agent);
+    agent.feedback_modal = Some(crate::views::feedback_modal::FeedbackModalState::new(
+        crate::views::feedback_modal::OpenFeedbackModal {
+            text: Some("draft feedback".to_string()),
+            ..Default::default()
+        },
+    ));
+
+    let _ = finalize_turn_from_terminal(&mut agent, "s1", hook_denied_signal(None));
+
+    assert!(agent.feedback_modal.is_none());
+    assert!(agent.question_view.is_some());
+    assert!(
+        agent.scrollback.len() > 1,
+        "displacement notice must be visible"
+    );
 }
 
 #[test]
@@ -624,7 +493,7 @@ fn blocked_prompt_card_refuses_skip() {
 
     // The focused card's footer must not advertise the refused dismissal.
     let labels: Vec<String> = agent
-        .current_shortcut_hints(&crate::actions::ActionRegistry::defaults(), false)
+        .current_shortcut_hints(&crate::actions::ActionRegistry::defaults())
         .iter()
         .map(|hint| hint.label.to_string())
         .collect();
@@ -848,61 +717,6 @@ fn deferred_card_reopens_when_other_question_closes() {
         .question_view
         .as_ref()
         .expect("the blocked-prompt card reopens");
-    assert!(
-        matches!(qv.local_kind, Some(LocalQuestionKind::PromptBlocked { row_id: r }) if r == row_id)
-    );
-}
-
-/// The `/feedback` report stage tears down through its own pane path (`submit_feedback_pane`), not the generic card teardown.
-/// Skipping it must also bring the deferred blocked-prompt card back.
-#[test]
-fn deferred_card_reopens_when_feedback_report_closes() {
-    use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
-    use xai_grok_tools::implementations::grok_build::ask_user_question::{
-        Question, QuestionOption,
-    };
-
-    let mut agent = running_viewer("p1");
-    stash_in_flight(&mut agent);
-    let stashed = agent.prompt.stash();
-    agent.question_view = Some(
-        QuestionViewState::new(
-            "feedback".into(),
-            vec![Question {
-                question: "feedback?".into(),
-                id: None,
-                options: vec![QuestionOption {
-                    label: "Send".into(),
-                    description: String::new(),
-                    preview: None,
-                    id: None,
-                }],
-                multi_select: Some(false),
-            }],
-            stashed,
-        )
-        .with_local_kind(LocalQuestionKind::Feedback),
-    );
-
-    let _ = finalize_turn_from_terminal(&mut agent, "s1", hook_denied_signal(None));
-    let row_id = agent.session.pending_prompts.front().map(|p| p.id).unwrap();
-    assert!(
-        agent
-            .question_view
-            .as_ref()
-            .is_some_and(|q| q.is_feedback_report()),
-        "the block card defers while the report pane is open"
-    );
-
-    let ctrl_c = crossterm::event::KeyEvent::new(
-        crossterm::event::KeyCode::Char('c'),
-        crossterm::event::KeyModifiers::CONTROL,
-    );
-    let _ = agent.handle_question_key_for_test(&ctrl_c);
-    let qv = agent
-        .question_view
-        .as_ref()
-        .expect("the blocked-prompt card reopens after the report pane closes");
     assert!(
         matches!(qv.local_kind, Some(LocalQuestionKind::PromptBlocked { row_id: r }) if r == row_id)
     );
@@ -1346,11 +1160,9 @@ fn real_end_marker_stays_plain_with_running_work() {
         Some(SessionEvent::TurnCompleted {
             elapsed: Some(std::time::Duration::from_secs(2)),
         }),
-        Some("p1"),
     );
 
     let block = last_marker_block(&agent);
-    assert_eq!(block.prompt_id.as_deref(), Some("p1"));
     assert_eq!(block.event.message(), "Worked for 2.0s");
     assert_eq!(
         agent.watchers().commands,
@@ -1368,7 +1180,6 @@ fn workless_marker_renders_legacy_text() {
         Some(SessionEvent::TurnCompleted {
             elapsed: Some(std::time::Duration::from_secs(2)),
         }),
-        Some("p1"),
     );
 
     let block = last_marker_block(&agent);
@@ -1481,7 +1292,6 @@ fn turn_end_after_park_pushes_single_marker() {
         Some(SessionEvent::TurnCompleted {
             elapsed: Some(std::time::Duration::from_secs(5)),
         }),
-        Some("p1"),
     );
 
     assert_eq!(

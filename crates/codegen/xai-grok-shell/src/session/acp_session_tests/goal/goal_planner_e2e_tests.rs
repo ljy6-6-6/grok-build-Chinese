@@ -7,7 +7,9 @@ use serial_test::serial;
 use std::sync::Arc as StdArc;
 use std::sync::atomic::{AtomicUsize, Ordering as SeqOrd};
 use tempfile::TempDir;
-use xai_grok_tools::implementations::grok_build::task::types::{SubagentEvent, SubagentResult};
+use xai_grok_tools::implementations::grok_build::task::types::{
+    SubagentCancelTarget, SubagentEvent, SubagentResult,
+};
 
 /// Pull the planner's plan-file path from the prompt by its backtick-quoted `.md` token.
 /// Rewording the surrounding sentence therefore can't silently break the fake, which would otherwise write nothing and fail far from the cause.
@@ -530,10 +532,9 @@ async fn planner_snapshots_plan_baseline_once_and_does_not_overwrite() {
 #[tokio::test(flavor = "current_thread")]
 #[serial]
 async fn planner_records_own_harness_trace_turn_with_footer() {
-    // The planner subagent is represented by its OWN trace turn
-    // After `maybe_run_goal_planner`, the chat-state side buffer holds exactly one sealed harness trace turn
-    // That turn carries the synthetic `task` call and result pair
-    // The result keeps the `<subagent_result>` footer (with the child session id) so the trace viewer can discover the planner subagent
+    // The planner subagent is represented by its OWN trace turn.
+    // After `maybe_run_goal_planner`, the chat-state side buffer holds exactly one sealed harness trace turn.
+    // The result keeps the `<subagent_result>` footer (with the child session id) so the trace viewer can discover the planner subagent.
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -620,14 +621,9 @@ async fn planner_success_sets_then_clears_planning_flag() {
 #[tokio::test(flavor = "current_thread")]
 #[serial]
 async fn planner_clears_planning_latch_before_publishing_the_plan() {
-    // Regression: the "planning…" badge must be cleared at the moment the planner run is taken and we commit to publishing the produced plan
-    // Clearing it only at the very end, after the plan/baseline I/O, is too late
-    // Before the fix the latch stayed set through the publish window, so the pager advertised "planning" while steering could no longer replan
-    // Steering no-ops with no active run and is merged only as an interjection
-    //
-    // Observed deterministically: the first instant `plan.md` is published on disk, latch the goal's `planning_in_flight`
-    // Publish happens when the staged attempt file is renamed, right before the baseline copy `.await` yields
-    // The fix clears the latch before that publish; before the fix it was still set
+    // Regression: the "planning…" badge must be cleared at the moment the planner run is taken and we commit to publishing the produced plan.
+    // Clearing it only at the very end, after the plan/baseline I/O, is too late.
+    // Before the fix the latch stayed set through the publish window, so the pager advertised "planning" while steering could no longer replan.
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -971,8 +967,6 @@ async fn reconcile_skips_when_planner_disabled() {
 /// Planner subagent tokens fold into the goal's total via the shared `subagent_token_records` map.
 /// The planner spawn routes through the same `SubagentSpawned` notification path the classifier uses.
 /// The actor's notification handler tags the record with the active goal_id and `goal_tokens()` sums every matching record.
-/// This test simulates that tagging: the real handler isn't reachable from this scaffold without standing up a full notification pipeline.
-/// It pins the structural invariant: a planner-tagged subagent record under the active goal_id flows into the chip's `tokens_used`.
 #[tokio::test(flavor = "current_thread")]
 #[serial]
 async fn planner_subagent_tokens_fold_into_goal_total() {
@@ -994,23 +988,20 @@ async fn planner_subagent_tokens_fold_into_goal_total() {
             actor.maybe_run_goal_planner("do X").await;
             assert_eq!(spawn_count.load(SeqOrd::SeqCst), 1);
 
-            // Simulate the SubagentSpawned notification handler: the planner's spawn produced 12_000 cumulative tokens (anchor 0, last 12_000)
-            // The handler tags the record with the live goal_id
-            // While the planner is still running the record is unsealed (`finished: false`)
-            actor.subagent_token_records.lock().insert(
-                "planner-subagent-id".to_string(),
-                SubagentTokenRecord {
-                    goal_id: Some(goal_id),
-                    resume_anchor_cumulative: 0,
-                    last_cumulative_reported: 12_000,
-                    model: None,
-                    finished: false,
-                },
+            // Simulate the SubagentSpawned notification handler after the planner reports 12,000 cumulative tokens.
+            let child_attempt = xai_message_delivery_core::AttemptId::mint(0x11).to_string();
+            let mut record = SubagentTokenRecord::new(0);
+            assert_eq!(
+                record.spawn(Some(goal_id), Some(child_attempt.clone()), None),
+                SubagentSpawnOutcome::Accepted
             );
+            record.last_cumulative_reported = 12_000;
+            actor
+                .subagent_token_records
+                .lock()
+                .insert("planner-subagent-id".to_string(), record);
 
-            // In-flight: the marginal folds into the ratcheted `tokens_used`, but NOT into the wire `finished_subagent_tokens`
-            // The pager adds its own live active-subagent sum on top of that field
-            // An unsealed subagent counted here too would be double-counted
+            // The pager adds active subagent tokens to the wire's finished-only field, so the active attempt is excluded there.
             let (tokens_used, finished_marginal) = actor.goal_tokens(0);
             assert_eq!(
                 finished_marginal, 0,
@@ -1029,13 +1020,22 @@ async fn planner_subagent_tokens_fold_into_goal_total() {
                 "pager live combine must not exceed goal_tokens total while a subagent runs",
             );
 
-            // Once the planner finishes, `SubagentFinished` seals the record; the same marginal now lands in `finished_subagent_tokens`
-            actor
-                .subagent_token_records
-                .lock()
+            // Once the planner finishes, the attempt tokens move into completed spend.
+            let mut records = actor.subagent_token_records.lock();
+            let record = records
                 .get_mut("planner-subagent-id")
-                .expect("planner record present")
-                .finished = true;
+                .expect("planner record present");
+            assert_eq!(
+                record.finish(
+                    Some(&child_attempt),
+                    SubagentFinishPayload {
+                        tokens_used: 12_000,
+                        ..Default::default()
+                    }
+                ),
+                SubagentFinishOutcome::Accepted
+            );
+            drop(records);
             let (tokens_used, finished_marginal) = actor.goal_tokens(0);
             assert_eq!(
                 finished_marginal, 12_000,
@@ -1046,9 +1046,6 @@ async fn planner_subagent_tokens_fold_into_goal_total() {
         .await;
 }
 
-/// Lifecycle regression guard: the planner fails, the goal pauses with the canonical message, and `GoalResume` re-fires the planner.
-/// The second attempt succeeds and the goal goes Active with `plan_file` set.
-/// This pins the retry-on-resume contract; without it, the pause message ("resume with /goal to retry") would be a lie.
 #[tokio::test(flavor = "current_thread")]
 #[serial]
 async fn lifecycle_fail_pause_resume_retry_success() {
@@ -1222,6 +1219,156 @@ async fn lifecycle_resume_with_plan_does_not_re_fire_planner() {
         .await;
 }
 
+#[derive(Debug, PartialEq)]
+enum FakeEvent {
+    CancelParentSession,
+    OpenAdmission,
+    Spawn { latched: bool },
+}
+
+fn spawn_latching_planner_coordinator() -> (
+    tokio::sync::mpsc::UnboundedSender<SubagentEvent>,
+    StdArc<std::sync::Mutex<Vec<FakeEvent>>>,
+) {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<SubagentEvent>();
+    let log: StdArc<std::sync::Mutex<Vec<FakeEvent>>> =
+        StdArc::new(std::sync::Mutex::new(Vec::new()));
+    let log_task = StdArc::clone(&log);
+    tokio::task::spawn_local(async move {
+        let mut latched = false;
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                SubagentEvent::Cancel(req)
+                    if matches!(req.target, SubagentCancelTarget::ParentSession) =>
+                {
+                    latched = true;
+                    log_task
+                        .lock()
+                        .unwrap()
+                        .push(FakeEvent::CancelParentSession);
+                }
+                SubagentEvent::OpenSpawnAdmission { .. } => {
+                    latched = false;
+                    log_task.lock().unwrap().push(FakeEvent::OpenAdmission);
+                }
+                SubagentEvent::Spawn(req) => {
+                    log_task.lock().unwrap().push(FakeEvent::Spawn { latched });
+                    let error = if latched {
+                        "parent session is stopped"
+                    } else {
+                        "planner failed"
+                    };
+                    let result = SubagentResult {
+                        success: false,
+                        error: Some(error.into()),
+                        cancelled: latched,
+                        subagent_id: req.id.clone(),
+                        child_session_id: req.id.clone(),
+                        ..Default::default()
+                    };
+                    let _ = req.result_tx.send(result);
+                }
+                _ => {}
+            }
+        }
+    });
+    (tx, log)
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial]
+async fn stop_then_slash_goal_resume_reopens_spawn_admission_before_planner_retry() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (tx, log) = spawn_latching_planner_coordinator();
+            let (actor, _tmp) = make_planner_actor(Some(tx), true).await;
+            *actor.agent.borrow_mut() = test_agent_with_goal_tool().await;
+            create_test_goal(&actor);
+            let _ = actor
+                .auto_pause_goal_if_active_with_message(
+                    crate::session::goal_tracker::GoalPauseReason::User,
+                    planner_failure_pause_message(),
+                )
+                .await;
+            {
+                let snap = actor.goal_tracker.lock().snapshot().cloned().unwrap();
+                assert!(snap.status.is_paused(), "got {:?}", snap.status);
+                assert!(snap.plan_file.is_none());
+            }
+
+            *actor
+                .current_prompt_id
+                .lock()
+                .expect("current_prompt_id mutex poisoned") = Some("running".to_string());
+            {
+                let mut state = actor.state.lock().await;
+                state.running_task = Some(running_task_stub("running"));
+                state.pending_inputs.push_back(user_item("running", "test"));
+            }
+            let _ = actor
+                .cancel_running_task(crate::session::CancelOptions {
+                    cancel_subagents: true,
+                    trigger: Some(crate::session::CancelTrigger::CtrlC),
+                    user_initiated: true,
+                    ..Default::default()
+                })
+                .await;
+            drain_gateway_turns().await;
+            assert_eq!(
+                *log.lock().unwrap(),
+                vec![FakeEvent::CancelParentSession],
+                "user Stop must latch spawn admission before the resume turn",
+            );
+
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                actor.handle_turn_input(TurnInputRequest {
+                    prompt_id: "goal-resume".into(),
+                    input_origin: InputOrigin::new(PromptOrigin::User),
+                    prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(
+                        "/goal resume",
+                    ))],
+                    prompt_mode: PromptMode::Agent,
+                    trace_gcs_config: None,
+                    artifact_tracker: None,
+                    client_identifier: None,
+                    screen_mode: None,
+                    verbatim: true,
+                    send_now: false,
+                    json_schema: None,
+                    persist_ack: None,
+                    parsed_prompt_tx: None,
+                    traceparent: None,
+                    start_gate: None,
+                }),
+            )
+            .await
+            .expect("turn must finish");
+            assert!(
+                result.is_ok(),
+                "re-paused resume must end the host turn cleanly: {result:?}"
+            );
+
+            assert_eq!(
+                *log.lock().unwrap(),
+                vec![
+                    FakeEvent::CancelParentSession,
+                    FakeEvent::OpenAdmission,
+                    FakeEvent::Spawn { latched: false },
+                ],
+                "the resume turn must reopen spawn admission before the planner retry",
+            );
+            let snap = actor.goal_tracker.lock().snapshot().cloned().unwrap();
+            assert!(snap.status.is_paused(), "got {:?}", snap.status);
+            assert_eq!(
+                snap.pause_message.as_deref(),
+                Some(planner_failure_pause_message().as_str()),
+            );
+        })
+        .await;
+}
+
 /// End-to-end gate (enabled side): when the planner is on and writes a plan, `setup_goal`'s reminder folds in the plan-aware block.
 /// That block carries the actual `plan_path()` pointer plus the seed-todos, `## Deviations`, and verifier-threading instructions.
 /// The legacy discipline stays intact.
@@ -1272,7 +1419,6 @@ async fn setup_goal_reminder_is_no_plan_when_planner_disabled() {
         .await;
 }
 
-/// The SECOND gated render site.
 /// `/goal resume` on a planner-enabled goal with a plan must build a plan-aware reminder (carrying the real `plan_path()` pointer).
 /// Guards against the resume site regressing to `None` while setup_goal stays correct (a prior regression: the sibling branch was untested).
 /// The reminder is returned as the `Inference` turn content (resume flows through to inference now).

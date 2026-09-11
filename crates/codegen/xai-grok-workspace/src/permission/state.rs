@@ -78,14 +78,9 @@ impl Default for PermissionState {
 }
 
 impl PermissionState {
-    /// Union `other`'s grants and denies into `self`.
-    /// Set-valued fields merge, and so does `allow_bash_execute` (`|=`): it is a persisted blanket *grant*, additive until an explicit reset.
-    /// Scalar policy fields keep `self`'s values; the in-memory session is authoritative for them.
-    /// `edit_policy` is migrated to `Ask` at manager startup regardless.
-    /// Denies persist like grants: an accepted "never allow" holds repo-wide until [`replace_state_on_disk`], the non-merging reset path.
-    /// Nothing removed only in one session's memory can win a merge.
-    ///
-    /// Exhaustive destructure: adding a `PermissionState` field breaks this fn until the merge decision for it is made explicitly.
+    /// Union `other`'s grants and denies into `self`. Sets merge, including `allow_bash_execute` (`|=`); scalars keep `self` (session-authoritative).
+    /// Denies persist like grants until [`replace_state_on_disk`]; a memory-only removal cannot win a merge. `edit_policy` is migrated to `Ask` at startup regardless.
+    /// Exhaustive destructure: a new `PermissionState` field must get an explicit merge decision.
     pub(crate) fn merge_grants_from(&mut self, other: PermissionState) {
         let PermissionState {
             edit_policy: _,
@@ -115,12 +110,9 @@ impl PermissionState {
     }
 }
 
-/// The directory that keys the persistent permission store: grants accepted anywhere inside a git repository apply repo-wide.
-/// Keying on the exact cwd would hide a grant accepted at the repo root from a session started in a subdirectory.
-/// Root discovery is [`RepoDirChain`], the same resolver folder trust and project-config discovery use, so all three agree on where a project starts.
-/// Its home-directory exception applies here too: a dotfiles-style repo at `$HOME` keys per-cwd, not repo-wide.
-///
-/// Synchronous filesystem work (git discovery and canonicalize): call from the blocking pool via [`resolve_store_dirs`] on the async paths.
+/// Directory key for the persistent permission store: grants apply repo-wide, not per-cwd, except a `$HOME` dotfiles repo which keys per-cwd.
+/// Root discovery is [`RepoDirChain`], shared with folder trust and project-config so all three agree where a project starts.
+/// Synchronous filesystem work: call from the blocking pool via [`resolve_store_dirs`] on async paths.
 fn permission_scope_root(cwd: &AbsPathBuf) -> std::path::PathBuf {
     match xai_grok_agent::repo::RepoDirChain::resolve(cwd.as_path()).git_root {
         // git2 workdirs can carry a trailing separator
@@ -144,9 +136,7 @@ fn legacy_state_dir(cwd: &AbsPathBuf, dir: &std::path::Path) -> Option<std::path
     (legacy != dir).then_some(legacy)
 }
 
-/// Both store locations for `cwd`, resolved once per call on the blocking pool.
-/// Root discovery walks the filesystem and, on the persist path, `ensure` creates and chmods the sessions dir.
-/// None of that belongs on the async worker.
+/// Both store locations for `cwd`, resolved once on the blocking pool (discovery walks the filesystem; persist `ensure` creates and chmods).
 /// Falls back to exact-cwd keying if the blocking task dies.
 struct StoreDirs {
     dir: std::path::PathBuf,

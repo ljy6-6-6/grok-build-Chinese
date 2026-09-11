@@ -1,5 +1,7 @@
 //! Plain-URL detection over rendered display ratatui Lines.
 
+use std::ops::Range;
+
 use linkify::{LinkFinder, LinkKind};
 use ratatui::text::Line;
 
@@ -18,11 +20,8 @@ pub(crate) fn detect_plain_urls(
 }
 
 /// Like [`detect_plain_urls`] but scans `lines` whose first element represents document line `line_index_offset`.
-/// The caller passes a tail slice of `self.output.lines` and the index of its first element.
-///
 /// Lines fully inside `0..line_index_offset` are assumed to be in `existing` already and are not re-scanned.
 /// The dedup overlap check still works because emitted targets use document-absolute `line_index = line_index_offset + i`.
-/// Those match the indices already present in `existing`.
 pub(crate) fn detect_plain_urls_with_offset(
     lines: &[Line<'_>],
     line_index_offset: usize,
@@ -31,8 +30,6 @@ pub(crate) fn detect_plain_urls_with_offset(
 ) -> (Vec<HyperlinkTarget>, u32) {
     let mut result = Vec::new();
     let mut current_id = next_id;
-    let mut finder = LinkFinder::new();
-    finder.kinds(&[LinkKind::Url, LinkKind::Email]);
 
     for (i, line) in lines.iter().enumerate() {
         let line_index = line_index_offset + i;
@@ -40,31 +37,9 @@ pub(crate) fn detect_plain_urls_with_offset(
         // (pretty-mode link coloring) is one target, not a truncated prefix.
         let line_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
 
-        for link in finder.links(&line_text) {
-            let start = link.start();
-            let end = link.end();
-            if start > end
-                || end > line_text.len()
-                || !line_text.is_char_boundary(start)
-                || !line_text.is_char_boundary(end)
-            {
-                continue;
-            }
-            let before = &line_text[..start];
-            let matched = &line_text[start..end];
-
-            let col_start = unicode_display_width(before);
-            let col_end = col_start + unicode_display_width(matched);
-            let url = match link.kind() {
-                LinkKind::Email => {
-                    // `git@github.com:org/repo` is an scp remote, not mail.
-                    if matches!(line_text.as_bytes().get(end), Some(b':' | b'/')) {
-                        continue;
-                    }
-                    format!("mailto:{}", link.as_str())
-                }
-                _ => link.as_str().to_string(),
-            };
+        for_each_plain_link(&line_text, |range, url| {
+            let col_start = unicode_display_width(&line_text[..range.start]);
+            let col_end = col_start + unicode_display_width(&line_text[range]);
 
             // Dedup: skip if any existing or already-added target overlaps on the same line
             let overlaps = existing.iter().chain(result.iter()).any(|h| {
@@ -82,10 +57,39 @@ pub(crate) fn detect_plain_urls_with_offset(
                 });
                 current_id += 1;
             }
-        }
+        });
     }
 
     (result, current_id)
+}
+
+/// Call `f` with the byte range and destination of every plain URL or email
+/// in `text`. Emails become `mailto:`; scp remotes (`git@host:path`) are skipped.
+pub(crate) fn for_each_plain_link(text: &str, mut f: impl FnMut(Range<usize>, String)) {
+    let mut finder = LinkFinder::new();
+    finder.kinds(&[LinkKind::Url, LinkKind::Email]);
+
+    for link in finder.links(text) {
+        let start = link.start();
+        let end = link.end();
+        if start > end
+            || end > text.len()
+            || !text.is_char_boundary(start)
+            || !text.is_char_boundary(end)
+        {
+            continue;
+        }
+        let url = match link.kind() {
+            LinkKind::Email => {
+                if matches!(text.as_bytes().get(end), Some(b':' | b'/')) {
+                    continue;
+                }
+                format!("mailto:{}", link.as_str())
+            }
+            _ => link.as_str().to_string(),
+        };
+        f(start..end, url);
+    }
 }
 
 #[cfg(test)]
@@ -320,9 +324,7 @@ mod tests {
 
     /// URL detection must run from `render()` too, not only `finish()`.
     /// Otherwise a state reset like `set_max_table_width` drops the URL hyperlinks pretty mode adds for the `(url)` suffix of markdown links.
-    ///
     /// Also pins the OSC 8 grouping invariant: the link-text and URL hyperlinks must have distinct ids and disjoint column ranges.
-    /// Terminals then group them as two separate hyperlinks instead of one merged underline across the brackets.
     #[test]
     fn render_detects_pretty_mode_url_suffix() {
         let text = "[link](https://example.com/some/long/path)\n";
@@ -386,8 +388,7 @@ mod tests {
         );
     }
 
-    /// Re-rendering after `finish()` (e.g. a width change) must not drop the URL hyperlinks pretty mode adds for the `(url)` suffix.
-    ///
+    /// Re-rendering after `finish()` must not drop the URL hyperlinks pretty mode adds for the `(url)` suffix.
     /// Snapshots the hyperlink list before and after the reset and asserts the URL-suffix entry keeps its column range.
     /// The post-reset re-render may re-assign the OSC 8 id; the location must not move.
     #[test]

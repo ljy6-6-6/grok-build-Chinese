@@ -260,10 +260,7 @@ pub static USER_GUIDE: &[Doc] = &[
     },
 ];
 
-/// Non-user-guide reference docs.
-/// Separate from USER_GUIDE: they live under `docs/` (not `docs/user-guide/`) and are not extracted to disk.
-/// They also skip the NN-*.md managed naming pattern.
-/// Bundled via `include_str!` so they are available at runtime without a docs path.
+/// Non-user-guide reference docs. Bundled via `include_str!` so they are available at runtime without a docs path.
 static REFERENCE_DOCS: &[Doc] = &[
     Doc {
         id: HOOKS_AND_PLUGINS,

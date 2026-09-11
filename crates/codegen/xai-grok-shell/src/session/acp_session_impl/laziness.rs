@@ -256,7 +256,7 @@ impl SessionActor {
             });
     }
 
-    /// React to a model-switch wakeup from [`crate::agent::models::ModelsManager`].
+    /// React to a model-switch wakeup from [`crate::agent::remote_config::ModelsManager`].
     /// Zeroes `nudges_used_this_session` so the Layer-3 cap is per session and model rather than per session.
     /// Called from the actor's main `select!` loop's `model_switch_rx.changed()` arm and directly by unit tests.
     pub(crate) async fn handle_model_switch_for_laziness(&self, new_gen: u64) {
@@ -271,22 +271,8 @@ impl SessionActor {
         }
     }
 
-    /// Layer-3 LazinessDetector: ask the active session model whether the current idle slice looks like a stall.
-    /// A stalled verdict pushes a `<system-reminder>` nudge into chat history for the next real user turn to pick up.
-    /// The default is a no-op: the feature is per-model opt-in (default off) with a separate per-session nudge cap (default 0).
-    ///
-    /// The classifier fire is invisible to the client, like the memory-flush path.
     /// The sampler call goes through `prepare_chat_completion().conversation_collect()`, which never publishes on the per-session sampler channel.
-    /// The client sees no "Grok is thinking", no streaming token chunks, and no other session update from a fire.
     /// A stalled verdict only queues a `<system-reminder>` via `push_system_reminder`; nothing enters `pending_inputs`, so no synthetic turn fires.
-    /// The next real user prompt picks up the reminder as context.
-    ///
-    /// **Dev toggle (`--laziness-debug-log <path>`)**: when set (`self.laziness_debug_log.is_some()`), this method
-    ///   - forces `cfg.enabled = true` (the classifier fires regardless of per-model opt-in),
-    ///   - bypasses the idle-threshold wait (effective threshold is 0 ms, so the classifier fires on every turn end), and
-    ///   - appends a JSONL log line at every return point (abort, parse error, verdict).
-    ///
-    /// The nudge cap (`max_nudges_per_session`) and the classifier telemetry events flow through the same code path in both modes.
     /// Debug mode adds logging; it does not bypass the production decision logic.
     pub(crate) async fn maybe_fire_laziness_check(self: Arc<Self>) {
         let model_id_acp = self.models_manager.current_model_id();
@@ -334,9 +320,8 @@ impl SessionActor {
         let poll_interval = std::time::Duration::from_millis(LAZINESS_ABORT_POLL_INTERVAL_MS);
         let abort_snapshot = self.laziness_abort_snapshot();
 
-        // Idle wait: polls the generation counters so user input or a model switch is observed within `poll_interval`
-        // Snapshot-and-poll instead of `tokio::sync::Notify::notified()` avoids the stored-permit hazard
-        // A `notify_one()` issued before this task spawns would otherwise fire the abort arm on the very first poll
+        // Idle wait: polls the generation counters so user input or a model switch is observed within `poll_interval`.
+        // Snapshot-and-poll instead of `tokio::sync::Notify::notified()` avoids the stored-permit hazard A `notify_one()` issued before this task spawns would otherwise fire the abort arm on the very first poll.
         // In debug mode the threshold is 0 so this loop is a no-op.
         let deadline = tokio::time::Instant::now() + idle_threshold;
         loop {
@@ -376,18 +361,9 @@ impl SessionActor {
             state.nudges_used_this_session
         };
 
-        // Build the classifier request as a two-item conversation, fully independent from the session under classification:
-        //
-        //   [0] System(classifier prompt: "you are a strict JSON classifier, you are NOT the agent in the transcript")
-        //   [1] User("Classify the following transcript:\n\n<flattened text>")
-        //
-        // The session's chat items are flattened to plain `[role] text` lines inside the user message
-        // The request body never contains a `ConversationItem::Assistant`, so the model has no assistant turn to continue
-        // This fixed the "Done. Let me know what part you're curious about." bug.
-        // The model was finishing the agent's own thought instead of classifying the transcript as data
-        //
-        // `items_sent` (surfaced to telemetry and the debug log) counts the source chat items the classifier saw, not the 2 wire items
-        // That matches the historical meaning and keeps the cost dashboard interpretable
+        // System(classifier prompt: "you are a strict JSON classifier, you are NOT the agent in the transcript") [1].
+        // The request body never contains a `ConversationItem::Assistant`, so the model has no assistant turn to continue.
+        // `items_sent` (surfaced to telemetry and the debug log) counts the source chat items the classifier saw, not the 2 wire items.
         let mut source_items = self.chat_state_handle.get_conversation().await;
         let window_start = laziness_window_start(
             &source_items,
@@ -403,21 +379,17 @@ impl SessionActor {
         let include_reasoning = cfg.include_reasoning.unwrap_or(LAZINESS_INCLUDE_REASONING);
         let transcript_text = flatten_transcript_for_classifier(&source_items, include_reasoning);
 
-        // Harness-truth signals: they come from the harness, not the agent, so a lazy agent cannot fabricate them to mask a stall
-        //  * `outstanding_subagents`: live `spawn_subagent` calls that haven't returned
-        //    An agent claiming "I launched X" while this count is 0 is strong `stalled_narration` evidence
-        //  * `outstanding_background_tasks`: terminal tasks (bash with `background: true`, monitors) that haven't completed
-        // TodoState is deliberately not injected
-        // The todo list is agent-authored and can be fabricated alongside the prose, so including it would confirm the lie rather than catch it
+        // Harness-truth signals: they come from the harness, not the agent, so a lazy agent cannot fabricate them to mask a stall.
+        // `outstanding_subagents`: live `spawn_subagent` calls that haven't returned.
+        // TodoState is deliberately not injected The todo list is agent-authored and can be fabricated alongside the prose, so including it would confirm the lie rather than catch it.
         let backing_task_count = self.snapshot_backing_task_count_for_debug_log().await;
         // Refresh the count captured on `meta` above so the debug log matches what the classifier saw
         if let Some(m) = meta.as_mut() {
             m.backing_task_count = backing_task_count;
         }
-        // `turn_elapsed_seconds` is also harness-truth (snapped by the session actor at turn start), so the agent cannot fabricate it
-        // The classifier cross-checks it against prose claims like "overnight run" or "N hours of work"
-        // `turn_elapsed_seconds_from_start_ms` handles negative deltas and absent timestamps
-        // Sub-second deltas truncate to 0, which the classifier reads as an explicit "very recent" signal rather than an absent field
+        // `turn_elapsed_seconds` is also harness-truth (snapped by the session actor at turn start), so the agent cannot fabricate it.
+        // The classifier cross-checks it against prose claims like "overnight run" or "N hours of work" `turn_elapsed_seconds_from_start_ms` handles negative deltas and absent timestamps.
+        // Sub-second deltas truncate to 0, which the classifier reads as an explicit "very recent" signal rather than an absent field.
         let turn_start_ms = self
             .chat_state_handle
             .get_notification_meta()
@@ -469,11 +441,9 @@ impl SessionActor {
             ..ConversationRequest::default()
         };
 
-        // Build a fresh `SamplingClient` via `prepare_chat_completion` and call `conversation_collect` directly, keeping the fire invisible
-        // `run_memory_flush`, `run_dream_model_call`, and `image_describe` use the same pattern
-        // The per-session `sampler_handle` would forward streaming events on the shared sampler channel
-        // Every `ChannelToken { Text }` becomes an ACP `AgentMessageChunk`, so the pager UI would render mid-classifier reasoning and text deltas
-        // `conversation_collect` never publishes on that channel, so the client sees nothing
+        // Build a fresh `SamplingClient` via `prepare_chat_completion` and call `conversation_collect` directly, keeping the fire invisible `run_memory_flush`, `run_dream_model_call`, and `image_describe` use the same pattern.
+        // The per-session `sampler_handle` would forward streaming events on the shared sampler channel.
+        // Every `ChannelToken { Text }` becomes an ACP `AgentMessageChunk`, so the pager UI would render mid-classifier reasoning and text deltas `conversation_collect` never publishes on that channel, so the client sees nothing.
         let sampling_client = match self.prepare_chat_completion(false).await {
             Ok(c) => c,
             Err(err) => {
@@ -650,21 +620,13 @@ impl SessionActor {
             return;
         }
 
-        // Final injection step: hold the state lock from the idle re-check through the chat history push and the counter increment
-        // `push_system_reminder` delegates to the non-blocking `chat_state_handle.push_user_message` (a channel send)
-        // It is safe to call under the `TokioMutex<State>` guard: no lock inversion, no deadlock
-        //
-        // No `pending_inputs.push_back` and no `maybe_start_running_task` wake
-        // The reminder is invisible until the next real user prompt drains it in the system-reminder block, so the user never sees a phantom turn
+        // Final injection step: hold the state lock from the idle re-check through the chat history push and the counter increment.
+        // `push_system_reminder` delegates to the non-blocking `chat_state_handle.push_user_message` (a channel send).
+        // It is safe to call under the `TokioMutex<State>` guard: no lock inversion, no deadlock.
         let mut state = self.state.lock().await;
-        // The abort check runs before the idle re-check
-        // A prompt that lands between sampler return and this lock acquire trips both: it fills `pending_inputs` and bumps `user_input_generation`
-        // Checking abort first reports it via the typed `LazinessClassifierAborted` event instead of the idle re-check's silent return
-        //
-        // The same ordering covers a model switch landing in that window
-        // After a switch, the main loop's `model_switch_rx.changed()` arm has zeroed `nudges_used_this_session`
-        // A nudge emitted here would then spend the new model's fresh budget on a chat slice classified under the old model
-        // Holding the lock keeps the abort observation in the same critical section as the would-be increment
+        // The abort check runs before the idle re-check A prompt that lands between sampler return and this lock acquire trips both: it fills `pending_inputs` and bumps `user_input_generation`.
+        // Checking abort first reports it via the typed `LazinessClassifierAborted` event instead of the idle re-check's silent return.
+        // The same ordering covers a model switch landing in that window.
         if let Some(reason) = self.laziness_abort_check(abort_snapshot) {
             self.emit_laziness_abort(reason);
             return;
@@ -737,7 +699,6 @@ impl SessionActor {
 
     /// Count of outstanding background terminal tasks.
     /// The gate's own count also includes the just-ended prompt's outstanding subagents.
-    /// This runs after turn end, and reaching that count would need the prompt_id passed through, more wiring than a prototype warrants.
     /// Operators correlating debug log lines with gate decisions can read the session's events.jsonl for the full subagent state.
     async fn snapshot_backing_task_count_for_debug_log(&self) -> usize {
         self.tool_bridge_handle()

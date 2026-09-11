@@ -24,6 +24,8 @@ pub const ARTIFACTS_ALIAS: &str = "/workspace/artifacts";
 pub struct PathVirtualization {
     visible_root: String,
     real_root: String,
+    /// Extra inbound spelling of `visible_root`; `None` for mappings that have no legacy alias.
+    alias: Option<&'static str>,
 }
 
 impl PathVirtualization {
@@ -34,6 +36,24 @@ impl PathVirtualization {
         Some(Self {
             visible_root: VISIBLE_ROOT.to_owned(),
             real_root: real,
+            alias: Some(ARTIFACTS_ALIAS),
+        })
+    }
+
+    /// Build a mapping between two arbitrary absolute roots with no alias.
+    /// Returns `None` when either root is not a usable absolute path, or when
+    /// `real_root` is `visible_root` or lies under it: a real tree inside its
+    /// own visible tree would make [`Self::to_guest`] map paths back onto themselves.
+    pub fn try_new(visible_root: impl AsRef<Path>, real_root: impl AsRef<Path>) -> Option<Self> {
+        let visible = normalize_session_root(visible_root.as_ref().to_str()?)?;
+        let real = normalize_session_root(real_root.as_ref().to_str()?)?;
+        if path_prefix_match(&real, &visible).is_some() {
+            return None;
+        }
+        Some(Self {
+            visible_root: visible,
+            real_root: real,
+            alias: None,
         })
     }
 
@@ -54,14 +74,13 @@ impl PathVirtualization {
         replace_path_prefix(path, &self.real_root, &self.visible_root)
     }
 
-    /// Inbound: rewrites a model path to the guest path.
-    /// `/workspace` and `/workspace/artifacts` both map to `real_root`; already-guest paths under `real_root` stay put.
-    /// A `..` walk that would leave `real_root` is clipped to `real_root`; passing it through would still resolve on the kernel to a sibling tree.
-    /// Absolute escapes such as `/tmp` and `/home` are left as-is.
+    /// Inbound: rewrite a model path to the guest path. `visible_root` and the alias (when set) map to `real_root`; paths already under it stay put.
+    /// A `..` walk that would leave `real_root` is clipped there; absolute escapes such as `/tmp` are left as-is.
     pub fn to_guest<'a>(&self, path: &'a str) -> Cow<'a, str> {
+        let alias_rest = self.alias.and_then(|alias| path_prefix_match(path, alias));
         let mapped = if path_prefix_match(path, &self.real_root).is_some() {
             Cow::Borrowed(path)
-        } else if let Some(rest) = path_prefix_match(path, ARTIFACTS_ALIAS) {
+        } else if let Some(rest) = alias_rest {
             Cow::Owned(join_root_suffix(&self.real_root, rest))
         } else if let Some(rest) = path_prefix_match(path, &self.visible_root) {
             Cow::Owned(join_root_suffix(&self.real_root, rest))

@@ -17,10 +17,8 @@ pub enum ChatStateEvent {
     /// reset idle-flush counters, memory injection flags, etc.
     ConversationReset { new_len: usize },
 
-    /// Image byte-budget record for a built request (observability only,
-    /// emitted on image-bearing turns). The session consumer writes this to
-    /// the local unified log for verification. `evicted == 0` means the body
-    /// was under the trigger and every image was kept.
+    /// Image byte-budget record for a built request (observability only).
+    /// `evicted == 0` means the body was under the trigger and every image was kept.
     ImageBudget {
         /// Exact serialized conversation body size measured for the gate.
         body_bytes: usize,

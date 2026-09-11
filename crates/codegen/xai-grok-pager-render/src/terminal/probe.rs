@@ -35,10 +35,8 @@ pub(crate) fn write_query(query: &[u8]) -> bool {
     write_result.is_ok()
 }
 
-/// Read stdin until `is_terminated`, the size cap, or the deadline.
-///
-/// Returns `Some(buf)` whenever bytes were consumed (even partial, so a half-read reply is never left for the EventStream).
-/// Returns `None` when nothing arrived or stdin errored before any byte.
+/// `Some` even for a partial read, so a half-read reply is never left for the EventStream.
+/// `None` only when nothing arrived or stdin errored before any byte.
 #[cfg(unix)]
 pub(crate) fn read_tty_reply(
     timeout: Duration,

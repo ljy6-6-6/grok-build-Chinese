@@ -27,18 +27,14 @@ use crate::types::tool::{ToolKind, ToolNamespace};
 use std::path::Path;
 use std::sync::Arc;
 
-/// Input for the `EnterPlanMode` tool.
-///
-/// Empty object — no parameters. The decision to enter plan mode is a binary
-/// gate. All configuration (workflow variant, explore agent count, etc.) comes
+/// Input for the `EnterPlanMode` tool. Empty object — no parameters. The decision to enter plan
+/// mode is a binary gate. All configuration (workflow variant, explore agent count, etc.) comes
 /// from feature flags and environment variables, not from the tool call.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct EnterPlanModeInput {}
 
-/// `EnterPlanMode` tool: signals plan mode entry and seeds the session plan
-/// file, returning a [`PlanFileSeedStatus`].
-///
-/// Params: `()` — no per-tool configuration.
+/// `EnterPlanMode` tool: signals plan mode entry and seeds the session plan file, returning a
+/// [`PlanFileSeedStatus`]. Params: `()` — no per-tool configuration.
 #[derive(Debug, Default)]
 pub struct EnterPlanModeTool;
 
@@ -176,10 +172,9 @@ impl xai_tool_runtime::Tool for EnterPlanModeTool {
     }
 }
 
-/// Probe the plan file; create an empty one only on not-found.
-///
-/// Never truncates existing content. Non-NotFound read errors fail closed as
-/// [`PlanFileSeedStatus::Missing`] without calling `write_file`.
+/// Probe the plan file; create an empty one only on not-found. Never truncates existing content.
+/// Non-NotFound read errors fail closed as [`PlanFileSeedStatus::Missing`] without calling
+/// `write_file`.
 async fn probe_or_create_empty_plan_file(
     fs: &dyn AsyncFileSystem,
     path: &Path,

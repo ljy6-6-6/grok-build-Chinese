@@ -148,7 +148,7 @@ pub fn render_new_worktree_dialog_with_locale(
     if input_width > 0 {
         let cursor_x = inner_x + prefix_w + viewport.cursor_display_column as u16;
         if let Some(cell) = buf.cell_mut((cursor_x, dialog.y + 2)) {
-            cell.set_style(Style::default().fg(theme.bg_dark).bg(theme.text_primary));
+            cell.set_style(theme.block_cursor_over(theme.bg_dark));
         }
     }
 
@@ -291,10 +291,16 @@ mod tests {
         let mut buffer = Buffer::empty(area);
         render_new_worktree_dialog(area, &mut buffer, &state);
 
+        // Cursor cell: `bg == text_primary` on RGB themes, SGR REVERSED
+        // where text_primary is Reset (which would match every untinted cell).
+        let theme = Theme::current();
+        let is_cursor = |cell: &ratatui::buffer::Cell| {
+            cell.modifier.contains(ratatui::style::Modifier::REVERSED)
+                || (theme.text_primary != ratatui::style::Color::Reset
+                    && cell.bg == theme.text_primary)
+        };
         assert!(
-            (0..area.height).any(|y| {
-                (0..area.width).any(|x| buffer[(x, y)].bg == Theme::current().text_primary)
-            }),
+            (0..area.height).any(|y| (0..area.width).any(|x| is_cursor(&buffer[(x, y)]))),
             "live cursor cell must remain visible",
         );
     }

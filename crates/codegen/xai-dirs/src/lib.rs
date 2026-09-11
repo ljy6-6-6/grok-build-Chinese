@@ -28,14 +28,9 @@ pub enum GrokHomeSource {
     HomeDefault,
 }
 
-/// The user's home directory via [`std::env::home_dir`]: `HOME` on Unix (with
-/// a passwd fallback), `USERPROFILE` on Windows.
-///
-/// Deliberately not `dirs::home_dir()`: on Windows `dirs` asks the
-/// known-folder API and ignores a redirected `USERPROFILE`, while this crate
-/// resolves `~/.grok` from the profile variable — mixing the two sources puts
-/// the grok directory and other home-anchored dot directories in different
-/// trees. Every home-anchored path must come from this one function.
+/// The user's home directory via [`std::env::home_dir`]: `HOME` on Unix, `USERPROFILE` on Windows.
+/// Not `dirs::home_dir()`: on Windows `dirs` ignores a redirected `USERPROFILE`.
+/// Every home-anchored path must come from this one function.
 #[allow(deprecated, clippy::disallowed_methods)] // the one sanctioned std::env::home_dir call
 pub fn home_dir() -> Option<PathBuf> {
     std::env::home_dir()
@@ -49,10 +44,8 @@ fn grok_home_in(home: &Path) -> PathBuf {
         .join(".grok")
 }
 
-/// `$GROK_HOME` verbatim when non-empty, else `<home>/.grok`. The env value is
-/// used as-is (not canonicalized) so it stays stable and comparable: callers do
-/// literal prefix checks against it, and downstream symlink guards must still see
-/// its original components.
+/// `$GROK_HOME` verbatim when non-empty, else `<home>/.grok`.
+/// Used as-is (not canonicalized) so literal prefix checks and symlink guards still see original components.
 fn resolve_grok_home_from(
     grok_home_env: Option<&OsStr>,
     os_home: Option<&Path>,

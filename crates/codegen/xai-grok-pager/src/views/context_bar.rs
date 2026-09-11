@@ -15,11 +15,8 @@ use crate::theme::Theme;
 // Formatting utilities
 // ---------------------------------------------------------------------------
 
-/// Format a percentage as a fixed-width 5-char string.
-///
-/// - `< 10`:  `"X.XX%"` (e.g. `"0.00%"`, `"5.12%"`)
-/// - `10–99`: `"XX.X%"` (e.g. `"20.1%"`, `"99.9%"`)
-/// - `≥ 100`: `"MAX %"`
+/// Format a percentage as a fixed-width 5-char string. `< 10`: `"X.XX%"` (e.g. `"0.00%"`,
+/// `"5.12%"`). `10–99`: `"XX.X%"` (e.g. `"20.1%"`, `"99.9%"`).
 pub fn fmt_pct5(pct: f64) -> String {
     if pct >= 100.0 {
         "MAX %".to_string()
@@ -30,13 +27,9 @@ pub fn fmt_pct5(pct: f64) -> String {
     }
 }
 
-/// Format a token count as a compact string (≤4 chars).
-///
-/// - `0–999`:     `"0"`, `"12"`, `"999"`
-/// - `1K–9.9K`:   `"1.2K"` (4 chars)
-/// - `10K–999K`:  `"12K"`, `"999K"` (≤4 chars)
-/// - `1M–9.9M`:   `"1.2M"` (4 chars)
-/// - `10M+`:      `"12M"`, `"123M"` (≤4 chars)
+/// Format a token count as a compact string (≤4 chars). `0–999`: `"0"`, `"12"`, `"999"`. `1K–9.9K`:
+/// `"1.2K"` (4 chars). `10K–999K`: `"12K"`, `"999K"` (≤4 chars). `1M–9.9M`: `"1.2M"` (4 chars).
+/// `10M+`: `"12M"`, `"123M"` (≤4 chars).
 pub fn fmt_tokens(n: u64) -> String {
     if n < 1_000 {
         n.to_string()
@@ -62,10 +55,9 @@ pub struct ColorBreakpoint {
     pub color: Color,
 }
 
-/// Default breakpoints: text_primary, then accent_user, then warning, then accent_error.
-///
-/// Breakpoint colors are raw RGB.
-/// The final color from [`blend_color`] is quantized by the caller (see [`context_bar_line`]) so the output matches the terminal's capability level.
+/// Default breakpoints: text_primary, then accent_user, then warning, then accent_error. Breakpoint
+/// colors are raw RGB. The final color from [`blend_color`] is quantized by the caller (see
+/// [`context_bar_line`]) so the output matches the terminal's capability level.
 pub fn default_breakpoints(theme: &Theme) -> Vec<ColorBreakpoint> {
     vec![
         ColorBreakpoint {
@@ -113,9 +105,11 @@ pub fn blend_color(pct: f64, breakpoints: &[ColorBreakpoint]) -> Color {
 }
 
 /// Linear interpolation between two colors.
-///
-/// When either input is `Color::Indexed`, the result is quantized back to the nearest indexed color so the output stays terminal-compatible.
 fn lerp_color(a: Color, b: Color, t: f32) -> Color {
+    let interpolable = |c: Color| matches!(c, Color::Rgb(..) | Color::Indexed(_));
+    if !interpolable(a) || !interpolable(b) {
+        return if t < 0.5 { a } else { b };
+    }
     let (ar, ag, ab) = color_to_rgb(a);
     let (br, bg, bb) = color_to_rgb(b);
     let t = t.clamp(0.0, 1.0);
@@ -130,10 +124,9 @@ fn lerp_color(a: Color, b: Color, t: f32) -> Color {
     }
 }
 
-/// RGB for any color variant, using a neutral fallback for `Reset`.
-///
-/// Needed for gradients that lerp across named breakpoints after the theme quantized to ANSI on lower-color terminals.
-/// Those still produce meaningful intermediate colors instead of collapsing all inputs onto one fallback.
+/// RGB for any color variant, using a neutral fallback for `Reset`. Needed for gradients that lerp
+/// across named breakpoints after the theme quantized to ANSI on lower-color terminals. Those still
+/// produce meaningful intermediate colors instead of collapsing all inputs onto one fallback.
 fn color_to_rgb(c: Color) -> (u8, u8, u8) {
     // (198, 198, 198) matches the FG-equivalent used elsewhere when the terminal owns the actual default fg color
     crate::render::color::resolve_to_rgb(c).unwrap_or((198, 198, 198))
@@ -155,20 +148,9 @@ const PCT_WIDTH: u16 = 5;
 /// Width of the gap between the progress bar and the percentage on hover.
 const BAR_PCT_GAP: u16 = 1;
 
-/// Build the context usage bar as a `Line<'static>`.
-///
-/// Normal: `8.5K / 1.0M`, actual token usage, colored by the same percentage gradient the hover bar uses so the urgency stays visible at a glance.
-/// Hovered: `█████ 42.0%`, a progress bar and colored percentage, sized to match.
-///
-/// The bar width is derived from the default token string length so the hovered line has the same total width as the default (no layout shift).
-/// The default is right-padded to a minimum of 6 columns (`BAR_PCT_GAP + PCT_WIDTH`) so the invariant holds for every input.
-/// Without the pad, degenerate cases like `0 / 9` (5 chars) would mismatch the hovered line, which rounds up to 6 (zero-width bar, gap, percentage).
-///
-/// Returns `None` if token data is unavailable.
-///
-/// Gateway light-frontend (`kind: "chat"`) sessions must not display Build / local sampler context usage.
-/// Call with `gateway_chat = true` to suppress the bar entirely (remote owns context; no mapped totals yet).
-/// Remote settings opt-in for chat entry can reuse the same gate later.
+/// The default is right-padded to a minimum of 6 columns (`BAR_PCT_GAP + PCT_WIDTH`) so the
+/// invariant holds for every input. Without the pad, degenerate cases like `0 / 9` (5 chars) would
+/// mismatch the hovered line, which rounds up to 6 (zero-width bar, gap, percentage).
 pub fn context_bar_line(
     used_tokens: Option<u64>,
     total_tokens: Option<u64>,
@@ -233,6 +215,33 @@ pub fn context_bar_line_for_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// On the terminal-native palette the low-usage meter must stay on the
+    /// terminal's own foreground; interpolating toward it produced a fixed
+    /// silver that is unreadable on a light profile.
+    #[test]
+    fn terminal_theme_meter_keeps_the_terminal_foreground() {
+        let theme = Theme::terminal();
+        let breakpoints = default_breakpoints(&theme);
+        for pct in [0.0, 10.0, 25.0, 49.0] {
+            assert_eq!(
+                blend_color(pct, &breakpoints),
+                Color::Reset,
+                "{pct}% must stay on the terminal default fg"
+            );
+        }
+        // Urgency still escalates to the palette's named ANSI accents —
+        // and between them the meter snaps rather than interpolating, so
+        // every emitted color stays a profile palette entry.
+        for pct in [55.0, 70.0, 80.0, 90.0, 100.0] {
+            let c = blend_color(pct, &breakpoints);
+            assert!(
+                !matches!(c, Color::Rgb(..) | Color::Indexed(_)),
+                "{pct}% must stay on a profile palette color, got {c:?}"
+            );
+        }
+        assert_eq!(blend_color(100.0, &breakpoints), theme.accent_error);
+    }
 
     #[test]
     fn test_fmt_pct5_under_10() {

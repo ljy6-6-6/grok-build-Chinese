@@ -32,7 +32,6 @@ pub(in crate::app::dispatch) enum PickerSeqKind {
 /// The accept rule shared by every picker result handler.
 /// Resolve the requesting host to its live picker (drop when it has none), then require generation equality and the per-kind seq to still be current.
 /// Returns the routed target on accept; logs and returns `None` on any failed check.
-/// Kind-specific extra guards (External filter, foreign source, welcome view liveness) stay at the call sites.
 pub(in crate::app::dispatch) fn accept_picker_result<'a>(
     app: &'a mut AppView,
     request: PickerRequest,
@@ -77,7 +76,6 @@ pub(in crate::app::dispatch) fn accept_picker_result<'a>(
 /// Mutable view of one host's picker storage plus the freshness values a result must match.
 /// Generation and the list/deep-search seqs are by-value copies.
 /// Result handlers only read them (producers bump the real counters before the handler borrows the storage).
-/// `detail_seq` alone is a mutable borrow: accepted list results and applied foreign scans advance it at apply time.
 pub(in crate::app::dispatch) struct PickerTarget<'a> {
     pub entries: &'a mut Option<Vec<SessionPickerEntry>>,
     pub loading: &'a mut bool,
@@ -162,8 +160,12 @@ pub(in crate::app::dispatch) fn picker_for_host(
             })
         }
         SessionPickerHost::Dashboard => {
+            let picker_cwd = app
+                .dashboard
+                .as_ref()
+                .map_or(app.cwd.as_path(), |dashboard| dashboard.cwd.as_path());
+            let current_repo = repo_name_from_cwd(&picker_cwd.to_string_lossy());
             let surface = app.dashboard_session_picker.as_mut()?;
-            let current_repo = repo_name_from_cwd(&app.cwd.to_string_lossy());
             Some(PickerTarget {
                 entries: &mut surface.entries,
                 loading: &mut surface.loading,

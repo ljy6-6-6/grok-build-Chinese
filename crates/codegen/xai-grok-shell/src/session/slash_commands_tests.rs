@@ -17,7 +17,6 @@ fn resolve(
         availability,
         skill_rewrite,
         workflows,
-        LoopFireMode::Detached,
     )
 }
 
@@ -35,7 +34,7 @@ async fn product_skill_infos_none_without_auth() {
 
 #[test]
 fn product_skills_cache_matches_identity_and_team() {
-    use crate::auth::{AuthMode, GrokAuth};
+    use xai_grok_login::{AuthMode, GrokAuth};
     let base = ProductSkillsCacheEntry {
         auth_key: "tok-a".into(),
         user_id: "user-1".into(),
@@ -91,7 +90,7 @@ fn product_skills_cache_matches_identity_and_team() {
 
 #[test]
 fn product_skills_cache_after_untagged_recovery_keeps_primary_tenant() {
-    use crate::auth::{AuthMode, GrokAuth};
+    use xai_grok_login::{AuthMode, GrokAuth};
     let primary = GrokAuth {
         key: "oidc-team".into(),
         user_id: "user-1".into(),
@@ -481,36 +480,6 @@ fn resolve_loop_without_args_uses_bare_command_display_text() {
 }
 
 #[test]
-fn resolve_loop_expands_for_the_sessions_fire_mode() {
-    let text_of = |mode| {
-        let outcome = super::resolve_human_intent(
-            vec![text_block("/loop 1m echo hello")],
-            &[],
-            all_gated(),
-            SkillSlashRewrite::default(),
-            &[],
-            mode,
-        )
-        .unwrap_err();
-        let SlashCommandOutcome::InvokeSkill { blocks, .. } = outcome else {
-            panic!("expected InvokeSkill for /loop");
-        };
-        let Some(acp::ContentBlock::Text(tb)) = blocks.into_iter().next() else {
-            panic!("expected a text block");
-        };
-        tb.text
-    };
-    assert!(
-        text_of(LoopFireMode::Detached).contains("cannot see this conversation"),
-        "detached sessions must get the standalone-prompt framing"
-    );
-    assert!(
-        text_of(LoopFireMode::InSession).contains("arrives as a new turn in this conversation"),
-        "in-session sessions must get the standing-order framing"
-    );
-}
-
-#[test]
 fn resolve_passthrough_preserves_original_blocks() {
     // External-harness agents: blocks are passed through verbatim.
     // The prompt assembly layer decides how to format them.
@@ -757,8 +726,8 @@ fn loop_does_not_resolve_when_scheduler_unavailable() {
     );
 }
 
-fn loop_text(args: &str, mode: LoopFireMode) -> String {
-    match build_loop_prompt_blocks(args, mode).into_iter().next() {
+fn loop_text(args: &str) -> String {
+    match build_loop_prompt_blocks(args).into_iter().next() {
         Some(acp::ContentBlock::Text(t)) => t.text,
         other => panic!("expected a text block, got {other:?}"),
     }
@@ -766,7 +735,7 @@ fn loop_text(args: &str, mode: LoopFireMode) -> String {
 
 #[test]
 fn loop_usage_has_no_10m_default() {
-    let usage = loop_text("", LoopFireMode::Detached);
+    let usage = loop_text("");
     assert!(usage.contains("Usage: /loop"), "got: {usage}");
     assert!(
         !usage.contains("10m"),
@@ -776,7 +745,7 @@ fn loop_usage_has_no_10m_default() {
 
 #[test]
 fn loop_instruction_derives_interval_without_default_or_inline_execute() {
-    let instr = loop_text("every 30 minutes do x", LoopFireMode::Detached);
+    let instr = loop_text("every 30 minutes do x");
     assert!(
         !instr.contains("10m"),
         "instruction must not default: {instr}"
@@ -793,13 +762,11 @@ fn loop_prompt_matches_pager_wording() {
     use xai_grok_tools::implementations::grok_build::{
         loop_schedule_instruction, loop_usage_message,
     };
-    assert_eq!(loop_text("", LoopFireMode::Detached), loop_usage_message());
-    for mode in [LoopFireMode::Detached, LoopFireMode::InSession] {
-        assert_eq!(
-            loop_text("2h run tests", mode),
-            loop_schedule_instruction("2h run tests", mode)
-        );
-    }
+    assert_eq!(loop_text(""), loop_usage_message());
+    assert_eq!(
+        loop_text("2h run tests"),
+        loop_schedule_instruction("2h run tests")
+    );
 }
 
 #[test]
@@ -1465,7 +1432,6 @@ fn default_availability_is_fail_closed_on_every_gate() {
 
 /// `/flush` is a memory-write that's only useful when the model can later read back what it wrote.
 /// The shell's `build_command_availability()` ANDs `memory.is_enabled()` with `memory_search`/`memory_get` registration.
-/// The gate itself just reads `availability.memory`.
 /// Lock both halves so a future change to either side is forced through this test.
 #[test]
 fn flush_hidden_when_memory_gate_off_visible_when_on() {

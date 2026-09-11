@@ -69,10 +69,9 @@ pub struct LspClient {
     pub main_loop: tokio::task::JoinHandle<()>,
     pub stderr_task: Option<tokio::task::JoinHandle<()>>,
     pub child_process: Option<std::process::Child>,
-    /// Strong owner of the server child's process group. The session
-    /// [`ProcessScope`] holds only a `Weak`, so dropping this on clean teardown
-    /// stops the scope from reaping a reused PID. `None` for the socket transport
-    /// (no child) or if group creation failed.
+    /// Strong owner of the server child's process group. The session [`ProcessScope`] holds only a
+    /// `Weak`, so dropping this on clean teardown stops the scope from reaping a reused PID. `None`
+    /// for the socket transport (no child) or if group creation failed.
     process_group: Option<Arc<ProcessGroup>>,
     pub shutdown_timeout: std::time::Duration,
     /// Registrations we accepted without turning them into OS watches.
@@ -90,10 +89,9 @@ impl std::fmt::Debug for LspClient {
 }
 
 impl Drop for LspClient {
-    /// Teardown backstop. `LspBackendAdapter`'s graceful shutdown only runs when
-    /// a tokio runtime is current, so killing the child here avoids orphaning one
-    /// language-server process per session. Idempotent with `shutdown`, which
-    /// takes the same fields first.
+    /// Teardown backstop. `LspBackendAdapter`'s graceful shutdown only runs when a tokio runtime is
+    /// current, so killing the child here avoids orphaning one language-server process per session.
+    /// Idempotent with `shutdown`, which takes the same fields first.
     fn drop(&mut self) {
         self.reap_children();
     }
@@ -122,10 +120,9 @@ fn create_client_main_loop(
             router.notification::<lsp_types::notification::PublishDiagnostics>(
                 move |_state, params| {
                     let uri = params.uri.as_str();
-                    // `version` is the revision the server analyzed. Servers
-                    // that name it are taken at their word; the rest are
-                    // credited with the text we had most recently sent, which
-                    // is all arrival order can tell us.
+                    // `version` is the revision the server analyzed. Servers that name it are taken
+                    // at their word; the rest are credited with the text we had most recently sent,
+                    // which is all arrival order can tell us.
                     diagnostics.record_push(
                         uri,
                         params.diagnostics,
@@ -378,15 +375,9 @@ impl LspClient {
         })
     }
 
-    /// Install a process group for this freshly started stdio server: register a
-    /// `Weak` into the session [`ProcessScope`] (when set) while this client keeps
-    /// the strong `Arc`; installed even without a scope so this client's own
-    /// `Drop` killpg's the whole child tree. No-op for the socket transport.
-    /// See the `process_group` field doc for the Weak/reuse-safety argument.
-    ///
-    /// Returns `false` when the scope was already closed (session teardown raced
-    /// this start): the child has been killed at registration, so the caller must
-    /// discard this client instead of installing it as ready.
+    /// Install a process group for this freshly started stdio server: register a `Weak` into the session [`ProcessScope`] (when set) while this
+    /// client keeps the strong `Arc`; installed even without a scope so this client's own `Drop` killpg's the whole child tree. No-op for the
+    /// socket transport. See the `process_group` field doc for the Weak/reuse-safety argument.
     pub(crate) fn enroll(&mut self, scope: Option<&ProcessScope>) -> bool {
         let Some(child) = self.child_process.as_ref() else {
             return true;
@@ -537,10 +528,9 @@ impl LspClient {
     }
 
     pub async fn shutdown(mut self) {
-        // Dead transport — a crashed server, or the session scope's
-        // SIGKILL-on-close (see grok-shell `take_session`) landing before this
-        // Drop-spawned graceful task ran. The shutdown/exit handshake can only
-        // fail, so skip it (and its warnings) and just reap.
+        // Dead transport — a crashed server, or the session scope's SIGKILL-on-close (see
+        // grok-shell `take_session`) landing before this Drop-spawned graceful task ran. The
+        // shutdown/exit handshake can only fail, so skip it (and its warnings) and just reap.
         if self.main_loop.is_finished() {
             tracing::debug!(server = %self.server_name, "LSP transport already down; skipping shutdown handshake");
             self.reap_children();
@@ -615,14 +605,9 @@ impl LspClient {
                     related_information: Some(true),
                     ..Default::default()
                 }),
-                // Pull diagnostics. Some servers — Roslyn among them — only
-                // answer `textDocument/diagnostic` and never publish, so
-                // without this we would see no diagnostics from them at all.
-                //
-                // `dynamic_registration: false` is deliberate: it makes Roslyn
-                // advertise one static provider instead of registering a
-                // separate provider per diagnostic source, which would turn
-                // every document into six pulls and six cache entries.
+                // Pull diagnostics. Some servers — Roslyn among them — only answer `textDocument/diagnostic` and never publish, so without this we would see
+                // no diagnostics from them at all. `dynamic_registration: false` is deliberate: it makes Roslyn advertise one static provider instead of
+                // registering a separate provider per diagnostic source, which would turn every document into six pulls and six cache entries.
                 diagnostic: Some(DiagnosticClientCapabilities {
                     dynamic_registration: Some(false),
                     related_document_support: Some(false),
@@ -634,10 +619,9 @@ impl LspClient {
                 ..Default::default()
             }),
             workspace: Some(WorkspaceClientCapabilities {
-                // A pull-model server cannot volunteer that its answers have
-                // changed unless we say we can hear it. Without this, a Roslyn
-                // that finishes analyzing a solution after we asked has no way
-                // to tell us, and we are left guessing how long to wait.
+                // A pull-model server cannot volunteer that its answers have changed unless we say
+                // we can hear it. Without this, a Roslyn that finishes analyzing a solution after
+                // we asked has no way to tell us, and we are left guessing how long to wait.
                 diagnostic: Some(DiagnosticWorkspaceClientCapabilities {
                     refresh_support: Some(true),
                 }),
@@ -660,11 +644,9 @@ impl LspClient {
         &self.server_name
     }
 
-    /// Tell the server about the current contents of `path`.
-    ///
-    /// Returns the document version the change was sent as, which is what a
-    /// caller waiting for the server's verdict compares later answers against.
-    /// `None` means the server was never told, so there is nothing to wait for.
+    /// Tell the server about the current contents of `path`. Returns the document version the
+    /// change was sent as, which is what a caller waiting for the server's verdict compares later
+    /// answers against. `None` means the server was never told, so there is nothing to wait for.
     pub fn notify_file_change(
         &mut self,
         path: &Path,
@@ -699,11 +681,9 @@ impl LspClient {
                 version,
                 previous_end,
             } => {
-                // We always resend the whole file. A server that asked for
-                // incremental sync still requires a range on every change
-                // event — Roslyn dereferences it unconditionally and tears its
-                // request queue down without one — so the full replacement is
-                // expressed as a range covering the previous revision.
+                // We always resend the whole file. A server that asked for incremental sync still requires a range on every change
+                // event — Roslyn dereferences it unconditionally and tears its request queue down without one — so the full
+                // replacement is expressed as a range covering the previous revision.
                 let range = self.policy.full_replacement_range(previous_end);
                 tracing::debug!(
                     server = %self.server_name, uri = %uri, version, ranged = range.is_some(),
@@ -728,13 +708,9 @@ impl LspClient {
             return None;
         }
 
-        // Only now, with the notification actually on the wire, does our record
-        // of the server's copy advance. It describes the text the *server* has;
-        // advancing it after a send that failed would compute every later
-        // incremental range against a revision the server never received — the
-        // same protocol violation the range exists to avoid. It is also what
-        // the pull about to be spawned reads to know which revision it is
-        // asking about, so it has to be committed first.
+        // Only now, with the notification actually on the wire, does our record of the server's copy advance. It describes the
+        // text the *server* has; advancing it after a send that failed would compute every later incremental range against a
+        // revision the server never received — the same protocol violation the range exists to avoid.
         self.documents
             .commit(&uri_str, version, language_id, new_end);
 

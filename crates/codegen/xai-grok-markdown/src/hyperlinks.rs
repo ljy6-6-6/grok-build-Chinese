@@ -16,7 +16,6 @@ use crate::buffers::{
 use crate::output::HyperlinkTarget;
 
 /// One link's projection onto the current chunk's transformed string.
-///
 /// Returned by `chunk_link_offsets`; bounds are in coordinate system #2 (transformed bytes within the chunk).
 /// `emit_segment_hyperlinks` later maps them onto display cells.
 #[derive(Debug, Clone, Copy)]
@@ -30,20 +29,8 @@ pub(crate) struct ChunkLinkRange {
 }
 
 /// Project a source byte position into the chunk's transformed coordinate space (system #1 to system #2). See the module doc.
-///
-/// Walks `transforms` in source order, accumulating `(to.len() - range.len())` for every transform fully consumed before `src_pos`.
-/// When the chunk has no transforms (or `pretty` is false), the caller skips this and uses `src_pos - chunk_start` directly.
-///
-/// **Invariants assumed of the inputs:**
-/// 1. `transforms` is sorted by `range.start` (`apply_transforms` relies on the same invariant; the parser pushes transforms in source order).
-/// 2. No transform's source range overlaps the bytes a caller intends to locate.
-///    Transforms touch *boundary* characters around link text (the `[` and `](` markers), never the link text itself.
-///    All transforms pushed by the parser today (link bracket removal, bullet substitutions) satisfy this.
-///    The `debug_assert!` at the call sites in `render_ratatui` enforces it via the cursor invariant.
-///
+/// `transforms` is sorted by `range.start` (`apply_transforms` relies on the same invariant; the parser pushes transforms in source order); No transform's source range overlaps the bytes a caller intends to locate. Transforms touch *boundary* characters around link text (the `[` and `](` markers), never the link text itself. All transforms pushed by the parser today (link bracket removal, bullet substitutions) satisfy this. The `debug_assert!` at the call sites in `render_ratatui` enforces it via the cursor invariant.
 /// **Straddle policy** (a transform contains `src_pos` despite invariant 2): the source position clamps to the start of the replacement string.
-/// Both endpoints clamp the same direction, so a link whose endpoint straddles a transform gets a column range that excludes the straddling bytes.
-/// The clamp is deliberately coarse; a future transform that rewrites link text should add a typed mapping instead.
 pub(crate) fn source_to_chunk_offset(
     src_pos: usize,
     chunk_start: usize,
@@ -80,7 +67,6 @@ pub(crate) fn source_to_chunk_offset(
 }
 
 /// One `ChunkLinkRange` per link whose source range overlaps `[chunk_start, chunk_end)`.
-///
 /// `from_idx` is the caller's monotonic cursor; links before it were handled in earlier chunks (see the module doc's source-order invariant).
 /// Returned bounds live in the chunk's transformed coordinate space.
 pub(crate) fn chunk_link_offsets(
@@ -121,9 +107,6 @@ pub(crate) fn chunk_link_offsets(
 }
 
 /// Push one `HyperlinkTarget` per `ChunkLinkRange` that overlaps this segment (system #2 to system #3).
-///
-/// `seg_x_offset` is where this segment starts within the chunk's transformed string.
-/// The caller advances it by `segment.len() + 1` per iteration to account for the `\n` consumed by `split('\n')`.
 /// `col` is the running display column on the in-progress line.
 pub(crate) fn emit_segment_hyperlinks(
     chunk_links: &[ChunkLinkRange],
@@ -174,12 +157,7 @@ mod hyperlink_tests {
     }
 
     /// Slice the rendered line by display-cell `column_range`.
-    /// Display width differs from char count for CJK and other wide characters, so we accumulate width per char until we land inside the range.
-    ///
-    /// Zero-width chars (combining marks, ZWJ, control chars) are included at both boundaries.
     /// At `range.start` they do not advance `col`; at `range.end` they still satisfy `end <= range.end`.
-    /// No caller in the test suite uses combining marks today.
-    /// A future caller can change the boundary condition to attach zero-width chars to the side that owns the grapheme cluster.
     fn slice_by_cells(rendered: &str, range: std::ops::Range<usize>) -> String {
         use unicode_width::UnicodeWidthChar;
         let mut col = 0usize;
@@ -318,10 +296,7 @@ mod hyperlink_tests {
     }
 
     /// `<https://example.com>` autolink: the parser records the source range over the entire `<...>`-bounded text.
-    /// pulldown-cmark fires multiple sub-chunks within a single autolink (the `<`, the URL text, and the `>`).
-    /// The in-render translation may therefore emit multiple `HyperlinkTarget`s.
     /// They MUST all share the same `id` and `url`, and their column ranges must collectively cover the rendered URL on a single line.
-    /// This is the same shape as a link that wraps across two rendered lines.
     #[test]
     fn autolink_emits_grouped_targets_for_same_logical_link() {
         let text = "Visit <https://example.com> for info.\n";
@@ -416,8 +391,6 @@ mod hyperlink_tests {
 
     /// A link whose source bytes straddle the frozen/tail boundary in the streaming renderer must still produce a `HyperlinkTarget`.
     /// The target must point at the right rendered line and columns.
-    /// In pretty mode, `[my link](url)` renders as `my link (url)`, so the renderer produces 2 targets.
-    /// One is parser-produced over the link text; one comes from the url_scan pass over the `(url)` suffix.
     #[test]
     fn streaming_link_across_chunk_boundaries_resolves_correctly() {
         let part1 = "Para one.\n\nSee [my ";
@@ -506,13 +479,6 @@ mod hyperlink_tests {
 
     /// Markdown links inside table cells must produce `HyperlinkTarget`s the same way links inside paragraphs do.
     /// Otherwise the pager's OSC 8 overlay never learns about them and the link is not clickable and not styled.
-    /// Before the fix, `Tag::Link` events inside table cells were swallowed by the table state machine.
-    /// That left the link text as plain text in `StyledCell::spans` with no URL attached.
-    ///
-    /// This test asserts:
-    /// 1. A `HyperlinkTarget` is emitted with the cell's URL.
-    /// 2. Its `column_range` covers the rendered link text glyphs (not the brackets, not the URL).
-    /// 3. The link text span carries the same `link_text` styling paragraph links get (bold in the test style).
     #[test]
     fn link_inside_table_cell_emits_hyperlink_and_styling() {
         let text = "\
@@ -561,11 +527,74 @@ mod hyperlink_tests {
         );
     }
 
+    /// `~~strike~~` inside a table cell must survive the table replace.
+    /// Tables rebuild cells from `CellSpan` flags, so strike has to be one of those flags.
+    #[test]
+    fn strikethrough_inside_table_cell_is_crossed_out() {
+        use ratatui::style::Modifier;
+
+        let text = "\
+| Item | Status | Link | Code |
+|------|--------|------|------|
+| ~~old plan~~ leftover | **~~gone~~** keep | ~~[click](https://example.com)~~ | ~~`gone-code`~~ |
+";
+        let (out, _) = render_markdown_ratatui_full(text, test_style::STYLE, true, None);
+
+        let span_named = |name: &str| {
+            out.lines
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .find(|s| s.content.as_ref() == name)
+                .unwrap_or_else(|| panic!("expected a span {name:?}"))
+        };
+
+        let old_plan = span_named("old plan");
+        assert!(
+            old_plan.style.add_modifier.contains(Modifier::CROSSED_OUT),
+            "struck cell text should be crossed out, got style={:?}",
+            old_plan.style,
+        );
+
+        let leftover = span_named(" leftover");
+        assert!(
+            !leftover.style.add_modifier.contains(Modifier::CROSSED_OUT),
+            "unstruck sibling in the same cell must not inherit strike, got style={:?}",
+            leftover.style,
+        );
+
+        let gone = span_named("gone");
+        assert!(
+            gone.style.add_modifier.contains(Modifier::CROSSED_OUT)
+                && gone.style.add_modifier.contains(Modifier::BOLD),
+            "struck bold cell text should keep both effects, got style={:?}",
+            gone.style,
+        );
+        let keep = span_named(" keep");
+        assert!(
+            !keep.style.add_modifier.contains(Modifier::CROSSED_OUT),
+            "text after a struck bold run must not stay struck, got style={:?}",
+            keep.style,
+        );
+
+        let click = span_named("click");
+        assert!(
+            click.style.add_modifier.contains(Modifier::CROSSED_OUT)
+                && click.style.add_modifier.contains(Modifier::BOLD),
+            "struck link text in a cell should keep strike and link_text styling, got style={:?}",
+            click.style,
+        );
+
+        let gone_code = span_named("gone-code");
+        assert!(
+            gone_code.style.add_modifier.contains(Modifier::CROSSED_OUT),
+            "struck inline code in a cell should stay crossed out after the code style replace, got style={:?}",
+            gone_code.style,
+        );
+    }
+
     /// Paragraph links must keep the `link_text` foreground color even when the `text` style sets its own foreground.
     /// Previously the parser pushed `ms.text` as a highlight after the link_text highlight.
     /// It did so whenever no `Heading`/`Emphasis`/`Strong`/`Strikethrough` ancestor was present.
-    /// `merge_styles` lets the later fg color win, so `ms.text`'s color silently clobbered `link_text`'s color on plain paragraph links.
-    /// Regression: extending `ancestor_styles` to recognise `Link`/`Image` keeps the link_text color intact.
     #[test]
     fn paragraph_link_keeps_link_text_fg_over_default_text_fg() {
         use crate::MarkdownStyle;
@@ -605,10 +634,6 @@ mod hyperlink_tests {
     }
 
     /// Links wrapped in inline formatting must keep the `link_text` foreground while still gaining the formatting effect.
-    /// Covered forms: `**[click](url)**`, `[**click**](url)`, `*[click](url)*`, `~~[click](url)~~`.
-    /// The Strong/Emphasis ancestor's inner style carries the theme's default text fg.
-    /// Its highlight is pushed at `Event::Text` time, *after* the `link_text` highlight from `Tag::Link` start.
-    /// merge_styles' last-wins fg ordering therefore let it clobber the link color.
     /// Regression: inline-format ancestors contribute effects only inside a link.
     #[test]
     fn formatted_link_keeps_link_fg_and_gains_effects() {

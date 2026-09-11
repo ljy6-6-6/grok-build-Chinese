@@ -251,7 +251,6 @@ fn deferred_paste_completion_after_refused_editor_does_not_implicitly_send_witho
                 target: crate::app::actions::ClipboardPasteTarget::AgentPrompt {
                     agent_id: id,
                     images_dir: None,
-                    from_feedback_pane: false,
                 },
                 source: crate::app::actions::ClipboardPasteSource::ClipboardKey {
                     text: crate::app::actions::ClipboardTextRead::Success(Some(
@@ -367,7 +366,7 @@ fn send_feedback_clears_active_ephemeral_tip() {
         Action::SendFeedback {
             text: "it broke".into(),
             images: Default::default(),
-            trace: Some(crate::app::actions::FeedbackTraceChoice::NoUpload),
+            trace: None,
         },
         &mut app,
     );
@@ -1823,21 +1822,8 @@ fn view_catalog_entry_emits_fetch_effect() {
     ));
 }
 /// End-to-end regression test for the "always re-asks" requirement.
-///
-/// Drives the full user-visible production pipeline twice, with no manual modal poking between rounds:
-///   round 1: dispatch(Action::Fork) -> modal opens.
-///            select option 0 ("Yes") on the modal.
-///            submit_question_answers(skipped=false)
-///              -> InputOutcome::Action(ForkAnswered { worktree=true })
-///              -> question_view cleared by the same submit call.
-///            dispatch(inner Action) -> placeholder + Effect.
-///   round 2: switch focus back to parent (Y-inert, picker cause).
-///            dispatch(Action::Fork) -> modal MUST re-open.
-///
-/// This catches BOTH:
-///   (a) "no persistence in dispatch_fork": whether the modal opens is decided only by the absence of `args.worktree_override`; and
-///   (b) "submit_question_answers clears question_view": open_fork_question refuses while a question is already on screen.
-///       A future refactor that breaks the clear would therefore also break "always re-asks" in production, so we exercise it here.
+/// dispatch(Action::Fork) -> modal MUST re-open.
+/// (a) "no persistence in dispatch_fork": whether the modal opens is decided only by the absence of `args.worktree_override`; and (b) "submit_question_answers clears question_view": open_fork_question refuses while a question is already on screen.
 #[test]
 fn dispatch_fork_no_flag_always_reopens_modal_after_previous_answer() {
     use crate::views::question_view::QuestionSelection;
@@ -2639,6 +2625,45 @@ fn delete_session_refuses_conversation_row() {
     );
     assert!(read_toast(&app).contains("isn't supported"));
 }
+#[test]
+fn delete_session_refuses_known_read_only_workspace_member() {
+    let mut app = test_app_with_agent();
+    open_session_picker_with(&mut app, vec![make_picker_entry("read-only-delete", "/r")]);
+    app.workspace_dashboard_enabled = true;
+    let temp = tempfile::tempdir().unwrap();
+    let store =
+        xai_grok_dashboard_store::WorkspaceStore::open(&temp.path().join("workspace.db")).unwrap();
+    app.workspace_membership.set_read_only_for_test(
+        store,
+        xai_grok_dashboard_store::WorkspaceSnapshot {
+            grouping: xai_grok_dashboard_store::Grouping::State,
+            members: vec![xai_grok_dashboard_store::Member {
+                session_id: xai_grok_dashboard_store::SessionId::new("read-only-delete").unwrap(),
+                kind: xai_grok_dashboard_store::MemberKind::Build,
+                origin: xai_grok_dashboard_store::MemberOrigin::Local,
+                cwd: Some("/r".into()),
+                title: Some("Read only".into()),
+                model: None,
+                last_turn_summary: None,
+                is_worktree: false,
+                last_change_unix_ms: 1,
+                pin_rank: None,
+                order_rank: None,
+            }],
+            data_version: 1,
+        },
+    );
+    let effects = dispatch(
+        Action::DeleteSession {
+            source: "local".into(),
+            session_id: "read-only-delete".into(),
+            cwd: "/r".into(),
+        },
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    assert!(read_toast(&app).contains("workspace is read-only"));
+}
 /// Expanding a conversation card must not read `chat_history.jsonl` (it doesn't exist); the row still toggles open.
 #[test]
 fn expand_conversation_card_skips_detail_load() {
@@ -2836,4 +2861,59 @@ fn toggle_scroll_log_flips_recorder_and_reports_path() {
         texts.iter().any(|t| t == "scroll log: off"),
         "disable must be confirmed, got {texts:?}"
     );
+}
+#[serial_test::serial(GROK_TEST_OPEN_URL_FILE)]
+#[test]
+fn open_managed_connectors_starts_wait_when_modal_open() {
+    use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab};
+    let url_file = std::env::temp_dir().join(format!(
+        "grok-managed-connectors-open-{}.txt",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&url_file);
+    unsafe { std::env::set_var("GROK_TEST_OPEN_URL_FILE", &url_file) };
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().extensions_modal =
+        Some(ExtensionsModalState::new(ExtensionsTab::McpServers));
+    let effects = dispatch(Action::OpenManagedConnectors, &mut app);
+    assert!(effects.is_empty());
+    assert!(
+        app.agents[&id]
+            .extensions_modal
+            .as_ref()
+            .is_some_and(|modal| modal.is_managed_connectors_wait())
+    );
+    let recorded = std::fs::read_to_string(&url_file).unwrap_or_default();
+    assert!(
+        recorded
+            .lines()
+            .any(|line| line == crate::views::mcps_modal::managed_connectors_url(None)),
+        "opener seam must record the connectors URL; got {recorded:?}"
+    );
+    unsafe { std::env::remove_var("GROK_TEST_OPEN_URL_FILE") };
+    let _ = std::fs::remove_file(&url_file);
+}
+#[test]
+fn refresh_mcp_list_clears_managed_connectors_wait() {
+    use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab, TabDataState};
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::McpServers);
+        modal.begin_managed_connectors_wait();
+        agent.extensions_modal = Some(modal);
+    }
+    let effects = dispatch(Action::RefreshMcpList, &mut app);
+    let modal = app.agents[&id]
+        .extensions_modal
+        .as_ref()
+        .expect("modal stays open");
+    assert!(!modal.is_managed_connectors_wait());
+    assert!(matches!(modal.mcps_data, TabDataState::Loading));
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::FetchMcpsList { cache: false, .. }]
+    ));
 }

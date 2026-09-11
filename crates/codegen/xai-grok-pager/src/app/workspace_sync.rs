@@ -1,110 +1,167 @@
-//! Adopts local build agents into the dashboard v2 workspace and keeps their stored metadata in sync.
+//! Adapts live agents to the workspace membership controller.
 use super::actions::Effect;
+use super::agent::AgentId;
 use super::agent_view::AgentView;
 use super::app_view::AppView;
+use super::workspace_layout::WorkspaceView;
+use super::workspace_membership::{RemovalCause, RemovalRequestError, WorkspaceMembership};
+use crate::views::dashboard::WorkspaceRowInputs;
+use indexmap::IndexMap;
+use std::collections::HashSet;
 use std::time::UNIX_EPOCH;
 use xai_grok_dashboard_store::{
-    MAX_CWD_BYTES, MAX_MODEL_BYTES, MAX_SUMMARY_BYTES, MAX_TITLE_BYTES, Member, MemberKind,
-    MemberMetadata, MemberOrigin, NewMember, SessionId, WORKSPACE_CAPACITY,
+    MAX_CWD_BYTES, MAX_MODEL_BYTES, MAX_SUMMARY_BYTES, MAX_TITLE_BYTES, MemberKind, MemberMetadata,
+    MemberOrigin, NewMember, SessionId,
 };
-/// Record that agent state may need mirroring into the initialized workspace.
 pub(crate) fn request(app: &mut AppView) {
-    if app.workspace_dashboard_enabled
-        && (app.workspace_snapshot.is_some()
-            || app.workspace_store_loading
-            || app.workspace_write_in_flight)
+    if app.workspace_dashboard_enabled {
+        app.workspace_membership.request_sync();
+    }
+}
+pub(crate) fn activate(app: &mut AppView) {
+    if app.workspace_dashboard_enabled {
+        app.workspace_membership.activate();
+    }
+}
+pub(crate) fn request_removal(
+    app: &mut AppView,
+    raw_session_id: &str,
+    cause: RemovalCause,
+) -> bool {
+    if !app.workspace_dashboard_enabled {
+        return true;
+    }
+    match app
+        .workspace_membership
+        .request_removal(raw_session_id, cause)
     {
-        app.workspace_sync_requested = true;
+        Ok(()) => true,
+        Err(RemovalRequestError::ReadOnly) => {
+            app.show_toast("Could not archive session: dashboard workspace is read-only");
+            false
+        }
+        Err(RemovalRequestError::InvalidSessionId) => {
+            tracing::warn!(
+                session_id = raw_session_id,
+                "invalid workspace archive session id"
+            );
+            app.show_toast("Could not archive session: invalid session id");
+            false
+        }
     }
 }
-/// Build and start one serialized workspace write, if current agent metadata differs from the cached snapshot.
-pub(crate) fn drain(app: &mut AppView) -> Vec<Effect> {
-    if !app.workspace_sync_requested {
-        return vec![];
-    }
-    if !app.workspace_dashboard_enabled || app.workspace_writes_disabled {
-        app.workspace_sync_requested = false;
-        return vec![];
-    }
-    let Some(snapshot) = app.workspace_snapshot.as_ref() else {
-        if !app.workspace_store_loading {
-            app.workspace_sync_requested = false;
-        }
-        return vec![];
-    };
-    if app.workspace_store.is_none() {
-        return vec![];
-    }
-    let mut seen = std::collections::HashSet::new();
-    let candidates: Vec<_> = app
-        .agents
+pub(crate) fn permanent_delete_blocked(app: &AppView, raw_session_id: &str) -> bool {
+    app.workspace_dashboard_enabled
+        && app
+            .workspace_membership
+            .permanent_delete_blocked(raw_session_id)
+}
+pub(crate) fn allow_loaded_session(app: &mut AppView, raw_session_id: &str) {
+    app.workspace_membership
+        .on_explicit_session_load(raw_session_id);
+}
+pub(crate) fn refresh(app: &mut AppView) -> Vec<Effect> {
+    app.workspace_membership.request_refresh().effects
+}
+pub(crate) fn live_session_ids(app: &AppView) -> HashSet<SessionId> {
+    app.agents
         .values()
-        .filter_map(agent_to_new_member)
-        .filter(|candidate| seen.insert(candidate.key.session_id.clone()))
-        .collect();
-    let existing_ids: std::collections::HashSet<_> = snapshot
-        .members
-        .iter()
-        .filter(|member| matches!(member.kind, MemberKind::Build))
-        .map(|member| member.session_id.clone())
-        .collect();
-    let candidate_ids: std::collections::HashSet<_> = candidates
-        .iter()
-        .map(|candidate| candidate.key.session_id.clone())
-        .collect();
-    let pinned_non_candidates = snapshot
-        .members
-        .iter()
-        .filter(|member| {
-            member.pin_rank.is_some()
-                && !(matches!(member.kind, MemberKind::Build)
-                    && candidate_ids.contains(&member.session_id))
-        })
-        .count();
-    let mut existing = Vec::new();
-    let mut missing = Vec::new();
-    for candidate in candidates {
-        if existing_ids.contains(&candidate.key.session_id) {
-            existing.push(candidate);
-        } else {
-            missing.push(candidate);
-        }
-    }
-    let missing_slots = WORKSPACE_CAPACITY
-        .saturating_sub(pinned_non_candidates)
-        .saturating_sub(existing.len());
-    existing.extend(missing.into_iter().take(missing_slots));
-    let mut members = Vec::new();
-    for candidate in existing {
-        let existing = snapshot.members.iter().find(|member| {
-            matches!(member.kind, MemberKind::Build)
-                && member.session_id == candidate.key.session_id
-        });
-        if existing.is_some_and(|member| metadata_matches(member, &candidate.metadata)) {
-            continue;
-        }
-        if app
-            .workspace_failed_metadata
-            .get(&candidate.key.session_id)
-            .is_some_and(|metadata| metadata == &candidate.metadata)
-        {
-            continue;
-        }
-        members.push(candidate);
-    }
-    app.workspace_sync_requested = false;
-    if members.is_empty() {
-        return vec![];
-    }
-    let Some(store) = app.workspace_store.take() else {
-        return vec![];
-    };
-    app.workspace_write_in_flight = true;
-    vec![Effect::UpsertWorkspaceMembers { store, members }]
+        .filter_map(|agent| agent.session.session_id.as_ref())
+        .filter_map(|id| SessionId::new(id.0.to_string()).ok())
+        .collect()
 }
-fn agent_to_new_member(agent: &AgentView) -> Option<NewMember> {
+pub(crate) fn drain(app: &mut AppView) -> Vec<Effect> {
+    if !app.workspace_dashboard_enabled {
+        app.workspace_membership.disable();
+        return Vec::new();
+    }
+    let candidates = if app.workspace_membership.wants_upsert_candidates() {
+        let live_ids = live_session_ids(app);
+        app.workspace_membership.retain_live_suppressions(&live_ids);
+        let mut seen = HashSet::new();
+        let home = app.home_session_agent;
+        app.agents
+            .iter()
+            .filter(|(id, _)| home != Some(**id))
+            .filter_map(|(_, agent)| agent_to_new_member(agent))
+            .filter(|candidate| seen.insert(candidate.key.session_id.clone()))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    app.workspace_membership.next_effect(candidates).effects
+}
+/// Row inputs shared by the renderer and the dispatchers so they never see different rows.
+#[derive(Default)]
+pub(crate) struct WorkspaceRowSource {
+    workspace: Option<WorkspaceView>,
+    provisional: Vec<AgentId>,
+}
+impl WorkspaceRowSource {
+    pub(crate) fn capture(
+        agents: &IndexMap<AgentId, AgentView>,
+        membership: &WorkspaceMembership,
+        home: Option<AgentId>,
+        workspace_dashboard_enabled: bool,
+    ) -> Self {
+        if !workspace_dashboard_enabled {
+            return Self::default();
+        }
+        let workspace = membership.view();
+        let provisional = provisional_agent_ids(agents, membership, home, workspace.as_ref());
+        Self {
+            workspace,
+            provisional,
+        }
+    }
+    pub(crate) fn inputs(&self) -> WorkspaceRowInputs<'_> {
+        WorkspaceRowInputs {
+            workspace: self.workspace.as_ref(),
+            provisional: &self.provisional,
+        }
+    }
+}
+/// Live agents that render as provisional rows: the adoption rules minus the session id, which binds late, and not already covered by a committed member (that row renders through the member path under the same id).
+/// A session with a removal in flight must not resurface, a bound id the store would reject can never persist, and an agent that lost its session to another agent (`clear_stale_session_id`) never rebinds, so none of those get a row.
+fn provisional_agent_ids(
+    agents: &IndexMap<AgentId, AgentView>,
+    membership: &WorkspaceMembership,
+    home: Option<AgentId>,
+    workspace: Option<&WorkspaceView>,
+) -> Vec<AgentId> {
+    let is_member = |session_id: &SessionId| {
+        workspace.is_some_and(|workspace| {
+            workspace
+                .members
+                .iter()
+                .any(|member| member.kind == MemberKind::Build && member.session_id == *session_id)
+        })
+    };
+    agents
+        .iter()
+        .filter(|(id, agent)| home != Some(**id) && is_adoptable(agent))
+        .filter(|(_, agent)| match agent.session.session_id.as_ref() {
+            None => agent.session_binding_epoch == 0,
+            Some(id) => SessionId::new(id.0.to_string())
+                .is_ok_and(|id| !membership.is_session_hidden(&id) && !is_member(&id)),
+        })
+        .map(|(id, _)| *id)
+        .collect()
+}
+/// Whether `agent` can ever become a workspace member; the session id is checked separately because it binds late.
+fn is_adoptable(agent: &AgentView) -> bool {
     let cwd = agent.session.cwd.to_string_lossy();
     if agent.conversation_entry || !agent.session.cwd.is_absolute() || cwd.len() > MAX_CWD_BYTES {
+        return false;
+    }
+    true
+}
+fn agent_to_new_member(agent: &AgentView) -> Option<NewMember> {
+    if !is_adoptable(agent) {
+        return None;
+    }
+    if agent.session.created_via_new && crate::views::dashboard::row::is_empty_idle_top_level(agent)
+    {
         return None;
     }
     let session_id = SessionId::new(agent.session.session_id.as_ref()?.0.to_string()).ok()?;
@@ -158,14 +215,6 @@ fn truncate(value: Option<String>, max_bytes: usize) -> Option<String> {
         value
     })
 }
-fn metadata_matches(member: &Member, metadata: &MemberMetadata) -> bool {
-    member.cwd == metadata.cwd
-        && member.title == metadata.title
-        && member.model == metadata.model
-        && member.last_turn_summary == metadata.last_turn_summary
-        && member.is_worktree == metadata.is_worktree
-        && member.last_change_unix_ms == metadata.last_change_unix_ms
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,6 +223,7 @@ mod tests {
         let mut agent = crate::app::agent_view::test_fixtures::make_agent();
         agent.session.session_id = Some(acp::SessionId::new("saved"));
         agent.session.cwd = "/tmp/workspace-sync".into();
+        agent.display_name = Some("Saved session".into());
         agent
     }
     #[test]
@@ -193,7 +243,6 @@ mod tests {
             Some("Summary")
         );
         assert!(member.metadata.is_worktree);
-        assert!(member.metadata.last_change_unix_ms > 0);
     }
     #[test]
     fn skips_unbound_conversation_and_relative_cwd_agents() {
@@ -208,200 +257,79 @@ mod tests {
         assert!(agent_to_new_member(&agent).is_none());
     }
     #[test]
+    fn skips_bound_empty_idle_startup_agent() {
+        let mut agent = eligible_agent();
+        agent.display_name = None;
+        agent.session.created_via_new = true;
+        assert!(agent_to_new_member(&agent).is_none());
+    }
+    #[test]
+    fn provisional_ids_cover_unbound_dispatch_but_not_hidden_or_ineligible_agents() {
+        let mut agents = IndexMap::new();
+        let mut dispatched = crate::app::agent_view::test_fixtures::make_agent();
+        dispatched.session.cwd = "/tmp/workspace-sync".into();
+        dispatched.session.enqueue_prompt("fix the bug".into());
+        assert!(dispatched.session.session_id.is_none());
+        agents.insert(AgentId(1), dispatched);
+        let mut conversation = eligible_agent();
+        conversation.conversation_entry = true;
+        agents.insert(AgentId(2), conversation);
+        let mut archived = eligible_agent();
+        archived.session.session_id = Some(acp::SessionId::new("archived"));
+        agents.insert(AgentId(3), archived);
+        agents.insert(AgentId(4), eligible_agent());
+        agents.insert(
+            AgentId(5),
+            crate::app::agent_view::test_fixtures::make_agent(),
+        );
+        let mut unstorable = eligible_agent();
+        unstorable.session.session_id = Some(acp::SessionId::new("has/separator"));
+        agents.insert(AgentId(6), unstorable);
+        let mut stale = eligible_agent();
+        stale.unbind_session_id();
+        assert!(stale.session.session_id.is_none());
+        agents.insert(AgentId(7), stale);
+        let mut committed = eligible_agent();
+        committed.session.session_id = Some(acp::SessionId::new("committed"));
+        agents.insert(AgentId(8), committed);
+        let mut membership = WorkspaceMembership::default();
+        membership.suppress_for_test(SessionId::new("archived").unwrap());
+        membership.set_snapshot_for_test(crate::app::workspace_test_fixtures::snapshot(vec![
+            crate::app::workspace_test_fixtures::member("committed", "Committed"),
+        ]));
+        assert_eq!(
+            provisional_agent_ids(
+                &agents,
+                &membership,
+                Some(AgentId(5)),
+                membership.view().as_ref()
+            ),
+            vec![AgentId(1), AgentId(4)],
+            "the committed agent renders through its member, not as a second row"
+        );
+        assert!(
+            WorkspaceRowSource::capture(
+                &agents,
+                &membership,
+                Some(AgentId(5)),
+                /* workspace_dashboard_enabled */ false
+            )
+            .inputs()
+            .provisional
+            .is_empty(),
+            "v1 must not pay for the provisional walk"
+        );
+    }
+    #[test]
     fn metadata_is_canonicalized_to_store_limits() {
         let mut agent = eligible_agent();
         agent.display_name = Some("é".repeat(MAX_TITLE_BYTES));
         agent.last_turn_summary = Some("s".repeat(MAX_SUMMARY_BYTES + 10));
         let member = agent_to_new_member(&agent).unwrap();
-        let title = member.metadata.title.unwrap();
-        assert!(title.len() <= MAX_TITLE_BYTES);
-        assert!(title.is_char_boundary(title.len()));
+        assert!(member.metadata.title.unwrap().len() <= MAX_TITLE_BYTES);
         assert_eq!(
             member.metadata.last_turn_summary.unwrap().len(),
             MAX_SUMMARY_BYTES
         );
-    }
-    #[test]
-    fn drain_moves_the_single_store_into_one_batch() {
-        let temp = tempfile::tempdir().unwrap();
-        let store =
-            xai_grok_dashboard_store::WorkspaceStore::open(&temp.path().join("workspace.db"))
-                .unwrap();
-        let snapshot = store.snapshot().unwrap();
-        let mut app = crate::app::app_view::tests::test_app();
-        app.workspace_dashboard_enabled = true;
-        app.workspace_store = Some(store);
-        app.workspace_snapshot = Some(snapshot);
-        app.workspace_sync_requested = true;
-        app.agents
-            .insert(crate::app::agent::AgentId(0), eligible_agent());
-        let effects = drain(&mut app);
-        assert!(matches!(
-            effects.as_slice(),
-            [Effect::UpsertWorkspaceMembers { members, .. }] if members.len() == 1
-        ));
-        assert!(app.workspace_store.is_none());
-        assert!(app.workspace_write_in_flight);
-        assert!(!app.workspace_sync_requested);
-    }
-    #[test]
-    fn drain_skips_metadata_already_in_snapshot() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut store =
-            xai_grok_dashboard_store::WorkspaceStore::open(&temp.path().join("workspace.db"))
-                .unwrap();
-        let agent = eligible_agent();
-        store
-            .insert_member(agent_to_new_member(&agent).unwrap())
-            .unwrap();
-        let snapshot = store.snapshot().unwrap();
-        let mut app = crate::app::app_view::tests::test_app();
-        app.workspace_dashboard_enabled = true;
-        app.workspace_store = Some(store);
-        app.workspace_snapshot = Some(snapshot);
-        app.workspace_sync_requested = true;
-        app.agents.insert(crate::app::agent::AgentId(0), agent);
-        assert!(drain(&mut app).is_empty());
-        assert!(app.workspace_store.is_some());
-        assert!(!app.workspace_write_in_flight);
-    }
-    #[test]
-    fn drain_keeps_request_while_write_owns_store() {
-        let temp = tempfile::tempdir().unwrap();
-        let store =
-            xai_grok_dashboard_store::WorkspaceStore::open(&temp.path().join("workspace.db"))
-                .unwrap();
-        let snapshot = store.snapshot().unwrap();
-        let mut app = crate::app::app_view::tests::test_app();
-        app.workspace_dashboard_enabled = true;
-        app.workspace_snapshot = Some(snapshot);
-        app.workspace_write_in_flight = true;
-        app.workspace_sync_requested = true;
-        assert!(drain(&mut app).is_empty());
-        assert!(app.workspace_sync_requested);
-    }
-    #[test]
-    fn drain_suppresses_identical_failed_metadata_until_it_changes() {
-        let temp = tempfile::tempdir().unwrap();
-        let store =
-            xai_grok_dashboard_store::WorkspaceStore::open(&temp.path().join("workspace.db"))
-                .unwrap();
-        let snapshot = store.snapshot().unwrap();
-        let agent = eligible_agent();
-        let failed = agent_to_new_member(&agent).unwrap();
-        let mut app = crate::app::app_view::tests::test_app();
-        app.workspace_dashboard_enabled = true;
-        app.workspace_store = Some(store);
-        app.workspace_snapshot = Some(snapshot);
-        app.workspace_sync_requested = true;
-        app.workspace_failed_metadata
-            .insert(failed.key.session_id, failed.metadata);
-        app.agents.insert(crate::app::agent::AgentId(0), agent);
-        assert!(drain(&mut app).is_empty());
-        app.agents
-            .get_mut(&crate::app::agent::AgentId(0))
-            .unwrap()
-            .display_name = Some("Changed".into());
-        app.workspace_sync_requested = true;
-        assert!(matches!(
-            drain(&mut app).as_slice(),
-            [Effect::UpsertWorkspaceMembers { members, .. }] if members.len() == 1
-        ));
-    }
-    #[test]
-    fn local_reinsert_preserves_existing_remote_origin() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut store =
-            xai_grok_dashboard_store::WorkspaceStore::open(&temp.path().join("workspace.db"))
-                .unwrap();
-        let agent = eligible_agent();
-        let mut remote = agent_to_new_member(&agent).unwrap();
-        remote.origin = MemberOrigin::Remote;
-        store.insert_member(remote).unwrap();
-        store
-            .insert_member(agent_to_new_member(&agent).unwrap())
-            .unwrap();
-        let snapshot = store.snapshot().unwrap();
-        assert!(matches!(snapshot.members[0].origin, MemberOrigin::Remote));
-    }
-    #[test]
-    fn drain_caps_live_candidates_to_workspace_capacity() {
-        let temp = tempfile::tempdir().unwrap();
-        let store =
-            xai_grok_dashboard_store::WorkspaceStore::open(&temp.path().join("workspace.db"))
-                .unwrap();
-        let snapshot = store.snapshot().unwrap();
-        let mut app = crate::app::app_view::tests::test_app();
-        app.workspace_dashboard_enabled = true;
-        app.workspace_store = Some(store);
-        app.workspace_snapshot = Some(snapshot);
-        app.workspace_sync_requested = true;
-        for index in 0..=WORKSPACE_CAPACITY {
-            let mut agent = eligible_agent();
-            agent.session.session_id = Some(acp::SessionId::new(format!("saved-{index}")));
-            app.agents.insert(crate::app::agent::AgentId(index), agent);
-        }
-        let effects = drain(&mut app);
-        assert!(matches!(
-            effects.as_slice(),
-            [Effect::UpsertWorkspaceMembers { members, .. }]
-                if members.len() == WORKSPACE_CAPACITY
-        ));
-    }
-    #[test]
-    fn drain_reserves_capacity_for_pinned_non_candidates() {
-        let temp = tempfile::tempdir().unwrap();
-        let store =
-            xai_grok_dashboard_store::WorkspaceStore::open(&temp.path().join("workspace.db"))
-                .unwrap();
-        let mut stored = Vec::new();
-        for index in 0..(WORKSPACE_CAPACITY - 2) {
-            stored.push(Member {
-                session_id: SessionId::new(format!("pinned-{index}")).unwrap(),
-                kind: MemberKind::Build,
-                origin: MemberOrigin::Local,
-                cwd: Some("/tmp/pinned".into()),
-                title: None,
-                model: None,
-                last_turn_summary: None,
-                is_worktree: false,
-                last_change_unix_ms: 1,
-                pin_rank: Some(index as i64),
-                order_rank: None,
-            });
-        }
-        stored.push(Member {
-            session_id: SessionId::new("live-0").unwrap(),
-            kind: MemberKind::Conversation,
-            origin: MemberOrigin::Local,
-            cwd: None,
-            title: None,
-            model: None,
-            last_turn_summary: None,
-            is_worktree: false,
-            last_change_unix_ms: 1,
-            pin_rank: Some(i64::MAX),
-            order_rank: None,
-        });
-        let snapshot = xai_grok_dashboard_store::WorkspaceSnapshot {
-            grouping: xai_grok_dashboard_store::Grouping::State,
-            members: stored,
-            data_version: 1,
-        };
-        let mut app = crate::app::app_view::tests::test_app();
-        app.workspace_dashboard_enabled = true;
-        app.workspace_store = Some(store);
-        app.workspace_snapshot = Some(snapshot);
-        app.workspace_sync_requested = true;
-        for index in 0..2 {
-            let mut agent = eligible_agent();
-            agent.session.session_id = Some(acp::SessionId::new(format!("live-{index}")));
-            app.agents.insert(crate::app::agent::AgentId(index), agent);
-        }
-        let effects = drain(&mut app);
-        assert!(matches!(
-            effects.as_slice(),
-            [Effect::UpsertWorkspaceMembers { members, .. }] if members.len() == 1
-        ));
     }
 }

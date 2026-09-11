@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use url::Url;
 use xai_grok_diag_server::{self as diag_server, DiagHandle, ErrorClass};
-use xai_grok_workspace::config::merge_session_metadata;
+use xai_grok_workspace::config::{merge_host_identity_metadata, merge_session_metadata};
 use xai_grok_workspace::error::WorkspaceError;
 use xai_grok_workspace_daemon::daemonize;
 use xai_grok_workspace_daemon::preview_supervisor::{
@@ -393,7 +393,15 @@ async fn run(
         ),
         None => None,
     };
-    let metadata = merge_session_metadata(parsed_metadata, session_id);
+    let host_kind = if session_id.as_deref().is_some_and(|s| !s.is_empty()) {
+        xai_tool_protocol::HOST_KIND_SANDBOX
+    } else {
+        xai_tool_protocol::HOST_KIND_DAEMON
+    };
+    let metadata = merge_host_identity_metadata(
+        merge_session_metadata(parsed_metadata, session_id),
+        host_kind,
+    );
     let launch_id = metadata
         .as_ref()
         .and_then(|v| v.get("launch_id"))

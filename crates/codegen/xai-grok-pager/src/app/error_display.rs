@@ -180,14 +180,8 @@ fn classified_retry_headline(
     }
 }
 
-/// Format a terminal request / API error for the TUI.
-///
-/// `status` is preferred when the caller already parsed it (ACP `http_status` field).
 /// Otherwise the status is recovered from the message text.
-///
-/// Shape: `Headline (code): optional why. What to do.`
 /// Server text is kept only when it adds information.
-/// It is dropped for server faults (5xx bodies are internal detail like "upstream exploded") and when it echoes the headline.
 /// A status-level next step is always kept when we have one.
 pub(crate) fn format_request_failure(
     status: Option<u16>,
@@ -244,8 +238,9 @@ pub(crate) fn format_request_failure_with_locale(
     }
 }
 
-/// Whether a fully untyped raw is `SamplingError::MaxTokensTruncation`'s
-/// flattened text. A present-but-unknown typed error is never reclassified.
+/// A present-but-unknown error type is a newer shell's kind and is never reclassified.
+/// TODO: error-kind-fallback-removal — this recovery is a version shim for terminals that predate the typed `errorKind`/`error_kind` fields.
+/// It is also the only truncation classifier for the exhausted-retry path, which passes no error type at all.
 fn truncation_recovered_from_untyped_raw(error_type: Option<WireErrorType>, raw: &str) -> bool {
     error_type.is_none()
         && parse_http_status(raw).is_none()

@@ -1,6 +1,6 @@
 //! The single refresh owner: every managed-config fetch and apply is driven from here.
 
-use crate::auth::GrokAuth;
+use xai_grok_login::GrokAuth;
 
 use super::ManagedConfigError;
 use super::response::{
@@ -29,7 +29,7 @@ impl SyncBudget {
             Self::Standard => None,
             Self::Revalidate => Some(REVALIDATE_DEADLINE),
             Self::Login => Some(std::time::Duration::from_secs(15)),
-            Self::SessionStart => Some(std::time::Duration::from_secs(8)),
+            Self::SessionStart => Some(SESSION_START_SYNC_DEADLINE),
         }
     }
 }
@@ -37,7 +37,9 @@ impl SyncBudget {
 const REVALIDATE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Bounds the pre-fetch `auth()` wait; on timeout the sync proceeds with no refreshed override.
-const SESSION_START_AUTH_DEADLINE: std::time::Duration = std::time::Duration::from_secs(8);
+pub const SESSION_START_AUTH_DEADLINE: std::time::Duration = std::time::Duration::from_secs(8);
+
+pub const SESSION_START_SYNC_DEADLINE: std::time::Duration = std::time::Duration::from_secs(8);
 
 /// Base 1s; `GROK_DEPLOYMENT_CONFIG_BACKOFF_MS` overrides it for tests.
 fn retry_backoff(attempt: u32) -> std::time::Duration {
@@ -195,7 +197,7 @@ pub(super) static REFRESH_SUPERVISOR: std::sync::Mutex<Option<ManagedConfigRefre
     std::sync::Mutex::new(None);
 
 /// The one place a managed-config refresh can be scheduled; called per boot, post-gate.
-pub fn start_refresh_supervisor(auth_manager: &std::sync::Arc<crate::auth::AuthManager>) {
+pub fn start_refresh_supervisor(auth_manager: &std::sync::Arc<xai_grok_login::AuthManager>) {
     // Every boot: a respawn after a contended logout cleanup must not serve the prior team.
     store::clear_orphan();
     let auth_manager = auth_manager.clone();
@@ -225,7 +227,7 @@ pub fn take_refresh_supervisor() -> Option<ManagedConfigRefresher> {
 
 pub fn spawn_refresh_supervisor(
     cancel: &tokio_util::sync::CancellationToken,
-    auth_manager: std::sync::Arc<crate::auth::AuthManager>,
+    auth_manager: std::sync::Arc<xai_grok_login::AuthManager>,
 ) -> ManagedConfigRefresher {
     ManagedConfigRefresher::spawn(cancel, async move {
         revalidate_stale_start(auth_manager).await;
@@ -255,7 +257,7 @@ pub fn spawn_refresh_supervisor(
     })
 }
 
-async fn revalidate_stale_start(auth_manager: std::sync::Arc<crate::auth::AuthManager>) {
+async fn revalidate_stale_start(auth_manager: std::sync::Arc<xai_grok_login::AuthManager>) {
     if !store::is_fetch_enabled() {
         return;
     }
@@ -501,7 +503,7 @@ fn policy_repair_pending_from(
 
 /// A usable cache serves the start; only an unusable-for-identity cache blocks (bounded).
 pub async fn ensure_managed_policy_present(
-    auth_manager: &std::sync::Arc<crate::auth::AuthManager>,
+    auth_manager: &std::sync::Arc<xai_grok_login::AuthManager>,
 ) {
     xai_grok_telemetry::startup::enter(xai_grok_telemetry::startup::StartupPhase::ManagedPolicy);
     let has_deployment_key = store::resolve_deployment_key().is_some();
@@ -516,13 +518,19 @@ pub async fn ensure_managed_policy_present(
     if !policy_repair_pending_from(has_deployment_key, &signed_in_team) {
         return;
     }
-    let team = refreshed_team_principal(auth_manager).await;
+    let team = {
+        let mut timer = crate::instrumentation_timer!("startup.managed_policy.auth_wait");
+        timer.with_subphase(xai_grok_telemetry::startup::Subphase::ManagedPolicyAuthWait);
+        refreshed_team_principal(auth_manager).await
+    };
     if !store::has_principal() {
         return;
     }
     if !crate::config::is_managed_config_hard_stale_for(&store::current_serving_identity()) {
         return;
     }
+    let mut timer = crate::instrumentation_timer!("startup.managed_policy.config_sync");
+    timer.with_subphase(xai_grok_telemetry::startup::Subphase::ManagedPolicyConfigSync);
     match sync_bounded(SyncBudget::SessionStart, team).await {
         Some(Ok(_)) => {}
         Some(Err(e)) => tracing::warn!("session-start managed policy refresh failed: {e}"),
@@ -533,7 +541,7 @@ pub async fn ensure_managed_policy_present(
 /// The deadline bounds only the WAIT: `auth()` runs on its own task, so a token rotated
 /// near the bound (or under a cancelled caller) still persists to disk.
 async fn refreshed_team_principal(
-    auth_manager: &std::sync::Arc<crate::auth::AuthManager>,
+    auth_manager: &std::sync::Arc<xai_grok_login::AuthManager>,
 ) -> Option<GrokAuth> {
     let refresh = tokio::spawn({
         let auth_manager = auth_manager.clone();

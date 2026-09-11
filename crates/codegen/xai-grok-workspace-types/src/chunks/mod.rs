@@ -23,15 +23,21 @@ pub use tool::{ToolChunk, ToolResponse};
 use serde::{Deserialize, Serialize};
 
 /// Static discriminator for every variant across [`ToolChunk`], [`OpsChunk`], and [`SessionChunk`].
-///
-/// Used as the `got` field of [`crate::WorkspaceError::ProtocolMismatch`].
-/// Each chunk enum exposes a `kind() -> ChunkKind` method that returns its current variant's discriminator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Used as `got` on [`crate::WorkspaceError::ProtocolMismatch`]; each chunk enum's `kind()` returns it.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    strum::AsRefStr,
+    strum::IntoStaticStr,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ChunkKind {
-    // ------------------------------------------------------------------
-    // ToolChunk variants
-    // ------------------------------------------------------------------
     /// `ToolChunk::Output`
     ToolOutput,
     /// `ToolChunk::Progress`
@@ -47,9 +53,6 @@ pub enum ChunkKind {
     /// `ToolChunk::NeedPlanModeChange`
     NeedPlanModeChange,
 
-    // ------------------------------------------------------------------
-    // OpsChunk variants
-    // ------------------------------------------------------------------
     /// `OpsChunk::GitStatus`
     GitStatus,
     /// `OpsChunk::GitDiff`
@@ -85,9 +88,6 @@ pub enum ChunkKind {
     /// `OpsChunk::RipgrepDone`
     RipgrepDone,
 
-    // ------------------------------------------------------------------
-    // SessionChunk variants
-    // ------------------------------------------------------------------
     /// `SessionChunk::SessionId`
     SessionId,
     /// `SessionChunk::SessionInfo`
@@ -101,51 +101,8 @@ pub enum ChunkKind {
 }
 
 impl ChunkKind {
-    /// Stable static name (used for error messages).
-    ///
-    /// Implemented as an exhaustive `match` so adding a new variant fails compilation here.
-    /// The array returned by [`Self::all`] depends on this property to stay in sync with the enum.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::ToolOutput => "ToolOutput",
-            Self::ToolProgress => "ToolProgress",
-            Self::ToolFinal => "ToolFinal",
-            Self::ToolDefinitions => "ToolDefinitions",
-            Self::NeedPermission => "NeedPermission",
-            Self::NeedUserAnswer => "NeedUserAnswer",
-            Self::NeedPlanModeChange => "NeedPlanModeChange",
-
-            Self::GitStatus => "GitStatus",
-            Self::GitDiff => "GitDiff",
-            Self::GitBranchInfo => "GitBranchInfo",
-            Self::GitMetadata => "GitMetadata",
-            Self::Hunks => "Hunks",
-            Self::Skills => "Skills",
-            Self::Plugins => "Plugins",
-            Self::ProjectConfig => "ProjectConfig",
-            Self::Permissions => "Permissions",
-            Self::Envrc => "Envrc",
-            Self::ResolvedFiles => "ResolvedFiles",
-            Self::MemoryChunks => "MemoryChunks",
-            Self::Plugin => "Plugin",
-            Self::Ack => "Ack",
-            Self::FuzzyMatch => "FuzzyMatch",
-            Self::RipgrepHit => "RipgrepHit",
-            Self::RipgrepDone => "RipgrepDone",
-
-            Self::SessionId => "SessionId",
-            Self::SessionInfo => "SessionInfo",
-            Self::RewindResult => "RewindResult",
-            Self::RewindPoints => "RewindPoints",
-            Self::SessionAck => "SessionAck",
-        }
-    }
-
-    /// Every variant of [`ChunkKind`], in declaration order.
-    ///
-    /// Pairs with [`Self::assert_exhaustive`].
-    /// The test below uses an exhaustive `match` to fail compilation if a new variant is added without also being added to this array.
-    /// The two together guarantee the array is exhaustive and unique-by-construction.
+    /// Every variant of [`ChunkKind`], in declaration order. Pairs with [`Self::assert_exhaustive`].
+    /// The test's exhaustive `match` fails compilation if a new variant is missing here, so the array stays exhaustive and unique.
     pub const fn all() -> &'static [Self] {
         &[
             Self::ToolOutput,
@@ -183,7 +140,7 @@ impl ChunkKind {
 
 impl std::fmt::Display for ChunkKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
+        f.write_str(self.as_ref())
     }
 }
 
@@ -245,18 +202,18 @@ mod tests {
 
     #[test]
     fn discriminator_strings_are_unique_globally() {
-        let names: HashSet<&str> = ChunkKind::all().iter().map(|k| k.as_str()).collect();
+        let names: HashSet<&str> = ChunkKind::all().iter().map(|k| k.as_ref()).collect();
         assert_eq!(
             names.len(),
             ChunkKind::all().len(),
-            "duplicate ChunkKind::as_str() values"
+            "duplicate ChunkKind discriminator values"
         );
     }
 
     #[test]
     fn display_matches_as_str() {
         for kind in ChunkKind::all() {
-            assert_eq!(kind.to_string(), kind.as_str());
+            assert_eq!(kind.to_string(), kind.as_ref());
         }
     }
 }

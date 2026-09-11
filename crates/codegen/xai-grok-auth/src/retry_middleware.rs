@@ -9,10 +9,9 @@ use reqwest_middleware::{Error, Middleware, Next};
 use crate::AuthCredentialProvider;
 use crate::bearer_fragment::bearer_suffix;
 
-/// Tail fragment of the bearer this middleware stamped, recorded into the request's `http::Extensions` at stamp time.
-/// 401-attribution sites read it back via [`execute_with_stamp`]; re-resolving at record time races with the refresh the 401 itself triggers.
-/// Absent means nothing was stamped; a retry overwrites it, so it always describes the attempt whose response the caller holds.
-/// Only the tail is stored: JWT heads are a shared constant, and the tail is safe for sinks to log.
+/// Tail fragment of the bearer this middleware stamped, recorded into request extensions at stamp time.
+/// 401-attribution reads it back; re-resolving at record time races the refresh the 401 itself triggers.
+/// Only the tail is stored: JWT heads are a shared constant, and the tail is safe to log.
 #[derive(Clone, Debug)]
 pub struct StampedBearerSuffix(pub String);
 
@@ -76,6 +75,7 @@ impl Middleware for AuthRetryMiddleware {
             return Ok(resp);
         };
 
+        let _retry_span = tracing::info_span!("auth.retry_401");
         let mut last_resp = resp;
         for _ in 0..self.max_retries {
             if !self.credentials.refresh_after_unauthorized().await {

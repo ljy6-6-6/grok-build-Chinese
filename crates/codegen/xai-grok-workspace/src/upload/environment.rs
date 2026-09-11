@@ -85,9 +85,7 @@ impl From<xai_computer_hub_sdk::AuthIdentity> for WorkspaceIdentity {
 }
 
 /// On-disk `workspace_environment.json` record.
-///
-/// Every field is always serialized (no `skip_serializing_if`) so the artifact presents a stable, fully-populated schema to consumers.
-/// Absent values are emitted as JSON `null`.
+/// Every field is always serialized so the artifact schema stays stable; absent values are JSON `null`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceEnvironment {
     /// Schema version of this record (always [`SCHEMA_VERSION`]).

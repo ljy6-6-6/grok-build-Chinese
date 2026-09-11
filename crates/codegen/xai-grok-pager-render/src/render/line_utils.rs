@@ -59,10 +59,7 @@ pub fn truncate_str(s: &str, max_width: usize) -> String {
     crate::util::truncate_to_width(s, max_width).into_owned()
 }
 
-/// Truncate a styled `Line` (multiple spans) to fit within `max_width` display columns.
-///
-/// The span where the budget runs out is truncated and a `…` is appended in the style of the last surviving span; later spans are dropped.
-/// Returns the line unchanged if it already fits.
+/// Truncate on the span where the budget runs out and append `…` in that span's style. Unchanged if it already fits.
 pub fn truncate_line(line: Line<'static>, max_width: usize) -> Line<'static> {
     if max_width == 0 {
         return Line::from(vec![]);
@@ -102,15 +99,8 @@ pub fn truncate_line(line: Line<'static>, max_width: usize) -> Line<'static> {
     Line::from(out)
 }
 
-/// Clip or pad a styled `Line` to exactly `width` display columns.
-///
-/// Wider lines are clipped on grapheme boundaries with no ellipsis; a multi-`char` grapheme like `⚠\u{FE0F}` is never split.
-/// Narrower lines are padded with trailing spaces, so the app writes a real cell in every column.
-/// A terminal drawing a glyph wider than the app measured then cannot strand a stale cell past the row.
-/// Such stale cells showed up as ghost glyphs beside markdown tables.
-/// Width uses [`UnicodeWidthStr`], matching the table layout.
-///
-/// `width` must be a bounded display width: the pad branch allocates `width - total` spaces.
+/// Clip on grapheme boundaries (no ellipsis) or pad with spaces so every column is a real cell.
+/// Otherwise a wider glyph strands a stale cell (ghost glyphs beside tables). `width` must be bounded: the pad allocates `width - total` spaces.
 pub fn fit_line_to_width<'a>(line: Line<'a>, width: usize) -> Line<'a> {
     let total: usize = line.spans.iter().map(|s| s.content.width()).sum();
     if total == width {
@@ -180,13 +170,7 @@ fn take_width(s: &str, n: usize) -> String {
     s[..byte_offset_at_width(s, n)].to_string()
 }
 
-/// Cascade-truncate multiple text elements to fit within `avail` display columns.
-///
-/// Returns `(type, description, activity, meta)` truncated to fit.
-/// Priority (highest first): type, activity, meta.
-/// Description is truncated first.
-/// If the combined width of type, activity, and meta reaches `avail`, the description is dropped entirely.
-/// The rest cascade: meta is dropped first, then activity is truncated, then type.
+/// Fit `(type, description, activity, meta)` in `avail`. Drop description first, then meta, then truncate activity, then type.
 pub fn cascade_truncate(
     avail: usize,
     type_text: &str,

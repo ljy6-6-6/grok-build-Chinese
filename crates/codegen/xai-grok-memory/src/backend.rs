@@ -118,7 +118,6 @@ impl EndpointScopedCredentials {
 }
 
 /// All configuration needed to build a fully-wired [`MemoryBackendImpl`] for a live session.
-///
 /// Grouping these in one struct makes every call site (ToolBridge, first-turn injection, post-compaction recovery) share identical config.
 /// Separately wired paths used to fall back to FTS-only search and ignore `[memory.search]` config because no one place applied all builder methods.
 #[derive(Clone)]
@@ -196,7 +195,6 @@ async fn build_embedding_provider(
 }
 
 /// `MemoryBackend` implementation backed by hybrid search (FTS5 + vector KNN).
-///
 /// Stores only `Send + Sync` config data.
 /// The `MemoryIndex` and `EmbeddingProvider` are constructed on demand per query.
 pub struct MemoryBackendImpl {
@@ -770,7 +768,6 @@ mod factory_tests {
     }
 
     /// Watcher startup telemetry reflects actual runtime state.
-    ///
     /// `watcher.is_some()` is `true` only when the watcher started successfully.
     /// Telemetry's `watcher_started` must reflect runtime outcome, not configuration intent.
     #[test]
@@ -951,14 +948,8 @@ mod factory_tests {
     }
 
     /// `ensure_initialized` must be called before watcher startup.
-    ///
     /// On a first-use machine the memory directories do not exist yet.
     /// `MemoryFileWatcher::start` on a non-existent directory returns `None`, silently dropping the feature.
-    /// After `ensure_initialized()` the directories exist and the watcher can start.
-    ///
-    /// This mirrors the ordering enforced in `spawn_session_actor`:
-    ///   1. `storage.ensure_initialized()`
-    ///   2. `MemoryFileWatcher::start(storage.global_dir())`
     #[test]
     fn test_ensure_initialized_before_watcher_ordering() {
         let tmp = TempDir::new().unwrap();
@@ -1015,15 +1006,7 @@ mod factory_tests {
     }
 
     /// End-to-end regression test for the watcher-driven delete path.
-    ///
-    /// Tests the full chain:
-    ///   1. file is indexed
-    ///   2. watcher is started
-    ///   3. first `backend.search()` confirms content is found
-    ///   4. file is deleted (OS fires a Remove event to the watcher)
-    ///   5. second `backend.search()` triggers sync-on-search, which calls `delete_path()` because the file no longer exists
-    ///   6. content is no longer returned
-    ///
+    /// file is indexed; watcher is started; first `backend.search()` confirms content is found; file is deleted (OS fires a Remove event to the watcher); second `backend.search()` triggers sync-on-search, which calls `delete_path()` because the file no longer exists; content is no longer returned.
     /// This test guards the branch that calls `delete_path()` when `file.exists()` is false, which the `delete_path` unit tests alone cannot see.
     #[tokio::test]
     async fn test_watcher_delete_clears_stale_chunks() {
@@ -1039,7 +1022,6 @@ mod factory_tests {
         let db_path = storage.workspace_dir().join("index.sqlite");
 
         // Step 1: Write and canonicalize the file path BEFORE indexing
-        //
         // On macOS, TempDir paths may live under /private/tmp (via a symlink from /tmp)
         // FSEvents returns canonicalized paths, so the path stored in the index must match what the watcher event delivers
         let file_raw = global.join("note.md");
@@ -1416,7 +1398,6 @@ mod tests {
     }
 
     /// The supplemental evergreen query in `search()` adds global/workspace candidates that the base `search_fts` missed due to candidate_limit.
-    ///
     /// With a tight FTS limit, global/workspace chunks are absent from the base results but present in the supplemental source-filtered query.
     /// The full backend search pipeline must then surface them.
     #[tokio::test]

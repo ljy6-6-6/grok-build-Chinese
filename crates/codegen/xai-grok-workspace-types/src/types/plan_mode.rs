@@ -12,9 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Direction of a plan-mode transition the tool wants to make.
-///
-/// Tagged with `tag = "type", content = "data"` (adjacent tagging) to match every other wire enum in the crate.
-/// See `crate::lib` doc-comment "# Wire format" for the rationale.
+/// Adjacent tagging matches every other wire enum; see "# Wire format".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum PlanModeTransition {
@@ -34,15 +32,8 @@ pub enum PlanModeTransition {
     },
 }
 
-/// User's decision on a proposed plan-mode transition.
-///
-/// `Defer` is distinct from `Reject`: it means "not right now" rather than "no".
-/// `Defer` fits when the user wants to gather more context before approving (e.g. read additional files first); the model may re-propose later.
-///
-/// Tagged with `tag = "type", content = "data"` (adjacent tagging) to match every other wire enum in the crate.
-/// See `crate::lib` doc-comment "# Wire format" for the rationale.
-/// Adjacent tagging is the only form that works uniformly across struct, newtype, and unit variants.
-/// It avoids the historical `{"decision":{"decision":"approve"}}` nesting hazard when this enum is itself the value of a parent's `decision` field.
+/// User's decision on a proposed plan-mode transition. `Defer` is "not right now", not `Reject`; the model may re-propose.
+/// Adjacent tagging is uniform across variant shapes and avoids the nested-`decision` hazard.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum PlanModeDecision {

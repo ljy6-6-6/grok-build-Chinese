@@ -110,10 +110,7 @@ pub fn hyperlink_capabilities(brand: TerminalName) -> HyperlinkCapabilities {
             native_link_hover: false,
             native_plain_url_open: false,
         },
-        // The VS Code integrated terminal has supported OSC 8 since v1.72
-        // VS Code-family embeds inherit the same terminal renderer (xterm.js)
-        // Zed implements OSC 8 with similar capabilities
-        // All of these handle link hover styling natively
+        // VS Code-family embeds share xterm.js OSC 8 (since v1.72); Zed does too. Hover styling is native.
         TerminalName::VsCode
         | TerminalName::Cursor
         | TerminalName::Windsurf
@@ -187,10 +184,7 @@ pub fn hyperlink_capabilities(brand: TerminalName) -> HyperlinkCapabilities {
 //
 // These wrap raw OSC 22 sequences as crossterm `Command`s so call sites can use `crossterm::execute!` / `queue!` instead of manual byte writes
 
-/// OSC 22: set the mouse pointer to the "pointer" (hand) shape.
-///
-/// Supported by iTerm2, Ghostty, and Kitty.
-/// Silently ignored by terminals that don't understand OSC 22.
+/// OSC 22 hand cursor. iTerm2, Ghostty, and Kitty honor it; others ignore it silently.
 pub struct SetPointerCursor;
 
 impl crossterm::Command for SetPointerCursor {

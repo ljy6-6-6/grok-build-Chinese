@@ -87,6 +87,7 @@ impl xai_tool_runtime::Tool for WebSearchTool {
             client = res.require::<WebSearchClient>()?.clone();
         }
 
+        let query_span = tracing::info_span!("web_search.query");
         let (content, citations) = client
             .search(&input.query, input.allowed_domains.clone())
             .await
@@ -96,6 +97,7 @@ impl xai_tool_runtime::Tool for WebSearchTool {
                     e.to_string(),
                 )
             })?;
+        drop(query_span);
 
         Ok(WebSearchOutput {
             query: input.query.clone(),

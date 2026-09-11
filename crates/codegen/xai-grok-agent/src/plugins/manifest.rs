@@ -78,10 +78,8 @@ fn is_path_contained(resolved: &Path, plugin_root: &Path) -> bool {
 }
 
 /// Resolve a plugin component path (hooks, MCP, LSP) from a manifest field.
-///
-/// If the field is `Path(p)`, resolves relative to plugin root with containment check.
-/// If `Inline(_)`, returns `None` (caller reads inline value directly).
-/// If `None`, checks for `default_file` at the plugin root.
+/// `Path` resolves relative to the plugin root with a containment check.
+/// `Inline` returns `None`; `None` checks for `default_file` at the plugin root.
 fn resolve_component_path(
     field: &Option<PathOrInline>,
     plugin_root: &Path,

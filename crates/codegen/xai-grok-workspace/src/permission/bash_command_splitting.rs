@@ -26,10 +26,8 @@ impl PlainCommand {
     }
 
     /// Whether this command's highlighted span covers the entire script (ignoring surrounding whitespace).
-    /// Only then can the dequoted word join stand in for the raw script string.
-    /// A leading `FOO=…` assignment or a chained sibling would otherwise be silently dropped from the compare.
-    /// That would let an env-injected or extended script match a narrower grant.
-    /// `get` keeps a mismatched or shorter `script` panic-safe; `false` is the conservative answer for one.
+    /// Only then can the dequoted word join stand in for the raw script; a dropped assignment or sibling would let a wider script match a narrower grant.
+    /// A mismatched or shorter `script` is panic-safe and answers `false`.
     pub(crate) fn spans_whole_script(&self, script: &str) -> bool {
         let (Some(before), Some(after)) =
             (script.get(..self.span_start), script.get(self.span_end..))
@@ -50,10 +48,8 @@ pub fn try_parse_shell(src: &str) -> Option<Tree> {
     parser.parse(src, old_tree)
 }
 
-/// Parse a script which may contain multiple simple commands joined only by the safe logical/pipe/sequencing operators: `&&`, `||`, `;`, `|`.
-///
-/// Returns `Some(Vec<PlainCommand>)` only when every command is a plain word-only command.
-/// Disallowed constructs (parentheses, redirections, substitutions, control flow, etc.) return `None`.
+/// Parse a script of plain word-only commands joined only by `&&`, `||`, `;`, `|`.
+/// Returns `Some` only when every command is word-only; parentheses, redirections, substitutions, and control flow return `None`.
 pub fn try_parse_word_only_commands_sequence(tree: &Tree, src: &str) -> Option<Vec<PlainCommand>> {
     if tree.root_node().has_error() {
         return None;
@@ -82,11 +78,8 @@ pub fn try_parse_word_only_commands_sequence(tree: &Tree, src: &str) -> Option<V
         "file_descriptor",
         // Comments never execute.
         "comment",
-        // Heredoc bodies are stdin data to the (separately classified) head command, not shell-executed text
-        // An unquoted body exposes `$(...)`/`${...}` as named child nodes outside this allowlist, so substitution smuggling still fails the parse
-        // A `> file` on the same statement stays visible to the write model as a file_redirect
-        // `declaration_command` (`export K=V`) is deliberately ABSENT
-        // It is not a `command` node, so ask-mode segment evaluation (which has no env guard) would never see a PATH/LD_PRELOAD hijack
+        // Heredoc bodies are stdin to the head command, not executed text; unquoted `$(...)` still fails this allowlist, and a same-statement `> file` stays a file_redirect
+        // `declaration_command` (`export K=V`) is deliberately absent: it is not a `command` node, so ask-mode segment evaluation (no env guard) would miss a PATH/LD_PRELOAD hijack
         "heredoc_redirect",
         "heredoc_start",
         "heredoc_body",
@@ -836,10 +829,7 @@ fn strip_builtin_prefix(cmd: &[String]) -> TransparentStrip<'_> {
     }
 }
 
-/// Simple shell-like splitter that:
-/// - splits on whitespace (outside of quotes)
-/// - handles single and double quotes, removing the quotes
-/// - handles backslash escapes in a basic way
+/// Split on unquoted whitespace, stripping quotes and applying basic backslash escapes.
 fn sh_split_simple(s: &str) -> Vec<String> {
     let mut result = Vec::new();
     let mut current = String::new();
@@ -878,29 +868,13 @@ fn sh_split_simple(s: &str) -> Vec<String> {
     result
 }
 
-/// Given a bash *script string* like:
-///
-/// ```bash
-/// XAI_API_KEY='xai-some-key' cargo run --bin xai-grok-pager
-/// ```
-///
-/// returns the first "important" command as a `BashCommandHighlights` where:
-/// - `prefix`: tokens before the highlighted command (env assignments, setup commands, operators)
-/// - `highlighted_words`: the main command and args
-/// - `suffix`: tokens after the highlighted command.
-///
-/// For the above example:
-///   prefix: ["XAI_API_KEY=xai-some-key"]
-///   highlighted_words: ["cargo", "run", "--bin", "xai-grok-pager"]
-///   suffix: []
+/// Split a bash script into the first important command: `prefix` (assignments/setup), `highlighted_words` (main command and args), and `suffix`.
 pub fn primary_command_from_script(script: &str) -> Option<BashCommandHighlights> {
     let tree = try_parse_shell(script)?;
     let commands = try_parse_word_only_commands_sequence(&tree, script)?;
 
-    // Peel wrappers before the setup check and before choosing the highlight
-    // Enforcement matches grants against wrapper-peeled words (`evaluate_bash` calls `unwrap_wrappers`)
-    // An "Always allow" saved from unpeeled words (`env FOO=1 …`) could never match
-    // Peeling first also gives a script that is only `timeout 30 cargo test` a primary command, so its prompt keeps the always-allow rows
+    // Peel wrappers before the setup check and highlight: grants match peeled words, so an unpeeled "Always allow" (`env FOO=1 …`) could never match
+    // Peeling first also gives a wrapper-only script (`timeout 30 cargo test`) a primary command, so the prompt keeps the always-allow rows
     let primary = commands.into_iter().find_map(|c| {
         let peeled = unwrap_wrappers(&c.words);
         if peeled.is_empty() || is_setup_command(peeled) {
@@ -1064,15 +1038,9 @@ fn is_payload_node_kind(kind: &str) -> bool {
     PAYLOAD_NODE_KINDS.contains(&kind)
 }
 
-/// Byte offsets into `script` **after** real shell list/pipeline operators where a display soft-wrap is safe.
-///
-/// Uses tree-sitter-bash so `&&` / `||` / `|` / `;` that appear only inside strings, heredoc bodies, or comments are **not** returned.
-/// The command-line operator in `cat <<EOF && echo after` **is** returned (it is a real `list` operator); the body's `foo && bar` is not.
-///
-/// Returns an empty vec when the script cannot be parsed at all (caller should fall back to width-only word-wrap, not naive substring splits).
-///
-/// Offsets are sorted ascending and de-duplicated.
-/// Each offset is `operator_node.end_byte()`, i.e. the split keeps the operator on the preceding display row.
+/// Byte offsets after real list/pipeline operators where a display soft-wrap is safe.
+/// Tree-sitter excludes operators that appear only inside strings, heredoc bodies, or comments; unparseable scripts return empty so the caller width-wraps instead of substring-splitting.
+/// Offsets are sorted, de-duplicated `operator_node.end_byte()` values so the operator stays on the preceding row.
 pub fn soft_break_offsets_after_operators(script: &str) -> Vec<usize> {
     let Some(tree) = try_parse_shell(script) else {
         return Vec::new();
@@ -1117,12 +1085,8 @@ pub fn soft_break_offsets_after_operators(script: &str) -> Vec<usize> {
     breaks
 }
 
-/// Byte ranges of heredoc *payload* (body / content), not the `<<WORD` opener on the command line.
-///
-/// Used by the permission overlay so physical lines that are pure heredoc body text are **not** soft-wrapped at spaces.
-/// They are free-form payload, not shell syntax.
-/// Returns an empty vec when the script cannot be parsed or the tree has errors.
-/// Same policy as [`soft_break_offsets_after_operators`]: error recovery can invent bogus heredoc spans.
+/// Byte ranges of heredoc payload, not the `<<WORD` opener, so the overlay does not soft-wrap free-form body text at spaces.
+/// Empty when the script cannot be parsed or the tree has errors: recovery can invent bogus spans, same policy as [`soft_break_offsets_after_operators`].
 pub fn heredoc_payload_byte_ranges(script: &str) -> Vec<(usize, usize)> {
     let Some(tree) = try_parse_shell(script) else {
         return Vec::new();

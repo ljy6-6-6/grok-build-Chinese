@@ -14,11 +14,8 @@ use xai_grok_sampling_types::ReasoningEffort;
 
 use crate::session::persistence::Summary;
 
-/// Coarse activity of a session as rendered in the dashboard's status column.
-///
-/// Mirrors the design's `SessionActivity` at dashboard granularity.
-/// A full background-work breakdown (bg tasks / monitors / scheduler / subagents) lands with a richer `SessionActivity`.
-/// The dashboard only needs this coarse signal to pick a status glyph.
+/// Coarse activity of a session as rendered in the dashboard's status column. Mirrors the design's `SessionActivity` at dashboard granularity.
+/// A full background-work breakdown (bg tasks / monitors / scheduler / subagents) lands with a richer `SessionActivity`. The dashboard only needs this coarse signal to pick a status glyph.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RosterActivity {
@@ -94,13 +91,9 @@ pub struct RosterChanged {
 pub const SESSIONS_LIST_METHOD: &str = "x.ai/sessions/list";
 pub const SESSIONS_CHANGED_METHOD: &str = "x.ai/sessions/changed";
 
-/// Merge live `resident` rows with on-disk `summaries` into the sorted roster.
-/// Pure, so it is unit-testable without disk or a live actor.
-///
-/// Resident rows own the live state but carry no title or last-active time, so each adopts those from its summary.
-/// A `Working` row keeps its "now" timestamp instead.
-/// Summaries with no resident row become `Dormant`; keying by id dedups them.
-/// Hidden and headless summaries are excluded, including resident rows whose persisted summary is headless.
+/// Merge live `resident` rows with on-disk `summaries` into the sorted roster. Pure, so it is unit-testable without disk or a live actor.
+/// Resident rows own the live state but carry no title or last-active time, so each adopts those from its summary. A `Working` row keeps its "now" timestamp instead.
+/// Summaries with no resident row become `Dormant`; keying by id dedups them. Hidden and headless summaries are excluded, including resident rows whose persisted summary is headless.
 pub(crate) fn merge_roster(
     mut entries: Vec<RosterEntry>,
     summaries: Vec<Summary>,

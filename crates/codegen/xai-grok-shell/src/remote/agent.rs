@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 
-use crate::auth::{AuthManager, GrokComConfig};
 use anyhow::{Context, Result, bail};
 use serde::de::DeserializeOwned;
+use xai_grok_login::{AuthManager, GrokComConfig};
 
 // Re-export sandbox API types from cli-chat-proxy-types for convenience.
 // Sorted alphabetically; see sandbox_types.rs for logical grouping.
@@ -23,11 +23,8 @@ pub use prod_mc_cli_chat_proxy_types::{
 // Sandbox Client
 // ============================================================================
 
-/// HTTP client for interacting with the sandbox API via cli-chat-proxy.
-///
-/// Path parameters (`session_id`, `environment_id`) are interpolated directly into URLs without percent-encoding.
-/// This is safe because these IDs are UUIDs in practice.
-/// If ID formats ever change to include URL-unsafe characters, the `format!()` calls should be updated to use percent-encoding.
+/// HTTP client for interacting with the sandbox API via cli-chat-proxy. Path parameters (`session_id`, `environment_id`) are interpolated directly into URLs without percent-encoding.
+/// This is safe because these IDs are UUIDs in practice. If ID formats ever change to include URL-unsafe characters, the `format!()` calls should be updated to use percent-encoding.
 pub struct SandboxClient {
     client: reqwest::Client,
     base_url: String,
@@ -77,7 +74,7 @@ impl SandboxClient {
                 crate::http::process_client_mode(),
             );
 
-        Ok(xai_file_utils::trace_context::inject_trace_context_into_request(builder))
+        Ok(xai_grok_otel::inject_trace_context_into_request(builder))
     }
 
     /// Check an HTTP response for errors, then deserialize the JSON body.

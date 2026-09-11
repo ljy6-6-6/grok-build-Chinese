@@ -130,6 +130,17 @@ pub struct MarketplaceSource {
     pub kind: SourceKind,
 }
 
+impl MarketplaceSource {
+    /// The stable identity string — the configured git URL or the expanded local path; keys install
+    /// provenance (`source_url_or_path`), remove-matching, and update caches.
+    pub fn identity(&self) -> String {
+        match &self.kind {
+            SourceKind::Local { path } => path.display().to_string(),
+            SourceKind::Git { url, .. } => url.clone(),
+        }
+    }
+}
+
 /// How to access a marketplace source.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

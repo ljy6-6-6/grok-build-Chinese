@@ -329,7 +329,7 @@ impl SessionActor {
     }
 
     async fn dispatch_turn_end(&self, report: TurnEndReport) {
-        self.dispatch_hook(report.event, report.payload, Some(&report.prompt_id), None)
+        self.dispatch_hook(report.event, report.payload, Some(&report.prompt_id))
             .await;
     }
 

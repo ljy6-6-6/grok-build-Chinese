@@ -113,10 +113,9 @@ impl ModelState {
             })
     }
 
-    /// Whether the current model accepts image input, read from the model's `meta` (the ACP extension point, same source as `totalContextTokens`).
-    /// Honors an explicit `acceptsImages` bool, else an `inputModalities` array containing `"image"`.
-    /// DEFAULTS TO `true` when neither key is present: all current Grok models accept images, so nothing is suppressed today.
-    /// Once the ACP server populates the key, non-vision models get suppressed.
+    /// Whether the current model accepts image input, read from the model's `meta` (the ACP extension point, same
+    /// source as `totalContextTokens`). Honors an explicit `acceptsImages` bool, else an `inputModalities` array
+    /// containing `"image"`. Once the ACP server populates the key, non-vision models get suppressed.
     pub fn current_model_accepts_images(&self) -> bool {
         let Some(meta) = self
             .current

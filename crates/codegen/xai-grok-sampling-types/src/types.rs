@@ -6,14 +6,9 @@ use std::num::NonZeroU64;
 // TraceContext — cloneable, type-erased context for request tracing
 // ============================================================================
 
-/// Object-safe trait for opaque tracing context attached to requests.
-///
-/// `Clone` is not object-safe, so we use a `clone_box` method instead.
-/// Any concrete type that is `Clone + Send + Sync + Debug + 'static` gets a blanket impl, so callers just do:
-///
-/// ```ignore
-/// request.trace = Some(Box::new(my_concrete_trace));
-/// ```
+/// Object-safe trait for opaque tracing context attached to requests. `Clone` is not object-safe, so we use a `clone_box`
+/// method instead. Any concrete type that is `Clone + Send + Sync + Debug + 'static` gets a blanket impl, so callers just
+/// do:
 pub trait TraceContext: std::any::Any + Send + Sync + std::fmt::Debug {
     fn clone_box(&self) -> Box<dyn TraceContext>;
 
@@ -36,10 +31,9 @@ where
 
 impl Clone for Box<dyn TraceContext> {
     fn clone(&self) -> Self {
-        // Explicitly dereference to `&dyn TraceContext` so `clone_box()` dispatches through the vtable to the concrete type's implementation
-        //
-        // Without the deref, `self.clone_box()` resolves via auto-deref to the blanket impl on `Box<dyn TraceContext>` itself
-        // That impl calls `self.clone()`, which calls `clone_box()` again, recursing forever
+        // Explicitly dereference to `&dyn TraceContext` so `clone_box()` dispatches through the vtable to the concrete type's
+        // implementation. Without the deref, `self.clone_box()` resolves via auto-deref to the blanket impl on `Box<dyn
+        // TraceContext>` itself. That impl calls `self.clone()`, which calls `clone_box()` again, recursing forever
         let inner: &dyn TraceContext = &**self;
         inner.clone_box()
     }
@@ -384,8 +378,7 @@ pub enum ToolType {
     Function,
 }
 
-// The canonical definitions live in xai-grok-tools; the re-export keeps existing `crate::sampling::types::ToolDefinition` imports working
-pub use xai_grok_tools::types::definition::{FunctionTool, ToolDefinition};
+pub use xai_tool_types::definition::{FunctionTool, ToolDefinition};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(untagged)]
@@ -585,11 +578,9 @@ pub struct ChatChunkChoice {
     pub finish_reason: Option<FinishReason>,
 }
 
-/// In OpenAI-compatible streaming, tool calls arrive across multiple chunks:
-/// - The first chunk carries `id`, `type`, `index`, `function.name`, and the start of `arguments`.
-/// - Subsequent chunks only carry `index` and a `function.arguments` fragment (no `id`, no `name`).
-///
-/// All fields except `index` are therefore optional so we can deserialize every chunk.
+/// The first chunk carries `id`, `type`, `index`, `function.name`, and the start of `arguments`; Subsequent chunks only
+/// carry `index` and a `function.arguments` fragment (no `id`, no `name`). All fields except `index` are therefore
+/// optional so we can deserialize every chunk.
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct ToolCallDelta {
     /// The positional index that correlates delta chunks of the same tool call.
@@ -638,10 +629,9 @@ pub struct ChatChunkDelta {
 /// Parameters to control realtime data.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SearchParameters {
-    /// Choose the mode to query realtime data:
-    /// * `off`: no search performed and no external sources will be considered.
-    /// * `on` (default): the model will search in every source for relevant data.
-    /// * `auto`: the model chooses whether to search data or not and where to search the data.
+    /// Choose the mode to query realtime data: `off`: no search performed and no external sources will be considered; `on`
+    /// (default): the model will search in every source for relevant data; `auto`: the model chooses whether to search data
+    /// or not and where to search the data.
     pub mode: Option<String>,
     /// List of sources to search in. If no sources are specified, the model will look over the web and X by default.
     pub sources: Option<Vec<SearchSource>>,
@@ -698,10 +688,9 @@ pub enum SearchSource {
     },
 }
 
-/// Per-model config for the `x-compaction-at` request header (a token count).
-///
-/// The remote-config value is polymorphic: `true` enables the header with the value `context_window * auto_compact_threshold_percent / 100`.
-/// `false` (or absent) disables it; an integer `N` sends the constant `N`.
+/// Per-model config for the `x-compaction-at` request header (a token count). The remote-config value is polymorphic:
+/// `true` enables the header with the value `context_window * auto_compact_threshold_percent / 100`. `false` (or absent)
+/// disables it; an integer `N` sends the constant `N`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(untagged)]
 pub enum CompactionAtTokens {
@@ -722,10 +711,9 @@ impl CompactionAtTokens {
     }
 }
 
-/// Per-model config for the `x-compactions-remaining` request header.
-///
-/// `true` sends the dynamic value (1 on the uncompacted prefix, 0 once the session compacts).
-/// `false`/absent disables the header; an integer `N` sends the constant `N`.
+/// Per-model config for the `x-compactions-remaining` request header. `true` sends the dynamic value (1 on the
+/// uncompacted prefix, 0 once the session compacts). `false`/absent disables the header; an integer `N` sends the
+/// constant `N`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(untagged)]
 pub enum CompactionsRemaining {
@@ -745,8 +733,20 @@ impl CompactionsRemaining {
 }
 
 /// `None`/`Minimal` are omitted on the Anthropic Messages API.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    strum::AsRefStr,
+    strum::IntoStaticStr,
+)]
 #[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "snake_case")]
 pub enum ReasoningEffort {
     None,
     Minimal,
@@ -784,29 +784,17 @@ impl ReasoningEffort {
         }
     }
 
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::None => "none",
-            Self::Minimal => "minimal",
-            Self::Low => "low",
-            Self::Medium => "medium",
-            Self::High => "high",
-            Self::Xhigh => "xhigh",
-            Self::Max => "max",
-        }
-    }
-
     pub fn to_messages_api(self) -> Option<&'static str> {
         match self {
             Self::None | Self::Minimal => None,
-            _ => Some(self.as_str()),
+            _ => Some(self.into()),
         }
     }
 }
 
 impl std::fmt::Display for ReasoningEffort {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
+        f.write_str(self.as_ref())
     }
 }
 
@@ -866,7 +854,7 @@ pub fn parse_reasoning_effort_meta(
 }
 
 pub fn reasoning_effort_meta_value(effort: ReasoningEffort) -> serde_json::Value {
-    serde_json::Value::String(effort.as_str().to_string())
+    serde_json::Value::String(effort.as_ref().to_string())
 }
 
 pub const REASONING_EFFORTS_META_KEY: &str = "reasoningEfforts";
@@ -916,7 +904,7 @@ impl<'de> serde::Deserialize<'de> for ReasoningEffortOption {
                 let value = s
                     .parse::<ReasoningEffort>()
                     .map_err(serde::de::Error::custom)?;
-                let id = value.as_str().to_string();
+                let id = value.as_ref().to_string();
                 let label = humanize_effort_id(&id);
                 ReasoningEffortOption {
                     id,
@@ -933,7 +921,7 @@ impl<'de> serde::Deserialize<'de> for ReasoningEffortOption {
                 description,
                 default,
             } => {
-                let id = id.unwrap_or_else(|| value.as_str().to_string());
+                let id = id.unwrap_or_else(|| value.as_ref().to_string());
                 let label = label.unwrap_or_else(|| humanize_effort_id(&id));
                 ReasoningEffortOption {
                     id,
@@ -1013,20 +1001,61 @@ impl ApiBackend {
     }
 }
 
+/// Stable identifier shared by every model request in one root conversation tree.
+#[derive(Clone, Debug, Hash, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ConversationGroupId(String);
+
+impl AsRef<str> for ConversationGroupId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ConversationGroupId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<String> for ConversationGroupId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for ConversationGroupId {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+
 /// Sampling client configuration (API key excluded; that stays in the client).
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SamplingConfig {
     pub base_url: String,
+    /// Local directory containing the mTLS client identity for this model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtls_cert_dir: Option<std::path::PathBuf>,
     pub model: String,
     pub max_completion_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
+    /// Model-resolved general retry budget paired with the rate-limit ceiling below.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<u32>,
+    /// Model-resolved total-attempt ceiling for rate-limited requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_retry_threshold: Option<u32>,
     /// Which API backend to use for this model
     #[serde(default)]
     pub api_backend: ApiBackend,
     /// Extra headers to send with requests (e.g., for bring-your-own-key (BYOK) scenarios).
     #[serde(default, skip_serializing_if = "indexmap::IndexMap::is_empty")]
     pub extra_headers: indexmap::IndexMap<String, String>,
+    /// Root conversation group propagated across model changes and child sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_group_id: Option<ConversationGroupId>,
     /// Query parameters folded into every request URL (percent-encoded).
     #[serde(default, skip_serializing_if = "indexmap::IndexMap::is_empty")]
     pub query_params: indexmap::IndexMap<String, String>,
@@ -1192,7 +1221,7 @@ mod tests {
             ReasoningEffort::Max,
         ] {
             let json = serde_json::to_string(&v).unwrap();
-            assert_eq!(json, format!("\"{}\"", v.as_str()), "serialize {v:?}");
+            assert_eq!(json, format!("\"{}\"", v.as_ref()), "serialize {v:?}");
             let back: ReasoningEffort = serde_json::from_str(&json).unwrap();
             assert_eq!(back, v, "round-trip {v:?}");
         }
@@ -1449,11 +1478,9 @@ mod tests {
         assert!(delta.tool_calls.is_empty());
     }
 
-    /// Regression test: cloning `Box<dyn TraceContext>` must not infinitely recurse.
-    ///
-    /// The blanket `impl<T: Clone + ...> TraceContext for T` applies to `Box<dyn TraceContext>` itself.
-    /// Without the dereference in `Clone for Box<dyn TraceContext>`, `self.clone_box()` resolves to the blanket impl's method via auto-deref.
-    /// That skips vtable dispatch, so `clone()` calls `clone_box()` calls `clone()` until the stack overflows.
+    /// Regression test: cloning `Box<dyn TraceContext>` must not infinitely recurse. Without the dereference in `Clone for
+    /// Box<dyn TraceContext>`, `self.clone_box()` resolves to the blanket impl's method via auto-deref. That skips vtable
+    /// dispatch, so `clone()` calls `clone_box()` calls `clone()` until the stack overflows.
     #[test]
     fn clone_box_dyn_trace_context_does_not_recurse() {
         #[derive(Debug, Clone)]

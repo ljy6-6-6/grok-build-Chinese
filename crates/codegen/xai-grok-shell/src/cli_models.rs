@@ -16,7 +16,6 @@ pub enum AuthStatus {
 }
 impl AuthStatus {
     /// Banner status precedence: env key, then session, then BYOK, then deployment, then none.
-    ///
     /// Differs from sampling (`resolve_credentials`: BYOK, then session, then env) so a logged-in user sees the login host.
     /// BYOK uses [`crate::agent::auth_method::should_advertise_xai_api_key`] so `disable_api_key_auth` is honored.
     pub fn resolve(agent_config: &AgentConfig) -> Self {
@@ -24,8 +23,8 @@ impl AuthStatus {
             return Self::ApiKey;
         }
         if agent_config.create_auth_manager().current().is_some() {
-            let backend = crate::auth::backend::ActiveAuthBackend::default();
-            return Self::LoggedIn(crate::auth::backend::AuthBackend::login_host(
+            let backend = xai_grok_login::backend::ActiveAuthBackend::default();
+            return Self::LoggedIn(xai_grok_login::backend::AuthBackend::login_host(
                 &backend,
                 &agent_config.grok_com_config,
             ));
@@ -98,8 +97,8 @@ mod tests {
     use super::*;
     use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
     use crate::agent::config::Config;
-    use crate::auth::{AuthMode, GrokAuth};
     use serial_test::serial;
+    use xai_grok_login::{AuthMode, GrokAuth};
     use xai_grok_test_support::EnvGuard;
     const EXPECTED_LOGIN_HOST: &str = "grok.com";
     /// A session the compiled-in backend recognises as its own, which `AuthBackend::owns` requires.

@@ -174,12 +174,9 @@ impl SessionActor {
         (instruction, tool_specs, self.hosted_tools_for_turn())
     }
 
-    /// Generate a session recap and broadcast it via [`SessionUpdate::SessionRecap`](crate::extensions::notification::SessionUpdate::SessionRecap).
-    ///
     /// Snapshots the conversation and appends a single recap instruction turn, reusing the prompt prefix verbatim so the provider cache stays warm.
-    /// Makes one tool-free model call and emits the cleaned one-line summary for display only. It never mutates the conversation.
-    ///
-    /// Best-effort: a failed or empty generation is logged and dropped. A missing recap must never disrupt the session.
+    /// Makes one tool-free model call and emits the cleaned one-line summary for display only.
+    /// A missing recap must never disrupt the session.
     pub(super) async fn handle_recap(&self, auto: bool) {
         use crate::session::helpers::session_recap;
 
@@ -431,11 +428,7 @@ impl SessionActor {
     }
 
     /// Persist a recap request artifact for offline prompt and garble analysis.
-    ///
     /// Writes `{session_dir}/recap_requests/{request_id}.json` containing the exact `ConversationItem` list sent to the model.
-    /// The artifact also carries the cleaned summary and raw assistant text (or error).
-    /// Rides on the post-turn session archive to cloud storage like compaction request artifacts.
-    ///
     /// Best-effort: send-failures are logged at `warn` and never surfaced; a missing artifact must never disrupt recap display.
     #[allow(clippy::too_many_arguments)]
     fn persist_recap_request_artifact(
@@ -627,7 +620,7 @@ impl SessionActor {
             &mut sampling_config,
             suggest_reasoning.effort,
             &self.session_info.id,
-            crate::agent::mvp_agent::reasoning_effort::EffortTarget::SummaryClient,
+            crate::sampling::EffortTarget::SummaryClient,
         );
         let max_output_tokens = crate::util::config::prompt_suggest_reasoning_budget(
             visible_output_tokens,

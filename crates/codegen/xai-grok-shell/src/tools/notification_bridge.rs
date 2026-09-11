@@ -7,6 +7,7 @@ use agent_client_protocol::{self as acp, Client as _};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex as TokioMutex, mpsc};
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
 use xai_grok_tools::notification::types::{ToolNotification, ToolNotificationHandle};
@@ -59,9 +60,7 @@ pub(crate) struct NotificationBridgeConfig {
             >,
         >,
     >,
-    /// Resolved name of the `BackgroundTaskAction` tool.
-    /// Written exactly once after the agent's toolset is finalized.
-    /// Read many times thereafter from the notification bridge and the session actor's between-turn drain.
+    /// Resolved name of the `BackgroundTaskAction` tool. Written exactly once after the agent's toolset is finalized. Read many times thereafter from the notification bridge and the session actor's between-turn drain.
     /// `None` means no such tool is registered in this toolset, which is a valid resolved state.
     pub task_output_tool_name: Arc<std::sync::OnceLock<Option<String>>>,
     /// Resolved name of the `Read` tool, used by `format_bash_completion`'s footer.
@@ -71,13 +70,21 @@ pub(crate) struct NotificationBridgeConfig {
     /// When `false`, bash task completions fall back to the idle-gated `InjectNotification` path instead of immediate synthetic prompts.
     pub auto_wake_enabled: bool,
     /// When `true`, an approved `PlanModeExited` also queues the tracker's next-turn exit reminder.
-    /// Grok-build leaves this `false`: its exit-plan tool result already informs the model, and a deferred reminder would arrive stale.
-    /// Shared with the session actor (the `gateway_enabled` pattern).
+    /// Grok-build leaves this `false`: its exit-plan tool result already informs the model, and a deferred reminder would arrive stale. Shared with the session actor (the `gateway_enabled` pattern).
     /// Refreshed on zero-turn rebuilds so the bridge always agrees with the live session gate.
     pub queue_exit_reminder_on_approved_exit: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// When `true`, suppress the bash auto-wake synthetic prompt.
     /// Shared `Arc` written in one place; see `SessionActor::set_goal_loop_active_resource` for the rationale.
     pub goal_loop_active: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Coalesce live `EmitBackgroundTasksSnapshot` requests. Last-wins only
+    /// needs the latest list; a burst of completions shares one emit.
+    pub background_tasks_snapshot_pending: std::sync::Arc<AtomicBool>,
+    /// When `false`, suppress local `background_tasks` snapshot emits (live
+    /// and actor). Gateway-backed sessions keep remote Running on their own
+    /// rail; an empty local registry must not last-wins-clear it.
+    /// Default `true` for local sessions; flipped off when
+    /// `session_computer_sessions` is non-empty (load/new/mid-session add).
+    pub emit_local_background_tasks: std::sync::Arc<AtomicBool>,
 }
 /// Returns `None` if the slot is unset (toolset not yet finalized) or if the resolved value is `None` (no such tool registered in this toolset).
 pub(crate) fn resolved_tool_name(slot: &std::sync::OnceLock<Option<String>>) -> Option<&str> {
@@ -86,6 +93,23 @@ pub(crate) fn resolved_tool_name(slot: &std::sync::OnceLock<Option<String>>) -> 
 /// Stamp a bridge-emitted notification's meta before it forks into persistence and broadcast; see `util::event_id::ensure_event_id_meta`.
 fn stamp_event_id(config: &NotificationBridgeConfig, meta: &mut Option<acp::Meta>) {
     crate::util::event_id::ensure_event_id_meta(&config.session_id.0, meta);
+}
+fn request_background_tasks_snapshot(config: &NotificationBridgeConfig) {
+    if !config.emit_local_background_tasks.load(Ordering::Acquire) {
+        return;
+    }
+    if config
+        .background_tasks_snapshot_pending
+        .swap(true, Ordering::AcqRel)
+    {
+        return;
+    }
+    let _ = config
+        .session_cmd_tx
+        .send(SessionCommand::EmitBackgroundTasksSnapshot {
+            respond_to: None,
+            pending: Some(Arc::clone(&config.background_tasks_snapshot_pending)),
+        });
 }
 fn stamp_scheduler_meta(
     config: &NotificationBridgeConfig,
@@ -327,6 +351,7 @@ async fn handle_notification(
                     acp::ExtNotification::new("x.ai/task_backgrounded", params.into());
                 config.gateway.forward_fire_and_forget(ext_notification);
             }
+            request_background_tasks_snapshot(config);
         }
         ToolNotification::FileWritten(written) => {
             let prompt_index = *config.prompt_index.lock().await;
@@ -421,7 +446,7 @@ async fn handle_notification(
                         client_identifier: None,
                         screen_mode: None,
                         verbatim: true,
-                        traceparent: xai_file_utils::trace_context::current_traceparent(),
+                        traceparent: xai_grok_otel::current_traceparent(),
                         json_schema: None,
                         send_now: false,
                         tool_overrides_update: None,
@@ -589,6 +614,7 @@ async fn handle_notification(
                     title: None,
                     level: Some("info".into()),
                 });
+            request_background_tasks_snapshot(config);
         }
         ToolNotification::PlanModeEntered(entered) => {
             let activated = config.plan_mode.lock().activate_from_tool();
@@ -672,23 +698,6 @@ async fn handle_notification(
                 subagent_id = fired.subagent_id.as_deref().unwrap_or(""),
                 "Scheduled task fired"
             );
-            if fired.subagent_id.is_none() {
-                let inject_payload = serde_json::json!({
-                    "sessionId": config.session_id,
-                    "taskId": &fired.task_id,
-                    "prompt": &fired.prompt,
-                    "humanSchedule": &fired.human_schedule,
-                    "nextFireAt": &fired.next_fire_at,
-                });
-                if let Ok(params) = serde_json::value::to_raw_value(&inject_payload) {
-                    config
-                        .gateway
-                        .forward_fire_and_forget(acp::ExtNotification::new(
-                            "x.ai/scheduled_task_inject_prompt",
-                            params.into(),
-                        ));
-                }
-            }
             let mut meta = None;
             stamp_scheduler_meta(config, &mut meta, &fired.generation, fired.revision);
             let fired_notif = crate::extensions::notification::SessionNotification {

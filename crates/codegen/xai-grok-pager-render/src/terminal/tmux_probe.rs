@@ -195,15 +195,8 @@ fn query_option_support_with(runner: &dyn TmuxCommandRunner, option: &str) -> Tm
     }
 }
 
-/// The attached client's resolved terminal features, as a comma-separated list (`RGB`, `clipboard`, `focus`, …).
-///
-/// tmux resolves this once per client at attach time from the outer terminal's terminfo plus `terminal-features` / `terminal-overrides`.
-/// The list decides whether 24-bit SGR survives the multiplexer.
-/// `COLORTERM` inside the pane describes only what the pane's program emits, so it cannot answer that.
-///
-/// Empty output means the answer is unknown rather than negative.
-/// tmux before 3.2 has no `terminal-features` and renders the unknown format as an empty string.
-/// A server with no attached client has nothing to report.
+/// Client features resolved at attach; this, not pane `COLORTERM`, decides whether 24-bit SGR survives tmux.
+/// Empty is unknown, not negative: pre-3.2 has no `terminal-features`, and a clientless server has nothing to report.
 pub fn query_client_features() -> TmuxQueryResult<String> {
     query_client_features_with(&LiveTmuxCommandRunner)
 }

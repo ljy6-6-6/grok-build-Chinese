@@ -93,6 +93,14 @@ async fn spawn_counting_gated_server() -> (String, Arc<AtomicUsize>, Arc<AtomicU
                     "result": {"tools": []},
                 }))
                 .into_response(),
+                // Legacy server: reject the SEP-2575 `server/discover` probe so the
+                // client falls back to `initialize` without waiting out the probe timeout.
+                Some("server/discover") => axum::Json(json!({
+                    "jsonrpc": "2.0",
+                    "id": msg["id"],
+                    "error": {"code": -32601, "message": "Method not found"},
+                }))
+                .into_response(),
                 _ => StatusCode::ACCEPTED.into_response(),
             }
         }

@@ -8,18 +8,14 @@ use super::{RpcActivityClass, WorkspaceRpc};
 /// The guest tracker uses it as its default and the gateway's refresh cadence must stay well inside it (pinned by a gateway test).
 pub const PRESENCE_ACTIVITY_WINDOW_MS: u64 = 90_000;
 
-/// Note client presence for the session. Fire-and-forget: the response is empty.
-/// A visible note stamps the guest's `ClientPresence` idle withhold.
-/// A hidden note deliberately stamps nothing, so the existing window expires on its own.
-/// A hide must never make the sandbox hibernate sooner than silence would.
+/// Note client presence. Fire-and-forget. A visible note stamps `ClientPresence`; a hidden note stamps nothing so the window expires on its own.
+/// A hide must never hibernate sooner than silence would.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PresenceNoteReq {
     pub session_id: String,
     pub visible: bool,
-    /// Strictly increasing per conversation.
-    /// The guest drops a note whose `seq` is not newer than the last applied one.
-    /// This means a slow superseded visible note cannot restart a withhold after a newer hidden note.
-    /// An absent `seq` (from an old gateway) always counts as newest.
+    /// Strictly increasing per conversation. A note whose `seq` is not newer is dropped, so a slow visible note cannot restart a withhold after a newer hide.
+    /// An absent `seq` (old gateway) always counts as newest.
     #[serde(default)]
     pub seq: Option<u64>,
 }

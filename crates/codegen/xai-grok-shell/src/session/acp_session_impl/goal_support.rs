@@ -131,9 +131,7 @@ impl NotAchievedSyntheticReason {
 }
 
 /// Disarm-able tracker scope-guard: runs `on_drop` on scope exit AND when a state can never outlive its run.
-///
 /// No `GoalUpdated` from `Drop`: the Ctrl+C cancel path emits its own auto-pause update strictly after the turn future is dropped.
-/// Cleared state therefore reaches the pager on that emit.
 /// `Drop` re-locks the non-reentrant tracker mutex; never let the guard drop while holding that lock.
 pub(super) struct TrackerDropGuard<'a, F: FnOnce(&mut crate::session::goal_tracker::GoalTracker)> {
     tracker: &'a parking_lot::Mutex<crate::session::goal_tracker::GoalTracker>,
@@ -197,9 +195,7 @@ pub(super) fn render_goal_plan_block(plan_path: &std::path::Path, names: &GoalTo
 
 /// Plan path for the goal-mode reminder, or `None` on the legacy path.
 /// `Some` only when the planner is enabled (`GROK_GOAL_PLANNER`) and a plan exists.
-/// When disabled, `None` selects the legacy block (no dangling `Plan:` line).
 /// All three render sites (`setup_goal`, `resume_goal`, continuation nudge) route through this helper so the gate can't drift.
-/// It borrows and allocates nothing.
 pub(super) fn goal_reminder_plan_path(
     planner_enabled: bool,
     orchestration: &crate::session::goal_tracker::GoalOrchestration,
@@ -222,26 +218,12 @@ pub(super) const GOAL_CONTINUATION_SENTINEL: &str =
 /// Bail-specific preface for the `{bail_preface}` slot of [`GOAL_CONTINUATION_DIRECTIVE_TEMPLATE`].
 /// Used when the turn-final text matched a [`goal_stop_detector`](super::goal_stop_detector) pattern while pending todos remained.
 /// Names the apparent stop and the outstanding work, then lets the unchanged generic body carry the next-step / token / Rule-1/Rule-4 content.
-/// The generic flavor substitutes the empty string for this slot.
 pub(super) const GOAL_CONTINUATION_BAIL_PREFACE: &str = "You appear to be stopping or handing off, but the goal is NOT complete \
      and todos remain. Do not end the turn here — keep working.\n\n";
 
 /// Render the shared goal-rules template with tool names and site-specific blocks substituted in.
-///
-/// The template is the slim current form: verification is owned by the harness (the adversarial skeptic panel in `goal_classifier.rs`),
-/// so this body only carries TRACKING / WORKING / VERIFY / TEST
-/// verdict-file path is substituted; `{VERIFIER_ID}` no longer appears in the template.
-/// `verifier_id` continues to anchor harness-owned skeptic verdict files inside `goal_classifier.rs`.
-///
-/// `block_recap` and `goal_state` are inserted verbatim; pass an empty string to omit either section.
-/// The trailing newline of the template is preserved.
-/// Callers can append their closing directive ("Start now." / "Continue working now.") and the closing `</system-reminder>` tag without extra glue.
-///
-/// `plan_path` `Some` folds the plan-aware preamble into the same block as the discipline; `None` renders the no-plan block byte-for-byte unchanged.
-///
-/// Legacy artifacts stay absent: the deleted COMPLETION AUDIT block, the canonical verifier blocks, and the `{VERIFIER_ID}` placeholder.
-/// `goal_rules_template_drops_all_legacy_verifier_artifacts` pins that.
-/// Keep the ## Active Goal heading. Body is the normal create/resume rules.
+/// The template is the slim current form: verification is owned by the harness (the adversarial skeptic panel in `goal_classifier.rs`),.
+/// so this body only carries TRACKING / WORKING / VERIFY / TEST.
 pub(crate) fn format_compaction_goal_section(rules_body: &str) -> String {
     format!("## Active Goal\n{rules_body}")
 }
@@ -367,7 +349,6 @@ fn neutralize_directive_braces(text: &str) -> std::borrow::Cow<'_, str> {
 
 /// Full model-slot sanitization: brace neutralization stops `{placeholder}` spoofing.
 /// Reminder-tag neutralization stops an `</system-reminder>` frame escape.
-/// Applied uniformly at the renderer so no slot's defense depends on its producer remembering either pass.
 /// Re-application to producer-neutralized values is a no-op, and the tag pass only allocates when a frame-tag fragment is present.
 fn neutralize_directive_slot(text: &str) -> std::borrow::Cow<'_, str> {
     use crate::session::goal_classifier::neutralize_reminder_tags;
@@ -381,28 +362,9 @@ fn neutralize_directive_slot(text: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// Render the per-turn directive continuation nudge.
-///
 /// Uses chained `.replace` calls rather than `format!`.
-/// The template carries literal `{...}` examples inside backticks that `format!` would force-escape.
-/// Placeholders are lowercase (see the doc on [`GOAL_CONTINUATION_DIRECTIVE_TEMPLATE`]).
-///
 /// `objective` is required and guarded by `debug_assert!`: an empty value renders an `Objective:` line the agent cannot resolve to a goal.
-/// `next_step` is NOT guarded.
-/// The production caller's `unwrap_or_else` already substitutes a non-empty fallback (`Check your \`{todo_tool}\` list for next steps.`).
 /// A guard here would only catch a future refactor that drops that fallback.
-///
-/// `plan_pointer` is inlined verbatim; pass the empty string when no plan is available.
-/// `bail_preface`, `verifier_gaps` and `next_step` pass through [`neutralize_directive_slot`] first but are otherwise inlined as passed.
-/// Pass [`GOAL_CONTINUATION_BAIL_PREFACE`] for `bail_preface` when the stop-detector fired, and the empty string otherwise.
-/// Pass [`render_verifier_gaps_block`]'s output for `verifier_gaps` (empty string when the latest verdict carries no gaps).
-/// That renders the freshest verifier findings above the next-step line.
-/// Pass the caller's chosen fallback for `next_step` when the plan yields no concrete step.
-///
-/// Model-controlled slots (`bail_preface`, `verifier_gaps`, `strategist_note`, `next_step`) are sanitized first.
-/// [`neutralize_directive_slot`] leaves them inert under any `.replace` order and unable to close the surrounding `<system-reminder>` frame.
-/// `objective` is user-authored and stays verbatim.
-/// Pinned by `render_goal_continuation_directive_order_dependent_substitution_pinned`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_goal_continuation_directive(
     objective: &str,
@@ -548,17 +510,9 @@ pub(super) fn render_goal_reverify_block_legacy(
     )
 }
 
-/// Render the strategist-note block for the continuation directive.
 /// `recommendation` is the capped, model-authored snippet read back from the strategy note (persisted as `last_strategy_recommendation`).
-/// An empty one renders the empty string, collapsing the `{strategist_note}` slot (the same empty-slot convention as `verifier_gaps`).
-/// Otherwise it renders a narrative telling the model to RE-READ its plan AND the strategy note before continuing.
 /// The narrative ends with a blank line so it stacks above the "Goal NOT complete" sentinel.
-/// When no plan path is available (planner disabled) the plan clause is dropped.
-///
-/// Injection hardening: the rendered note is wrapped in fence markers carrying a PER-RENDER nonce.
 /// The nonce makes the fence unguessable, so a model-authored recommendation can't reproduce the END marker to break out and pose as harness narration.
-/// As a second layer any body line equal to a fence marker is dropped.
-/// Placeholder/tag spoofing is handled at the directive slot ([`neutralize_directive_slot`]), not here.
 pub(super) fn render_strategist_note(
     recommendation: &str,
     plan_path: Option<&Path>,
@@ -635,16 +589,9 @@ pub(super) fn render_verifier_gaps_block_legacy(gaps: &str, goal_tool: &str) -> 
 /// Applied BEFORE tag neutralization, which may add a zero-width break per broken tag (plus the `…` cap suffix).
 pub(super) const GOAL_NEXT_STEP_MAX_CHARS: usize = 400;
 
-/// Resolve the inlined "next concrete step" for the continuation nudge from the planner-emitted plan file.
-/// The read is 8 KiB-capped and best-effort: any I/O or parse failure yields `None`.
-/// The caller then substitutes a generic "check your todo list" fallback.
-///
 /// The plan item is model-authored: it is `char`-capped to [`GOAL_NEXT_STEP_MAX_CHARS`].
 /// Reminder-frame tags are then zero-width-broken so the item cannot close the `<system-reminder>` frame it is inlined into.
-///
-/// Verifier gaps are NOT consulted here.
 /// A `NotAchieved` verdict's findings render separately via [`render_verifier_gaps_block`] (persisted in `last_classifier_gaps`).
-/// This slot therefore carries only the plan's next item and avoids duplicating the top gap.
 pub(super) fn resolve_goal_next_step(plan_path: Option<&Path>) -> Option<String> {
     use crate::session::goal_classifier::{cap_chars, neutralize_reminder_tags};
     use crate::session::goal_next_step::first_unchecked_plan_item;
@@ -667,90 +614,272 @@ pub(super) fn format_blocked_chat_notification(reason: &str, detail: Option<&str
     out
 }
 
-/// Per-subagent token state; the goal-scoped marginal is `last_cumulative_reported - resume_anchor_cumulative`.
-///
-/// Child reports carry the child's CONTEXT token total.
-/// A child compaction therefore freezes the ratchet at its pre-compaction max until the child's context regrows past it.
+/// Child token counters are cumulative across activations. Completed deltas are retained,
+/// and each reactivation anchors at the previous high-water mark so every token is counted once.
 #[derive(Debug)]
 pub(crate) struct SubagentTokenRecord {
-    /// `None` for subagents spawned outside any active goal.
     pub goal_id: Option<String>,
-    /// Parent's `last_cumulative_reported` at spawn; 0 for fresh spawns.
-    pub resume_anchor_cumulative: u64,
-    /// Monotonic high-water mark, ratcheted on `SubagentProgress` ticks and sealed by `SubagentFinished`.
+    pub completed_attempt_tokens: u64,
+    pub active_attempt: Option<ActiveSubagentAttempt>,
+    completed_attempt: Option<CompletedSubagentAttempt>,
     pub last_cumulative_reported: u64,
-    /// Effective model id captured from `SubagentSpawned.model` at spawn time, not at aggregation time.
-    /// That pins attribution to the model the subagent actually ran on, even if the user switches the session model mid-goal.
-    /// `None` (or empty) only when the wire field was absent; such records fold under the current model id as a best-effort fallback during aggregation.
+}
+
+#[derive(Debug)]
+pub(crate) struct ActiveSubagentAttempt {
+    pub attempt_id: Option<String>,
+    pub cumulative_anchor: u64,
     pub model: Option<String>,
-    /// Set by `SubagentFinished`; later (stale or spoofed) progress ticks for the subagent are ignored so they can't move the ratchet.
-    pub finished: bool,
+    pub is_reactivation: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SubagentFinishPayload {
+    pub child_session_id: String,
+    pub status: String,
+    pub error: Option<String>,
+    pub tool_calls: u32,
+    pub turns: u32,
+    pub duration_ms: u64,
+    pub tokens_used: u64,
+    pub output: Option<String>,
+    pub will_wake: bool,
+}
+
+#[derive(Debug)]
+struct CompletedSubagentAttempt {
+    attempt_id: Option<String>,
+    cumulative_anchor: u64,
+    payload: SubagentFinishPayload,
+    accounted_tokens: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SubagentSpawnOutcome {
+    Accepted,
+    Duplicate,
+    Stale,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SubagentProgressOutcome {
+    Accepted {
+        advanced: bool,
+        live_display_tokens: u64,
+    },
+    InactiveGoal,
+    Stale,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SubagentFinishOutcome {
+    Accepted,
+    Correction,
+    Duplicate,
+    Stale,
 }
 
 impl SubagentTokenRecord {
-    /// Goal-scoped marginal cost: `last_cumulative_reported - resume_anchor_cumulative`.
-    /// Saturating, so a stale or out-of-order report below the anchor yields 0 instead of underflowing.
-    /// Shared by the single-line total ([`SessionActor::goal_tokens`]) and the per-model breakdown ([`fold_tokens_by_model`]) so they can't drift.
-    pub(crate) fn marginal(&self) -> u64 {
-        self.last_cumulative_reported
-            .saturating_sub(self.resume_anchor_cumulative)
+    pub(crate) fn new(cumulative_anchor: u64) -> Self {
+        Self {
+            goal_id: None,
+            completed_attempt_tokens: 0,
+            active_attempt: None,
+            completed_attempt: None,
+            last_cumulative_reported: cumulative_anchor,
+        }
+    }
+
+    pub(crate) fn spawn(
+        &mut self,
+        goal_id: Option<String>,
+        attempt_id: Option<String>,
+        model: Option<String>,
+    ) -> SubagentSpawnOutcome {
+        if let Some(active) = self.active_attempt.as_ref() {
+            return if active.attempt_id == attempt_id {
+                SubagentSpawnOutcome::Duplicate
+            } else {
+                SubagentSpawnOutcome::Stale
+            };
+        }
+        if self
+            .completed_attempt
+            .as_ref()
+            .is_some_and(|completed| completed.attempt_id == attempt_id)
+        {
+            return SubagentSpawnOutcome::Duplicate;
+        }
+
+        let is_reactivation = self.completed_attempt.is_some();
+        if self.goal_id != goal_id {
+            self.completed_attempt_tokens = 0;
+        }
+        self.goal_id = goal_id;
+        self.active_attempt = Some(ActiveSubagentAttempt {
+            attempt_id,
+            cumulative_anchor: self.last_cumulative_reported,
+            model,
+            is_reactivation,
+        });
+        SubagentSpawnOutcome::Accepted
+    }
+
+    pub(crate) fn progress(
+        &mut self,
+        goal_id: Option<&str>,
+        attempt_id: Option<&str>,
+        tokens_used: u64,
+    ) -> SubagentProgressOutcome {
+        let Some(active) = self.active_attempt.as_ref() else {
+            return SubagentProgressOutcome::Stale;
+        };
+        if active.attempt_id.as_deref() != attempt_id {
+            return SubagentProgressOutcome::Stale;
+        }
+        if goal_id.is_none() || self.goal_id.as_deref() != goal_id {
+            return SubagentProgressOutcome::InactiveGoal;
+        }
+
+        let advanced = tokens_used > self.last_cumulative_reported;
+        self.last_cumulative_reported = self.last_cumulative_reported.max(tokens_used);
+        SubagentProgressOutcome::Accepted {
+            advanced,
+            live_display_tokens: self.live_display_tokens(),
+        }
+    }
+
+    pub(crate) fn finish(
+        &mut self,
+        attempt_id: Option<&str>,
+        payload: SubagentFinishPayload,
+    ) -> SubagentFinishOutcome {
+        let tokens_used = payload.tokens_used;
+        if let Some(active) = self.active_attempt.as_ref() {
+            let is_legacy_single_attempt =
+                attempt_id.is_none() && self.completed_attempt.is_none() && !active.is_reactivation;
+            if !is_legacy_single_attempt && active.attempt_id.as_deref() != attempt_id {
+                return SubagentFinishOutcome::Stale;
+            }
+
+            let Some(active) = self.active_attempt.take() else {
+                unreachable!("active subagent attempt disappeared during finish")
+            };
+            self.last_cumulative_reported = self.last_cumulative_reported.max(tokens_used);
+            let accounted_tokens = self
+                .last_cumulative_reported
+                .saturating_sub(active.cumulative_anchor);
+            self.completed_attempt_tokens = self
+                .completed_attempt_tokens
+                .saturating_add(accounted_tokens);
+            self.completed_attempt = Some(CompletedSubagentAttempt {
+                attempt_id: active.attempt_id,
+                cumulative_anchor: active.cumulative_anchor,
+                payload,
+                accounted_tokens,
+            });
+            return SubagentFinishOutcome::Accepted;
+        }
+
+        let Some(completed) = self.completed_attempt.as_mut() else {
+            return SubagentFinishOutcome::Stale;
+        };
+        if completed.attempt_id.as_deref() != attempt_id {
+            return SubagentFinishOutcome::Stale;
+        }
+        if completed.payload == payload {
+            return SubagentFinishOutcome::Duplicate;
+        }
+
+        self.last_cumulative_reported = self.last_cumulative_reported.max(tokens_used);
+        let corrected_tokens = self
+            .last_cumulative_reported
+            .saturating_sub(completed.cumulative_anchor);
+        self.completed_attempt_tokens = self
+            .completed_attempt_tokens
+            .saturating_sub(completed.accounted_tokens)
+            .saturating_add(corrected_tokens);
+        completed.payload = payload;
+        completed.accounted_tokens = corrected_tokens;
+        SubagentFinishOutcome::Correction
+    }
+
+    pub(crate) fn active_attempt_tokens(&self) -> u64 {
+        self.active_attempt.as_ref().map_or(0, |attempt| {
+            self.last_cumulative_reported
+                .saturating_sub(attempt.cumulative_anchor)
+        })
+    }
+
+    pub(crate) fn total_tokens(&self) -> u64 {
+        self.completed_attempt_tokens
+            .saturating_add(self.active_attempt_tokens())
+    }
+
+    pub(crate) fn live_display_tokens(&self) -> u64 {
+        self.active_attempt.as_ref().map_or(0, |attempt| {
+            if attempt.is_reactivation {
+                self.active_attempt_tokens()
+            } else {
+                self.last_cumulative_reported
+            }
+        })
     }
 }
 
-/// Fold subagent token records into a `model_id -> marginal_tokens` breakdown for `goal_id`.
-/// The breakdown is sorted by tokens descending; ties break by model id for determinism.
-/// Marginal cost per record is [`SubagentTokenRecord::marginal`].
-/// Records whose `model` was absent or empty/whitespace-only on the wire fold under `current_model_id`.
-/// Zero-marginal records are skipped.
-fn fold_tokens_by_model<'a>(
+/// Fold active subagent token records into a `model_id -> tokens` breakdown for `goal_id`.
+/// Missing or blank model ids fold under `current_model_id`; zero-token records are skipped.
+fn fold_active_tokens_by_model<'a>(
     records: impl IntoIterator<Item = &'a SubagentTokenRecord>,
     goal_id: &'a str,
     current_model_id: &'a str,
 ) -> Vec<(String, u64)> {
     let mut by_model: HashMap<&'a str, u64> = HashMap::new();
-    for r in records {
-        if r.goal_id.as_deref() != Some(goal_id) {
+    for record in records {
+        if record.goal_id.as_deref() != Some(goal_id) {
             continue;
         }
-        let marginal = r.marginal();
-        if marginal == 0 {
+        let Some(attempt) = record.active_attempt.as_ref() else {
+            continue;
+        };
+        let tokens = record.active_attempt_tokens();
+        if tokens == 0 {
             continue;
         }
-        // A missing OR empty/whitespace-only captured id folds under the current model so we never create a blank-id bucket
-        let model = r
+        let model = attempt
             .model
             .as_deref()
-            .filter(|m| !m.trim().is_empty())
+            .filter(|model| !model.trim().is_empty())
             .unwrap_or(current_model_id);
         let entry = by_model.entry(model).or_insert(0);
-        *entry = entry.saturating_add(marginal);
+        *entry = entry.saturating_add(tokens);
     }
     let mut out: Vec<(String, u64)> = by_model
         .into_iter()
-        .map(|(m, t)| (m.to_owned(), t))
+        .map(|(model, tokens)| (model.to_owned(), tokens))
         .collect();
     out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     out
 }
 
 #[cfg(test)]
-mod fold_tokens_by_model_tests {
-    use super::{SubagentTokenRecord, fold_tokens_by_model};
+mod fold_active_tokens_by_model_tests {
+    use super::{SubagentTokenRecord, fold_active_tokens_by_model};
 
     fn rec(goal: Option<&str>, anchor: u64, last: u64, model: Option<&str>) -> SubagentTokenRecord {
-        SubagentTokenRecord {
-            goal_id: goal.map(str::to_owned),
-            resume_anchor_cumulative: anchor,
-            last_cumulative_reported: last,
-            model: model.map(str::to_owned),
-            finished: false,
-        }
+        let mut record = SubagentTokenRecord::new(anchor);
+        assert_eq!(
+            record.spawn(goal.map(str::to_owned), None, model.map(str::to_owned)),
+            super::SubagentSpawnOutcome::Accepted
+        );
+        record.last_cumulative_reported = last;
+        record
     }
 
     #[test]
     fn empty_records_yields_empty() {
         let records: Vec<SubagentTokenRecord> = Vec::new();
-        assert!(fold_tokens_by_model(&records, "g1", "cur").is_empty());
+        assert!(fold_active_tokens_by_model(&records, "g1", "cur").is_empty());
     }
 
     #[test]
@@ -760,7 +889,7 @@ mod fold_tokens_by_model_tests {
             rec(Some("g1"), 100, 500, Some("grok-4")), // marginal 400
             rec(Some("g1"), 0, 50, Some("grok-3")),    // grok-3 total 150
         ];
-        let out = fold_tokens_by_model(&records, "g1", "cur");
+        let out = fold_active_tokens_by_model(&records, "g1", "cur");
         assert_eq!(
             out,
             vec![("grok-4".to_owned(), 400), ("grok-3".to_owned(), 150)]
@@ -773,7 +902,7 @@ mod fold_tokens_by_model_tests {
             rec(Some("g1"), 0, 100, Some("zeta")),
             rec(Some("g1"), 0, 100, Some("alpha")),
         ];
-        let out = fold_tokens_by_model(&records, "g1", "cur");
+        let out = fold_active_tokens_by_model(&records, "g1", "cur");
         assert_eq!(
             out,
             vec![("alpha".to_owned(), 100), ("zeta".to_owned(), 100)]
@@ -783,7 +912,7 @@ mod fold_tokens_by_model_tests {
     #[test]
     fn none_model_folds_under_current() {
         let records = vec![rec(Some("g1"), 0, 100, None), rec(Some("g1"), 0, 200, None)];
-        let out = fold_tokens_by_model(&records, "g1", "cur-model");
+        let out = fold_active_tokens_by_model(&records, "g1", "cur-model");
         assert_eq!(out, vec![("cur-model".to_owned(), 300)]);
     }
 
@@ -793,7 +922,7 @@ mod fold_tokens_by_model_tests {
             rec(Some("g1"), 0, 100, Some("grok-4")),
             rec(Some("g1"), 0, 200, None), // folds under current = grok-4
         ];
-        let out = fold_tokens_by_model(&records, "g1", "grok-4");
+        let out = fold_active_tokens_by_model(&records, "g1", "grok-4");
         assert_eq!(out, vec![("grok-4".to_owned(), 300)]);
     }
 
@@ -804,7 +933,7 @@ mod fold_tokens_by_model_tests {
             rec(Some("g2"), 0, 999, Some("grok-4")),
             rec(None, 0, 999, Some("grok-4")),
         ];
-        let out = fold_tokens_by_model(&records, "g1", "cur");
+        let out = fold_active_tokens_by_model(&records, "g1", "cur");
         assert_eq!(out, vec![("grok-4".to_owned(), 100)]);
     }
 
@@ -812,14 +941,14 @@ mod fold_tokens_by_model_tests {
     fn last_below_anchor_does_not_underflow() {
         let records = vec![rec(Some("g1"), 500, 100, Some("grok-4"))];
         // The marginal saturates to 0, so the record is skipped as a zero-token entry
-        assert!(fold_tokens_by_model(&records, "g1", "cur").is_empty());
+        assert!(fold_active_tokens_by_model(&records, "g1", "cur").is_empty());
     }
 
     #[test]
     fn captured_model_survives_mid_goal_current_model_switch() {
         // A record captured `grok-4` at spawn keeps it even though the current model at aggregation time is `grok-3`
         let records = vec![rec(Some("g1"), 0, 100, Some("grok-4"))];
-        let out = fold_tokens_by_model(&records, "g1", "grok-3");
+        let out = fold_active_tokens_by_model(&records, "g1", "grok-3");
         assert_eq!(out, vec![("grok-4".to_owned(), 100)]);
     }
 
@@ -831,7 +960,7 @@ mod fold_tokens_by_model_tests {
             rec(Some("g1"), 0, 200, Some("   ")),
             rec(Some("g1"), 0, 50, None),
         ];
-        let out = fold_tokens_by_model(&records, "g1", "cur-model");
+        let out = fold_active_tokens_by_model(&records, "g1", "cur-model");
         assert_eq!(out, vec![("cur-model".to_owned(), 350)]);
     }
 
@@ -842,15 +971,13 @@ mod fold_tokens_by_model_tests {
             rec(Some("g1"), 0, 100, Some("grok-4")),
             rec(Some("g1"), 0, 200, Some("")),
         ];
-        let out = fold_tokens_by_model(&records, "g1", "grok-4");
+        let out = fold_active_tokens_by_model(&records, "g1", "grok-4");
         assert_eq!(out, vec![("grok-4".to_owned(), 300)]);
     }
 }
 
 /// Resolved per-role `/goal` model selection, cached on the actor.
-///
 /// `Default` (every role `InheritCurrent`, empty skeptic pool) reproduces today's behavior.
-/// That is `runtime_overrides.model = None` and the role's default `subagent_type`.
 /// The kill-switch (`goal_use_current_model_only`) collapses all three to `InheritCurrent` at resolution time, so consumers never need to re-check it.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct GoalRoleModelConfig {
@@ -864,7 +991,7 @@ pub(crate) struct GoalRoleModelConfig {
 }
 
 pub(crate) fn planner_failure_pause_message() -> String {
-    "Planning failed; resume with /goal to retry.".to_string()
+    "Planning failed; run /goal resume to retry.".to_string()
 }
 
 pub(crate) fn goal_slash_and_harness_available(goal_enabled: bool, tool_names: &[String]) -> bool {
@@ -907,7 +1034,6 @@ impl SessionActor {
     /// Tag `task_id`s reparented from a harness verifier/planner subagent as goal-turn origin.
     /// Gated on the goal harness being enabled (stable across status flips), NOT on `Active`.
     /// A final-round skeptic exiting as the goal flips `Active → Blocked` is thus still suppressed.
-    /// The caller already filters to harness-internal children (`surface_completion: false`).
     pub(super) fn record_reparented_goal_turn_task_ids(
         &self,
         task_ids: impl IntoIterator<Item = String>,
@@ -960,7 +1086,7 @@ impl SessionActor {
             .auto_pause_goal_if_active_with_message(
                 crate::session::goal_tracker::GoalPauseReason::User,
                 "Goal paused: `update_goal` is not available in this session's toolset. \
-                 Resume with /goal after the tool is registered."
+                 Run /goal resume after the tool is registered."
                     .into(),
             )
             .await;
@@ -1009,11 +1135,6 @@ impl SessionActor {
             .retain(|_, r| r.goal_id.as_deref() != Some(goal_id.as_str()));
     }
 
-    /// Run the planner subagent for a goal that has no plan yet.
-    /// Called from `setup_goal` (fresh goal) and from `resume_goal` (post-pause retry).
-    /// The retry honours the canonical "Planning failed; resume with /goal to retry." message.
-    /// No-op when the planner is disabled, when the coordinator is absent (tests / compatible template), or when `plan_file` is already populated.
-    /// On `FailClosed` the goal is paused with the canonical reason.
     pub(super) async fn maybe_run_goal_planner(&self, objective: &str) {
         let objective = objective.to_owned();
         let mut steering = Vec::new();
@@ -1081,11 +1202,9 @@ impl SessionActor {
                     if !can_publish {
                         break;
                     }
-                    // The subagent produced a plan and we are committing to publish it
-                    // `run_goal_planner_attempt` already took the planner run, so steering can no longer replan
-                    // A late Send Now landing in the publish window is delivered only as an interjection
-                    // Turn the "planning…" badge off NOW, before the plan/baseline I/O below, instead of only at the very end
-                    // That way the UI never advertises "planning" while it can no longer replan
+                    // Now landing in the publish window is delivered only as an interjection.
+                    // Turn the "planning…" badge off NOW, before the plan/baseline I/O below, instead of only at the very end.
+                    // That way the UI never advertises "planning" while it can no longer replan.
                     self.clear_goal_planning_latch(run_goal_id.as_deref()).await;
                     if attempt_file.persist(&plan_file).is_err() {
                         let still_same_goal =
@@ -1171,21 +1290,15 @@ impl SessionActor {
             break;
         }
 
-        // Catch-all latch reset for every exit path that did NOT already clear it at the commit-to-publish point
-        // Those paths: Stop, cap-exhausted, fail-closed, steered-retry, or a publish that broke out before committing
-        // The conditional emit inside the helper keeps the success path's earlier clear from being re-emitted as a duplicate `planning=None`
-        // A no-op if the orchestration has since vanished or the goal was replaced
+        // Catch-all latch reset for every exit path that did NOT already clear it at the commit-to-publish point.
+        // Those paths: Stop, cap-exhausted, fail-closed, steered-retry, or a publish that broke out before committing.
+        // The conditional emit inside the helper keeps the success path's earlier clear from being re-emitted as a duplicate `planning=None` A no-op if the orchestration has since vanished or the goal was replaced.
         self.clear_goal_planning_latch(run_goal_id.as_deref()).await;
     }
 
-    /// Clear the goal's "planning…" latch for `run_goal_id`.
     /// Only if the latch was actually set, emit a snapshot-derived `GoalUpdated` so the pager's planning badge turns off.
-    /// Returns whether the latch was set (and thus an emit happened).
-    ///
-    /// Two call sites in [`Self::maybe_run_goal_planner`] share this: the commit-to-publish point and the catch-all on every other exit path.
     /// At the commit-to-publish point steering can no longer replan, so the planning phase is over.
     /// Turn the badge off there BEFORE the publish/baseline I/O.
-    /// The conditional emit keeps the two sites from double-emitting a redundant `planning=None`.
     async fn clear_goal_planning_latch(&self, run_goal_id: Option<&str>) -> bool {
         let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
         let (tokens_used, finished_marginal) = self.goal_tokens(current_tokens);
@@ -1346,12 +1459,9 @@ impl SessionActor {
         }
     }
 
-    /// Run the stall-triggered strategist subagent (best-effort, fail-OPEN).
-    /// Called from `apply_classifier_outcome`'s `NotAchieved` branch once the consecutive-failure streak hits a multiple of `goal_strategist_every`.
     /// Runs only when neither the cap nor the stall paused the round.
     /// On success the recommendation and the strategy-note path are persisted on the orchestration so the continuation directive can inline them.
     /// Any failure (no coordinator, spawn error, missing note) is logged and ignored; the goal keeps running, never pauses.
-    /// No `goal_tracker` lock is held across the strategist `.await`.
     pub(super) async fn maybe_run_goal_strategist(&self, attempt: u32, consecutive_failures: u32) {
         // The claim granted the cap bonus up front
         // Every exit that delivers no restructure (early return, FailOpen, future dropped by a turn cancel) must give it back
@@ -1462,13 +1572,9 @@ impl SessionActor {
         }
     }
 
-    /// Generate the ONE closing user-facing summary after a goal is verified-achieved and send it as the goal turn's final message.
-    ///
-    /// Best-effort / fail-OPEN: gated by `goal_summary_enabled`.
     /// Any failure (disabled, no coordinator, spawn error, empty output) is logged, recorded in telemetry, and skipped.
     /// Goal completion is NEVER blocked, paused, or un-achieved (the goal is already Complete when this runs).
     /// Read-only: the spawn pins a read-only toolset and the prompt forbids edits.
-    /// No `goal_tracker` lock is held across the summarizer `.await`.
     pub(super) async fn maybe_run_goal_summarizer(&self, attempt: u32) {
         if !self.goal_summary_enabled {
             return;
@@ -1563,18 +1669,10 @@ impl SessionActor {
         )
     }
 
-    /// Returns `(ratcheted_total, finished_subagent_marginal_sum)` for the active goal, or `(0, 0)` if no orchestration is loaded.
-    ///
-    /// The ratcheted total folds in EVERY goal-scoped subagent's marginal (finished and in-flight) so the displayed/enforced spend tracks live progress.
-    /// The second value is the wire `finished_subagent_tokens` and intentionally folds ONLY sealed (`finished`) records.
-    /// The pager adds its own live active-subagent sum on top of that field (`GoalDisplayState::live_tokens_used`).
-    /// Including an in-flight subagent here would therefore double-count it in the live display / budget bar.
-    ///
+    /// Returns the active goal's ratcheted total and finished-subagent token sum, or `(0, 0)`.
+    /// The wire `finished_subagent_tokens` folds only completed attempts; the pager adds live tokens.
     /// Parent usage is accumulated as a monotonic spend counter (`parent_tokens_spent`).
     /// Only POSITIVE deltas of the session token total are added, anchored at `last_session_tokens_seen`.
-    /// A compaction that shrinks the context total merely re-anchors, so the count can neither decrease nor freeze until context regrows past a prior peak.
-    /// Best-effort sampling: growth fully consumed by a compaction between two calls is unobserved.
-    ///
     /// Side-effect: advances the spend accumulator and ratchets `tokens_used_high_water` monotonically; idempotent under stable inputs.
     pub(crate) fn goal_tokens(&self, current_session_tokens: i64) -> (i64, i64) {
         let goal_id = {
@@ -1584,33 +1682,27 @@ impl SessionActor {
                 None => return (0, 0),
             }
         };
-        // `subagent_sum` folds every goal-scoped record (finished and in-flight) into the ratcheted total
-        // `finished_subagent_sum` folds only sealed records and is what ships on the wire as `finished_subagent_tokens`
-        // Keeping them distinct preserves the pager contract: the pager sums running subagents itself and adds them to `finished_subagent_tokens`
-        // So an in-flight marginal must NOT appear in the wire field
+        // The pager adds active subagent tokens to `finished_subagent_tokens`, so active tokens must not appear in the wire field.
         let (subagent_sum, finished_subagent_sum) = {
             let records = self.subagent_token_records.lock();
             records
                 .values()
-                .filter(|r| r.goal_id.as_deref() == Some(goal_id.as_str()))
-                .fold((0i64, 0i64), |(all, finished), r| {
-                    let d = r.marginal();
-                    if i64::try_from(d).is_err() {
+                .filter(|record| record.goal_id.as_deref() == Some(goal_id.as_str()))
+                .fold((0i64, 0i64), |(all, finished), record| {
+                    let tokens = record.total_tokens();
+                    if i64::try_from(tokens).is_err() {
                         static WARNED: std::sync::Once = std::sync::Once::new();
                         WARNED.call_once(|| {
                             tracing::warn!(
-                                marginal = d,
-                                "subagent token marginal exceeds i64::MAX; saturating"
+                                tokens,
+                                "subagent token total exceeds i64::MAX; saturating"
                             );
                         });
                     }
-                    let d = i64::try_from(d).unwrap_or(i64::MAX);
-                    let all = all.saturating_add(d);
-                    let finished = if r.finished {
-                        finished.saturating_add(d)
-                    } else {
-                        finished
-                    };
+                    let all = all.saturating_add(i64::try_from(tokens).unwrap_or(i64::MAX));
+                    let finished = finished.saturating_add(
+                        i64::try_from(record.completed_attempt_tokens).unwrap_or(i64::MAX),
+                    );
                     (all, finished)
                 })
         };
@@ -1640,36 +1732,21 @@ impl SessionActor {
         self.goal_tokens(current_session_tokens).0
     }
 
-    /// Per-model marginal-token breakdown for the active goal's LIVE active-subagent window, sorted by tokens descending.
-    /// Empty when no goal is loaded.
-    /// Records with no captured model fold under `current_model_id` (best-effort); see [`fold_tokens_by_model`] for the fold contract.
-    /// Fed into `update_live_progress` by the `SubagentProgress` handler.
-    ///
-    /// Sealed (`finished`) records are excluded: this feeds `live_tokens_by_model`, rendered under the running subagent's live block.
-    /// Spend from earlier finished subagents must not leak into that block.
-    /// This is the per-model analogue of the finished/in-flight split in [`Self::goal_tokens`]; the ratcheted total path is unaffected.
+    /// Per-model marginal-token breakdown for the active goal's live attempts.
+    /// Records with no captured model fold under `current_model_id`; see [`fold_active_tokens_by_model`].
+    /// Finished-attempt spend must not leak into the running subagent's live block.
     pub(crate) fn goal_tokens_by_model(&self, current_model_id: &str) -> Vec<(String, u64)> {
         let goal_id = match self.goal_tracker.lock().snapshot() {
             Some(o) => o.goal_id.clone(),
             None => return Vec::new(),
         };
         let records = self.subagent_token_records.lock();
-        fold_tokens_by_model(
-            records.values().filter(|r| !r.finished),
-            &goal_id,
-            current_model_id,
-        )
+        fold_active_tokens_by_model(records.values(), &goal_id, current_model_id)
     }
 
     /// Push the tool-layer `GoalLoopActive` flag.
-    /// Per-tool-call bg-task / subagent completion reminders suppress themselves while the goal loop drives the turn.
     /// Mirrors the `CurrentPromptIdResource` push.
-    ///
-    /// Also mirrors the value into `tool_context.goal_loop_active_gate`, the shared `Arc<AtomicBool>`.
-    /// The notification bridge (bash auto-wake) and subagent spawn contexts (subagent auto-wake) read it to suppress synthetic completion prompts mid-goal.
-    /// Writing both from this one place keeps the gate from *persistently* drifting from the resource.
     /// The two writes are sequential (gate store, then async `update_resource`), so a transient window exists.
-    /// That window is benign: those consumers read only the gate.
     pub(super) async fn set_goal_loop_active_resource(&self, active: bool) {
         self.tool_context
             .goal_loop_active_gate

@@ -289,7 +289,17 @@ pub enum BackgroundTaskType {
     Subagent,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, strum::IntoStaticStr, strum::EnumIter)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    strum::AsRefStr,
+    strum::IntoStaticStr,
+    strum::EnumIter,
+)]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum StopFailureKind {
@@ -301,7 +311,17 @@ pub enum StopFailureKind {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, strum::IntoStaticStr, strum::EnumIter)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    strum::AsRefStr,
+    strum::IntoStaticStr,
+    strum::EnumIter,
+)]
 #[strum(serialize_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 pub enum StopCancelledReason {
@@ -331,18 +351,7 @@ impl StopCancelledReason {
             Self::Unknown => CancelledBy::Unknown,
         }
     }
-
-    pub fn as_str(self) -> &'static str {
-        self.into()
-    }
 }
-
-impl StopFailureKind {
-    pub fn as_str(self) -> &'static str {
-        self.into()
-    }
-}
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HookEventEnvelope {
@@ -569,6 +578,17 @@ pub enum HookPayload {
 }
 
 impl HookPayload {
+    /// The tool a tool-event payload is about; `None` for every other event.
+    pub fn tool_name(&self) -> Option<&str> {
+        match self {
+            Self::PreToolUse { tool_name, .. }
+            | Self::PostToolUse { tool_name, .. }
+            | Self::PostToolUseFailure { tool_name, .. }
+            | Self::PermissionDenied { tool_name, .. } => Some(tool_name),
+            _ => None,
+        }
+    }
+
     pub fn match_value(&self) -> Option<&str> {
         let value = match self {
             Self::PreToolUse { tool_name, .. }
@@ -584,8 +604,8 @@ impl HookPayload {
             | Self::PreCompact { source }
             | Self::PostCompact { source } => source,
             Self::SessionEnd { reason, .. } => reason,
-            Self::StopFailure { error, .. } => return Some(error.as_str()),
-            Self::StopCancelled { reason, .. } => return Some(reason.as_str()),
+            Self::StopFailure { error, .. } => return Some(error.as_ref()),
+            Self::StopCancelled { reason, .. } => return Some(reason.as_ref()),
             Self::Stop { .. } | Self::UserPromptSubmit { .. } => return None,
         };
         Some(value.as_str()).filter(|v| !v.is_empty())

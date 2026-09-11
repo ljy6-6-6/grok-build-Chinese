@@ -21,14 +21,6 @@ pub enum FeedbackTier {
 }
 
 impl FeedbackTier {
-    pub fn sample_rate(&self) -> f64 {
-        match self {
-            FeedbackTier::Tier1 => 0.0005, // 0.05%
-            FeedbackTier::Tier2 => 0.0002, // 0.02%
-            FeedbackTier::Tier3 => 0.0001, // 0.01%
-        }
-    }
-
     pub fn trigger_type(&self) -> &'static str {
         match self {
             FeedbackTier::Tier1 => "tier1_engagement",
@@ -256,60 +248,6 @@ impl FeedbackHeuristics {
         }
     }
 
-    /// Create a heuristics evaluator from a remote feedback-heuristics config.
-    pub fn from_config(config: &FeedbackHeuristicsConfig) -> Self {
-        use prod_mc_cli_chat_proxy_types::feedback_types::parse_feedback_mode_str;
-
-        Self {
-            enabled: config.enabled,
-
-            // Global limits
-            cooldown_seconds: config.cooldown_seconds as u64,
-            max_requests_per_session: config.max_requests_per_session as u32,
-
-            // Tier 1
-            tier1_enabled: config.tier1_enabled,
-            tier1_sample_rate: config.tier1_sample_rate,
-            tier1_min_turns: config.tier1_min_turns as u32,
-            tier1_min_tool_calls: config.tier1_min_tool_calls as u32,
-            tier1_min_compactions: config.tier1_min_compactions as u32,
-            tier1_no_cancellations: config.tier1_no_cancellations,
-            tier1_feedback_mode: parse_feedback_mode_str(&config.tier1_feedback_mode),
-            tier1_dismissible: config.tier1_dismissible,
-            tier1_prompt: config.tier1_prompt.clone(),
-            tier1_max_triggers: config.tier1_max_triggers as u32,
-
-            // Tier 2
-            tier2_enabled: config.tier2_enabled,
-            tier2_sample_rate: config.tier2_sample_rate,
-            tier2_min_turns: config.tier2_min_turns as u32,
-            tier2_min_tool_calls: config.tier2_min_tool_calls as u32,
-            tier2_min_compactions: config.tier2_min_compactions as u32,
-            tier2_min_errors: config.tier2_min_errors as u32,
-            tier2_feedback_mode: parse_feedback_mode_str(&config.tier2_feedback_mode),
-            tier2_dismissible: config.tier2_dismissible,
-            tier2_prompt: config.tier2_prompt.clone(),
-            tier2_max_triggers: config.tier2_max_triggers as u32,
-
-            // Tier 3
-            tier3_enabled: config.tier3_enabled,
-            tier3_sample_rate: config.tier3_sample_rate,
-            tier3_min_turns: config.tier3_min_turns as u32,
-            tier3_requires_cancellation: config.tier3_requires_cancellation,
-            tier3_requires_revert: config.tier3_requires_revert,
-            tier3_requires_recovery: config.tier3_requires_recovery,
-            tier3_feedback_mode: parse_feedback_mode_str(&config.tier3_feedback_mode),
-            tier3_dismissible: config.tier3_dismissible,
-            tier3_prompt: config.tier3_prompt.clone(),
-            tier3_max_triggers: config.tier3_max_triggers as u32,
-
-            trigger_counts: std::collections::HashMap::new(),
-            requests_sent: 0,
-            last_request_time: None,
-            last_request_at: None,
-        }
-    }
-
     /// Preserves the triggered_tiers state and request tracking.
     pub fn update_config(&mut self, config: &FeedbackHeuristicsConfig) {
         use prod_mc_cli_chat_proxy_types::feedback_types::parse_feedback_mode_str;
@@ -450,23 +388,14 @@ impl FeedbackHeuristics {
         }
     }
 
-    /// Check if a specific tier should trigger (without sampling).
-    /// Used for testing or when sampling is done externally.
-    pub fn check_tier(&self, tier: FeedbackTier, signals: &SessionSignals) -> bool {
+    /// Tier criteria without the sampling step.
+    #[cfg(test)]
+    fn check_tier(&self, tier: FeedbackTier, signals: &SessionSignals) -> bool {
         match tier {
             FeedbackTier::Tier1 => self.check_tier1(signals).is_some(),
             FeedbackTier::Tier2 => self.check_tier2(signals).is_some(),
             FeedbackTier::Tier3 => self.check_tier3(signals).is_some(),
         }
-    }
-
-    pub fn mark_triggered(&mut self, tier: FeedbackTier) {
-        *self.trigger_counts.entry(tier).or_insert(0) += 1;
-    }
-
-    /// Reset trigger counts (e.g., for a new session).
-    pub fn reset(&mut self) {
-        self.trigger_counts.clear();
     }
 
     fn tier_exhausted(&self, tier: FeedbackTier) -> bool {
@@ -618,16 +547,6 @@ pub struct FeedbackRequest {
 }
 
 impl FeedbackRequest {
-    pub fn new(session_id: String, trigger_condition: TriggerCondition) -> Self {
-        Self::with_mode(
-            session_id,
-            trigger_condition,
-            FeedbackMode::Thumbs,
-            true,
-            None,
-        )
-    }
-
     pub fn with_mode(
         session_id: String,
         trigger_condition: TriggerCondition,
@@ -675,11 +594,6 @@ impl FeedbackRequest {
             thumbs,
             text,
         }
-    }
-
-    pub fn with_context(mut self, context: serde_json::Value) -> Self {
-        self.context = Some(context);
-        self
     }
 }
 
@@ -777,7 +691,10 @@ mod tests {
         );
 
         // Simulate that the request was sent
-        heuristics.mark_triggered(FeedbackTier::Tier1);
+        *heuristics
+            .trigger_counts
+            .entry(FeedbackTier::Tier1)
+            .or_insert(0) += 1;
 
         // Second evaluation with the same signals does not trigger Tier 1 again
         let eval = heuristics.evaluate(&signals);
@@ -791,7 +708,13 @@ mod tests {
     fn test_feedback_request_creation() {
         let signals = make_signals(10, 5, 2, 0, 0);
         let condition = TriggerCondition::tier1(&signals);
-        let request = FeedbackRequest::new("session-123".to_string(), condition);
+        let request = FeedbackRequest::with_mode(
+            "session-123".to_string(),
+            condition,
+            FeedbackMode::Thumbs,
+            true,
+            None,
+        );
 
         assert!(!request.request_id.is_empty());
         assert_eq!(request.session_id, "session-123");
@@ -818,7 +741,13 @@ mod tests {
         // Test Tier2
         let signals2 = make_signals(15, 10, 3, 1, 0);
         let condition2 = TriggerCondition::tier2(&signals2);
-        let request2 = FeedbackRequest::new("session-456".to_string(), condition2);
+        let request2 = FeedbackRequest::with_mode(
+            "session-456".to_string(),
+            condition2,
+            FeedbackMode::Thumbs,
+            true,
+            None,
+        );
         assert_eq!(request2.trigger_type, "tier2_complex_recovery");
         assert_eq!(
             request2.trigger_condition.condition,
@@ -829,16 +758,15 @@ mod tests {
         let mut signals3 = make_signals(20, 10, 3, 1, 2);
         signals3.has_reverted = true;
         let condition3 = TriggerCondition::tier3(&signals3, true, true);
-        let request3 = FeedbackRequest::new("session-789".to_string(), condition3);
+        let request3 = FeedbackRequest::with_mode(
+            "session-789".to_string(),
+            condition3,
+            FeedbackMode::Thumbs,
+            true,
+            None,
+        );
         assert_eq!(request3.trigger_type, "tier3_friction_recovery");
         assert!(request3.trigger_condition.condition.contains("turns >= 20"));
-    }
-
-    #[test]
-    fn test_sample_rate_values() {
-        assert_eq!(FeedbackTier::Tier1.sample_rate(), 0.0005);
-        assert_eq!(FeedbackTier::Tier2.sample_rate(), 0.0002);
-        assert_eq!(FeedbackTier::Tier3.sample_rate(), 0.0001);
     }
 
     #[test]

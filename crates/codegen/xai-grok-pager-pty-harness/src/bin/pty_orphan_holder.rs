@@ -17,14 +17,8 @@ use xai_grok_test_support::TestSandbox;
 
 fn main() -> anyhow::Result<()> {
     let sandbox = TestSandbox::new();
-    // The child ignores SIGHUP: when the holder dies its PTY master closes and
-    // the kernel HUPs the child's foreground group, which would kill a
-    // well-behaved child and mask the leak. The leaked CI pagers were exactly
-    // the ones that did not act on that SIGHUP (wedged mid-shutdown), so the
-    // fixture models them; only the kernel-side pdeathsig can reap it.
-    // `exec` keeps this a single process (no shell grandchild), so the test's
-    // liveness probe targets the one PID that must die with the holder
-    // (SIG_IGN dispositions survive exec).
+    // Ignore SIGHUP so a well-behaved child does not mask the leak; only pdeathsig can reap it.
+    // `exec` keeps one PID (SIG_IGN survives) so the liveness probe targets the process that must die with the holder.
     let controller = PtyController::spawn_in_sandbox(
         Path::new("/bin/sh"),
         PtySize {

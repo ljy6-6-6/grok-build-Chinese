@@ -7,14 +7,15 @@
 use serde_json::{Value, json};
 use xai_tool_protocol::{
     BotBindConversationParams, BotCommandParams, BotEmptyResult, BotEventChannel, BotEventEnvelope,
-    BotRelayError, BotRelayErrorCode, BotRosterResult, BotStatusResult, BotSubscribeParams,
-    BotTranscriptOffboxParams, BotTranscriptOffboxResult, BotVncDescriptorParams,
-    BotVncDescriptorResult, COMMAND_REJECTED_AGENT_ID_MISMATCH, COMMAND_REJECTED_ARGS_INVALID,
-    COMMAND_REJECTED_ARGS_TOO_LARGE, COMMAND_REJECTED_ATTACHMENT_CREDENTIAL_UNAVAILABLE,
-    COMMAND_REJECTED_ATTACHMENT_NOT_FOUND, COMMAND_REJECTED_ATTACHMENT_NOT_READY,
-    COMMAND_REJECTED_ATTACHMENT_TOO_LARGE, COMMAND_REJECTED_ATTACHMENT_WRONG_SOURCE,
-    COMMAND_REJECTED_ATTACHMENTS_NOT_SUPPORTED_IN_LIVE, COMMAND_REJECTED_GATEWAY_UNKNOWN_METHOD,
-    HubChannel, HubResyncRequiredEvent, HubTurnFinishedEvent,
+    BotRelayError, BotRelayErrorCode, BotRelaySiblingAccount, BotRelaySignIn, BotRosterResult,
+    BotStatusResult, BotSubscribeParams, BotTranscriptOffboxParams, BotTranscriptOffboxResult,
+    BotVncDescriptorParams, BotVncDescriptorResult, COMMAND_REJECTED_AGENT_ID_MISMATCH,
+    COMMAND_REJECTED_ARGS_INVALID, COMMAND_REJECTED_ARGS_TOO_LARGE,
+    COMMAND_REJECTED_ATTACHMENT_CREDENTIAL_UNAVAILABLE, COMMAND_REJECTED_ATTACHMENT_NOT_FOUND,
+    COMMAND_REJECTED_ATTACHMENT_NOT_READY, COMMAND_REJECTED_ATTACHMENT_TOO_LARGE,
+    COMMAND_REJECTED_ATTACHMENT_WRONG_SOURCE, COMMAND_REJECTED_ATTACHMENTS_NOT_SUPPORTED_IN_LIVE,
+    COMMAND_REJECTED_GATEWAY_UNKNOWN_METHOD, HubChannel, HubResyncRequiredEvent,
+    HubTurnFinishedEvent,
 };
 
 const ERROR_IDENTITY_UNAVAILABLE: &str =
@@ -30,6 +31,8 @@ const ERROR_LEGACY_PRICING_UNSUPPORTED: &str =
 const ERROR_EMAIL_UNVERIFIED: &str =
     include_str!("../fixtures/bot_relay/error_email_unverified.json");
 const ERROR_LINK_CONFLICT: &str = include_str!("../fixtures/bot_relay/error_link_conflict.json");
+const ERROR_LINK_CONFLICT_SIBLINGS: &str =
+    include_str!("../fixtures/bot_relay/error_link_conflict_siblings.json");
 const ERROR_CURSOR_ACCOUNT_UNAVAILABLE: &str =
     include_str!("../fixtures/bot_relay/error_cursor_account_unavailable.json");
 const ERROR_LINK_UNSUPPORTED: &str =
@@ -435,6 +438,65 @@ fn handwritten_gateway_unknown_method_reason() {
         BotRelayErrorCode::CommandRejected,
     );
     assert_eq!(err.detail.upstream, None);
+}
+
+#[test]
+fn handwritten_link_conflict_siblings() {
+    let (wire, err) = replay_error(ERROR_LINK_CONFLICT_SIBLINGS);
+    assert_eq!(wire["code"], "link_conflict");
+    assert_eq!(wire["reason"], "jit_link_declined");
+    assert_eq!(
+        wire["detail"]["siblingAccounts"].as_array().map(Vec::len),
+        Some(3)
+    );
+    assert_eq!(err.code, BotRelayErrorCode::LinkConflict);
+    assert_eq!(err.reason.as_deref(), Some("jit_link_declined"));
+    assert_eq!(err.detail.upstream, None);
+    let siblings = err
+        .detail
+        .sibling_accounts
+        .as_deref()
+        .expect("siblingAccounts");
+    assert_eq!(
+        siblings,
+        [
+            BotRelaySiblingAccount {
+                sign_in: BotRelaySignIn::X,
+                handle: Some("grokfan".to_owned()),
+                created_at_ms: 1_699_920_000_000,
+                linked: true,
+            },
+            BotRelaySiblingAccount {
+                sign_in: BotRelaySignIn::Apple,
+                handle: None,
+                created_at_ms: 1_717_200_000_000,
+                linked: false,
+            },
+            BotRelaySiblingAccount {
+                sign_in: BotRelaySignIn::Other,
+                handle: None,
+                created_at_ms: 0,
+                linked: false,
+            },
+        ]
+    );
+    assert_eq!(siblings.iter().filter(|s| s.linked).count(), 1);
+    let reserialized = serde_json::to_value(&err).unwrap();
+    assert_eq!(
+        reserialized["detail"]["siblingAccounts"][0],
+        wire["detail"]["siblingAccounts"][0]
+    );
+    assert_eq!(
+        reserialized["detail"]["siblingAccounts"][1],
+        wire["detail"]["siblingAccounts"][1]
+    );
+    assert_eq!(
+        reserialized["detail"]["siblingAccounts"][2]["signIn"],
+        "other"
+    );
+    for sign_in in BotRelaySignIn::ALL {
+        assert_eq!(BotRelaySignIn::from_wire(sign_in.as_str()), *sign_in);
+    }
 }
 
 #[test]

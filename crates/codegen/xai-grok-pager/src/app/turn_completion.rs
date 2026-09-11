@@ -159,7 +159,6 @@ pub(super) fn note_hook_blocked_turn(
     // Consume the armed skip so it cannot swallow the next live user message (another client's prompt)
     agent.session.tracker.clear_user_echo_skip();
     // The scrollback bubble stays: the live session keeps showing what the user typed, even though a blocked prompt is stored nowhere
-    //
     // Adopting another client's turn also stashes a text-only prompt, so rewind can restore it
     // Only the originating client may requeue the prompt and own the card
     let foreign = prompt_id.is_some_and(|p| !agent.is_self_originated_prompt(p));
@@ -264,6 +263,10 @@ fn open_prompt_blocked_card(
         agent.show_toast(&message);
         return;
     }
+
+    agent.displace_feedback_modal(
+        crate::views::feedback_modal::FeedbackModalDisplacement::HookBlockedPrompt,
+    );
 
     let row_id = blocked.row_id;
     let was_combined = blocked.was_combined;
@@ -372,68 +375,27 @@ fn open_prompt_blocked_card(
     ];
 
     let stashed = agent.prompt.stash();
-    agent.question_view = Some(
-        QuestionViewState::new(
-            format!("prompt-blocked-{row_id}"),
-            vec![Question {
-                question,
-                id: None,
-                options,
-                multi_select: Some(false),
-            }],
-            stashed,
-        )
-        .with_local_kind(LocalQuestionKind::PromptBlocked { row_id })
-        .with_no_freeform(),
-    );
+    let state = QuestionViewState::new(
+        format!("prompt-blocked-{row_id}"),
+        vec![Question {
+            question,
+            id: None,
+            options,
+            multi_select: Some(false),
+        }],
+        stashed,
+    )
+    .with_local_kind(LocalQuestionKind::PromptBlocked { row_id })
+    .with_no_freeform();
+    agent.install_local_question(state);
     agent.prompt.set_text("");
 }
 
-/// Push a turn-terminal marker ("Turn completed/cancelled/failed"), folding any pending stop-family hook runs into it.
-/// The folded runs render inline (right-justified) on the marker line instead of as a standalone block.
-///
-/// All three marker rails route through here: the driver's `PromptResponse`, the lost-RPC reconcile, and the viewer finalize.
-/// (Wake turns route through `finish_wake_turn` in acp_handler, which maps their stop reason and calls here only when a marker is due.)
-/// `event == None` (bash turns, rate-limit / re-auth UX that replaces the marker) flushes the held hooks as the legacy standalone lifecycle block.
-/// Failures then stay visible.
-///
-/// A stamped stash folds only on an exact ending-id match.
-/// On a mismatch it flushes standalone (the ending turn is THE turn; an older stash has no marker coming).
-/// An unstamped stash keeps the legacy stashed-during-this-turn heuristic.
-pub(super) fn push_turn_terminal_marker(
-    agent: &mut AgentView,
-    event: Option<SessionEvent>,
-    ending_prompt_id: Option<&str>,
-) {
-    let pending = agent.pending_stop_hooks.take();
-    let groups = match pending {
-        None => Vec::new(),
-        Some(pending) => {
-            let stale = match (pending.prompt_id.as_deref(), ending_prompt_id) {
-                (Some(stashed), Some(ending)) => stashed != ending,
-                (Some(_), None) => true,
-                (None, _) => false,
-            };
-            if stale {
-                for (name, runs) in pending.groups {
-                    agent.scrollback.push_lifecycle_hooks(name, runs);
-                }
-                Vec::new()
-            } else {
-                pending.groups
-            }
-        }
-    };
-
-    match event {
-        Some(event) => {
-            agent.push_end_marker_block(event, groups, ending_prompt_id.map(str::to_string));
-        }
-        None => {
-            for (name, runs) in groups {
-                agent.scrollback.push_lifecycle_hooks(name, runs);
-            }
-        }
+/// Push a turn-terminal marker ("Turn completed/cancelled/failed"); every marker rail routes through here, wake turns
+/// via `finish_wake_turn`. `event == None` (bash turns, rate-limit / re-auth UX that replaces the marker) pushes nothing.
+pub(super) fn push_turn_terminal_marker(agent: &mut AgentView, event: Option<SessionEvent>) {
+    if let Some(event) = event {
+        agent.push_end_marker_block(event);
     }
 }
 
@@ -474,13 +436,8 @@ pub(super) enum TerminalApply {
     ViewerFinalized,
 }
 
-/// Arm lost-`PromptResponse` reconcile for the driver turn we own.
-///
-/// - **Exact** `prompt_id` match: arm (canonical).
-/// - **Missing** wire `promptId` (`None` or empty): arm on `current_prompt_id` only when the turn is not mid-tool/thinking/compact/retry.
-///   These are legacy / broken `TurnCompleted` payloads.
-/// - **Non-empty mismatch**: ignore (a stale/peer terminal must not kill a newer live turn after grace).
-///
+/// **Missing** wire `promptId` (`None` or empty): arm on `current_prompt_id` only when the turn is not mid-tool/thinking/compact/retry.
+/// **Non-empty mismatch**: ignore (a stale/peer terminal must not kill a newer live turn after grace).
 /// Never clobber an existing arm for a different pid; keep earliest `received_at` when re-arming the same pid.
 fn arm_driver_turn_end_reconcile(
     agent: &mut AgentView,
@@ -619,22 +576,9 @@ fn driver_mid_active_work(agent: &AgentView) -> bool {
     }
 }
 
-/// Finalize a turn from a terminal signal.
-/// The `prompt_complete` broadcast and the durable `TurnCompleted` update both route here so they behave identically.
-///
 /// DRIVER (`!attached_as_viewer`): the `PromptResponse` RPC owns the turn lifecycle, so do NOT finish the turn here.
-/// The RPC carries context this signal lacks: error classes, rewind bookkeeping, adoption transfer.
-/// Finishing here would race/double-finish on every normal turn end (the signal is emitted BEFORE the RPC response is written).
-/// But the RPC response can be LOST in transit (leader response routing / reconnect races).
 /// It is also the ONLY exit from `TurnRunning`/`TurnCancelling`.
-/// So when the signal refers to the turn this client is driving (exact pid, or missing/empty pid while not mid-tool), arm a deferred reconcile.
-/// If the RPC lands within the grace window it disarms this (see `TaskResult::PromptResponse`).
-/// Otherwise the event loop finishes the turn from it (`reconcile_overdue_turn_ends`).
-///
 /// VIEWER (`attached_as_viewer`): a viewer adopts the driver's turn and never receives its `PromptResponse`.
-/// This is therefore its only non-interactive exit from `TurnRunning`.
-/// Finish the turn and push the "Turn completed/cancelled/failed" marker mapped from [`TerminalSignal::stop_reason`].
-/// Idempotent: a duplicate/stale terminal for an already-finished turn pushes nothing and returns [`TerminalApply::Ignored`].
 pub(super) fn finalize_turn_from_terminal(
     agent: &mut AgentView,
     session_id: &str,
@@ -667,12 +611,6 @@ pub(super) fn finalize_turn_from_terminal(
     // The anchor was back-dated from the authoritative `turnStartMs` on adoption, so this reads the same wall-clock duration the driver shows
     // Missing clock stays `None` (same as the live driver) so we render "Turn completed." rather than "Worked for 0.0s"
     let elapsed_ms = duration_to_elapsed_ms(agent.turn_elapsed());
-    // Read before `finish_turn()` clears it; keys the pending stop-hook stash.
-    let ending_prompt_id = agent
-        .session
-        .current_prompt_id
-        .clone()
-        .or_else(|| prompt_id.map(str::to_string));
 
     // Before `finish_turn`: the blocked-prompt requeue reads `in_flight_prompt`, which finish_turn clears
     note_hook_blocked_turn(
@@ -703,23 +641,16 @@ pub(super) fn finalize_turn_from_terminal(
             &agent.scrollback,
         ),
     });
-    push_turn_terminal_marker(agent, event, ending_prompt_id.as_deref());
+    push_turn_terminal_marker(agent, event);
 
     agent.mark_turn_finished(TurnEnd::Completed);
 
     TerminalApply::ViewerFinalized
 }
 
-/// Map a [`finalize_turn_from_terminal`] outcome to the redraw/tick bool that BOTH terminal rails RETURN DIRECTLY.
-/// Both rails are `prompt_complete` and the live `TurnCompleted`; the mapping also applies the viewer-finalize side effect.
 /// The live `TurnCompleted` arm must return this instead of routing through `changed && is_active` (see below).
-///
-/// - `Ignored` returns `false`.
-/// - `ReconcileArmed` returns `true` UNCONDITIONALLY (not gated on visibility).
-///   The lost-RPC reconcile sweep rides the animation tick, and the event loop only re-arms the tick when a batch reports a change.
-///   A background-tab driver (`is_active == false`) that armed the reconcile must still report the change.
-///   Otherwise `reconcile_overdue_turn_ends` never fires and the turn strands on "Waiting…" (the exact bug this rail fixes).
-/// - `ViewerFinalized` returns `true` only when `is_active` (drop pending adoption).
+/// The lost-RPC reconcile sweep rides the animation tick, and the event loop only re-arms the tick when a batch reports a change.
+/// A background-tab driver (`is_active == false`) that armed the reconcile must still report the change.
 pub(super) fn apply_terminal_outcome(
     outcome: TerminalApply,
     app: &mut AppView,

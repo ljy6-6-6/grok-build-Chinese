@@ -1187,10 +1187,7 @@ fn empty_reason_reasoning_only() {
 fn build_responses_input_preserves_multi_turn_ordering() {
     // 4-turn conversation where each assistant turn carries reasoning.
     // The wire-level item order must be
-    //     [Sys, U1, R, A1, U2, R, A2, U3, R, A3, U4, R, A4, U5]
-    // and NOT the buggy
-    //     [Sys, U1, U2, U3, U4, U5, R, A1, R, A2, ...]
-    // which would shift the cache prefix every turn.
+    // [Sys, U1, U2, U3, U4, U5, R, A1, R, A2, ...] which would shift the cache prefix every turn.
     fn r(text: &str) -> ConversationItem {
         ConversationItem::Reasoning(rs::ReasoningItem {
             id: text.to_string(),
@@ -1559,14 +1556,7 @@ fn empty_content_assistant_with_tool_calls_and_reasoning() {
     let input = input_items_json(&req);
     let summary = summarise_input(&input);
 
-    // Expected:
-    //   user:u1
-    //   reasoning:r1
-    //   (assistant message DROPPED because content is empty -- per
-    //    conversation_item_to_input_items, lines 1718-1724)
-    //   function_call:call_1
-    //   function_call_output (tool result)
-    //
+    // (assistant message DROPPED because content is empty -- per conversation_item_to_input_items, lines 1718-1724) function_call_output (tool result)
     // No spurious extra reasoning items, no placeholder.
     let reasoning_count = summary
         .iter()

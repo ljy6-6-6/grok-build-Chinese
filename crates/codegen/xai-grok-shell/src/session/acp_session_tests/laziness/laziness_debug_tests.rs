@@ -46,7 +46,6 @@ fn assistant_with_tool_call(text: &str, name: &str, args: &str) -> ConversationI
 
 /// Build an `AssistantItem` with arbitrary `reasoning`, `content`, and `tool_calls` for the `[assistant reasoning]` test coverage.
 /// Trivially-defaulted fields (`raw_output`, `model_id`, `model_fingerprint`) are filled with `None` so each test stays a one-liner.
-/// Build `[Reasoning(text), Assistant(content, tool_calls)]`, the equivalent of the old `AssistantItem { reasoning, content, tool_calls }` literal.
 /// When `reasoning_text` is empty, no Reasoning item is emitted (callers who want an encrypted-only sibling should build that variant inline).
 fn assistant_with_reasoning_items(
     reasoning_text: &str,
@@ -389,9 +388,8 @@ fn window_pins_min_user_turns_user_prompts_into_view() {
             items.push(assistant_with_tool_call("step", "read_file", "{}"));
         }
     }
-    // Layout: U(0) Asst×10  U(11) Asst×10  U(22) Asst×10  U(33) Asst×10  U(44) Asst×10
-    // With min_user_turns=3, the 3rd-from-last user idx = U(22) at idx 22
-    // tail_start = 55 - 30 = 25.
+    // Layout: U(0).
+    // With min_user_turns=3, the 3rd-from-last user idx = U(22) at idx 22 tail_start = 55 - 30 = 25.
     // Window must start at min(25, 22) = 22.
     let start = super::laziness_window_start(&items, 30, 3, 0);
     assert_eq!(start, 22);
@@ -408,11 +406,8 @@ fn window_pins_min_assistant_turns_assistant_replies_into_view() {
             items.push(assistant_with_tool_call("step", "read_file", "{}"));
         }
     }
-    // Layout: AT(0) AC×6  AT(7) AC×6  AT(14) AC×6  AT(21) AC×6  AT(28) AC×6  AT(35) AC×6
-    // (AT = assistant text turn, AC = assistant-with-tool-call, whose non-empty content "step" also counts it as an assistant text turn.)
-    // Every assistant item is an eligible assistant text turn, so there are 42
-    // 3rd-from-last assistant-text turn idx = 42 - 3 = 39.
-    // tail_start = 42 - 30 = 12.
+    // Layout: AT(0) AC×6 AT(7) AC×6 AT(14) AC×6 AT(21) AC×6 AT(28) AC×6 AT(35) AC×6 (AT = assistant text turn, AC = assistant-with-tool-call, whose non-empty content "step" also counts it as an assistant text turn.).
+    // Every assistant item is an eligible assistant text turn, so there are 42 3rd-from-last assistant-text turn idx = 42 - 3 = 39.
     // Window must start at min(12, 39) = 12.
     let start = super::laziness_window_start(&items, 30, 0, 3);
     assert_eq!(start, 12);
@@ -429,13 +424,9 @@ fn window_takes_earliest_of_user_pin_and_assistant_pin_and_tail() {
             items.push(assistant_with_tool_call("x", "read_file", "{}"));
         }
     }
-    // Layout: U(0) AC×15  U(16) AC×15  U(32) AC×15, total 48
-    // For min_user_turns=2:
-    //   user idxs = [0, 16, 32]; 2nd-from-last = idx 16.
-    // For min_assistant_turns=10:
-    //   assistant_text idxs are every AC (45 of them); 10th-from-last = idx 47 - 9 = 38
-    // tail_start = 48 - 30 = 18.
-    // Earliest of (18, 16, 38) = 16.
+    // Layout: U(0) AC×15 U(16) AC×15 U(32) AC×15, total 48.
+    // For min_user_turns=2: user idxs = [0, 16, 32]; 2nd-from-last = idx 16.
+    // For min_assistant_turns=10: assistant_text idxs are every AC (45 of them); 10th-from-last = idx 47 - 9 = 38 tail_start = 48 - 30 = 18.
     let start = super::laziness_window_start(&items, 30, 2, 10);
     assert_eq!(start, 16);
 }

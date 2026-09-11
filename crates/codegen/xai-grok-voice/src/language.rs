@@ -27,9 +27,7 @@ pub const STT_LANGUAGE_AUTO: &str = "auto";
 /// Default STT language when unset or unrecognized.
 pub const STT_LANGUAGE_DEFAULT: &str = "en";
 
-/// Official Grok STT languages (docs.x.ai), sorted by English name.
-///
-/// Keep this list in lockstep with the public docs.
+/// Official Grok STT languages (docs.x.ai), sorted by English name. Keep this list in lockstep with the public docs.
 /// Adding a code that the API does not list will not break transcription, but ITN formatting may not apply.
 pub const STT_LANGUAGES: &[SttLanguage] = &[
     SttLanguage {
@@ -139,13 +137,9 @@ pub fn stt_language_by_code(code: &str) -> Option<&'static SttLanguage> {
     STT_LANGUAGES.iter().find(|l| l.code == code)
 }
 
-/// Map a user/config string to a catalog code or [`STT_LANGUAGE_AUTO`].
-///
-/// - `None`, blank, and unknown values map to [`STT_LANGUAGE_DEFAULT`] (`en`)
-/// - `auto` (any case) maps to [`STT_LANGUAGE_AUTO`]
-/// - An exact catalog code (any case) maps to that code
-/// - BCP-47 / locale forms (`en-US`, `pt_BR.UTF-8`) map to the primary subtag when supported
-/// - Common aliases map too: `tl` (Tagalog) maps to `fil` (Filipino)
+/// Map a user/config string to a catalog code or [`STT_LANGUAGE_AUTO`]. `None`, blank, and unknown values map to
+/// [`STT_LANGUAGE_DEFAULT`] (`en`); `auto` (any case) maps to [`STT_LANGUAGE_AUTO`]; An exact catalog code (any case)
+/// maps to that code.
 pub fn canonicalize_stt_language(value: Option<&str>) -> &'static str {
     let raw = value.unwrap_or_default().trim();
     if raw.is_empty() {

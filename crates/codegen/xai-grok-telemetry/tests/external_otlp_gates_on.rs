@@ -121,6 +121,7 @@ fn external_stream_gates_on_end_to_end() {
         hook_rewrote: false,
         duration_ms: 12,
         tool_result_size_bytes: None,
+        model_id: "grok".into(),
         file_path: Some("/tmp/projectdir/config.toml".into()),
         parameters: Some(serde_json::json!({
             "marker": PARAM_MARK,
@@ -138,6 +139,7 @@ fn external_stream_gates_on_end_to_end() {
         hook_rewrote: false,
         duration_ms: 8,
         tool_result_size_bytes: None,
+        model_id: "grok".into(),
         file_path: None,
         parameters: Some(serde_json::json!({ "command": long_command })),
         tool_use_id: Some("call-bash-long".into()),

@@ -40,11 +40,11 @@ pub use error::{Result, StoreError};
 pub use schema::USER_VERSION;
 pub use store::WorkspaceStore;
 pub use types::{
-    Grouping, InsertOutcome, MAX_CWD_BYTES, MAX_ENUM_BYTES, MAX_MODEL_BYTES, MAX_SESSION_ID_BYTES,
-    MAX_SUMMARY_BYTES, MAX_TITLE_BYTES, Member, MemberKey, MemberKind, MemberMetadata,
-    MemberOrigin, NewMember, RANK_GAP, RankAssignment, RekeyOutcome, RemoveOutcome, SchemaState,
-    SessionId, UnknownGrouping, UnknownMemberKind, UnknownMemberOrigin, WORKSPACE_CAPACITY,
-    WorkspaceSnapshot,
+    Grouping, InsertOutcome, LayoutApplyOutcome, LayoutGrouping, LayoutPatch, MAX_CWD_BYTES,
+    MAX_ENUM_BYTES, MAX_MODEL_BYTES, MAX_SESSION_ID_BYTES, MAX_SUMMARY_BYTES, MAX_TITLE_BYTES,
+    Member, MemberKey, MemberKind, MemberMetadata, MemberOrigin, NewMember, PinAssignment,
+    RANK_GAP, RankAssignment, RekeyOutcome, RemoveOutcome, SchemaState, SessionId, UnknownGrouping,
+    UnknownMemberKind, UnknownMemberOrigin, WORKSPACE_CAPACITY, WorkspaceSnapshot,
 };
 
 /// The canonical store path under a grok home.

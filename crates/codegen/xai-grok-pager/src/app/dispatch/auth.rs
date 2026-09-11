@@ -35,9 +35,7 @@ pub(super) fn dispatch_logout(_app: &mut AppView) -> Vec<Effect> {
 
 /// Ensure `login_method_id` is populated from stored auth methods.
 /// On the eager-auth path (cached token) `login_method_id` is never set, because the user skipped the login screen.
-///
 /// Does **not** invent `grok.com` when no interactive method is advertised (`preferred_method=api_key` with no key leaves `auth_methods` empty).
-/// Callers already show "No login method available" when this leaves `login_method_id` unset.
 pub(super) fn ensure_login_method(app: &mut AppView) {
     if app.login_method_id.is_some() {
         return;
@@ -179,7 +177,6 @@ pub(in crate::app) fn scrollback_has_recent_error_banner(
 /// True if the trailing run already has a formatted [`SessionEvent::RequestFailed`] banner.
 /// Lets `PromptResponse` skip the redundant `TurnFailed`.
 /// Deliberately does not match `RetryFailed`.
-/// The special cases that keep it (legacy_auth, encrypted_content_mismatch) keep their pre-existing marker behavior.
 pub(super) fn scrollback_has_recent_request_failed(
     scrollback: &crate::scrollback::state::ScrollbackState,
 ) -> bool {
@@ -231,10 +228,8 @@ pub(super) fn strip_trailing_auth_error_blocks(agent: &mut AgentView) {
 }
 
 /// Start an interactive login flow. Triggered by pressing 'l' on the welcome screen or by the `/login` slash command.
-///
 /// Only the welcome view renders the auth UI (the external auth provider's sign-in URL and status).
 /// A mid-session invocation therefore stashes the caller's view in `auth_return_view` and switches to `Welcome` so the flow is visible.
-/// The prior view is restored once auth completes or is cancelled.
 pub(super) fn dispatch_login(app: &mut AppView) -> Vec<Effect> {
     ensure_login_method(app);
     let Some(method_id) = app.login_method_id.clone() else {
@@ -274,7 +269,6 @@ pub(super) fn dispatch_login(app: &mut AppView) -> Vec<Effect> {
     ]
 }
 
-/// Cancel a login that was started from inside a session and restore the caller's view.
 /// Only meaningful when `auth_return_view` is set (a mid-session `/login` or 401 re-auth prompt).
 /// Aborts the in-flight auth task and tells the shell to cancel its device/loopback flow so a retry does not race a still-polling prior mint.
 /// Bump the seq so a fresh login does not collide with a late `AuthComplete`/`AuthFailed`.
@@ -294,12 +288,9 @@ pub(super) fn dispatch_cancel_login(app: &mut AppView) -> Vec<Effect> {
     app.auth_show_raw_url = false;
     app.auth_code_input.reset();
     restore_auth_return_view(app, return_view);
-    // The user bailed out of re-auth: drop stashed prompts and strip the stale re-auth prompt from scrollback
     // This runs on all agents because the login may have been started from the dashboard
     // Clearing the stash alone is not enough
     // A leftover `ReAuthRequired` block would let a later `PromptResponse` re-detect it via `scrollback_has_recent_reauth_prompt`
-    // The prompt would be re-stashed, and a subsequent unrelated login could silently resubmit it
-    // Mirrors the strip in the `AuthComplete` path
     for agent in app.agents.values_mut() {
         agent.reauth_stashed_prompt = None;
         strip_trailing_auth_error_blocks(agent);
@@ -337,7 +328,7 @@ pub(super) fn handle_auth_complete(
     {
         if let Some(meta_val) = meta.as_ref()
             && let Ok(auth_meta) =
-                serde_json::from_value::<xai_grok_shell::auth::AuthMeta>(meta_val.clone())
+                serde_json::from_value::<xai_grok_login::AuthMeta>(meta_val.clone())
         {
             app.apply_auth_meta(&auth_meta);
         }
@@ -390,7 +381,7 @@ pub(super) fn handle_auth_complete(
             }
             let mut effects = dispatch(Action::RequestBundleStatus, app);
             if app.usage_visible {
-                effects.push(Effect::FetchAppBilling);
+                effects.push(Effect::FetchAppBilling { nonce: 0 });
             }
             effects.extend(retry_effects);
             return effects;
@@ -408,7 +399,7 @@ pub(super) fn handle_auth_complete(
         }
         // Fetch billing so the welcome screen can show a credit warning.
         if app.usage_visible {
-            effects.push(Effect::FetchAppBilling);
+            effects.push(Effect::FetchAppBilling { nonce: 0 });
         }
         // Fetch changelog (mirrors startup path for interactive login).
         effects.push(Effect::FetchChangelog);
@@ -420,7 +411,6 @@ pub(super) fn handle_auth_complete(
         }
 
         // Replay deferred session startup once both gates are open
-        // Auth is now Done, so `session_startup_allowed()` here means "is trust also resolved?"
         // If trust is still Pending its question renders next and its answer drains instead
         // The trust handlers use the same predicate, so the deferred startup runs exactly once after whichever gate resolves last
         if app.session_startup_allowed() {

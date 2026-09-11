@@ -1,6 +1,7 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 use super::*;
 use super::super::resume_window::resume_inherited_prefix_len;
+use crate::session::storage::UnfinishedSubagent;
 use crate::test_support::lsp_runtime::{ctx_with_toggle, test_gateway};
 use crate::upload::trace::SubagentSpawnedRef;
 use xai_grok_tools::implementations::grok_build::task::backend::ChannelBackend;
@@ -217,8 +218,7 @@ fn last_user_message_is_task_after_normalization() {
             "last user message should be the task, not background context"
         );
 }
-/// Simulate compaction preserving the inherited prefix.
-/// The compactor produces [System, UserPrefix, Summary, ...].
+/// Simulate compaction preserving the inherited prefix. The compactor produces [System, UserPrefix, Summary, ...].
 /// The prefix preservation logic takes [System, BackgroundContext] from the original conversation and skips the compacted System.
 /// The result is [System(inherited), BackgroundContext(inherited), UserPrefix(compacted), Summary, ...].
 #[test]
@@ -367,11 +367,13 @@ fn resumed_from_none_not_serialized_in_meta() {
         );
 }
 #[test]
-fn backward_compat_meta_without_resumed_from() {
+fn backward_compat_meta_ignores_legacy_identity_fields() {
     let json = r#"{
             "subagent_id": "sa1",
             "parent_session_id": "p1",
             "child_session_id": "c1",
+            "agent_id": "ag1.1",
+            "attempt_id": "at1.2",
             "subagent_type": "explore",
             "description": "d",
             "prompt": "p",
@@ -379,6 +381,7 @@ fn backward_compat_meta_without_resumed_from() {
             "started_at": "2026-01-01T00:00:00Z"
         }"#;
     let meta: SubagentMeta = serde_json::from_str(json).unwrap();
+    assert_eq!(meta.subagent_id, "sa1");
     assert!(meta.resumed_from.is_none());
 }
 #[test]
@@ -423,6 +426,7 @@ fn backward_compat_meta_without_snapshot_ref() {
 fn base_meta() -> SubagentMeta {
     SubagentMeta {
         subagent_id: "sa".into(),
+        attempt_id: None,
         parent_session_id: "parent".into(),
         child_session_id: "child".into(),
         subagent_type: "general-purpose".into(),
@@ -1377,7 +1381,7 @@ fn inspection(id: &str, status: SubagentSnapshotStatus) -> SubagentInspection {
     }
 }
 async fn reconcile_with_inspections(
-    unfinished: &[(String, String)],
+    unfinished: &[UnfinishedSubagent],
     inspections: HashMap<String, Option<SubagentInspection>>,
     session_dir: &Path,
     gateway: &GatewaySender,
@@ -1525,7 +1529,13 @@ async fn reconcile_reemits_shared_actor_terminal_outcome() {
     write_subagent_meta(&sub_dir, &running_test_meta(id, "parent-x"));
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
     reconcile_with_inspections(
-            &[(id.to_string(), format!("child-{id}"))],
+            &[
+                UnfinishedSubagent {
+                    subagent_id: id.to_string(),
+                    attempt_id: None,
+                    child_session_id: format!("child-{id}"),
+                },
+            ],
             HashMap::from([
                 (
                     id.to_string(),
@@ -1910,7 +1920,13 @@ async fn reconcile_dedups_replay_and_running_meta_sources() {
     write_subagent_meta(&sub_dir, &running_test_meta(id, "parent-x"));
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
     reconcile_with_inspections(
-            &[(id.to_string(), format!("child-{id}"))],
+            &[
+                UnfinishedSubagent {
+                    subagent_id: id.to_string(),
+                    attempt_id: None,
+                    child_session_id: format!("child-{id}"),
+                },
+            ],
             HashMap::from([(id.to_string(), None)]),
             session_dir.path(),
             &test_gateway(),
@@ -2053,6 +2069,7 @@ fn provenance_carries_resumed_from() {
 #[test]
 fn notification_subagent_spawned_includes_resumed_from() {
     let notification = SessionUpdate::SubagentSpawned {
+        attempt_id: None,
         subagent_id: "sa-resumed".into(),
         parent_session_id: "parent".into(),
         parent_prompt_id: Some("prompt-1".into()),
@@ -2067,6 +2084,7 @@ fn notification_subagent_spawned_includes_resumed_from() {
         model: None,
         resumed_from: Some("prev-agent-id".into()),
         workflow_run_id: None,
+        agent_address: None,
     };
     let json = serde_json::to_value(&notification).unwrap();
     assert_eq!(json["resumed_from"], "prev-agent-id");
@@ -2074,6 +2092,7 @@ fn notification_subagent_spawned_includes_resumed_from() {
     assert_eq!(json["role"], serde_json::Value::Null);
     assert_eq!(json["model"], serde_json::Value::Null);
     let fresh = SessionUpdate::SubagentSpawned {
+        attempt_id: None,
         subagent_id: "sa-fresh".into(),
         parent_session_id: "p".into(),
         parent_prompt_id: None,
@@ -2088,6 +2107,7 @@ fn notification_subagent_spawned_includes_resumed_from() {
         model: None,
         resumed_from: None,
         workflow_run_id: None,
+        agent_address: None,
     };
     let json = serde_json::to_value(&fresh).unwrap();
     assert!(json.get("resumed_from").is_none());
@@ -2121,33 +2141,6 @@ fn upload_ref_includes_resumed_from() {
     let parsed: SubagentSpawnedRef = serde_json::from_value(json).unwrap();
     assert!(parsed.description.is_empty());
 }
-#[test]
-fn turn_active_flag_defaults_to_false() {
-    let presentation = SubagentPresentation::new();
-    assert!(
-            !presentation
-                .turn_active_flag()
-                .load(std::sync::atomic::Ordering::Relaxed)
-        );
-}
-#[test]
-fn turn_active_flag_shared_via_arc() {
-    let presentation = SubagentPresentation::new();
-    let flag = presentation.turn_active_flag();
-    assert!(!flag.load(std::sync::atomic::Ordering::Relaxed));
-    flag.store(true, std::sync::atomic::Ordering::Relaxed);
-    assert!(
-            presentation
-                .turn_active_flag()
-                .load(std::sync::atomic::Ordering::Relaxed)
-        );
-    flag.store(false, std::sync::atomic::Ordering::Relaxed);
-    assert!(
-            !presentation
-                .turn_active_flag()
-                .load(std::sync::atomic::Ordering::Relaxed)
-        );
-}
 fn ctx_with_parent_chat_state(
     session_model_id: &str,
     inference_slug: &str,
@@ -2156,8 +2149,17 @@ fn ctx_with_parent_chat_state(
 ) -> SubagentSpawnContext {
     let mut ctx = ctx_with_toggle(HashMap::new());
     ctx.model_id = acp::ModelId::new(session_model_id);
-    ctx.parent_chat_state = Some(spawn_test_parent_chat_state(inference_slug));
-    ctx.models_manager = crate::agent::models::ModelsManager::new(
+    let parent_chat_state = spawn_test_parent_chat_state(inference_slug);
+    let mut parent_sampling_config = test_sampling_config(inference_slug);
+    parent_sampling_config.max_retries = available_models
+        .get(session_model_id)
+        .and_then(|entry| entry.info.max_retries);
+    parent_sampling_config.rate_limit_retry_threshold = available_models
+        .get(session_model_id)
+        .and_then(|entry| entry.info.rate_limit_retry_threshold);
+    parent_chat_state.update_sampling_config(parent_sampling_config);
+    ctx.parent_chat_state = Some(parent_chat_state);
+    ctx.models_manager = crate::agent::remote_config::ModelsManager::new(
         None,
         available_models.clone(),
         acp::ModelId::new(global_model_id),
@@ -2168,13 +2170,35 @@ fn ctx_with_parent_chat_state(
     ctx
 }
 #[tokio::test]
-async fn read_parent_sampling_config_keeps_auto_catalog_id_with_routing_slug() {
+async fn read_parent_sampling_config_keeps_catalog_threshold_when_routing_slug_is_also_key() {
     let mut models = indexmap::IndexMap::new();
-    models.insert("auto".to_string(), test_model_entry("grok-4.5"));
+    let mut entry = test_model_entry("grok-4.5");
+    entry.info.max_retries = Some(6);
+    entry.info.rate_limit_retry_threshold = Some(6);
+    models.insert("auto".to_string(), entry);
+    let mut competing_entry = test_model_entry("grok-4.5");
+    competing_entry.info.max_retries = Some(3);
+    competing_entry.info.rate_limit_retry_threshold = Some(3);
+    models.insert("grok-4.5".to_string(), competing_entry);
     let ctx = ctx_with_parent_chat_state("auto", "grok-4.5", "composer-2-fast", models);
+    let expected_group = crate::sampling::derive_conversation_group_id(
+        &ctx.parent_session_id,
+    );
+    let mut parent_config = ctx
+        .parent_chat_state
+        .as_ref()
+        .unwrap()
+        .get_sampling_config()
+        .await
+        .unwrap();
+    parent_config.conversation_group_id = Some(expected_group.clone());
+    ctx.parent_chat_state.as_ref().unwrap().update_sampling_config(parent_config);
     let (config, model_id) = read_parent_sampling_config(&ctx).await;
     assert_eq!(config.model, "grok-4.5");
     assert_eq!(model_id.0.as_ref(), "auto");
+    assert_eq!(config.max_retries, Some(6));
+    assert_eq!(config.rate_limit_retry_threshold, Some(6));
+    assert_eq!(config.conversation_group_id, Some(expected_group));
 }
 #[tokio::test]
 async fn read_parent_sampling_config_keeps_auto_when_catalog_has_slug_key_only() {
@@ -2206,7 +2230,7 @@ async fn read_parent_sampling_config_fallback_uses_session_model_id() {
     ctx.parent_chat_state = None;
     ctx.sampling_config.model = "composer-2-fast".to_string();
     ctx.available_models = models;
-    ctx.models_manager = crate::agent::models::ModelsManager::new(
+    ctx.models_manager = crate::agent::remote_config::ModelsManager::new(
         None,
         indexmap::IndexMap::new(),
         acp::ModelId::new("auto"),
@@ -2304,22 +2328,20 @@ async fn read_parent_sampling_config_fallback_no_resolver_for_api_key_method() {
     let (config, _) = read_parent_sampling_config(&ctx).await;
     assert!(config.bearer_resolver.is_none());
 }
-/// The override path wires the resolver for a session key regardless of freshness.
-/// Hard-expired (the post-sleep 401 window) is the case that matters.
-/// Gating on whether the key is still valid would freeze the subagent for life.
-/// The sampler strips the dead seeded key at request time instead.
+/// The override path wires the resolver for a session key regardless of freshness. Hard-expired (the post-sleep 401 window) is the case that matters.
+/// Gating on whether the key is still valid would freeze the subagent for life. The sampler strips the dead seeded key at request time instead.
 #[test]
 fn resolve_model_override_wires_resolver_for_fresh_and_hard_expired_session_keys() {
     for auth in [
-        crate::auth::GrokAuth {
+        xai_grok_login::GrokAuth {
             key: "session-jwt".into(),
-            ..crate::auth::GrokAuth::test_default()
+            ..xai_grok_login::GrokAuth::test_default()
         },
-        crate::auth::GrokAuth {
+        xai_grok_login::GrokAuth {
             key: "hard-expired-session-jwt".into(),
             create_time: chrono::Utc::now() - chrono::Duration::hours(2),
             expires_at: Some(chrono::Utc::now() - chrono::Duration::hours(1)),
-            ..crate::auth::GrokAuth::test_default()
+            ..xai_grok_login::GrokAuth::test_default()
         },
     ] {
         let key = auth.key.clone();
@@ -2392,7 +2414,7 @@ async fn read_parent_sampling_config_fallback_resolves_backend_search_from_catal
     ctx.sampling_config.api_backend = crate::sampling::ApiBackend::Responses;
     ctx.sampling_config.base_url = "https://api.x.ai/v1".to_string();
     ctx.sampling_config.supports_backend_search = false;
-    ctx.models_manager = crate::agent::models::ModelsManager::new(
+    ctx.models_manager = crate::agent::remote_config::ModelsManager::new(
         None,
         models,
         acp::ModelId::new("auto"),
@@ -2432,7 +2454,7 @@ async fn read_parent_sampling_config_fallback_resolves_compactions_remaining_fro
     ctx.parent_chat_state = None;
     ctx.sampling_config.model = "grok-4.5".to_string();
     ctx.sampling_config.compactions_remaining = None;
-    ctx.models_manager = crate::agent::models::ModelsManager::new(
+    ctx.models_manager = crate::agent::remote_config::ModelsManager::new(
         None,
         models,
         acp::ModelId::new("auto"),
@@ -2503,10 +2525,8 @@ async fn runtime_override_wins_over_subagents_models_pin_in_precedence_path() {
             "an unknown override falls through to the pin",
         );
 }
-/// A `fork_context = true` spawn must infer on the parent session model (`ctx.model_id`) for per-model radix reuse.
-/// That holds even when a `[subagents.models]` pin and an `AgentDefinition.model` override are both present.
-/// `run_shell_child` forces `effective_runtime.model = Some(ctx.model_id)` on the fork path after other override sources.
-/// The runtime override wins in `resolve_effective_model_config`.
+/// A `fork_context = true` spawn must infer on the parent session model (`ctx.model_id`) for per-model radix reuse. That holds even when a `[subagents.models]` pin and an `AgentDefinition.model` override are both present.
+/// `run_shell_child` forces `effective_runtime.model = Some(ctx.model_id)` on the fork path after other override sources. The runtime override wins in `resolve_effective_model_config`.
 #[tokio::test]
 async fn fork_context_pins_parent_model_over_overrides() {
     use xai_grok_agent::config::ModelOverride;
@@ -2579,10 +2599,7 @@ async fn resolve_subagent_inherits_parent_model_without_pins() {
         assert_eq!(model_id.0.as_ref(), parent_model);
     }
 }
-/// An explicit `[subagents.models]` pin routes the subagent to that
-/// model regardless of the parent model — both a light parent
-/// (`grok-4.5`) and a custom parent (`composer-2-fast`)
-/// honor the pin identically now that the heavy-model gate is gone.
+/// An explicit `[subagents.models]` pin routes the subagent to that model regardless of the parent model — a light parent and a custom parent honor the pin identically now that the heavy-model gate is gone.
 #[tokio::test]
 async fn resolve_subagent_config_override_pin_applies_for_any_parent() {
     use xai_grok_agent::config::ModelOverride;
@@ -2768,7 +2785,7 @@ async fn resolve_subagent_agent_definition_unknown_model_falls_through_to_inheri
 async fn subagent_override_provider_model_spawns_cache_only_credentials() {
     use xai_grok_agent::config::ModelOverride;
     let dir = tempfile::tempdir().unwrap();
-    let provider = crate::auth::test_counting_provider(
+    let provider = xai_grok_login::test_counting_provider(
         "test-subagent-spawn",
         dir.path(),
     );
@@ -2781,7 +2798,7 @@ async fn subagent_override_provider_model_spawns_cache_only_credentials() {
     ctx.sampling_config.model = "grok-4.5".to_string();
     ctx.model_id = acp::ModelId::new("grok-4.5");
     ctx.available_models = models;
-    ctx.auth = Some(crate::auth::GrokAuth {
+    ctx.auth = Some(xai_grok_login::GrokAuth {
         key: "parent-session-jwt".to_string(),
         ..Default::default()
     });
@@ -3286,6 +3303,7 @@ async fn progress_publisher_delivers_ticks_to_parent_cmd_channel() {
                 test_gateway(),
                 "parent-1".to_string(),
                 "sub-1".to_string(),
+                Some("at1.test".to_string()),
                 "child-1".to_string(),
                 std::time::Instant::now(),
                 cancel.clone(),

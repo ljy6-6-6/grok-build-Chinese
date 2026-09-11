@@ -10,12 +10,11 @@ use url::Url;
 use xai_file_utils::queue::{EnqueueOutcome, TraceExportSource, UploadQueue, UploadRetryPolicy};
 use xai_grok_workspace::permission::PermissionEvent;
 /// Upload the canonical tool definitions trace and wait for completion.
-///
 /// `ToolDefinition` serializes in Chat Completions format: `{ "type": "function", "function": { ... } }`.
 /// That is the shape downstream ingest/enrichment expects to read from `tool_definitions.json`.
 pub(crate) async fn upload_tool_definitions(
     gcs_config: TraceExportConfig,
-    auth_manager: Option<Arc<crate::auth::AuthManager>>,
+    auth_manager: Option<Arc<xai_grok_login::AuthManager>>,
     tool_definitions: &[ToolDefinition],
     artifact_tracker: Option<&super::manifest::ArtifactTracker>,
 ) {
@@ -69,10 +68,6 @@ pub(crate) async fn upload_tool_definitions(
         }
     }
 }
-/// Floor for every [`blocking_attempt_budget`]-bounded wait on this path: the
-/// attempt must still happen after earlier uploads fully consumed the shared
-/// deadline.
-const DIRECT_ATTEMPT_FLOOR: std::time::Duration = std::time::Duration::from_secs(10);
 /// `restorable_turn_number` is not advanced without a cloud archive.
 pub(crate) async fn upload_session_state(
     _ctx: &PromptTraceContext,
@@ -95,10 +90,7 @@ pub(crate) async fn upload_session_state(
         status_code: None,
     }
 }
-/// Truth for a Defer-timeout of the blocking session-state upload: `Enqueued`
-/// only while the cancellation left the item parked on queue confirmation (the
-/// live worker still owns it); a cancelled direct attempt or full-channel
-/// inline divert queued nothing durable and must record the loss.
+/// Truth for a Defer-timeout of the blocking session-state upload: `Enqueued` only while the cancellation left the item parked on queue confirmation (the live worker still owns it); a cancelled direct attempt or full-channel inline divert queued nothing durable and must record the loss.
 #[cfg(test)]
 fn confirm_timeout_artifact_result(
     direct_attempt_started: bool,
@@ -148,7 +140,7 @@ fn upload_method_label(method: &UploadMethod) -> &'static str {
         UploadMethod::Proxy { .. } => TraceUploadReason::Proxy,
         UploadMethod::S3 { .. } => TraceUploadReason::DirectS3,
     }
-    .as_str()
+    .into()
 }
 /// A confirmed upload ends the session's failure episode; the next failure logs at full detail again.
 fn record_upload_success(ctx: &PromptTraceContext) {
@@ -290,11 +282,7 @@ async fn fill_git_fields(metadata: &mut PromptMetadata, cwd: &str) {
 pub(crate) async fn enrich_git_metadata(ctx: &PromptTraceContext, metadata: &mut PromptMetadata) {
     fill_git_fields(metadata, &ctx.session_info.cwd).await;
 }
-/// Bounds the pre-upload git enrichment for Defer callers (child teardown,
-/// blocking turn end): discovery walks the repo tree on `spawn_blocking` (a
-/// hung NFS/FUSE mount never returns) and the visibility check rides a client
-/// with no request timeout, so the enrichment must not park teardown ahead of
-/// the bounded upload attempt. On timeout the metadata uploads unenriched.
+/// Bounds the pre-upload git enrichment for Defer callers (child teardown, blocking turn end): discovery walks the repo tree on `spawn_blocking` (a hung NFS/FUSE mount never returns) and the visibility check rides a client with no request timeout, so the enrichment must not park teardown ahead of the bounded upload attempt. On timeout the metadata uploads unenriched.
 async fn bounded_enrichment(enrich: impl std::future::Future<Output = ()>, wait: UploadWait) {
     match wait {
         UploadWait::Confirm => enrich.await,
@@ -310,14 +298,8 @@ async fn bounded_enrichment(enrich: impl std::future::Future<Output = ()>, wait:
 }
 const METADATA_ARTIFACT: &str = "metadata.json";
 const FULL_PROMPT_ARTIFACT: &str = "full_prompt.txt";
-/// Metadata about the prompt turn, uploaded as JSON for tracing/debugging.
-///
-/// Note: Session state is uploaded as an archive by `upload_session_state()`.
-/// See `complete_prompt_trace` for the upload flow.
-/// The struct definition lives in the shared metadata types crate.
-///
-/// Uploads prompt metadata to cloud storage as JSON.
-/// Path format: {session_id}/turn_{N}/metadata.json
+/// Metadata about the prompt turn, uploaded as JSON for tracing/debugging. Note: Session state is uploaded as an archive by `upload_session_state()`. See `complete_prompt_trace` for the upload flow.
+/// The struct definition lives in the shared metadata types crate. Uploads prompt metadata to cloud storage as JSON. Path format: {session_id}/turn_{N}/metadata.json
 pub(crate) async fn upload_metadata(
     ctx: &PromptTraceContext,
     metadata: PromptMetadata,
@@ -364,17 +346,13 @@ pub(crate) async fn upload_metadata(
 /// tarpit endpoint leaks a parked task pinning an `AuthManager` Arc.
 const SUBAGENT_METADATA_UPLOAD_BOUND: std::time::Duration = std::time::Duration::from_secs(60);
 /// Uploads subagent session metadata to cloud storage as `subagent.json`.
-///
 /// Path format: `{child_session_id}/subagent.json` (session-root, not turn-scoped).
-///
-/// Called at spawn (`status = running`) and again at completion with final
-/// status/duration/tool-calls/turns, always as a detached task; bounded by
-/// [`SUBAGENT_METADATA_UPLOAD_BOUND`].
+/// Called at spawn (`status = running`) and again at completion with final status/duration/tool-calls/turns, always as a detached task; bounded by [`SUBAGENT_METADATA_UPLOAD_BOUND`].
 pub(crate) async fn upload_subagent_metadata(
     metadata: &crate::agent::subagent::SubagentSessionMetadata,
     bucket_url: &str,
     upload_method: crate::session::repo_changes::UploadMethod,
-    auth_manager: std::sync::Arc<crate::auth::AuthManager>,
+    auth_manager: std::sync::Arc<xai_grok_login::AuthManager>,
 ) {
     let json = match serde_json::to_vec_pretty(metadata) {
         Ok(j) => j,
@@ -618,9 +596,6 @@ pub(crate) async fn upload_artifact_to_gcs(
 }
 /// One-shot artifact upload and manifest recording.
 ///
-/// `Confirm` (detached/interactive contexts) keeps the direct awaited upload.
-/// The recorded status reflects the actual result, and an interactive turn's manifest never races a queue it does not flush.
-/// `Defer` (blocking turn end) routes through the durable queue accept so the prompt response stays fast and a process exit cannot lose the artifact.
 pub(crate) async fn upload_small_artifact(
     ctx: &PromptTraceContext,
     content: &[u8],
@@ -631,23 +606,15 @@ pub(crate) async fn upload_small_artifact(
 ) {
     match wait {
         UploadWait::Confirm => {
-            let ok = upload_artifact_to_gcs(ctx, gcs_path, content, content_type, artifact_name)
-                .await
-                .is_some();
-            if let Some(filename) = gcs_path.rsplit('/').next() {
-                super::manifest::record_artifact(
-                    &ctx.artifact_tracker,
-                    filename,
-                    if ok {
-                        super::manifest::ArtifactResult::Succeeded
-                    } else {
-                        super::manifest::ArtifactResult::Failed {
-                            reason: "direct_upload_failed",
-                            error: None,
-                        }
-                    },
-                );
-            }
+            let _ = upload_trace_artifact_blocking(
+                ctx,
+                content,
+                gcs_path,
+                content_type,
+                artifact_name,
+                None,
+            )
+            .await;
         }
         UploadWait::Defer { deadline } => {
             let _ = upload_trace_artifact_deferred(
@@ -753,17 +720,9 @@ pub(crate) async fn upload_turn_result(
     )
     .await;
 }
-/// Uploads the out-of-band streaming-turn capture to cloud storage as JSON.
-/// Path format: `{session_id}/turn_N/streaming_partial.json`
-///
-/// Called when a turn ended without `record_assistant_response` committing the canonical assistant turn.
-/// That happens on a user cancel mid-stream or a sampler terminal error such as `MaxTokensTruncation`.
-/// It also happens in a doomloop where every generation returns only reasoning.
-/// The artifact carries every uncommitted generation of the turn as `segments[]`.
-/// Partials cut off mid-response by a cancel or an error are included, whether they were reasoning, response text, or a tool call.
-/// It also carries a flat joined `reasoning_text`/`response_text` view of the segments for the currently-deployed trace viewer.
-///
-/// This artifact is intentionally separate from `chat.jsonl` / `turn_messages.json` so the model never sees the partial on subsequent turns.
+/// Uploads the out-of-band streaming-turn capture to cloud storage as JSON. Path format: `{session_id}/turn_N/streaming_partial.json`
+/// Called when a turn ended without `record_assistant_response` committing the canonical assistant turn. It also happens in a doomloop where every generation returns only reasoning.
+/// Partials cut off mid-response by a cancel or an error are included, whether they were reasoning, response text, or a tool call. This artifact is intentionally separate from `chat.jsonl` / `turn_messages.json` so the model never sees the partial on subsequent turns.
 pub(crate) async fn upload_streaming_partial(
     ctx: &PromptTraceContext,
     capture: &crate::session::acp_session::StreamingTurnCapture,
@@ -835,13 +794,8 @@ pub(crate) async fn upload_session_metadata(
     };
     upload_artifact_to_gcs(ctx, &gcs_path, &metadata_json, "application/json", artifact).await;
 }
-/// Uploads the session-scoped unified log to cloud storage.
-/// Path format: {session_id}/turn_{N}/unified_log.jsonl
-///
-/// Called only from 401/404 auth-failure diagnostics, never per turn.
-///
-/// Only entries belonging to the current session (matching `sid`) are included.
-/// The snapshot runs on a blocking thread since `snapshot_session_log` reads and parses the on-disk log file.
+/// Uploads the session-scoped unified log to cloud storage. Path format: {session_id}/turn_{N}/unified_log.jsonl Called only from 401/404 auth-failure diagnostics, never per turn.
+/// Only entries belonging to the current session (matching `sid`) are included. The snapshot runs on a blocking thread since `snapshot_session_log` reads and parses the on-disk log file.
 pub(crate) async fn upload_unified_log(ctx: &PromptTraceContext, wait: UploadWait) {
     let session_id = ctx.session_info.id.0.to_string();
     let log_bytes = match tokio::task::spawn_blocking(move || {
@@ -1000,12 +954,8 @@ fn compress_chat_history_archive(jsonl: Vec<u8>) -> Result<Vec<u8>, SessionState
     Ok(archive_data)
 }
 /// Build a gzipped tar holding a single `chat_history.jsonl` entry from the in-memory conversation `messages`.
-///
 /// The trace viewer renders a turn's conversation only from the `chat_history.jsonl` entry inside a session-state archive, parsed as JSONL.
-/// Harness sub-turns upload no other session state, so we emit that shape from the same items that feed `turn_messages.json`.
-/// Each `ConversationItem` is serialized compactly, one per `\n`-terminated line.
-/// Empty `messages` yield a zero-byte payload the viewer treats as "no history".
-/// Harness pairs always carry at least one message, so this is only a safety floor.
+/// Harness sub-turns upload no other session state, so we emit that shape from the same items that feed `turn_messages.json`. Each `ConversationItem` is serialized compactly, one per `\n`-terminated line. Empty `messages` yield a zero-byte payload the viewer treats as "no history". Harness pairs always carry at least one message, so this is only a safety floor.
 pub(crate) async fn build_chat_history_session_state(
     messages: &[xai_grok_sampling_types::conversation::ConversationItem],
 ) -> Result<Vec<u8>, SessionStateBuildError> {
@@ -1030,18 +980,11 @@ pub(crate) async fn upload_harness_session_archive(
 ) -> bool {
     false
 }
-/// Credential resolver for the queue worker.
-/// [`TraceExportSource::proxy_credentials`] supplies a refresh-aware [`ShellAuthCredentialProvider`].
-/// [`TraceExportSource::proxy_attribution`] supplies a [`StorageClientAttributionBridge`].
-/// The queue worker attaches both to the resolved config before constructing the per-attempt `StorageClient`.
-/// That closes the buffer-window 401 leak and makes upload-queue 401s show up in the `auth_401_attribution` event stream.
-///
-/// The `proxy_*` methods delegate to [`crate::upload::gcs::WithAuth`] so the wiring stays in one place (the `TraceExportConfigWithAuth` adapter).
-/// `resolve()` returns the bare `base_config`.
-/// The static `user_token` snapshot it carries is unused at the wire level (the provider returned by `proxy_credentials` always drives the bearer).
-/// The queue worker still reads other fields like `gcs_prefix` / `bucket_url` off the resolved config.
+/// Credential resolver for the queue worker. [`TraceExportSource::proxy_credentials`] supplies a refresh-aware [`ShellAuthCredentialProvider`].
+/// [`TraceExportSource::proxy_attribution`] supplies a [`StorageClientAttributionBridge`]. The queue worker attaches both to the resolved config before constructing the per-attempt `StorageClient`.
+/// The `proxy_*` methods delegate to [`crate::upload::gcs::WithAuth`] so the wiring stays in one place (the `TraceExportConfigWithAuth` adapter). The static `user_token` snapshot it carries is unused at the wire level (the provider returned by `proxy_credentials` always drives the bearer).
 pub(crate) struct DynamicResolver {
-    auth_manager: Arc<crate::auth::AuthManager>,
+    auth_manager: Arc<xai_grok_login::AuthManager>,
     base_config: TraceExportConfig,
 }
 impl DynamicResolver {
@@ -1218,17 +1161,15 @@ pub(crate) async fn flush_upload_queue(
     }
     remaining
 }
+pub(crate) const BLOCKING_ATTEMPT_FLOOR: std::time::Duration = std::time::Duration::from_secs(10);
+pub(crate) const BLOCKING_ATTEMPT_CAP: std::time::Duration = std::time::Duration::from_secs(30);
 /// Budget for one awaited attempt on the blocking path (a non-durable-accept
 /// direct upload, or the manifest write): whatever remains of the flush
-/// deadline, floored at [`DIRECT_ATTEMPT_FLOOR`] (the attempt must still
-/// happen after a fully consumed deadline — the manifest is the ingestion
-/// trigger) and capped at 30s (no storage client on this path has a request
-/// timeout, so this cap is the only bound against a tarpit endpoint).
 pub(crate) fn blocking_attempt_budget(deadline: tokio::time::Instant) -> std::time::Duration {
     deadline
         .saturating_duration_since(tokio::time::Instant::now())
-        .max(DIRECT_ATTEMPT_FLOOR)
-        .min(std::time::Duration::from_secs(30))
+        .max(BLOCKING_ATTEMPT_FLOOR)
+        .min(BLOCKING_ATTEMPT_CAP)
 }
 /// Blocking error path: bounded queue flush, then the error manifest under its own budget so the prompt response cannot hang on the final write.
 pub(crate) async fn flush_then_write_error_manifest(
@@ -1241,7 +1182,10 @@ pub(crate) async fn flush_then_write_error_manifest(
         .await
         .is_err()
     {
-        tracing::warn!("error manifest write timed out");
+        tracing::warn!(
+            "error manifest not confirmed within its attempt budget; \
+             a durably spooled manifest stays with the queue"
+        );
     }
 }
 /// Delete `upload_queue/scratch` (staging copies only).
@@ -1261,9 +1205,7 @@ pub(crate) fn purge_stale_upload_scratch_dir(scratch_dir: &Path) -> std::io::Res
     std::fs::remove_dir_all(scratch_dir)?;
     Ok(true)
 }
-/// Once-per-process: best-effort removal of leftover `upload_queue/scratch` staging written by other builds of the shell.
-/// This build never writes it, so anything found there is stale.
-/// Never touches the durable queue itself.
+/// Once-per-process: best-effort removal of leftover `upload_queue/scratch` staging written by other builds of the shell. This build never writes it, so anything found there is stale. Never touches the durable queue itself.
 /// Skipped under cargo test so unit/integration helpers cannot wipe a developer's real home.
 pub(crate) fn spawn_purge_stale_upload_scratch() {
     {
@@ -1304,14 +1246,13 @@ pub(crate) fn spawn_purge_stale_upload_scratch() {
     }
 }
 /// Spawn a background upload queue for the given trace config.
-///
 /// Credentials are re-read on each upload attempt via [`DynamicResolver`].
 /// Session/trace artifacts use this queue for durable spill in every build.
 pub(crate) fn spawn_upload_queue(
     grok_home: &Path,
     gcs_config: &TraceExportConfig,
     client_version: Option<&str>,
-    auth_manager: Arc<crate::auth::AuthManager>,
+    auth_manager: Arc<xai_grok_login::AuthManager>,
 ) -> UploadQueue {
     let resolver: Arc<dyn TraceExportSource> = Arc::new(DynamicResolver {
         auth_manager,
@@ -1324,6 +1265,98 @@ pub(crate) fn spawn_upload_queue(
         queue
     }
 }
+pub(crate) async fn upload_trace_artifact_blocking(
+    ctx: &PromptTraceContext,
+    content: &[u8],
+    gcs_path: &str,
+    content_type: &str,
+    artifact_name: &str,
+    direct_attempt_started: Option<&std::sync::atomic::AtomicBool>,
+) -> anyhow::Result<()> {
+    let queue_result = if let Some(queue) = &ctx.upload_queue {
+        let session_id = ctx.session_info.id.0.to_string();
+        match queue
+            .enqueue_blocking(
+                content,
+                gcs_path,
+                content_type,
+                artifact_name,
+                &session_id,
+                ctx.turn_number,
+                direct_attempt_started,
+            )
+            .await
+        {
+            Ok(_url) => {
+                record_upload_success(ctx);
+                tracing::info!("Artifact upload confirmed by GCS");
+                Some(Ok(()))
+            }
+            Err(e)
+                if e.downcast_ref::<xai_file_utils::queue::QueueClosed>()
+                    .is_some() =>
+            {
+                tracing::debug!(
+                    artifact = artifact_name,
+                    "upload queue closed; attempting direct upload"
+                );
+                None
+            }
+            Err(e) => {
+                record_upload_failure(
+                    ctx,
+                    UploadFailure {
+                        artifact: artifact_name,
+                        reason: "enqueue_blocking_failed",
+                        error: &format!("{e:#}"),
+                        gcs_path: Some(gcs_path),
+                        bytes: Some(content.len()),
+                        ..Default::default()
+                    },
+                );
+                Some(Err(e))
+            }
+        }
+    } else {
+        None
+    };
+    let result = match queue_result {
+        Some(result) => result,
+        None => {
+            if let Some(flag) = direct_attempt_started {
+                flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            if upload_artifact_to_gcs(ctx, gcs_path, content, content_type, artifact_name)
+                .await
+                .is_some()
+            {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("inline upload failed"))
+            }
+        }
+    };
+    if let Some(filename) = gcs_path.rsplit('/').next() {
+        match &result {
+            Ok(()) => {
+                super::manifest::record_artifact(
+                    &ctx.artifact_tracker,
+                    filename,
+                    super::manifest::ArtifactResult::Succeeded,
+                );
+            }
+            Err(e) => super::manifest::record_artifact(
+                &ctx.artifact_tracker,
+                filename,
+                super::manifest::ArtifactResult::Failed {
+                    reason: "upload_failed",
+                    error: Some(&format!("{e:#}")),
+                },
+            ),
+        }
+    }
+    result
+}
 /// Only these accept shapes are durably owned by the queue (temp and recovery sidecar on disk, flushed by the turn-end wait or recovered next run).
 /// `FellBackToInline` is a fire-and-forget task the flush cannot see, and `Failed` was never handed off.
 /// Both need a real awaited attempt before the manifest may claim anything.
@@ -1335,12 +1368,9 @@ fn enqueue_outcome_is_durable(outcome: &EnqueueOutcome) -> bool {
         | EnqueueOutcome::Skipped { .. } => false,
     }
 }
-/// Durable-accept a trace artifact for the flush-bounded blocking path.
-/// The bytes and a recovery sidecar are on local disk once this returns, and the queue owns the upload.
-/// The artifact is recorded `Enqueued`; the caller runs one bounded queue flush.
-/// Non-durable accept shapes and queue-less contexts get one awaited direct attempt, so the recorded status is the real result.
-/// The attempt is bounded by `blocking_attempt_budget(deadline)`, since the storage clients carry no request timeout.
-/// `Ok` means durably accepted or directly uploaded.
+/// Durable-accept a trace artifact for the flush-bounded blocking path. The bytes and a recovery sidecar are on local disk once this returns, and the queue owns the upload.
+/// The artifact is recorded `Enqueued`; the caller runs one bounded queue flush. Non-durable accept shapes and queue-less contexts get one awaited direct attempt, so the recorded status is the real result.
+/// The attempt is bounded by `blocking_attempt_budget(deadline)`, since the storage clients carry no request timeout. `Ok` means durably accepted or directly uploaded.
 pub(crate) async fn upload_trace_artifact_deferred(
     ctx: &PromptTraceContext,
     content: &[u8],
@@ -1673,10 +1703,10 @@ pub(crate) mod tests {
     }
     #[test]
     fn dynamic_resolver_refreshes_proxy_token() {
-        use crate::auth::{GrokAuth, GrokComConfig};
         use crate::session::repo_changes::UploadMethod;
         use chrono::{Duration, Utc};
         use std::collections::BTreeMap;
+        use xai_grok_login::{GrokAuth, GrokComConfig};
         let dir = tempfile::tempdir().unwrap();
         let grok_com_config = GrokComConfig::default();
         let scope = grok_com_config.auth_scope();
@@ -1688,7 +1718,7 @@ pub(crate) mod tests {
         store.insert(scope.clone(), initial_auth);
         let auth_json = serde_json::to_string_pretty(&store).unwrap();
         std::fs::write(dir.path().join("auth.json"), &auth_json).unwrap();
-        let auth_manager = Arc::new(crate::auth::AuthManager::new(
+        let auth_manager = Arc::new(xai_grok_login::AuthManager::new(
             dir.path(),
             grok_com_config.clone(),
         ));
@@ -1742,10 +1772,10 @@ pub(crate) mod tests {
     }
     #[test]
     fn dynamic_resolver_rereads_disk_on_expired_token() {
-        use crate::auth::{GrokAuth, GrokComConfig};
         use crate::session::repo_changes::UploadMethod;
         use chrono::{Duration, Utc};
         use std::collections::BTreeMap;
+        use xai_grok_login::{GrokAuth, GrokComConfig};
         let dir = tempfile::tempdir().unwrap();
         let grok_com_config = GrokComConfig::default();
         let scope = grok_com_config.auth_scope();
@@ -1758,7 +1788,7 @@ pub(crate) mod tests {
         store.insert(scope.clone(), expired_auth);
         let auth_json = serde_json::to_string_pretty(&store).unwrap();
         std::fs::write(dir.path().join("auth.json"), &auth_json).unwrap();
-        let auth_manager = Arc::new(crate::auth::AuthManager::new(
+        let auth_manager = Arc::new(xai_grok_login::AuthManager::new(
             dir.path(),
             grok_com_config.clone(),
         ));
@@ -1803,10 +1833,10 @@ pub(crate) mod tests {
     /// This verifies the error path doesn't panic.
     #[tokio::test]
     async fn resolve_async_falls_back_when_no_refresher() {
-        use crate::auth::{GrokAuth, GrokComConfig};
         use crate::session::repo_changes::UploadMethod;
         use chrono::{Duration, Utc};
         use std::collections::BTreeMap;
+        use xai_grok_login::{GrokAuth, GrokComConfig};
         let dir = tempfile::tempdir().unwrap();
         let grok_com_config = GrokComConfig::default();
         let scope = grok_com_config.auth_scope();
@@ -1819,7 +1849,10 @@ pub(crate) mod tests {
         store.insert(scope, expired_auth);
         let auth_json = serde_json::to_string_pretty(&store).unwrap();
         std::fs::write(dir.path().join("auth.json"), &auth_json).unwrap();
-        let auth_manager = Arc::new(crate::auth::AuthManager::new(dir.path(), grok_com_config));
+        let auth_manager = Arc::new(xai_grok_login::AuthManager::new(
+            dir.path(),
+            grok_com_config,
+        ));
         let resolver = DynamicResolver {
             auth_manager,
             base_config: TraceExportConfig {
@@ -1848,10 +1881,10 @@ pub(crate) mod tests {
     /// `resolve_async()` picks up a fresh disk token (written by another flow) when the in-memory token is expired.
     #[tokio::test]
     async fn resolve_async_picks_up_disk_refreshed_token() {
-        use crate::auth::{GrokAuth, GrokComConfig};
         use crate::session::repo_changes::UploadMethod;
         use chrono::{Duration, Utc};
         use std::collections::BTreeMap;
+        use xai_grok_login::{GrokAuth, GrokComConfig};
         let dir = tempfile::tempdir().unwrap();
         let grok_com_config = GrokComConfig::default();
         let scope = grok_com_config.auth_scope();
@@ -1864,7 +1897,10 @@ pub(crate) mod tests {
         store.insert(scope, valid_auth);
         let auth_json = serde_json::to_string_pretty(&store).unwrap();
         std::fs::write(dir.path().join("auth.json"), &auth_json).unwrap();
-        let auth_manager = Arc::new(crate::auth::AuthManager::new(dir.path(), grok_com_config));
+        let auth_manager = Arc::new(xai_grok_login::AuthManager::new(
+            dir.path(),
+            grok_com_config,
+        ));
         let resolver = DynamicResolver {
             auth_manager,
             base_config: TraceExportConfig {
@@ -1897,10 +1933,10 @@ pub(crate) mod tests {
     /// The refresher fires and the resolved config carries the fresh token, not the stale `base_config` snapshot.
     #[tokio::test]
     async fn resolve_async_drives_refresh_chain_when_token_expired() {
-        use crate::auth::{GrokAuth, GrokComConfig};
         use crate::session::repo_changes::UploadMethod;
         use chrono::{Duration, Utc};
         use std::collections::BTreeMap;
+        use xai_grok_login::{GrokAuth, GrokComConfig};
         let dir = tempfile::tempdir().unwrap();
         let grok_com_config = GrokComConfig::default();
         let scope = grok_com_config.auth_scope();
@@ -1914,20 +1950,25 @@ pub(crate) mod tests {
         store.insert(scope, expired_auth);
         let auth_json = serde_json::to_string_pretty(&store).unwrap();
         std::fs::write(dir.path().join("auth.json"), &auth_json).unwrap();
-        let auth_manager = Arc::new(crate::auth::AuthManager::new(dir.path(), grok_com_config));
+        let auth_manager = Arc::new(xai_grok_login::AuthManager::new(
+            dir.path(),
+            grok_com_config,
+        ));
         struct FreshRefresher;
         #[async_trait::async_trait]
-        impl crate::auth::refresh::TokenRefresher for FreshRefresher {
+        impl xai_grok_login::refresh::TokenRefresher for FreshRefresher {
             async fn refresh(
                 &self,
-                _r: crate::auth::manager::RefreshReason,
-            ) -> crate::auth::refresh::RefreshOutcome {
-                crate::auth::refresh::RefreshOutcome::Success(Box::new(crate::auth::GrokAuth {
-                    key: "refresher-fresh-token".into(),
-                    expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
-                    refresh_token: Some("rt-new".into()),
-                    ..crate::auth::GrokAuth::test_default()
-                }))
+                _r: xai_grok_login::manager::RefreshReason,
+            ) -> xai_grok_login::refresh::RefreshOutcome {
+                xai_grok_login::refresh::RefreshOutcome::Success(Box::new(
+                    xai_grok_login::GrokAuth {
+                        key: "refresher-fresh-token".into(),
+                        expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+                        refresh_token: Some("rt-new".into()),
+                        ..xai_grok_login::GrokAuth::test_default()
+                    },
+                ))
             }
         }
         auth_manager.set_refresher(Arc::new(FreshRefresher));
@@ -1963,12 +2004,15 @@ pub(crate) mod tests {
     /// The refresher fires once (proactive), then `resolve_async` picks up the cached token without calling the refresher again.
     #[tokio::test]
     async fn proactive_refresh_makes_trace_resolve_a_cache_hit() {
-        use crate::auth::{GrokAuth, GrokComConfig};
         use crate::session::repo_changes::UploadMethod;
         use chrono::{Duration, Utc};
+        use xai_grok_login::{GrokAuth, GrokComConfig};
         let dir = tempfile::tempdir().unwrap();
         let grok_com_config = GrokComConfig::default();
-        let auth_manager = Arc::new(crate::auth::AuthManager::new(dir.path(), grok_com_config));
+        let auth_manager = Arc::new(xai_grok_login::AuthManager::new(
+            dir.path(),
+            grok_com_config,
+        ));
         auth_manager.hot_swap(GrokAuth {
             key: "expired-oidc".into(),
             refresh_token: Some("rt".into()),
@@ -1979,13 +2023,13 @@ pub(crate) mod tests {
         let cc = call_count.clone();
         struct Counting(Arc<std::sync::atomic::AtomicU32>);
         #[async_trait::async_trait]
-        impl crate::auth::refresh::TokenRefresher for Counting {
+        impl xai_grok_login::refresh::TokenRefresher for Counting {
             async fn refresh(
                 &self,
-                _: crate::auth::manager::RefreshReason,
-            ) -> crate::auth::refresh::RefreshOutcome {
+                _: xai_grok_login::manager::RefreshReason,
+            ) -> xai_grok_login::refresh::RefreshOutcome {
                 self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                crate::auth::refresh::RefreshOutcome::Success(Box::new(GrokAuth {
+                xai_grok_login::refresh::RefreshOutcome::Success(Box::new(GrokAuth {
                     key: "proactive-fresh".into(),
                     expires_at: Some(chrono::Utc::now() + Duration::hours(1)),
                     refresh_token: Some("rt-new".into()),
@@ -1997,7 +2041,7 @@ pub(crate) mod tests {
         let cancel = tokio_util::sync::CancellationToken::new();
         auth_manager.start_proactive_refresh(cancel.clone());
         tokio::time::sleep(
-            crate::auth::manager::PROACTIVE_MIN_SLEEP + std::time::Duration::from_millis(1000),
+            xai_grok_login::manager::PROACTIVE_MIN_SLEEP + std::time::Duration::from_millis(1000),
         )
         .await;
         assert!(call_count.load(std::sync::atomic::Ordering::SeqCst) >= 1);
@@ -2040,8 +2084,11 @@ pub(crate) mod tests {
     fn dynamic_resolver_preserves_token_when_auth_unavailable() {
         use crate::session::repo_changes::UploadMethod;
         let dir = tempfile::tempdir().unwrap();
-        let grok_com_config = crate::auth::GrokComConfig::default();
-        let auth_manager = Arc::new(crate::auth::AuthManager::new(dir.path(), grok_com_config));
+        let grok_com_config = xai_grok_login::GrokComConfig::default();
+        let auth_manager = Arc::new(xai_grok_login::AuthManager::new(
+            dir.path(),
+            grok_com_config,
+        ));
         let base_config = TraceExportConfig {
             bucket_url: None,
             service_account_key: None,
@@ -2070,11 +2117,11 @@ pub(crate) mod tests {
     }
     #[test]
     fn dynamic_resolver_noop_for_direct_mode() {
-        use crate::auth::GrokAuth;
         use crate::session::repo_changes::UploadMethod;
         use std::collections::BTreeMap;
+        use xai_grok_login::GrokAuth;
         let dir = tempfile::tempdir().unwrap();
-        let grok_com_config = crate::auth::GrokComConfig::default();
+        let grok_com_config = xai_grok_login::GrokComConfig::default();
         let scope = grok_com_config.auth_scope();
         let auth = GrokAuth {
             key: "some-token".into(),
@@ -2084,7 +2131,10 @@ pub(crate) mod tests {
         store.insert(scope, auth);
         let auth_json = serde_json::to_string_pretty(&store).unwrap();
         std::fs::write(dir.path().join("auth.json"), &auth_json).unwrap();
-        let auth_manager = Arc::new(crate::auth::AuthManager::new(dir.path(), grok_com_config));
+        let auth_manager = Arc::new(xai_grok_login::AuthManager::new(
+            dir.path(),
+            grok_com_config,
+        ));
         let base_config = TraceExportConfig {
             bucket_url: Some("gs://bucket".into()),
             service_account_key: Some("sa-key".into()),
@@ -2118,9 +2168,9 @@ pub(crate) mod tests {
         use crate::session::repo_changes::UploadMethod;
         use xai_file_utils::queue::TraceExportSource;
         let dir = tempfile::tempdir().unwrap();
-        let auth_manager = Arc::new(crate::auth::AuthManager::new(
+        let auth_manager = Arc::new(xai_grok_login::AuthManager::new(
             dir.path(),
-            crate::auth::GrokComConfig::default(),
+            xai_grok_login::GrokComConfig::default(),
         ));
         let base_config = TraceExportConfig {
             bucket_url: None,
@@ -2159,14 +2209,14 @@ pub(crate) mod tests {
         use crate::session::repo_changes::UploadMethod;
         use xai_file_utils::queue::TraceExportSource;
         let dir = tempfile::tempdir().unwrap();
-        let auth_manager = Arc::new(crate::auth::AuthManager::new(
+        let auth_manager = Arc::new(xai_grok_login::AuthManager::new(
             dir.path(),
-            crate::auth::GrokComConfig::default(),
+            xai_grok_login::GrokComConfig::default(),
         ));
-        auth_manager.hot_swap(crate::auth::GrokAuth {
+        auth_manager.hot_swap(xai_grok_login::GrokAuth {
             key: "fresh-token".into(),
             expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
-            ..crate::auth::GrokAuth::test_default()
+            ..xai_grok_login::GrokAuth::test_default()
         });
         let resolver = DynamicResolver {
             auth_manager,
@@ -2201,14 +2251,14 @@ pub(crate) mod tests {
         use crate::session::repo_changes::UploadMethod;
         use xai_file_utils::queue::TraceExportSource;
         let dir = tempfile::tempdir().unwrap();
-        let auth_manager = Arc::new(crate::auth::AuthManager::new(
+        let auth_manager = Arc::new(xai_grok_login::AuthManager::new(
             dir.path(),
-            crate::auth::GrokComConfig::default(),
+            xai_grok_login::GrokComConfig::default(),
         ));
-        auth_manager.hot_swap(crate::auth::GrokAuth {
+        auth_manager.hot_swap(xai_grok_login::GrokAuth {
             key: "session-token".into(),
             expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
-            ..crate::auth::GrokAuth::test_default()
+            ..xai_grok_login::GrokAuth::test_default()
         });
         let resolver = DynamicResolver {
             auth_manager,
@@ -2239,8 +2289,11 @@ pub(crate) mod tests {
     async fn spawn_upload_queue_uses_dynamic_resolver_when_auth_manager_provided() {
         use crate::session::repo_changes::UploadMethod;
         let dir = tempfile::tempdir().unwrap();
-        let grok_com_config = crate::auth::GrokComConfig::default();
-        let auth_manager = Arc::new(crate::auth::AuthManager::new(dir.path(), grok_com_config));
+        let grok_com_config = xai_grok_login::GrokComConfig::default();
+        let auth_manager = Arc::new(xai_grok_login::AuthManager::new(
+            dir.path(),
+            grok_com_config,
+        ));
         let gcs_config = TraceExportConfig {
             bucket_url: None,
             service_account_key: None,
@@ -2663,16 +2716,13 @@ pub(crate) mod tests {
             "enrichment must ride the capped attempt budget"
         );
     }
-    /// Regression: the detached spawn-/completion-time `subagent.json` uploads
-    /// must be bounded — unbounded, every child against a tarpit endpoint
-    /// leaked one parked task (and its `AuthManager` Arc) for the process
-    /// lifetime.
+    /// Regression: the detached spawn-/completion-time `subagent.json` uploads must be bounded — unbounded, every child against a tarpit endpoint leaked one parked task (and its `AuthManager` Arc) for the process lifetime.
     #[tokio::test(start_paused = true)]
     async fn upload_subagent_metadata_is_bounded_against_a_tarpit() {
         let tmp = tempfile::tempdir().unwrap();
-        let auth = std::sync::Arc::new(crate::auth::AuthManager::new(
+        let auth = std::sync::Arc::new(xai_grok_login::AuthManager::new(
             tmp.path(),
-            crate::auth::GrokComConfig::default(),
+            xai_grok_login::GrokComConfig::default(),
         ));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

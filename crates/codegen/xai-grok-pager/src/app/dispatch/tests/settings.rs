@@ -1463,7 +1463,6 @@ fn pr13_set_show_tips_toast_includes_restart_marker() {
         "toast must include the deferred-effect cue, got {toast:?}"
     );
 }
-/// Helper for `every_setting_has_action_for_reset_arm`.
 /// Flips the setting to a non-default value so the round-trip dispatch has an observable effect.
 /// Otherwise the assertion would pass vacuously when current == default.
 /// Dispatches theme-mutating actions for the theme keys; callers must hold the theme test lock (wrap the test in [`with_theme_test_env`]).
@@ -1782,7 +1781,6 @@ fn set_simple_mode_propagates_to_every_agent() {
     }
 }
 /// Setters must update BOTH `app.current_ui` AND `crate::appearance::cache`.
-/// The cache is the render hot path's source of truth.
 /// If a refactor drops the `cache::set(new)` call, `app.current_ui` would still show the new value but the renderer would revert on the next frame.
 /// Runs in a fresh thread because the thread-locals are sticky.
 #[test]
@@ -1839,10 +1837,8 @@ fn set_multiline_mode_mutates_agent_and_emits_no_effect() {
     );
 }
 /// Idempotent fast path: re-emitting the same value is a UX no-op (no toast, no Effect).
-///
 /// SHARED setters differ: `set_compact_mode_inner` only skips the `app.set_appearance` fan-out.
 /// The outer `set_compact_mode` still toasts AND emits `Effect::PersistSetting` on every dispatch, including no-ops.
-/// PAGER setters have no disk write to confirm, so re-toasting on a same-value re-dispatch is pure UI noise and the toast is skipped too.
 #[test]
 fn set_multiline_mode_idempotent_no_toast() {
     let mut app = test_app_with_agent();
@@ -1966,8 +1962,6 @@ fn set_multiline_mode_mutates_only_active_agent_not_others() {
     );
 }
 /// Regression test.
-///
-/// Open the settings modal, dispatch `SetMultilineMode(true)`, assert the modal's `pager_snapshot.multiline_mode` is refreshed to `true`.
 /// Without `refresh_open_settings_modals`, the snapshot stays at the open-time value and the user gets stuck.
 /// The indicator shows the wrong state AND subsequent toggles are no-ops via the idempotent guard.
 #[test]
@@ -2006,7 +2000,6 @@ fn set_multiline_mode_refreshes_open_modal_pager_snapshot() {
     );
 }
 /// Regression test (SHARED path).
-///
 /// Same bug pattern as the multiline test above, but for `compact_mode` (SHARED).
 /// The fix covers the entire SHARED family: every `set_X` outer calls `refresh_open_settings_modals`, not just multiline.
 #[test]
@@ -2944,10 +2937,8 @@ fn action_for_reset_permission_mode_dispatches_set_permission_mode_for_each_cano
     assert!(action_for_reset("permission_mode", &SettingValue::Enum("bogus")).is_none());
 }
 /// Slash-command-while-modal-open refresh.
-/// `dispatch_cycle_mode` is the entry point for both Shift+Tab and the `/plan` / `/cycle-mode` slash commands.
 /// When the settings modal is open and a cycle lands, the modal's `pager_snapshot.plan_mode_active` must refresh to the new effective state.
 /// Otherwise the indicator stays stale until the next setter dispatch.
-/// Mirror of `set_plan_mode_refreshes_open_modal_pager_snapshot`.
 #[test]
 fn dispatch_cycle_mode_refreshes_open_modal_snapshot() {
     use crate::views::modal::ActiveModal;
@@ -2982,10 +2973,7 @@ fn dispatch_cycle_mode_refreshes_open_modal_snapshot() {
 }
 /// `dispatch(Action::SetTheme("grokday"), &mut app)` emits exactly one `Effect::PersistSetting` and mutates `app.current_ui.theme`.
 /// It also fires a toast and toggles AUTO_MODE off (kind is concrete).
-///
 /// The test persists `grokday` (a non-truecolor theme) because the asserted payload is the registry's CANONICAL, not the live theme cache.
-/// `clamp_to_terminal` might fold the cache to GrokNight in non-truecolor test environments.
-/// The cache contract is exercised separately by the `*_applies_when_*` tests.
 #[test]
 fn set_theme_emits_persist_setting_with_correct_payload() {
     use crate::settings::SettingValue;
@@ -3110,10 +3098,8 @@ fn preview_auto_light_theme_emits_no_persist_and_no_current_ui_mutation() {
     });
 }
 /// Auto-theme commit applies the live theme **only** when `theme="auto"` AND the system is in the matching mode.
-///
 /// Scenario: `theme="groknight"` (concrete) while the system is Dark, and the user commits `auto_dark_theme="grokday"`.
 /// The setting is dormant (parent theme is concrete, not auto), so the live display must stay on GrokNight.
-/// Uses `grokday` to avoid `clamp_to_terminal` ambiguity in non-truecolor envs.
 #[test]
 fn set_auto_dark_theme_does_not_apply_when_theme_is_not_auto() {
     with_theme_test_env(|| {
@@ -3136,10 +3122,8 @@ fn set_auto_dark_theme_does_not_apply_when_theme_is_not_auto() {
     });
 }
 /// Auto-theme commit DOES apply the live theme when both (a) the parent theme is auto AND (b) the system matches.
-///
 /// Uses `GrokDay` (non-truecolor-requiring) for the dark-mode fixture: the test environment may not report truecolor support.
 /// `Theme::apply_kind` clamps truecolor-only themes (TokyoNight, RosePineMoon) to GrokNight, so a non-truecolor theme avoids the clamp.
-/// The "live apply" contract is what matters; the specific theme picked is incidental.
 #[test]
 fn set_auto_dark_theme_applies_when_theme_is_auto_and_system_is_dark() {
     with_theme_test_env(|| {
@@ -3308,7 +3292,6 @@ fn set_auto_light_theme_toast_format_uses_display_name() {
 }
 /// `apply_setting_rollback` for theme keys: a failed persist reverts `app.current_ui.theme` AND the live cache.
 /// Mirror of `rollback_known_key_reverts_cache_and_no_effect`.
-///
 /// Uses the non-truecolor themes `grokday` and `groknight` to avoid the `clamp_to_terminal` interaction in test envs without truecolor support.
 #[test]
 fn rollback_theme_reverts_current_ui_and_cache() {
@@ -3579,4 +3562,32 @@ fn mouse_reporting_toggle_off_sticky_persists_after_transient_toast() {
         Some("Mouse reporting on"),
     );
     reset_mouse_capture_enabled(true);
+}
+/// The toggle's capture sequences must ride the writer queue (see `EscapeWriter`).
+#[cfg(not(windows))]
+#[serial_test::serial(MOUSE_CAPTURE_ENABLED)]
+#[test]
+fn mouse_reporting_toggle_enqueues_capture_escapes_on_the_writer_queue() {
+    reset_mouse_capture_enabled(true);
+    let mut app = test_app_with_agent();
+    app.registry = crate::actions::ActionRegistry::defaults_with_config(true);
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.escape_writer =
+        crate::render::draw::EscapeWriter::new(tx, crate::render::draw::WriterSync::new());
+    let _ = dispatch(Action::ToggleMouseCapture, &mut app);
+    assert!(!mouse_capture_is_enabled());
+    let disable = rx.try_recv().expect("disable escape queued");
+    assert!(String::from_utf8_lossy(disable.data()).contains("\x1b[?1000l"));
+    assert!(
+        rx.try_recv().is_err(),
+        "toggle-off queues exactly one payload"
+    );
+    let _ = dispatch(Action::ToggleMouseCapture, &mut app);
+    assert!(mouse_capture_is_enabled());
+    let enable = rx.try_recv().expect("enable escape queued");
+    assert!(String::from_utf8_lossy(enable.data()).contains("\x1b[?1000h"));
+    assert!(
+        rx.try_recv().is_err(),
+        "toggle-on queues exactly one payload"
+    );
 }

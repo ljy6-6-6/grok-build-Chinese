@@ -24,7 +24,6 @@ pub fn detect_mmdc() -> Option<PathBuf> {
 }
 
 /// An engine that shells out to `mmdc` (mermaid-cli).
-///
 /// Off by default: construct it explicitly (it requires Node and headless Chromium).
 /// Use [`MmdcEngine::detect`] to build one only if `mmdc` is present.
 pub struct MmdcEngine {

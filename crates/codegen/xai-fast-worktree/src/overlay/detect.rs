@@ -30,10 +30,8 @@ pub struct OverlayInfo {
     pub overlay_root: PathBuf,
 }
 
-/// Detect if `path` is on a FUSE+overlayfs stack with btrfs upper.
-///
-/// Returns `Ok(Some(OverlayInfo))` if all conditions are met, `Ok(None)` otherwise.
-/// Handles `EIO`/`ENOTCONN` from a crashed FUSE daemon gracefully by returning `Ok(None)`.
+/// `Ok(Some)` only if `path` is a FUSE+overlayfs stack with btrfs upper.
+/// A crashed FUSE daemon (`EIO`/`ENOTCONN`) is `Ok(None)`, not an error.
 pub fn detect_fuse_overlay(path: &Path) -> Result<Option<OverlayInfo>> {
     let entries = match mount_info::parse_mountinfo() {
         Ok(entries) => entries,

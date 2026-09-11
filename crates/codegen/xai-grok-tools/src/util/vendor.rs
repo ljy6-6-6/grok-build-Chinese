@@ -13,11 +13,9 @@ pub(crate) enum InstallError {
     Io(#[from] std::io::Error),
 }
 
-/// Installs a bundled binary on first use and returns its path.
-///
-/// Returns `None` when installation is skipped or fails for an operational
-/// reason, so the caller can fall back to a `PATH` binary. Returns an error only
-/// when the embedded bytes fail their integrity check.
+/// Installs a bundled binary on first use and returns its path. Returns `None` when installation is
+/// skipped or fails for an operational reason, so the caller can fall back to a `PATH` binary.
+/// Returns an error only when the embedded bytes fail their integrity check.
 #[cfg(any(bundle_rg, bundle_fd, bundle_bfs, bundle_ugrep))]
 pub(crate) fn resolve(
     versioned_name: &str,

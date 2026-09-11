@@ -38,11 +38,8 @@ pub const WORKSPACE_TOOL_NOTIFICATIONS_TOOL_ID: &str = "workspace_tool_notificat
 /// Tool ID used for workspace-originated client ext-notification frames (e.g. `x.ai/search/fuzzy/status`). Carries `{ method, params }`.
 pub const WORKSPACE_CLIENT_EXT_NOTIFICATIONS_TOOL_ID: &str = "workspace_client_ext_notifications";
 
-/// What a workspace RPC's execution says about human presence, consumed by the idle-hibernation activity tracker.
-///
-/// `Mutation` is evidence a person is working through the workspace API, so the sandbox must not be idle-hibernated underneath them.
-/// `Read` covers everything else, including deliberate exceptions that mutate but must never hold a sandbox alive.
-/// Those are teardown (`drop_session`), maintenance (`worktree_gc`, db rebuilds), and agent-turn boundaries already tracked through `turn_active`.
+/// What a workspace RPC says about human presence, for idle-hibernation.
+/// `Mutation` must not hibernate under a person; `Read` includes mutations that must not hold a sandbox (teardown, maintenance, turn boundaries already tracked via `turn_active`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RpcActivityClass {
     /// A client-driven write that counts as workspace activity.

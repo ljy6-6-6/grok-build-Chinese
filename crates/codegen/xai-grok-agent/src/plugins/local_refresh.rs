@@ -23,13 +23,35 @@ pub(crate) struct RefreshSummary {
     pub errors: usize,
 }
 
-/// Load the install registry, [`refresh_local_installs`], and persist it if a snapshot changed.
-///
-/// Runs only at genuine session spawn (`force=false`, cheap skip-unchanged) and explicit `/plugins reload` (`force=true`, always re-copies).
-/// Trust granted at install time re-applies at every spawn: the refresh keeps copying whatever the source now contains.
-/// Failures are non-fatal.
+/// Load the install registry, refresh local installs, and persist if a snapshot changed.
+/// `force=false` at session spawn (skip-unchanged); `force=true` on explicit reload (always re-copy).
+/// Trust granted at install re-applies at every spawn. Failures are non-fatal.
 pub(crate) fn refresh_local_installs_from_disk(trust: &TrustStore, force: bool) -> RefreshSummary {
-    let mut registry = InstallRegistry::load();
+    refresh_local_installs_in(&InstallRegistry::resolve_install_dir(), trust, force)
+}
+
+/// Short registry-lock wait: contention means a plugin install/update is in
+/// flight, and the refresh reruns at the next spawn / `/plugins reload`.
+const REFRESH_REGISTRY_LOCK_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// [`refresh_local_installs_from_disk`] at an explicit install dir (tests
+/// inject temp dirs).
+fn refresh_local_installs_in(
+    install_dir: &Path,
+    trust: &TrustStore,
+    force: bool,
+) -> RefreshSummary {
+    // Registry flock across load→refresh→save like every shell writer, or an
+    // overlapping writer's fresh entries are lost to this stale snapshot.
+    let _lock =
+        match super::install_registry::lock_registry(install_dir, REFRESH_REGISTRY_LOCK_TIMEOUT) {
+            Ok(lock) => lock,
+            Err(detail) => {
+                tracing::warn!(%detail, "skipping local plugin refresh: registry is locked");
+                return RefreshSummary::default();
+            }
+        };
+    let mut registry = InstallRegistry::load_from(install_dir.to_path_buf());
     let summary = refresh_local_installs(&mut registry, trust, force);
     if summary.refreshed > 0
         && let Err(e) = registry.save()
@@ -49,11 +71,9 @@ struct RefreshTarget {
     expected: HashMap<String, RepoPlugin>,
 }
 
-/// Re-copy refreshable local installs from their live `source_path` into the managed snapshot, rediscovering plugins so new components show up.
-///
-/// A source is refreshable when it is under the user's home (auto-trusted, same rule as config-path plugins) or in the trust store.
-/// Remote git installs are handled by `update_repo`, not here.
-/// Unless `force`, snapshots already matching the live source are skipped (a stat-walk, not a byte copy).
+/// Re-copy refreshable local installs from their live `source_path` into the managed snapshot.
+/// Refreshable when under the user's home or in the trust store. Remote git installs are handled by `update_repo`.
+/// Unless `force`, snapshots already matching the live source are skipped.
 fn refresh_local_installs(
     registry: &mut InstallRegistry,
     trust: &TrustStore,
@@ -159,14 +179,9 @@ fn snapshot_matches_source(source: &Path, dest: &Path) -> bool {
     }
 }
 
-/// Re-copy `source_path` into `dest`, returning the rediscovered plugins, or `Ok(None)` to keep the existing snapshot unchanged.
-///
-/// Invariant: refresh only syncs file contents within the existing plugin set.
-/// If rediscovery is empty or changes the `(name, subdir)` set, the snapshot is kept (protects legacy entries whose `subdir` wasn't persisted).
-///
-/// `subdir` scopes discovery as it did at install time; symlinks in the source are skipped (see [`copy_dir_recursive`]).
-/// The swap is rename-aside: move the live snapshot to backup, promote tmp, drop backup.
-/// `dest` is never absent during a slow delete, and a failed promote rolls back to the previous snapshot.
+/// Re-copy `source_path` into `dest`, or `Ok(None)` to keep the existing snapshot.
+/// Refresh only syncs file contents within the existing plugin set; a changed `(name, subdir)` set keeps the snapshot.
+/// Swap is rename-aside so `dest` is never absent, and a failed promote rolls back.
 fn recopy_local_install(
     source_path: &Path,
     subdir: Option<&str>,
@@ -182,10 +197,10 @@ fn recopy_local_install(
         .unwrap_or("plugin");
     // Reclaim orphaned tmp/backup dirs left by a crash in a prior run.
     sweep_stale(parent, file_name);
-    let tmp = parent.join(format!(".{file_name}.refresh-{}", std::process::id()));
-    let backup = parent.join(format!(".{file_name}.backup-{}", std::process::id()));
+    // PID alone collides when two in-process session creates refresh the same install.
+    let tmp = unique_tmp_path(parent, file_name, "refresh");
+    let backup = unique_tmp_path(parent, file_name, "backup");
 
-    let _ = remove_repo_path(&tmp);
     copy_dir_recursive(source_path, &tmp).map_err(|e| {
         let _ = remove_repo_path(&tmp);
         InstallError::Io {
@@ -216,7 +231,6 @@ fn recopy_local_install(
         return Ok(None);
     }
 
-    let _ = remove_repo_path(&backup);
     if dest.exists()
         && let Err(e) = std::fs::rename(dest, &backup)
     {
@@ -267,6 +281,28 @@ fn promote_tmp_to_dest(tmp: &Path, dest: &Path) -> std::io::Result<()> {
     std::fs::rename(tmp, dest)
 }
 
+/// Per-invocation sibling of `dest`. Same uniqueness as the models-cache `unique_tmp_path`: pid plus a monotonic seq.
+fn unique_tmp_path(parent: &Path, file_name: &str, kind: &str) -> PathBuf {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = parent.join(format!(".{file_name}.{kind}-{}.{n}", std::process::id()));
+    #[cfg(test)]
+    {
+        if let Ok(mut seen) = TEST_REFRESH_TMP_PATHS.lock() {
+            seen.push(path.clone());
+        }
+        if kind == "refresh"
+            && let Some(barrier) = TEST_REFRESH_OVERLAP
+                .lock()
+                .ok()
+                .and_then(|slot| slot.clone())
+        {
+            barrier.wait();
+        }
+    }
+    path
+}
+
 /// Best-effort removal of orphaned `.<name>.refresh-*` / `.<name>.backup-*` siblings left by a crash between copy and promote.
 /// Only entries older than [`STALE_SWEEP_AGE`] are reaped, so a still-running refresh's freshly created working dir is never deleted.
 fn sweep_stale(parent: &Path, file_name: &str) {
@@ -293,6 +329,12 @@ fn sweep_stale(parent: &Path, file_name: &str) {
         }
     }
 }
+
+#[cfg(test)]
+static TEST_REFRESH_TMP_PATHS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+#[cfg(test)]
+static TEST_REFRESH_OVERLAP: std::sync::Mutex<Option<std::sync::Arc<std::sync::Barrier>>> =
+    std::sync::Mutex::new(None);
 
 #[cfg(test)]
 mod tests {
@@ -399,6 +441,48 @@ mod tests {
         let summary = refresh_local_installs(&mut registry, &trust, false);
         assert_eq!(summary.refreshed, 1, "{summary:?}");
         assert!(installed.repo_path.join("agents/new.md").exists());
+    }
+
+    /// While a shell writer holds the registry flock, the refresh must skip its load→mutate→save (it reruns next spawn).
+    #[test]
+    #[serial(home_env)]
+    fn refresh_skips_registry_writes_while_flock_held() {
+        let (_home_tmp, home, _home_guard) = home_tempdir();
+        let source = home.join(".claude").join("demo-plugin");
+        write_plugin_json(&source, "demo-plugin");
+        write_agent_md(&source, "old");
+
+        let install_dir = home.join(".grok").join("installed-plugins");
+        let mut registry = InstallRegistry::empty(install_dir.clone());
+        let installed = register_local_install(&mut registry, &source, None);
+        registry.save().unwrap();
+
+        // A change that would trigger a re-copy + registry save.
+        write_agent_md(&source, "new");
+        let registry_before = std::fs::read_to_string(install_dir.join("registry.json")).unwrap();
+
+        let _held = super::super::install_registry::lock_registry(
+            &install_dir,
+            std::time::Duration::from_millis(50),
+        )
+        .expect("test takes the registry flock");
+
+        let trust = TrustStore::load_from(home.join(".grok").join("trusted-plugins"));
+        let summary = refresh_local_installs_in(&install_dir, &trust, false);
+
+        assert_eq!(
+            summary.refreshed, 0,
+            "refresh must not proceed while the registry flock is held: {summary:?}"
+        );
+        assert!(
+            !installed.repo_path.join("agents/new.md").exists(),
+            "snapshot must not be re-copied while the registry flock is held"
+        );
+        assert_eq!(
+            std::fs::read_to_string(install_dir.join("registry.json")).unwrap(),
+            registry_before,
+            "registry must not be rewritten while the flock is held"
+        );
     }
 
     #[test]
@@ -637,5 +721,71 @@ mod tests {
             }
             _ => panic!("expected Local"),
         }
+    }
+
+    #[test]
+    #[serial(home_env)]
+    fn concurrent_refreshes_use_distinct_tmp_paths_and_keep_a_complete_snapshot() {
+        let (_home_tmp, home, _home_guard) = home_tempdir();
+        let source = home.join(".claude").join("demo-plugin");
+        write_plugin_json(&source, "demo-plugin");
+        write_agent_md(&source, "agent");
+        std::fs::write(source.join("agents").join("agent.md"), "body-v2\n").unwrap();
+
+        let mut registry = InstallRegistry::empty(home.join(".grok").join("installed-plugins"));
+        let installed = register_local_install(&mut registry, &source, None);
+        let dest = installed.repo_path.clone();
+
+        TEST_REFRESH_TMP_PATHS.lock().unwrap().clear();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        *TEST_REFRESH_OVERLAP.lock().unwrap() = Some(barrier);
+        let trust_path = home.join(".grok").join("trusted-plugins");
+
+        let spawn_refresh = |registry: InstallRegistry, trust_path: PathBuf| {
+            std::thread::spawn(move || {
+                let trust = TrustStore::load_from(trust_path);
+                let mut local = registry;
+                refresh_local_installs(&mut local, &trust, true)
+            })
+        };
+        let a = spawn_refresh(registry.clone(), trust_path.clone());
+        let b = spawn_refresh(registry, trust_path);
+        let summary_a = a.join().unwrap();
+        let summary_b = b.join().unwrap();
+        *TEST_REFRESH_OVERLAP.lock().unwrap() = None;
+
+        let paths = TEST_REFRESH_TMP_PATHS.lock().unwrap().clone();
+        let refresh_paths: Vec<_> = paths
+            .iter()
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.contains(".refresh-"))
+            })
+            .collect();
+        assert!(
+            refresh_paths.len() >= 2,
+            "each overlapping refresh must mint its own tmp dir, got {paths:?}"
+        );
+        assert_eq!(
+            refresh_paths
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            refresh_paths.len(),
+            "concurrent refreshes must not share a tmp path: {refresh_paths:?}"
+        );
+        assert!(
+            summary_a.errors + summary_b.errors < 2,
+            "both refreshes failed: {summary_a:?} {summary_b:?}"
+        );
+        assert!(
+            dest.join("plugin.json").is_file(),
+            "dest must remain a complete snapshot"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dest.join("agents").join("agent.md")).unwrap(),
+            "body-v2\n"
+        );
     }
 }

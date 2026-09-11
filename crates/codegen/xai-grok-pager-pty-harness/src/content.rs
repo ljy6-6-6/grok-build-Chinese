@@ -95,10 +95,7 @@ impl AgentTurnExpectation {
     }
 }
 
-/// Drives content into the pager: the bundled shell agent hits the mock inference endpoint for `/v1/chat/completions` and `/v1/responses`.
-/// Thin wrapper over the shared [`MockInferenceServer`] that adds the isolated `$HOME` sandbox and the pager env vars.
-/// Applies the harness defaults the pager depends on (always-200 `/v1/settings`, fixed default response).
-/// Shuts the server down on drop (the inner server's `Drop`).
+/// Mock inference plus an isolated `$HOME`. Always-200 `/v1/settings` and a fixed default response; the server shuts down on drop.
 pub struct ContentController {
     server: MockInferenceServer,
     sandbox: TestSandbox,

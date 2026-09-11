@@ -9,6 +9,8 @@ pub mod tmux;
 
 use std::time::{Duration, Instant};
 
+use crate::render::draw::EscapeWriter;
+
 /// Ghostty resets the OSC 9;4 progress indicator after ~15 s of silence.
 /// Re-send the sequence at this interval to keep it alive.
 const PROGRESS_KEEPALIVE: Duration = Duration::from_secs(5);
@@ -40,10 +42,12 @@ pub struct NotificationService {
     /// Whether we have already fired an `ApprovalRequired` terminal notification for the current batch of queued permissions.
     /// Set to `true` after the first notification; cleared via [`clear_permission_notification`] when the queue drains to empty.
     permission_notified: bool,
+    /// Out-of-band escape queue for notification/shutdown escapes; see [`EscapeWriter`](crate::render::draw::EscapeWriter).
+    escape_writer: EscapeWriter,
 }
 
 impl NotificationService {
-    pub fn new(config: NotificationConfig) -> Self {
+    pub fn new(config: NotificationConfig, escape_writer: EscapeWriter) -> Self {
         let terminal_ctx = crate::terminal::terminal_context();
         let protocol = resolve_protocol(config.method, terminal_ctx);
         let focus_tracker = focus::FocusTracker::new(
@@ -62,6 +66,7 @@ impl NotificationService {
             progress_active: false,
             progress_last_sent: None,
             permission_notified: false,
+            escape_writer,
         }
     }
 
@@ -85,14 +90,9 @@ impl NotificationService {
         }
     }
 
-    /// Fire a one-shot terminal notification (bell/OSC popup).
-    ///
-    /// These escape sequences deliberately bypass the frame pipeline and write directly to stderr.
-    /// Unlike per-tick title/progress updates, notifications are rare, one-shot events (turn complete, agent error) that must reach the terminal now.
-    /// Deferring them to the next draw frame would add up to 16ms latency, and the sequences are short enough not to garble interleaved frame data.
-    ///
-    /// For `ApprovalRequired` events, the caller must check [`should_suppress_permission_notification`] first.
-    /// Call [`mark_permission_notified`] after a successful emit to avoid repeated bells during concurrent permission requests.
+    /// Notifications bypass the frame pipeline: rare one-shot events that must not wait for the next draw (16ms away,
+    /// or indefinitely while a frame ack is outstanding). For `ApprovalRequired` events, the caller must check
+    /// [`should_suppress_permission_notification`] first.
     pub fn notify(&self, event: NotificationEvent) {
         if !self.is_event_enabled(&event.kind) {
             return;
@@ -103,38 +103,15 @@ impl NotificationService {
                 &event.title,
                 &event.body,
                 self.terminal_ctx,
+                &self.escape_writer,
             );
             xai_grok_telemetry::session_ctx::log_event(
                 xai_grok_telemetry::events::NotificationEmitted {
-                    protocol: self.protocol.as_str(),
-                    event_kind: event.kind.as_str(),
+                    protocol: self.protocol.into(),
+                    event_kind: event.kind.into(),
                     was_focused: self.focus_tracker.is_focused(),
                 },
             );
-        }
-    }
-
-    /// Flush the tab title and progress bar to the idle state, writing directly to stderr.
-    /// Call before `notify()` so Ghostty's notification popup picks up the updated (non-spinning) title instead of a stale "Responding" subtitle.
-    pub fn flush_idle_state(&mut self, state: &title::TitleState<'_>) {
-        let mut buf = String::new();
-
-        if self.config.title.enabled
-            && let Some(esc) = self.title_manager.update(state)
-        {
-            buf.push_str(&esc);
-        }
-
-        if !state.is_busy {
-            self.clear_progress_into(&mut buf);
-        }
-
-        if !buf.is_empty() {
-            xai_grok_shell::util::with_locked_stderr(|stderr| {
-                use std::io::Write;
-                let _ = stderr.write_all(buf.as_bytes());
-                let _ = stderr.flush();
-            });
         }
     }
 
@@ -158,7 +135,6 @@ impl NotificationService {
     }
 
     /// Advance the tab title and progress bar state.
-    ///
     /// Returns escape sequences to emit (title and progress) as a single `String`, or `None` if nothing changed.
     /// The caller should route these bytes through the frame pipeline's `post_flush_escapes`.
     pub fn on_tick(&mut self, state: &title::TitleState<'_>) -> Option<String> {
@@ -197,24 +173,13 @@ impl NotificationService {
         if buf.is_empty() { None } else { Some(buf) }
     }
 
+    /// Reset the tab title back to "grok" and clear the progress bar so neither lingers after exit. Enqueued, never
+    /// inline: `/quit` can land while the writer is parked holding the stderr lock, and the queue orders the reset
+    /// after any still-queued busy-title escape.
     pub fn shutdown(&mut self) {
-        // Reset the tab title back to "grok" so it doesn't linger on the last activity label after exit
-        let title_esc = self.title_manager.reset();
-        xai_grok_shell::util::with_locked_stderr(|stderr| {
-            use std::io::Write as _;
-            let _ = stderr.write_all(title_esc.as_bytes());
-            let _ = stderr.flush();
-        });
-
-        let mut buf = String::new();
+        let mut buf = self.title_manager.reset();
         self.clear_progress_into(&mut buf);
-        if !buf.is_empty() {
-            xai_grok_shell::util::with_locked_stderr(|stderr| {
-                use std::io::Write as _;
-                let _ = stderr.write_all(buf.as_bytes());
-                let _ = stderr.flush();
-            });
-        }
+        self.escape_writer.emit(buf);
     }
 
     /// Returns `true` if a terminal notification for `ApprovalRequired` has already been emitted and should not be repeated.
@@ -247,7 +212,7 @@ impl NotificationService {
     }
 
     /// Whether the OSC 9;4 progress indicator is currently considered active.
-    /// Test-only: production callers drive progress exclusively via [`Self::on_tick`] / [`Self::build_idle_escapes`] / [`Self::flush_idle_state`].
+    /// Test-only: production callers drive progress exclusively via [`Self::on_tick`] / [`Self::build_idle_escapes`].
     #[cfg(test)]
     pub(crate) fn is_progress_active(&self) -> bool {
         self.progress_active
@@ -272,6 +237,7 @@ impl NotificationService {
             progress_active: false,
             progress_last_sent: None,
             permission_notified: false,
+            escape_writer: EscapeWriter::disconnected(),
         }
     }
 }
@@ -305,6 +271,7 @@ pub fn load_notification_config(raw_config: &toml::Value) -> NotificationConfig 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::draw::WriterSync;
     use crate::terminal::{TerminalContext, TerminalName};
 
     #[test]
@@ -453,33 +420,45 @@ mod tests {
     }
 
     #[test]
-    fn notify_no_panic_with_none_protocol() {
-        let svc = NotificationService::new_for_test(NotificationConfig {
+    fn notify_enqueues_nothing_with_none_protocol() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut svc = NotificationService::new_for_test(NotificationConfig {
             events: vec![NotificationEventKind::TurnComplete],
             condition: NotificationCondition::Always,
             ..Default::default()
         });
+        svc.escape_writer = EscapeWriter::new(tx, WriterSync::new());
         svc.notify(NotificationEvent {
             kind: NotificationEventKind::TurnComplete,
             title: "Grok".into(),
             body: "Turn complete".into(),
             session_id: Some("test-session".into()),
         });
+        assert!(
+            rx.try_recv().is_err(),
+            "protocol None must enqueue no payload"
+        );
     }
 
     #[test]
     fn notify_skips_filtered_event() {
-        let svc = NotificationService::new_for_test(NotificationConfig {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut svc = NotificationService::new_for_test(NotificationConfig {
             events: vec![NotificationEventKind::TurnComplete],
             condition: NotificationCondition::Always,
             ..Default::default()
         });
+        svc.escape_writer = EscapeWriter::new(tx, WriterSync::new());
         svc.notify(NotificationEvent {
             kind: NotificationEventKind::SessionReady,
             title: "Grok".into(),
             body: "Session ready".into(),
             session_id: None,
         });
+        assert!(
+            rx.try_recv().is_err(),
+            "a filtered event kind must enqueue no payload"
+        );
     }
 
     #[test]
@@ -665,8 +644,32 @@ mod tests {
         assert!(!svc.is_progress_active());
     }
 
+    /// Shutdown's title/progress resets must ride the writer queue, never an inline write.
     #[test]
-    fn flush_idle_state_clears_progress_and_title() {
+    fn shutdown_enqueues_resets_on_the_writer_queue() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut svc = NotificationService::new_for_test(NotificationConfig {
+            progress_bar: true,
+            ..Default::default()
+        });
+        svc.escape_writer = EscapeWriter::new(tx, WriterSync::new());
+        svc.on_tick(&make_title_state(true));
+
+        svc.shutdown();
+
+        assert!(!svc.is_progress_active());
+        let payload = rx
+            .try_recv()
+            .expect("shutdown escapes must ride the writer queue");
+        assert!(
+            String::from_utf8_lossy(payload.data()).contains("grok"),
+            "expected the title reset in the queued escape"
+        );
+        assert!(rx.try_recv().is_err(), "one combined payload expected");
+    }
+
+    #[test]
+    fn build_idle_escapes_clears_progress_and_title() {
         let mut svc = NotificationService::new_for_test(NotificationConfig {
             progress_bar: true,
             ..Default::default()
@@ -677,20 +680,20 @@ mod tests {
         assert!(svc.is_progress_active());
         assert!(svc.progress_last_sent.is_some());
 
-        // Flushing with is_busy=false should clear both.
-        svc.flush_idle_state(&make_title_state(false));
+        // Building idle escapes with is_busy=false should clear both.
+        svc.build_idle_escapes(&make_title_state(false));
         assert!(!svc.is_progress_active());
         assert!(svc.progress_last_sent.is_none());
     }
 
     #[test]
-    fn flush_idle_state_noop_when_already_idle() {
+    fn build_idle_escapes_noop_when_already_idle() {
         let mut svc = NotificationService::new_for_test(NotificationConfig {
             progress_bar: true,
             ..Default::default()
         });
-        // Never activated: flush should not panic or change state
-        svc.flush_idle_state(&make_title_state(false));
+        // Never activated: building idle escapes should not panic or change state
+        svc.build_idle_escapes(&make_title_state(false));
         assert!(!svc.is_progress_active());
     }
 

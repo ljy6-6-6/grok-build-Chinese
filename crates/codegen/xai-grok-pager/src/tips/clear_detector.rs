@@ -51,11 +51,9 @@ pub fn undo_tip() -> EphemeralTip {
     .with_session_seen_cap(UNDO_TIP_SEEN_KEY, UNDO_TIP_SEEN_CAP)
 }
 
-/// Tracks prompt text length across user key edits and fires when a substantial draft collapses to (near) empty in the user's hands.
-///
-/// The detector must be fed only user-initiated edits.
-/// Programmatic mutations (submit clears, queue restores, slash completions) must not be observed.
-/// The `last_len` resync absorbs any that slip through, so the next user edit does not fire on a peak the user did not build down from.
+/// The detector must be fed only user-initiated edits. Programmatic mutations (submit clears, queue restores, slash
+/// completions) must not be observed. The `last_len` resync absorbs any that slip through, so the next user edit
+/// does not fire on a peak the user did not build down from.
 #[derive(Debug, Default)]
 pub struct ClearDetector {
     /// High-water mark of the draft since the last fire or resync.

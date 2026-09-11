@@ -13,13 +13,8 @@ use xai_grok_test_support::process_has_exited_without_reap;
 use xai_grok_test_support::{TestProcessTree, TestSandbox};
 
 const PTY_DROP_REAP_TIMEOUT: Duration = Duration::from_millis(250);
-/// How long Drop waits after the graceful group SIGTERM before escalating to
-/// SIGKILL. Bounded best-effort: one grace period in which a responsive child
-/// can run its own TERM cleanup before the hard kill (proven by
-/// `pty_drop_grace_lets_a_trapping_child_run_its_term_cleanup`); a slow or
-/// wedged child simply falls through to the group SIGKILL (and pdeathsig on
-/// Linux). The setsid-detached-background-task reap contract is owned by the
-/// pager's quit path (`background_task_reaped_on_quit`), not by this grace.
+/// Grace after group SIGTERM before SIGKILL so a responsive child can run TERM cleanup. Wedged children fall through to SIGKILL.
+/// Detached-background reap is the pager quit path, not this grace.
 const PTY_DROP_TERM_GRACE: Duration = Duration::from_millis(500);
 const PTY_REAP_POLL: Duration = Duration::from_millis(10);
 const PENDING_STATUS_ERROR: &str = "exit observed but status unavailable";
@@ -35,6 +30,8 @@ pub mod keys {
     pub const PGDN: &[u8] = b"\x1b[6~";
     pub const PGUP: &[u8] = b"\x1b[5~";
     pub const ENTER: &[u8] = b"\r";
+    /// Ctrl+N — leave the welcome home screen into an explicit new session.
+    pub const CTRL_N: &[u8] = b"\x0e";
     pub const CTRL_C: &[u8] = b"\x03";
     /// Ctrl+R (0x12): prompt history search or the scrollback mouse-reporting toggle.
     pub const CTRL_R: &[u8] = b"\x12";
@@ -133,13 +130,7 @@ impl PtyController {
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(size)?;
 
-        // Unix spawns through the harness's own fork/exec path (see
-        // `spawn_pty_session_child`): portable-pty's `CommandBuilder` exposes
-        // no `pre_exec` hook, and the child must arm `PR_SET_PDEATHSIG` on
-        // Linux so a SIGKILLed test runner (e.g. Bazel's test timeout, where
-        // no Drop runs) cannot leak the child. The child is still spawned as
-        // its own session leader with the PTY slave as controlling terminal,
-        // matching portable-pty's behavior.
+        // Own fork/exec: portable-pty has no pre_exec, and the child must arm PDEATHSIG so a SIGKILLed runner (no Drop) cannot leak it.
         #[cfg(unix)]
         let child: Box<dyn portable_pty::Child + Send> = {
             let env_map = crate::pty_spawn::compute_child_env(sandbox, env);
@@ -517,11 +508,7 @@ fn recover_consumed_status(status: io::Result<Option<ExitStatus>>) -> io::Result
     status?.ok_or_else(|| io::Error::other("PTY child status was consumed without being cached"))
 }
 
-/// Typed result of polling a PTY child's lifecycle.
-///
-/// Only [`Self::Running`] means the process is live.
-/// [`Self::PendingStatus`] means exit was already observed, descendants were cleaned, and the PID was hidden.
-/// portable-pty has not yet yielded the final status in that state.
+/// Only [`Self::Running`] is live. [`Self::PendingStatus`] has already exited and cleaned descendants; portable-pty has not yielded status yet.
 #[must_use = "PTY exit state and poll errors must be handled explicitly"]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PtyExitPoll<T> {
@@ -845,10 +832,7 @@ mod tests {
             started.elapsed() < Duration::from_secs(1),
             "PTY Drop exceeded its bounded wait"
         );
-        // Zombie-tolerant probe: the killed grandchild re-parents to pid 1,
-        // and whether that init reaps it promptly is environmental (e.g. a
-        // bare `cargo` as a container's pid 1 never does). The harness's
-        // contract is that the grandchild stops *running*.
+        // Grandchild re-parents to pid 1, which may not reap promptly. The contract is that it stops running, not that it is reaped.
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         while !xai_tty_utils::process_not_running(grandchild_pid)
             && std::time::Instant::now() < deadline
@@ -861,10 +845,7 @@ mod tests {
         );
     }
 
-    /// Differential proof of the Drop SIGTERM grace: a child that traps TERM
-    /// gets to run its cleanup before the group SIGKILL. Removing the grace
-    /// (going straight to the hard kill) fails this test — SIGKILL never runs
-    /// the trap, so the marker file never appears.
+    /// A TERM-trapping child must run cleanup before SIGKILL. Without the grace the trap never runs and the marker never appears.
     #[cfg(unix)]
     #[test]
     fn pty_drop_grace_lets_a_trapping_child_run_its_term_cleanup() {

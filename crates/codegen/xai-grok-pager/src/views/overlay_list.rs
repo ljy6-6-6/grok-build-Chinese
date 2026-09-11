@@ -126,32 +126,32 @@ impl ListOverlay {
                 break;
             }
             let is_cursor = i == self.selected;
-            let row_bg = if is_cursor && focused {
-                theme.bg_visual
-            } else {
-                bg
-            };
             let row_rect = Rect {
                 x: content_x.saturating_sub(1),
                 y,
                 width: content_w + 2,
                 height: 1,
             };
-            buf.set_style(row_rect, Style::default().bg(row_bg));
+            buf.set_style(row_rect, Style::default().bg(bg));
 
             let ctx = RowCtx {
                 is_cursor,
-                row_bg,
+                row_bg: bg,
                 content_width: content_w,
             };
             let line = row_line(i, &ctx);
             buf.set_line(content_x, y, &line, content_w);
+            // Selection band on RGB themes; reverse video on the terminal
+            // theme (patched over the rendered row).
+            if is_cursor && focused {
+                buf.set_style(row_rect, theme.selection_overlay());
+            }
             y += 1;
         }
 
         // Unfocus dim: blend foregrounds toward the panel bg so the overlay recedes when the prompt area is unfocused (prompt_widget pattern)
         if !focused {
-            crate::render::color::blend_area(buf, area, Some((bg, 0.66)), None);
+            crate::render::color::recede_area(buf, area, bg, 0.66);
         }
     }
 }
@@ -194,6 +194,49 @@ mod tests {
         };
         assert_eq!(list.row_at(area(), 5, 2), Some(13));
         assert_eq!(list.row_at(area(), 5, 8), Some(19));
+    }
+
+    /// Terminal theme (zero opaque cells): the cursor row carries reverse
+    /// video instead of a painted band. RGB themes keep the `bg_visual`
+    /// band and the row's own fgs.
+    #[test]
+    fn terminal_theme_cursor_row_uses_reverse_video() {
+        use ratatui::style::Modifier;
+
+        let _guard = crate::theme::cache::pin_theme();
+        let list = ListOverlay {
+            len: 3,
+            selected: 1,
+        };
+        let render = || {
+            let theme = Theme::current();
+            let mut buf = Buffer::empty(area());
+            list.render(&mut buf, area(), "Pick", true, |i, ctx| {
+                Line::from(Span::styled(
+                    format!("row {i}"),
+                    Style::default().fg(theme.text_primary).bg(ctx.row_bg),
+                ))
+            });
+            // Rows start at y+2; content at x+3.
+            (buf[(3, 3)].style(), buf[(3, 2)].style())
+        };
+
+        crate::theme::cache::set(crate::theme::ThemeKind::Terminal);
+        let (cursor, normal) = render();
+        assert!(
+            cursor.add_modifier.contains(Modifier::REVERSED),
+            "cursor row uses reverse video, got {cursor:?}"
+        );
+        assert_eq!(cursor.bg, Some(Color::Reset), "no painted band");
+        assert!(!normal.add_modifier.contains(Modifier::REVERSED));
+
+        crate::theme::cache::set(crate::theme::ThemeKind::GrokNight);
+        let (cursor, normal) = render();
+        let theme = Theme::current();
+        assert_eq!(cursor.bg, Some(theme.bg_visual), "RGB keeps the band");
+        assert_eq!(cursor.fg, Some(theme.text_primary), "RGB keeps row fgs");
+        assert!(!cursor.add_modifier.contains(Modifier::REVERSED));
+        assert_eq!(normal.bg, Some(theme.bg_light));
     }
 
     #[test]

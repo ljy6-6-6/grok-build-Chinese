@@ -32,7 +32,7 @@ pub(crate) fn legacy_effort_options() -> Vec<ReasoningEffortOption> {
     EFFORT_LEVELS
         .iter()
         .map(|&level| ReasoningEffortOption {
-            id: level.as_str().to_string(),
+            id: level.as_ref().to_string(),
             value: level,
             label: level.to_string(),
             description: Some(effort_description(level).to_string()),
@@ -41,14 +41,8 @@ pub(crate) fn legacy_effort_options() -> Vec<ReasoningEffortOption> {
         .collect()
 }
 
-/// Build effort rows for autocomplete from a per-model option list.
-///
-/// - `mark_active` and `current_effort` mark the current session effort with `(active)`.
-/// - `insert_text_for` controls what is inserted on select:
-///   - `/effort`: the option id (`"deep"`)
-///   - `/model` chained phase: `"ModelName deep"`
-///
-/// `match_text` gets an `a `/`b `/…` sort prefix so the matcher's alphabetical tiebreak preserves the option order.
+/// Build effort rows for autocomplete from a per-model option list. `match_text` gets an `a `/`b `/…` sort prefix
+/// so the matcher's alphabetical tiebreak preserves the option order.
 pub(crate) fn build_effort_arg_items(
     options: &[ReasoningEffortOption],
     current_effort: Option<ReasoningEffort>,

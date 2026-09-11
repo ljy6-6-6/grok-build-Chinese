@@ -84,24 +84,92 @@ pub fn default_auth_path() -> anyhow::Result<PathBuf> {
     Ok(grok.join("auth.json"))
 }
 
-/// Read the active OIDC entry and its scope key.
-/// The key is threaded to the refresh write so rotation updates exactly the entry that was read.
+/// The `grok login` session [`provider`] would build from an auth file: which scope entry, and whose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoginSession {
+    /// The `auth.json` scope key the entry lives under; refreshes are persisted back to it.
+    pub scope_key: String,
+    pub identity: AuthIdentity,
+    /// Whether the entry carries the client id the OIDC refresher needs. Without it the session can
+    /// only serve a loopback hub on its static bearer.
+    pub refreshable: bool,
+}
+
+/// The session [`provider`] would serve from `auth_path`, or `None` when there is no file or no OIDC
+/// entry in it (signed out). Same selection as the provider, so a caller that checks before building
+/// it, or watches the file afterwards, sees exactly the entry the provider uses.
 ///
-/// When several OIDC entries qualify, the latest `expires_at` wins: that is the entry the shell is actively refreshing.
-/// Picking any other entry could rotate a different principal's refresh-token chain out from under the user's sessions.
+/// # Errors
+///
+/// The file cannot be read (for any reason other than not existing) or parsed.
+pub fn login_session(auth_path: &Path) -> anyhow::Result<Option<LoginSession>> {
+    let Some(entries) = read_auth_entries_if_present(auth_path)? else {
+        return Ok(None);
+    };
+    Ok(
+        select_login_entry(entries).map(|(scope_key, entry)| LoginSession {
+            scope_key,
+            identity: identity_from_entry(&entry),
+            refreshable: entry.oidc_client_id.is_some(),
+        }),
+    )
+}
+
+/// The session under one scope key of `auth_path`, or `None` when there is no file, no such entry,
+/// or the entry is not an OIDC session. For watching the entry a provider was built from: a
+/// `grok logout` removes it, a `grok login` as someone else replaces its identity.
+///
+/// # Errors
+///
+/// The file cannot be read (for any reason other than not existing) or parsed.
+pub fn login_session_at(auth_path: &Path, scope_key: &str) -> anyhow::Result<Option<LoginSession>> {
+    let Some(mut entries) = read_auth_entries_if_present(auth_path)? else {
+        return Ok(None);
+    };
+    Ok(entries
+        .remove(scope_key)
+        .filter(|entry| entry.refresh_token.is_some() && entry.oidc_issuer.is_some())
+        .map(|entry| LoginSession {
+            scope_key: scope_key.to_owned(),
+            identity: identity_from_entry(&entry),
+            refreshable: entry.oidc_client_id.is_some(),
+        }))
+}
+
+/// Read the active OIDC entry and its scope key, threaded to the refresh write so rotation updates exactly that entry.
+/// When several qualify, latest `expires_at` wins — any other pick could rotate a different principal's refresh-token chain.
 fn read_auth_entry(path: &Path) -> anyhow::Result<(String, AuthEntry)> {
-    if !path.exists() {
+    let Some(entries) = read_auth_entries_if_present(path)? else {
         anyhow::bail!(
             "No auth credentials found at {}. Run `grok login` first.",
             path.display()
         );
+    };
+    select_login_entry(entries).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no OIDC auth entry found in {}. Run `grok login` first.",
+            path.display()
+        )
+    })
+}
+
+/// `None` only when the file is definitely absent. Any other failure to read it (a stale network
+/// mount, an unsearchable parent) or to parse it is an error: it says nothing about a sign-out,
+/// whereas `Path::exists` would have folded it into "no file".
+fn read_auth_entries_if_present(
+    path: &Path,
+) -> anyhow::Result<Option<BTreeMap<String, AuthEntry>>> {
+    match std::fs::read_to_string(path) {
+        Ok(content) => serde_json::from_str(&content)
+            .map(Some)
+            .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(anyhow::anyhow!("failed to read {}: {e}", path.display())),
     }
+}
 
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", path.display()))?;
-    let entries: BTreeMap<String, AuthEntry> = serde_json::from_str(&content)
-        .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", path.display()))?;
-
+/// The selection rule [`read_auth_entry`] documents, shared with the public session readers.
+fn select_login_entry(entries: BTreeMap<String, AuthEntry>) -> Option<(String, AuthEntry)> {
     entries
         .into_iter()
         .filter(|(_, e)| e.refresh_token.is_some() && e.oidc_issuer.is_some())
@@ -109,12 +177,6 @@ fn read_auth_entry(path: &Path) -> anyhow::Result<(String, AuthEntry)> {
         .fold(None::<(String, AuthEntry)>, |best, cand| match best {
             Some(b) if cand.1.expires_at <= b.1.expires_at => Some(b),
             _ => Some(cand),
-        })
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no OIDC auth entry found in {}. Run `grok login` first.",
-                path.display()
-            )
         })
 }
 
@@ -127,9 +189,13 @@ enum OidcProviderKind {
 /// Writes `auth.json` on the calling thread.
 /// The proactive provider already offloads this onto its persist worker, whose seq check drops stale writes.
 /// A nested spawn here would run `write_refreshed_token` after that check and let a stale write land over a newer one.
-pub(crate) fn persist_on_refresh(auth_path: PathBuf, scope_key: String) -> OnRefreshCallback {
+pub(crate) fn persist_on_refresh(
+    auth_path: PathBuf,
+    scope_key: String,
+    owner_user_id: String,
+) -> OnRefreshCallback {
     Arc::new(move |event: &RefreshEvent| {
-        if let Err(e) = write_refreshed_token(&auth_path, &scope_key, event) {
+        if let Err(e) = write_refreshed_token(&auth_path, &scope_key, &owner_user_id, event) {
             tracing::warn!(error = %e, "failed to persist refreshed token to auth.json");
         }
     })
@@ -137,8 +203,12 @@ pub(crate) fn persist_on_refresh(auth_path: PathBuf, scope_key: String) -> OnRef
 
 /// SDK `on_refresh` is invoked from the async refresh path, which has no PersistGate.
 /// Offload the same write so a contended flock cannot stall the runtime.
-fn persist_on_refresh_off_thread(auth_path: PathBuf, scope_key: String) -> OnRefreshCallback {
-    let persist = persist_on_refresh(auth_path, scope_key);
+fn persist_on_refresh_off_thread(
+    auth_path: PathBuf,
+    scope_key: String,
+    owner_user_id: String,
+) -> OnRefreshCallback {
+    let persist = persist_on_refresh(auth_path, scope_key, owner_user_id);
     Arc::new(move |event: &RefreshEvent| {
         let persist = persist.clone();
         let event = event.clone();
@@ -172,7 +242,11 @@ fn build_oidc_provider(
                 identity: identity_from_entry(entry),
                 expires_at: entry.expires_at,
                 refresh: refresh_cfg.clone(),
-                on_refresh: Some(persist_on_refresh(auth_path, scope_key)),
+                on_refresh: Some(persist_on_refresh(
+                    auth_path,
+                    scope_key,
+                    entry.user_id.clone(),
+                )),
             })),
             OidcProviderKind::Proactive,
         ));
@@ -191,7 +265,11 @@ fn build_oidc_provider(
     if let Some(exp) = entry.expires_at {
         builder = builder.expires_at(exp);
     }
-    builder = builder.on_refresh(persist_on_refresh_off_thread(auth_path, scope_key));
+    builder = builder.on_refresh(persist_on_refresh_off_thread(
+        auth_path,
+        scope_key,
+        entry.user_id.clone(),
+    ));
 
     Ok((Arc::new(builder.build()), OidcProviderKind::Sdk))
 }
@@ -258,9 +336,14 @@ fn lock_inode_is_live(_file: &std::fs::File, _path: &Path) -> bool {
     true
 }
 
+/// `owner_user_id` is the account this provider was built for: an entry that has since changed hands
+/// (a `grok login` as someone else reusing the scope key) is left alone, because writing this
+/// session's rotated chain over theirs would leave a hybrid entry — their identity, our tokens.
+/// An empty owner (the entry named no account) disables that check.
 pub(crate) fn write_refreshed_token(
     path: &Path,
     scope_key: &str,
+    owner_user_id: &str,
     event: &RefreshEvent,
 ) -> anyhow::Result<()> {
     // Read-modify-write under the shared advisory lock
@@ -282,6 +365,18 @@ pub(crate) fn write_refreshed_token(
     let Some(obj) = raw.get_mut(scope_key).and_then(|e| e.as_object_mut()) else {
         anyhow::bail!("auth entry '{scope_key}' not found while persisting refreshed token");
     };
+
+    let disk_owner = obj
+        .get("user_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if !owner_user_id.is_empty() && !disk_owner.is_empty() && disk_owner != owner_user_id {
+        tracing::warn!(
+            scope_key,
+            "auth.json entry now belongs to another account; not persisting this session's refreshed token"
+        );
+        return Ok(());
+    }
 
     // Never roll disk back to an older token
     // Each refresh persists on its own thread and a sibling shell writes the same file, so writes can arrive out of order
@@ -352,12 +447,8 @@ fn write_json_atomic(path: &Path, value: &serde_json::Value) -> anyhow::Result<(
     Ok(())
 }
 
-/// Build a hub auth provider for `hub_url`. `auth_config` overrides
-/// the default credential path (`~/.grok/auth.json`).
-///
-/// `refresh_cfg.enabled` selects the workspace-owned proactive refresher (the default).
-/// The SDK `OidcAuthProvider` is the explicit kill-switch path (`GROK_WORKSPACE_OIDC_PROACTIVE_REFRESH_ENABLED=false`).
-/// Loopback `ws://` ignores the flag and stays on a static bearer.
+/// Hub auth provider for `hub_url`. `auth_config` overrides `~/.grok/auth.json`.
+/// `refresh_cfg.enabled` selects the workspace refresher; the SDK provider is the kill-switch. Loopback `ws://` stays on a static bearer.
 pub fn provider(
     hub_url: &Url,
     auth_config: Option<&Path>,
@@ -418,6 +509,102 @@ mod tests {
         assert_eq!(
             entry.oidc_issuer.as_deref(),
             Some("https://auth.example.com")
+        );
+    }
+
+    /// `login_session` must pick exactly what `provider` will serve, and tell "signed out" apart from "unreadable".
+    #[test]
+    fn login_session_mirrors_the_provider_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_auth_json(
+            dir.path(),
+            r#"{
+                "grok-shell": { "key": "eyJ.older", "user_id": "u-old", "refresh_token": "rt1", "oidc_issuer": "https://auth.x.ai", "oidc_client_id": "grok-cli", "expires_at": "2026-01-01T00:00:00Z" },
+                "other": { "key": "eyJ.newer", "user_id": "u-new", "refresh_token": "rt2", "oidc_issuer": "https://auth.x.ai", "expires_at": "2026-06-01T00:00:00Z" },
+                "grok-desktop": { "key": "eyJ.bearer-only", "user_id": "u-app" }
+            }"#,
+        );
+        let session = login_session(&path).unwrap().expect("a session");
+        let (scope_key, entry) = read_auth_entry(&path).unwrap();
+        assert_eq!(session.scope_key, scope_key);
+        assert_eq!(session.identity, identity_from_entry(&entry));
+        assert_eq!(
+            session,
+            LoginSession {
+                scope_key: "other".to_owned(),
+                identity: AuthIdentity {
+                    user_id: "u-new".to_owned(),
+                    principal_type: None,
+                    principal_id: None,
+                },
+                refreshable: false,
+            }
+        );
+
+        let bearer_only = write_auth_json(dir.path(), r#"{ "grok-desktop": { "key": "eyJ.x" } }"#);
+        assert_eq!(
+            login_session(&bearer_only).unwrap(),
+            None,
+            "no OIDC entry is signed out"
+        );
+        assert_eq!(
+            login_session(&dir.path().join("missing.json")).unwrap(),
+            None,
+            "no file is signed out"
+        );
+        let corrupt = write_auth_json(dir.path(), "{");
+        assert!(
+            login_session(&corrupt).is_err(),
+            "unreadable is an error, not a sign-out"
+        );
+    }
+
+    /// A stat that fails for any reason but NotFound (here ENOTDIR; on a daemon's network home a
+    /// stale handle or an unsearchable parent) must not read as signed out. Windows reports a file
+    /// in the parent position as NotFound, so the case is unix-only.
+    #[cfg(unix)]
+    #[test]
+    fn a_stat_error_is_not_a_sign_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let unstattable = write_auth_json(dir.path(), "{}").join("auth.json");
+        assert!(
+            !unstattable.exists(),
+            "Path::exists folds the stat error into false"
+        );
+        assert!(login_session(&unstattable).is_err());
+        assert!(login_session_at(&unstattable, "grok-shell").is_err());
+        assert!(
+            read_auth_entry(&unstattable)
+                .unwrap_err()
+                .to_string()
+                .contains("failed to read")
+        );
+    }
+
+    #[test]
+    fn login_session_at_reads_one_scope_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_auth_json(
+            dir.path(),
+            r#"{
+                "grok-shell": { "key": "eyJ.a", "user_id": "u-a", "refresh_token": "rt", "oidc_issuer": "https://auth.x.ai", "oidc_client_id": "grok-cli" },
+                "grok-desktop": { "key": "eyJ.bearer-only", "user_id": "u-app" }
+            }"#,
+        );
+        let session = login_session_at(&path, "grok-shell")
+            .unwrap()
+            .expect("a session");
+        assert_eq!(session.identity.user_id, "u-a");
+        assert!(session.refreshable);
+        assert_eq!(
+            login_session_at(&path, "grok-desktop").unwrap(),
+            None,
+            "not an OIDC session"
+        );
+        assert_eq!(login_session_at(&path, "missing").unwrap(), None);
+        assert_eq!(
+            login_session_at(&dir.path().join("none.json"), "grok-shell").unwrap(),
+            None
         );
     }
 
@@ -586,13 +773,49 @@ mod tests {
             new_refresh_token: Some("rt-new".into()),
             expires_at: None,
         };
-        write_refreshed_token(&path, "oidc", &event).unwrap();
+        write_refreshed_token(&path, "oidc", "u2", &event).unwrap();
 
         let updated: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(updated["oidc"]["key"], "eyJ.new");
         assert_eq!(updated["oidc"]["refresh_token"], "rt-new");
         assert_eq!(updated["legacy"]["key"], "xai-old");
+    }
+
+    /// A refresh that lands after `grok login` as someone else reused the scope key must not write
+    /// the old account's chain into the new account's entry.
+    #[test]
+    fn write_refreshed_token_leaves_an_entry_that_changed_hands_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_auth_json(
+            dir.path(),
+            r#"{ "oidc": { "key": "eyJ.theirs", "user_id": "u-new", "refresh_token": "rt-theirs", "oidc_issuer": "https://auth.x.ai" } }"#,
+        );
+        let event = RefreshEvent {
+            access_token: "eyJ.ours".into(),
+            new_refresh_token: Some("rt-ours".into()),
+            expires_at: None,
+        };
+        write_refreshed_token(&path, "oidc", "u-old", &event).unwrap();
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(after["oidc"]["key"], "eyJ.theirs");
+        assert_eq!(after["oidc"]["refresh_token"], "rt-theirs");
+
+        // The same account, or a provider whose entry named no account, still updates it.
+        write_refreshed_token(&path, "oidc", "u-new", &event).unwrap();
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(after["oidc"]["key"], "eyJ.ours");
+        let unnamed = RefreshEvent {
+            access_token: "eyJ.unnamed".into(),
+            new_refresh_token: None,
+            expires_at: None,
+        };
+        write_refreshed_token(&path, "oidc", "", &unnamed).unwrap();
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(after["oidc"]["key"], "eyJ.unnamed");
     }
 
     /// With several OIDC entries (personal and enterprise login), the latest `expires_at` wins; the user's grok sessions refresh that entry.
@@ -644,7 +867,7 @@ mod tests {
             new_refresh_token: Some("rt-a-new".into()),
             expires_at: None,
         };
-        write_refreshed_token(&path, &key, &event).unwrap();
+        write_refreshed_token(&path, &key, "", &event).unwrap();
 
         let updated: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -671,7 +894,7 @@ mod tests {
             new_refresh_token: Some("rt-older".into()),
             expires_at: Some("2026-05-01T00:00:00Z".parse().unwrap()),
         };
-        write_refreshed_token(&path, "oidc", &stale).unwrap();
+        write_refreshed_token(&path, "oidc", "", &stale).unwrap();
 
         let updated: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -694,7 +917,7 @@ mod tests {
             new_refresh_token: None,
             expires_at: None,
         };
-        write_refreshed_token(&path, "oidc", &event).unwrap();
+        write_refreshed_token(&path, "oidc", "", &event).unwrap();
 
         let updated: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();

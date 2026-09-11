@@ -137,7 +137,6 @@ pub struct DreamMessage {
 }
 
 /// Returns `true` if the content is scaffold boilerplate that should not be fed to the dream model as existing memory context.
-///
 /// A file is scaffold only if it is short (under 500 bytes trimmed) and contains a scaffold marker.
 /// Files with substantial content are never scaffold, even if they contain leftover marker strings from the initial template.
 pub(crate) fn is_scaffold_template(content: &str) -> bool {
@@ -152,11 +151,7 @@ pub(crate) fn is_scaffold_template(content: &str) -> bool {
 }
 
 /// Build the user message for the dream model call from session log contents.
-///
 /// Non-scaffold `existing_memory` is prepended before the session logs so the model merges prior knowledge instead of discarding it.
-/// Reads each session file and concatenates their contents with separators.
-/// Stops adding sessions once total size exceeds [`MAX_DREAM_INPUT_CHARS`].
-/// Returns `None` if no session files could be read.
 pub fn build_dream_user_message(
     sessions_dir: &Path,
     stems: &[String],
@@ -236,12 +231,6 @@ pub fn build_dream_user_message(
 const MAX_DREAM_CHARS: usize = 16_000;
 
 /// Process the dream model's response.
-///
-/// Returns the processed content ready for writing, or `None` if:
-/// - Response is empty/whitespace
-/// - Response matches the `NO_REPLY` pattern
-/// - Response lacks markdown heading structure
-///
 /// `write_long_term` writes content directly without normalization, so the dream's markdown structure is preserved as-is.
 /// Truncates content exceeding [`MAX_DREAM_CHARS`].
 pub fn process_dream_response(response: &str) -> Option<String> {
@@ -294,11 +283,7 @@ pub fn process_dream_response(response: &str) -> Option<String> {
 const CLEANUP_RECENCY_GUARD_SECS: u64 = 300; // 5 minutes
 
 /// Delete session log files whose stems were processed during dream.
-///
-/// Returns the stems actually removed from disk; the caller purges their search-index entries.
-/// Stems skipped by the recency guard or that failed to delete are excluded so their index chunks stay intact.
 /// Logs warnings for deletion failures but never propagates errors, because the consolidation already succeeded.
-/// Files modified within the last [`CLEANUP_RECENCY_GUARD_SECS`] are skipped; a concurrent session may still be writing them.
 pub fn clean_processed_sessions(sessions_dir: &Path, stems: &[String]) -> Vec<String> {
     let mut cleaned = Vec::new();
     let now = SystemTime::now();

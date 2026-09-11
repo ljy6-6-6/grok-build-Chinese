@@ -69,9 +69,17 @@ pub fn init(config: Config) -> ClientInitGuard {
 
 /// Flush in-flight events. Call before `std::process::exit` in signal handlers.
 pub fn flush_on_shutdown() {
+    let flush_span = crate::region::Region::from_span(tracing::info_span!(
+        "teardown.sentry_flush",
+        elapsed_ms = tracing::field::Empty,
+    ));
+    let started = std::time::Instant::now();
     if let Some(client) = sentry::Hub::current().client() {
         client.flush(Some(FLUSH_TIMEOUT));
     }
+    flush_span
+        .span()
+        .record("elapsed_ms", started.elapsed().as_millis() as i64);
 }
 
 // ─── Internals ─────────────────────────────────────────────────────────────

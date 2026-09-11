@@ -26,10 +26,8 @@ pub(crate) fn read_config_document_for_edit(path: &Path) -> Option<toml_edit::Do
     }
 }
 
-/// Set `[hints].<key>` to `value` in `~/.grok/config.toml`, preserving every other key and table.
-/// Creates the file and parent dir when missing.
-/// No-ops when the existing file is non-blank but unparseable, so a malformed config is never clobbered.
-/// Performs blocking I/O.
+/// Set `[hints].<key>` to `value` in `~/.grok/config.toml`, preserving every other key and table. No-ops when the
+/// existing file is non-blank but unparseable, so a malformed config is never clobbered.
 pub(crate) fn set_hint(key: &str, value: impl Into<toml_edit::Value>) -> std::io::Result<()> {
     let path =
         xai_grok_tools::util::grok_home::grok_home().join(xai_grok_config::USER_CONFIG_FILENAME);

@@ -15,6 +15,7 @@ xai-grok-version = { workspace = true }
 # External
 async-openai = { workspace = true }
 async-stream = { workspace = true }
+blake3 = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 eventsource-stream = { workspace = true }
 futures-util = { workspace = true }
@@ -31,6 +32,9 @@ uuid = { workspace = true, features = ["v4"] }
 [dev-dependencies]
 # Mock HTTP server for actor / request_task integration tests.
 axum = { workspace = true }
+axum-server = { workspace = true, features = ["tls-rustls"] }
+rcgen = { workspace = true }
+rustls = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["registry"] }
 # Shared SSE generators for the happy-path mock payloads.
 xai-grok-test-support = { workspace = true }

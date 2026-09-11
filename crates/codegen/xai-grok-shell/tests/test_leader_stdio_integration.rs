@@ -1161,12 +1161,9 @@ async fn test_two_clients_session_isolation() {
 
 // ── Multi-client model switch fan-out ─────────────────────────────────
 
-/// When a client switches models on a shared session, the leader must broadcast `ModelChanged` to every subscriber, not just the invoker.
-/// Only that broadcast lets the follower mirror the new model in its UI.
+/// When a client switches models on a shared session, the leader must broadcast `ModelChanged` to every subscriber, not just the invoker. Only that broadcast lets the follower mirror the new model in its UI.
 /// The agent emitting it from `model_switch::apply` is covered by the `extensions::notification` tests in `xai-grok-shell`.
-/// The pager applying it silently on followers is covered by the `model_changed_*` tests in `xai-grok-pager`'s `acp_handler` tests.
-/// The setModel response itself still routes back to the invoker only.
-/// Asserting both the broadcast and the response catches a regression that suppresses the notification when a response is also produced.
+/// The pager applying it silently on followers is covered by the `model_changed_*` tests in `xai-grok-pager`'s `acp_handler` tests. The setModel response itself still routes back to the invoker only. Asserting both the broadcast and the response catches a regression that suppresses the notification when a response is also produced.
 #[tokio::test]
 async fn test_set_model_broadcasts_to_session_subscribers() {
     let temp = TempDir::new().unwrap();
@@ -1231,11 +1228,8 @@ async fn test_set_model_broadcasts_to_session_subscribers() {
     assert_eq!(json["method"], "session/setModel");
     assert_eq!(json["params"]["modelId"], "grok-4");
 
-    // Simulate the agent's two outputs for a successful switch:
-    //
-    //   1. A session-scoped `ModelChanged` broadcast, which `model_switch::apply` emits via the gateway after the actor confirms the swap.
-    //   2. The `SetSessionModelResponse`, routed by the leader to the invoker only via namespaced-id matching.
-    //
+    // Simulate the agent's two outputs for a successful switch: A session-scoped `ModelChanged` broadcast, which `model_switch::apply` emits via the gateway after the actor confirms the swap.
+    // The `SetSessionModelResponse`, routed by the leader to the invoker only via namespaced-id matching.
     // Order matters: `model_switch::apply` fires the broadcast BEFORE the response, so it arrives at each subscriber's recv() first
     let broadcast = format!(
         r#"{{"jsonrpc":"2.0","method":"x.ai/session_notification","params":{{"sessionId":"{}","update":{{"sessionUpdate":"model_changed","model_id":"grok-4","reasoning_effort":"high"}}}}}}"#,
@@ -1248,12 +1242,9 @@ async fn test_set_model_broadcasts_to_session_subscribers() {
     );
     response_tx.send(response).unwrap();
 
-    // --- Invoker: must receive BOTH the broadcast AND the targeted response, in that order
-    // The broadcast is what keeps the other clients in sync
+    // --- Invoker: must receive BOTH the broadcast AND the targeted response, in that order The broadcast is what keeps the other clients in sync
     // The response is what the invoker's `SwitchModelComplete` dispatch handler keys on for the user-facing "Switched to X" message
-    // The pager's broadcast handler ignores it (it gates on `model_switch_pending == true`), so the invoker doesn't double-apply state
-    // But the leader is still required to fan it out, because the same JSON-RPC connection is what the response travels on
-    // Suppressing it leader-side would also suppress it for the follower below
+    // The pager's broadcast handler ignores it (it gates on `model_switch_pending == true`), so the invoker doesn't double-apply state But the leader is still required to fan it out, because the same JSON-RPC connection is what the response travels on Suppressing it leader-side would also suppress it for the follower below
     let invoker_msg1 = tokio::time::timeout(Duration::from_secs(2), invoker.recv())
         .await
         .expect("timeout waiting for broadcast on invoker")
@@ -1434,8 +1425,7 @@ async fn test_client_notification_forwarded_without_id_rewrite() {
 }
 
 /// With two clients attached, `session/cancel` carrying `_meta.cancelPromptId` (the canceller's awaited prompt id) must reach the agent unmodified.
-/// The meta is how the session actor cancels only the canceller's queued prompt while preserving the other client's queued work.
-/// The actor side is covered by `cancel_running_task_resolves_cancellers_queued_prompt`.
+/// The meta is how the session actor cancels only the canceller's queued prompt while preserving the other client's queued work. The actor side is covered by `cancel_running_task_resolves_cancellers_queued_prompt`.
 /// A second client's interleaved cancel for a different session must also pass through independently, with no cross-client meta bleed or reordering.
 #[tokio::test]
 async fn test_cancel_prompt_id_meta_passes_through_with_two_clients() {
@@ -1604,11 +1594,8 @@ async fn test_error_response_routing() {
 // ── Session cleanup on disconnect ─────────────────────────────────────
 
 /// Test that when a client disconnects, notifications for its sessions are still delivered to the next active client via fallback routing.
-///
-/// Session ownership entries are intentionally *not* removed on disconnect so the server can distinguish IPC-originated sessions
-/// (present in `session_owners`) from relay-originated ones (absent).
-/// The session-based routing path naturally falls through (the dead client is gone from `clients`), and the fallback picks up the notification
-/// for the new client.
+/// Session ownership entries are intentionally *not* removed on disconnect so the server can distinguish IPC-originated sessions (present in `session_owners`) from relay-originated ones (absent).
+/// The session-based routing path naturally falls through (the dead client is gone from `clients`), and the fallback picks up the notification for the new client.
 #[tokio::test]
 async fn test_session_ownership_cleanup_on_disconnect() {
     use xai_grok_shell::leader::run_leader_server;
@@ -1715,10 +1702,8 @@ async fn test_session_ownership_cleanup_on_disconnect() {
         .unwrap();
     let _ = acp_rx.recv().await.unwrap();
 
-    // Send a notification for the old session; it should be DROPPED, not forwarded to client2
-    // The dead client's session entry is still in session_owners (for relay detection)
-    // Session-based routing sees the owner is dead and drops the notification to prevent cross-session leaks
-    // The reconnecting client will replay via session/load instead.
+    // Send a notification for the old session; it should be DROPPED, not forwarded to client2 The dead client's session entry is still in session_owners (for relay detection)
+    // Session-based routing sees the owner is dead and drops the notification to prevent cross-session leaks The reconnecting client will replay via session/load instead.
     let old_notif = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-temp","data":"orphan"}}"#;
     response_tx.send(old_notif.to_string()).unwrap();
 
@@ -1739,11 +1724,8 @@ async fn test_session_ownership_cleanup_on_disconnect() {
     cancel.cancel();
 }
 
-// =============================================================================
-// Code-nav capability injection integration tests
-//
-// These tests drive `code_nav_enabled` injection from the leader boundary all the way to the forwarded ACP payload and check per-client isolation
-// =============================================================================
+// ============================================================================= Code-nav capability injection integration tests
+// These tests drive `code_nav_enabled` injection from the leader boundary all the way to the forwarded ACP payload and check per-client isolation =============================================================================
 
 /// Verify that the leader injects `codeNavEnabled: true` into session/new for a web client that registered with `code_nav_enabled: true`.
 #[tokio::test]
@@ -1952,15 +1934,9 @@ async fn test_code_status_ext_request_forwarded_to_agent() {
 
 // ── Startup readiness gate ────────────────────────────────────────────
 
-/// Raw-protocol test for the server-side readiness handshake.
-///
-/// Verifies that when the leader is not yet ready:
-/// - A connecting client receives `Registered { ready: false }` in the wire protocol.
-/// - The server then sends `LeaderReady` once `ready_tx` fires.
-/// - Post-readiness ACP traffic is forwarded to the agent normally.
-///
-/// Uses the raw IPC wire protocol (`write_message` / `read_message`) rather than `LeaderClient::connect`.
-/// The high-level client blocks in `connect()` until `LeaderReady`, so it cannot observe the intermediate `Registered { ready: false }` state.
+/// Raw-protocol test for the server-side readiness handshake. Verifies that when the leader is not yet ready: A connecting client receives `Registered { ready: false }` in the wire protocol.
+/// The server then sends `LeaderReady` once `ready_tx` fires. Post-readiness ACP traffic is forwarded to the agent normally.
+/// Uses the raw IPC wire protocol (`write_message` / `read_message`) rather than `LeaderClient::connect`. The high-level client blocks in `connect()` until `LeaderReady`, so it cannot observe the intermediate `Registered { ready: false }` state.
 #[tokio::test]
 async fn test_raw_registration_handshake_not_ready_then_ready() {
     use std::sync::Arc;
@@ -2366,11 +2342,7 @@ async fn test_no_version_mismatch_notification_when_versions_match() {
 
 /// A connected `LeaderClient` receives `ShuttingDown { reason: AutoUpdate }`.
 /// `LeaderClient::shutting_down_reason()` then updates to `Some(AutoUpdate)`.
-///
-/// This covers the full propagation path:
-///   shutdown_tx.send(AutoUpdate) → cancel → server cancel branch reads reason →
-///   broadcast_shutdown(AutoUpdate) → client read loop receives ShuttingDown →
-///   shutting_down_tx.send(Some(AutoUpdate)) → shutting_down_rx observes Some(AutoUpdate)
+/// This covers the full propagation path: shutdown_tx.send(AutoUpdate) → cancel → server cancel branch reads reason → broadcast_shutdown(AutoUpdate) → client read loop receives ShuttingDown → shutting_down_tx.send(Some(AutoUpdate)) → shutting_down_rx observes Some(AutoUpdate)
 #[tokio::test]
 async fn test_auto_update_shutdown_reason_reaches_client() {
     use xai_grok_shell::leader::{ClientCapabilities, ClientMode, LeaderClient, ShutdownReason};
@@ -2705,12 +2677,8 @@ async fn test_leader_code_nav_isolation_end_to_end() {
     cancel.cancel();
 }
 
-/// Regression test for a deadlock in `connect_or_spawn`.
-///
-/// The bug: the spawner held a file lock while doing a full `LeaderClient::connect`, which blocks in `register()` waiting for `LeaderReady`.
-/// The leader needs the same lock to reach readiness.
-///
-/// This test couples readiness to a file lock (matching production) so holding the lock while connecting would deadlock.
+/// Regression test for a deadlock in `connect_or_spawn`. The bug: the spawner held a file lock while doing a full `LeaderClient::connect`, which blocks in `register()` waiting for `LeaderReady`.
+/// The leader needs the same lock to reach readiness. This test couples readiness to a file lock (matching production) so holding the lock while connecting would deadlock.
 /// Existing tests missed this because they drove readiness via a bare `watch::channel`.
 #[tokio::test]
 async fn test_lock_released_before_connect_prevents_deadlock() {
@@ -2799,13 +2767,9 @@ async fn test_lock_released_before_connect_prevents_deadlock() {
     cancel.cancel();
 }
 
-// =============================================================================
-// Hung-agent and sever-mid-RPC scenarios
-//
-// The fake agent in these tests is the test body itself (acp_rx/response_tx)
-// "Agent hangs" and "agent completes after the client is gone" are driven deterministically
-// Reconnects use fresh raw `UnixStream`s so the sever is an abrupt socket close, not a graceful `Disconnect`
-// =============================================================================
+// ============================================================================= Hung-agent and sever-mid-RPC scenarios
+// The fake agent in these tests is the test body itself (acp_rx/response_tx) "Agent hangs" and "agent completes after the client is gone" are driven deterministically
+// Reconnects use fresh raw `UnixStream`s so the sever is an abrupt socket close, not a graceful `Disconnect` =============================================================================
 
 /// Server that survives client disconnects (`no_exit_on_disconnect = true`), for sever/reconnect scenarios.
 /// Same wiring as `test_session_ownership_cleanup_on_disconnect`.
@@ -2897,15 +2861,8 @@ async fn raw_recv_acp(reader: &mut tokio::io::ReadHalf<UnixStream>) -> serde_jso
     }
 }
 
-/// Count `unified.jsonl` orphan-drop entries for `request_id`.
-/// Namespaced request ids are unique per process (global `ClientId` counter).
-/// The pid filter fences off other test processes appending to the same shared log.
-///
-/// This binary does not sandbox GROK_HOME, so on a dev machine these entries
-/// land in the real `~/.grok` log — accepted: the server already writes
-/// `leader.client.*` lines there from every test in this file, and the
-/// pid+request-id fence keeps the counting sound regardless of what else is
-/// in the file. (Bazel sandboxes HOME, so CI writes stay test-scoped.)
+/// Count `unified.jsonl` orphan-drop entries for `request_id`. Namespaced request ids are unique per process (global `ClientId` counter). The pid filter fences off other test processes appending to the same shared log.
+/// This binary does not sandbox GROK_HOME, so on a dev machine these entries land in the real `~/.grok` log — accepted: the server already writes `leader.client.*` lines there from every test in this file, and the pid+request-id fence keeps the counting sound regardless of what else is in the file. (Bazel sandboxes HOME, so CI writes stay test-scoped.)
 fn orphan_log_count(request_id: &str) -> usize {
     let Some(bytes) = xai_grok_telemetry::unified_log::snapshot_log() else {
         return 0;
@@ -2956,11 +2913,8 @@ async fn wait_for_client_disconnected_log(client_id: u64) -> bool {
     }
 }
 
-/// Hung agent: a prompt is forwarded but the agent never replies.
-/// The client must not receive a fabricated response.
-/// The transport must stay healthy: a later cancel still reaches the agent, and other traffic still flows.
-/// This is the client-visible state of the hung-turn class.
-/// Deadman semantics on top of it are a product change asserted by the ignored test below.
+/// Hung agent: a prompt is forwarded but the agent never replies. The client must not receive a fabricated response. The transport must stay healthy: a later cancel still reaches the agent, and other traffic still flows.
+/// This is the client-visible state of the hung-turn class. Deadman semantics on top of it are a product change asserted by the ignored test below.
 #[tokio::test]
 async fn test_hung_agent_leaves_transport_healthy_and_forwards_cancel() {
     let temp = TempDir::new().unwrap();

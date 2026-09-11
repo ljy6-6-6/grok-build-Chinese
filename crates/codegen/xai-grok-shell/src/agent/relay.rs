@@ -3,7 +3,6 @@
 //! This module provides a shared `RelayConnection` that handles the WebSocket connection to the grok.com relay server with automatic reconnection.
 //! It is used by both `run_headless` and `run_leader` modes.
 use super::proxy;
-use crate::auth::{GrokAuth, GrokComConfig};
 use crate::{teprintln, tprintln};
 use futures_util::{SinkExt as _, StreamExt as _};
 use std::sync::Arc;
@@ -15,30 +14,48 @@ use tokio_tungstenite::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
+use xai_grok_login::{GrokAuth, GrokComConfig};
 const KEEPALIVE_INTERVAL_SECS: u64 = 15;
-/// Read-side liveness deadline.
-/// The write half pings every `KEEPALIVE_INTERVAL_SECS`, and a healthy peer answers each ping with a pong.
-/// A live connection thus delivers an inbound frame at least that often.
+/// Read-side liveness deadline. The write half pings every `KEEPALIVE_INTERVAL_SECS`, and a healthy peer answers each ping with a pong. A live connection thus delivers an inbound frame at least that often.
 /// If *nothing* arrives for this long the connection is treated as dead and the session is torn down so the reconnect loop can take over.
-///
-/// Without it, a half-open TCP connection blocks `ws_inbound.next()` forever and the agent never reconnects.
-/// (E.g. the proxy/NAT leg still ACKs our tiny pings while the upstream relay leg is gone.)
-/// Sessions stay bricked until the process is killed; the server sees a 1006 close, the client never notices.
+/// Without it, a half-open TCP connection blocks `ws_inbound.next()` forever and the agent never reconnects. (E.g. the proxy/NAT leg still ACKs our tiny pings while the upstream relay leg is gone.) Sessions stay bricked until the process is killed; the server sees a 1006 close, the client never notices.
 const READ_LIVENESS_TIMEOUT_SECS: u64 = 4 * KEEPALIVE_INTERVAL_SECS;
 /// Upper bound on a single auth-recovery attempt: a backstop against an indefinitely wedged relay loop, NOT a bound on a healthy refresh.
-/// It must stay comfortably above the refresh path's own internal worst case so it only fires when something is truly stuck.
-/// `refresh_chain` waits up to 25s for `auth.json.lock` (`REFRESH_LOCK_TIMEOUT`) before IdP IO.
-/// Another 25s applies if the suspend-only revalidate re-acquires the lock.
-/// The IdP IO has its own timeouts (7s external refresher; 15s per OIDC request with short retries).
-/// When this fires the recovery future is dropped (the file lock releases on drop) and the loop falls through to reconnect backoff.
-/// Backoff retries recovery on the next 401.
+/// It must stay comfortably above the refresh path's own internal worst case so it only fires when something is truly stuck. `refresh_chain` waits up to 25s for `auth.json.lock` (`REFRESH_LOCK_TIMEOUT`) before IdP IO.
+/// Another 25s applies if the suspend-only revalidate re-acquires the lock. The IdP IO has its own timeouts (7s external refresher; 15s per OIDC request with short retries). When this fires the recovery future is dropped (the file lock releases on drop) and the loop falls through to reconnect backoff.
 const AUTH_RECOVERY_TIMEOUT_SECS: u64 = 180;
 const BASE_DELAY_SECS: u64 = 1;
 const MAX_DELAY_SECS: u64 = 60;
 const CONNECT_TIMEOUT_SECS: u64 = 30;
+/// Bounded wait for the reader after the writer ends a session, so a `-32000` frame that is already in the socket
+/// buffer is classified as an auth error instead of being dropped with the reader and reported as a normal close.
+const AUTH_DRAIN_TIMEOUT_SECS: u64 = 1;
+/// Exponential reconnect backoff for the relay loop.
+/// Reset only on evidence the credential was accepted: an authenticated session ended, or recovery produced a new credential. A successful WebSocket handshake is not proof: the relay can accept the socket and reject the bearer on the first JSON-RPC message, and a reset at connect time would retry a standing auth verdict every `2 * BASE_DELAY_SECS` for its whole TTL.
+struct ReconnectBackoff {
+    attempts: u32,
+    delay_secs: u64,
+}
+impl ReconnectBackoff {
+    const fn new() -> Self {
+        Self {
+            attempts: 0,
+            delay_secs: BASE_DELAY_SECS,
+        }
+    }
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
+    /// Record a failed cycle and return the delay to sleep before the next attempt.
+    fn next_delay(&mut self) -> Duration {
+        self.attempts += 1;
+        self.delay_secs = std::cmp::min(self.delay_secs * 2, MAX_DELAY_SECS);
+        Duration::from_secs(self.delay_secs)
+    }
+}
 /// JSON-RPC auth error code
 const AUTH_ERROR_CODE: i64 = -32000;
-use crate::auth::AuthManager;
+use xai_grok_login::AuthManager;
 /// Config for the grok.com WebSocket relay.
 /// Fields are private so the only constructor is [`RelayConfig::for_session`]: "no relay without a session bearer" is a compile-time guarantee.
 #[derive(Clone)]
@@ -75,9 +92,7 @@ impl RelayConfig {
 /// Callback type for first connection event.
 pub(crate) type FirstConnectCallback = Box<dyn FnOnce() + Send + 'static>;
 /// Handle to a running relay connection.
-///
-/// The relay maintains a persistent WebSocket connection to grok.com with
-/// automatic reconnection on disconnection.
+/// The relay maintains a persistent WebSocket connection to grok.com with automatic reconnection on disconnection.
 pub struct RelayHandle {
     /// Cancel token to stop the relay connection loop
     cancel: CancellationToken,
@@ -97,18 +112,8 @@ impl Drop for RelayHandle {
         self.cancel.cancel();
     }
 }
-/// Spawn a relay connection task that maintains a WebSocket connection.
-///
-/// The task runs in the background, automatically reconnecting on disconnection.
-/// Messages from the relay are sent to `to_agent_tx`, and messages to send to the relay should be sent via the returned sender.
-///
-/// # Arguments
-/// * `config` - Relay connection configuration
-/// * `to_agent_tx` - Channel to send messages received from the relay
-/// * `parent_cancel` - Parent cancellation token (relay stops when parent is cancelled)
-///
-/// # Returns
-/// A tuple of (sender for outbound messages, handle to control the relay)
+/// Spawn a relay connection task that maintains a WebSocket connection. The task runs in the background, automatically reconnecting on disconnection.
+/// Messages from the relay are sent to `to_agent_tx`, and messages to send to the relay should be sent via the returned sender. A tuple of (sender for outbound messages, handle to control the relay)
 pub fn spawn_relay_connection(
     config: RelayConfig,
     to_agent_tx: mpsc::UnboundedSender<String>,
@@ -165,7 +170,7 @@ async fn attempt_auth_recovery(
     info!("auth recovery: relay {context}, attempting refresh");
     let mut recovery = am.unauthorized_recovery(
         Some(config.auth.clone()),
-        crate::auth::recovery::RecoverySource::Relay,
+        xai_grok_login::recovery::RecoverySource::Relay,
     );
     let recovered = match tokio::time::timeout(
         Duration::from_secs(AUTH_RECOVERY_TIMEOUT_SECS),
@@ -216,7 +221,7 @@ async fn attempt_auth_recovery(
             config.auth = new_auth;
             true
         }
-        Err(e) if crate::auth::recovery::relay_should_cancel(&e) => {
+        Err(e) if xai_grok_login::recovery::relay_should_cancel(&e) => {
             teprintln!("{e}");
             xai_grok_telemetry::unified_log::warn(
                 "auth recovery: relay giving up (terminal)",
@@ -245,8 +250,7 @@ async fn run_relay_loop(
     cancel: CancellationToken,
     mut on_first_connect: Option<FirstConnectCallback>,
 ) {
-    let mut reconnect_attempts = 0u32;
-    let mut delay_secs = BASE_DELAY_SECS;
+    let mut backoff = ReconnectBackoff::new();
     let mut first_connection = true;
     let target_host = url::Url::parse(&config.ws_url)
         .ok()
@@ -270,7 +274,7 @@ async fn run_relay_loop(
             target: crate::instrumentation::TARGET,
             event = "relay_connecting",
             ws_url = %config.ws_url,
-            attempt = reconnect_attempts,
+            attempt = backoff.attempts,
         );
         match connect_to_relay(&config, proxy_url.as_deref(), &cancel).await {
             Ok(ws) => {
@@ -279,8 +283,6 @@ async fn run_relay_loop(
                     event = "relay_connected",
                     ws_url = %config.ws_url,
                 );
-                reconnect_attempts = 0;
-                delay_secs = BASE_DELAY_SECS;
                 if first_connection {
                     if let Some(callback) = on_first_connect.take() {
                         callback();
@@ -290,11 +292,15 @@ async fn run_relay_loop(
                 let result =
                     run_websocket_session(ws, &to_agent_tx, &mut agent_to_ws_rx, &cancel).await;
                 match result {
-                    Ok(SessionEndReason::Normal) => {
-                        info!("WebSocket session ended normally");
+                    Ok(SessionEndReason::Normal { authenticated }) => {
+                        info!(authenticated, "WebSocket session ended normally");
+                        if authenticated {
+                            backoff.reset();
+                        }
                     }
                     Ok(SessionEndReason::AuthError) => {
                         if attempt_auth_recovery(&mut config, &cancel, "Auth error").await {
+                            backoff.reset();
                             continue;
                         }
                     }
@@ -324,6 +330,7 @@ async fn run_relay_loop(
                 );
                 if handshake_401 {
                     if attempt_auth_recovery(&mut config, &cancel, "Handshake 401").await {
+                        backoff.reset();
                         continue;
                     }
                 } else {
@@ -334,25 +341,30 @@ async fn run_relay_loop(
         if cancel.is_cancelled() {
             break;
         }
-        reconnect_attempts += 1;
-        delay_secs = std::cmp::min(delay_secs * 2, MAX_DELAY_SECS);
-        info!(delay_secs, attempt = reconnect_attempts, "Reconnecting...");
+        let delay = backoff.next_delay();
+        info!(
+            delay_secs = delay.as_secs(),
+            attempt = backoff.attempts,
+            "Reconnecting..."
+        );
         tprintln!(
             "Attempting to reconnect in {} seconds... (attempt #{})",
-            delay_secs,
-            reconnect_attempts
+            delay.as_secs(),
+            backoff.attempts
         );
         tokio::select! {
             _ = cancel.cancelled() => break,
-            _ = tokio::time::sleep(Duration::from_secs(delay_secs)) => {}
+            _ = tokio::time::sleep(delay) => {}
         }
     }
 }
 /// Reason why a WebSocket session ended.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum SessionEndReason {
-    /// Normal disconnection (server closed, network error, etc.)
-    Normal,
+    /// Normal disconnection (server closed, network error, etc.).
+    /// `authenticated` is set once the relay delivered an ACP message to the agent, which it only does for an
+    /// accepted bearer; a session that closed before that proves nothing about the credential.
+    Normal { authenticated: bool },
     /// Authentication error that may be recoverable with token refresh
     AuthError,
 }
@@ -386,7 +398,6 @@ fn build_relay_request(config: &RelayConfig) -> anyhow::Result<axum::http::Reque
     Ok(req)
 }
 /// Attempt to connect to the relay WebSocket server.
-///
 /// If `proxy_url` is `Some`, the connection is established through an HTTP CONNECT tunnel.
 /// Otherwise, a direct connection is used.
 async fn connect_to_relay(
@@ -472,6 +483,8 @@ where
 {
     let (mut ws_outbound, mut ws_inbound) = ws.split();
     let (auth_error_tx, mut auth_error_rx) = mpsc::channel::<()>(1);
+    let authenticated = std::sync::atomic::AtomicBool::new(false);
+    let authenticated_ref = &authenticated;
     let cancel_read = cancel.clone();
     let read_from_ws = async move {
         loop {
@@ -533,6 +546,7 @@ where
                                 warn!("Failed to forward message to agent - channel closed");
                                 break;
                             }
+                            authenticated_ref.store(true, std::sync::atomic::Ordering::Relaxed);
                         }
                         Ok(Message::Binary(bin)) => {
                             tprintln!("ws_inbound::binary");
@@ -546,6 +560,7 @@ where
                                 if to_agent_tx.send(s.to_string()).is_err() {
                                     break;
                                 }
+                                authenticated_ref.store(true, std::sync::atomic::Ordering::Relaxed);
                             } else {
                                 debug!("received non-utf8 WS binary frame - skipping");
                             }
@@ -638,8 +653,9 @@ where
         }
         anyhow::Ok(())
     };
+    tokio::pin!(read_from_ws);
     tokio::select! {
-        (_, auth_error) = read_from_ws => {
+        (_, auth_error) = &mut read_from_ws => {
             info!("WebSocket read task completed (connection closed)");
             if auth_error {
                 return Ok(SessionEndReason::AuthError);
@@ -647,519 +663,25 @@ where
         }
         res = write_to_ws => {
             info!("WebSocket write task completed");
+            // The reader may hold an unread auth frame; let it finish classifying before the session is reported as a normal close
+            if let Ok((_, true)) = tokio::time::timeout(
+                Duration::from_secs(AUTH_DRAIN_TIMEOUT_SECS),
+                &mut read_from_ws,
+            )
+            .await
+            {
+                return Ok(SessionEndReason::AuthError);
+            }
             res?;
         }
     }
     if auth_error_rx.try_recv().is_ok() {
         return Ok(SessionEndReason::AuthError);
     }
-    Ok(SessionEndReason::Normal)
+    Ok(SessionEndReason::Normal {
+        authenticated: authenticated.load(std::sync::atomic::Ordering::Relaxed),
+    })
 }
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::auth::AuthMode;
-    use serde_json::json;
-    use std::sync::atomic::{AtomicU32, Ordering};
-    use tokio_tungstenite::tungstenite::{Utf8Bytes, protocol::Role};
-    /// Create an in-memory WebSocket pair (no network, no handshake needed).
-    async fn ws_pair() -> (
-        tokio_tungstenite::WebSocketStream<tokio::io::DuplexStream>,
-        tokio_tungstenite::WebSocketStream<tokio::io::DuplexStream>,
-    ) {
-        let (client, server) = tokio::io::duplex(64 * 1024);
-        let client_ws =
-            tokio_tungstenite::WebSocketStream::from_raw_socket(client, Role::Client, None).await;
-        let server_ws =
-            tokio_tungstenite::WebSocketStream::from_raw_socket(server, Role::Server, None).await;
-        (client_ws, server_ws)
-    }
-    #[test]
-    fn test_handshake_401_detected_through_anyhow_context() {
-        use tokio_tungstenite::tungstenite::Error as WsError;
-        let resp = axum::http::Response::builder()
-            .status(401)
-            .body(None::<Vec<u8>>)
-            .unwrap();
-        let err = anyhow::Error::from(WsError::Http(Box::new(resp)))
-            .context("WebSocket connection failed");
-        assert!(is_handshake_unauthorized(&err));
-    }
-    #[test]
-    fn test_handshake_non_401_and_non_ws_errors_rejected() {
-        use tokio_tungstenite::tungstenite::Error as WsError;
-        let resp = axum::http::Response::builder()
-            .status(403)
-            .body(None::<Vec<u8>>)
-            .unwrap();
-        let err = anyhow::Error::from(WsError::Http(Box::new(resp)))
-            .context("WebSocket connection failed");
-        assert!(!is_handshake_unauthorized(&err));
-        let err = anyhow::anyhow!("some random error");
-        assert!(!is_handshake_unauthorized(&err));
-    }
-    #[tokio::test]
-    async fn test_ws_session_auth_error_returns_auth_error() {
-        let (client_ws, server_ws) = ws_pair().await;
-        let (mut server_tx, _server_rx) = server_ws.split();
-        let (to_agent_tx, _to_agent_rx) = mpsc::unbounded_channel::<String>();
-        let (_agent_out_tx, mut agent_out_rx) = mpsc::unbounded_channel::<String>();
-        let cancel = CancellationToken::new();
-        tokio::spawn(async move {
-            let auth_error = json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "error": { "code": -32000, "message": "Authentication required" }
-            });
-            let _ = server_tx
-                .send(Message::Text(Utf8Bytes::from(auth_error.to_string())))
-                .await;
-            let _ = server_tx.close().await;
-        });
-        let result = tokio::time::timeout(
-            Duration::from_secs(5),
-            run_websocket_session(client_ws, &to_agent_tx, &mut agent_out_rx, &cancel),
-        )
-        .await
-        .expect("test timed out")
-        .expect("session should not error");
-        assert_eq!(result, SessionEndReason::AuthError);
-    }
-    #[tokio::test]
-    async fn test_ws_session_non_auth_error_skipped() {
-        let (client_ws, server_ws) = ws_pair().await;
-        let (mut server_tx, _server_rx) = server_ws.split();
-        let (to_agent_tx, _to_agent_rx) = mpsc::unbounded_channel::<String>();
-        let (_agent_out_tx, mut agent_out_rx) = mpsc::unbounded_channel::<String>();
-        let cancel = CancellationToken::new();
-        tokio::spawn(async move {
-            let other_error = json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "error": { "code": -32600, "message": "Invalid Request" }
-            });
-            let _ = server_tx
-                .send(Message::Text(Utf8Bytes::from(other_error.to_string())))
-                .await;
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            let _ = server_tx.close().await;
-        });
-        let result = tokio::time::timeout(
-            Duration::from_secs(5),
-            run_websocket_session(client_ws, &to_agent_tx, &mut agent_out_rx, &cancel),
-        )
-        .await
-        .expect("test timed out")
-        .expect("session should not error");
-        assert_eq!(result, SessionEndReason::Normal);
-    }
-    #[tokio::test]
-    async fn test_ws_session_normal_close_returns_normal() {
-        let (client_ws, server_ws) = ws_pair().await;
-        let (mut server_tx, _server_rx) = server_ws.split();
-        let (to_agent_tx, _to_agent_rx) = mpsc::unbounded_channel::<String>();
-        let (_agent_out_tx, mut agent_out_rx) = mpsc::unbounded_channel::<String>();
-        let cancel = CancellationToken::new();
-        tokio::spawn(async move {
-            let _ = server_tx.send(Message::Close(None)).await;
-        });
-        let result = tokio::time::timeout(
-            Duration::from_secs(5),
-            run_websocket_session(client_ws, &to_agent_tx, &mut agent_out_rx, &cancel),
-        )
-        .await
-        .expect("test timed out")
-        .expect("session should not error");
-        assert_eq!(result, SessionEndReason::Normal);
-    }
-    #[tokio::test]
-    async fn test_ws_session_read_liveness_timeout_ends_session() {
-        let (client_ws, server_ws) = ws_pair().await;
-        let _silent_server = server_ws;
-        let (to_agent_tx, _to_agent_rx) = mpsc::unbounded_channel::<String>();
-        let (_agent_out_tx, mut agent_out_rx) = mpsc::unbounded_channel::<String>();
-        let cancel = CancellationToken::new();
-        let result = tokio::time::timeout(
-            Duration::from_secs(5),
-            run_websocket_session_with_liveness(
-                client_ws,
-                &to_agent_tx,
-                &mut agent_out_rx,
-                &cancel,
-                Duration::from_millis(100),
-            ),
-        )
-        .await
-        .expect("session must end via read-liveness timeout instead of hanging")
-        .expect("session should not error");
-        assert_eq!(result, SessionEndReason::Normal);
-    }
-    #[tokio::test]
-    async fn test_ws_session_inbound_traffic_resets_liveness_window() {
-        let (client_ws, server_ws) = ws_pair().await;
-        let (mut server_tx, _server_rx) = server_ws.split();
-        let (to_agent_tx, mut to_agent_rx) = mpsc::unbounded_channel::<String>();
-        let (_agent_out_tx, mut agent_out_rx) = mpsc::unbounded_channel::<String>();
-        let cancel = CancellationToken::new();
-        tokio::spawn(async move {
-            for i in 0..12 {
-                let msg = json!({ "jsonrpc": "2.0", "method": "ping", "id": i });
-                if server_tx
-                    .send(Message::Text(Utf8Bytes::from(msg.to_string())))
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            let _ = server_tx.close().await;
-        });
-        let result = tokio::time::timeout(
-            Duration::from_secs(5),
-            run_websocket_session_with_liveness(
-                client_ws,
-                &to_agent_tx,
-                &mut agent_out_rx,
-                &cancel,
-                Duration::from_millis(200),
-            ),
-        )
-        .await
-        .expect("test timed out")
-        .expect("session should not error");
-        assert_eq!(result, SessionEndReason::Normal);
-        let mut forwarded = 0;
-        while to_agent_rx.try_recv().is_ok() {
-            forwarded += 1;
-        }
-        assert_eq!(forwarded, 12);
-    }
-    #[tokio::test]
-    async fn test_ws_session_forwards_text_to_agent() {
-        let (client_ws, server_ws) = ws_pair().await;
-        let (mut server_tx, _server_rx) = server_ws.split();
-        let (to_agent_tx, mut to_agent_rx) = mpsc::unbounded_channel::<String>();
-        let (_agent_out_tx, mut agent_out_rx) = mpsc::unbounded_channel::<String>();
-        let cancel = CancellationToken::new();
-        let test_msg = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {}
-        });
-        let msg_str = test_msg.to_string();
-        tokio::spawn(async move {
-            let _ = server_tx
-                .send(Message::Text(Utf8Bytes::from(msg_str)))
-                .await;
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            let _ = server_tx.close().await;
-        });
-        let _result = tokio::time::timeout(
-            Duration::from_secs(5),
-            run_websocket_session(client_ws, &to_agent_tx, &mut agent_out_rx, &cancel),
-        )
-        .await
-        .expect("test timed out");
-        let received = to_agent_rx
-            .try_recv()
-            .expect("should have forwarded message to agent");
-        let received_json: serde_json::Value = serde_json::from_str(&received).unwrap();
-        assert_eq!(received_json["method"], "initialize");
-    }
-    #[tokio::test]
-    async fn test_ws_session_cancel_stops_session() {
-        let (client_ws, server_ws) = ws_pair().await;
-        let _server_ws = server_ws;
-        let (to_agent_tx, _to_agent_rx) = mpsc::unbounded_channel::<String>();
-        let (_agent_out_tx, mut agent_out_rx) = mpsc::unbounded_channel::<String>();
-        let cancel = CancellationToken::new();
-        let cancel_clone = cancel.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            cancel_clone.cancel();
-        });
-        let result = tokio::time::timeout(
-            Duration::from_secs(5),
-            run_websocket_session(client_ws, &to_agent_tx, &mut agent_out_rx, &cancel),
-        )
-        .await
-        .expect("test timed out")
-        .expect("session should not error");
-        assert_eq!(result, SessionEndReason::Normal);
-    }
-    /// Helper to create a test GrokAuth with the given key.
-    fn test_auth(key: &str) -> GrokAuth {
-        GrokAuth {
-            key: key.to_string(),
-            refresh_token: Some("rt".to_string()),
-            ..GrokAuth::test_default()
-        }
-    }
-    #[test]
-    fn for_session_builds_only_for_xai_issuer() {
-        use crate::auth::XAI_OAUTH2_ISSUER;
-        let cfg = GrokComConfig::default();
-        let builds = |a: &GrokAuth| RelayConfig::for_session(a, &cfg, None, None).is_some();
-        let xai = GrokAuth {
-            auth_mode: AuthMode::Oidc,
-            oidc_issuer: Some(XAI_OAUTH2_ISSUER.to_string()),
-            ..test_auth("xai-bearer")
-        };
-        assert!(xai.is_xai_auth(), "precondition: is_xai_auth");
-        assert!(builds(&xai));
-        let external_xai = GrokAuth {
-            auth_mode: AuthMode::External,
-            oidc_issuer: Some(XAI_OAUTH2_ISSUER.to_string()),
-            ..test_auth("ext-bearer")
-        };
-        assert!(external_xai.is_xai_auth(), "precondition: is_xai_auth");
-        assert!(builds(&external_xai));
-        assert!(!builds(&GrokAuth {
-            key: String::new(),
-            ..xai.clone()
-        }));
-        assert!(!builds(&GrokAuth {
-            auth_mode: AuthMode::ApiKey,
-            ..test_auth("k")
-        }));
-        assert!(!builds(&GrokAuth {
-            auth_mode: AuthMode::External,
-            ..test_auth("k")
-        }));
-        assert!(!builds(&GrokAuth {
-            auth_mode: AuthMode::WebLogin,
-            ..test_auth("k")
-        }));
-        assert!(!builds(&GrokAuth {
-            auth_mode: AuthMode::Oidc,
-            oidc_issuer: Some("https://login.acme-corp.example/oauth2".to_string()),
-            ..test_auth("k")
-        }));
-        assert!(!builds(&GrokAuth {
-            auth_mode: AuthMode::External,
-            oidc_issuer: Some("https://login.acme-corp.example/oauth2".to_string()),
-            ..test_auth("k")
-        }));
-    }
-    /// Helper: write a GrokAuth to disk under the given scope.
-    fn write_test_auth_to_disk(dir: &std::path::Path, scope: &str, auth: &GrokAuth) {
-        let path = dir.join("auth.json");
-        let mut map = crate::auth::read_auth_json(&path).unwrap_or_default();
-        map.insert(scope.to_owned(), auth.clone());
-        let json = serde_json::to_string_pretty(&map).unwrap();
-        std::fs::write(&path, json).unwrap();
-    }
-    /// Regression: `auth.json` vanishes (deleted, corrupt, or externally removed).
-    /// The process still holds an expired access token and a valid refresh token in `AuthManager` memory.
-    /// Relay 401 recovery must drive the full refresh chain (mint a fresh token via the refresher and REWRITE `auth.json`) instead of dead-ending.
-    /// A relay holding a private, refresher-less `AuthManager` fails this: it can only adopt sibling disk tokens, and there are none.
-    #[tokio::test]
-    async fn auth_recovery_refreshes_and_heals_missing_auth_json() {
-        use crate::auth::XAI_OAUTH2_ISSUER;
-        use crate::auth::refresh::{RefreshOutcome, TokenRefresher};
-        use std::sync::atomic::AtomicU32;
-        struct CountingRefresher {
-            calls: Arc<AtomicU32>,
-        }
-        #[async_trait::async_trait]
-        impl TokenRefresher for CountingRefresher {
-            async fn refresh(
-                &self,
-                _reason: crate::auth::manager::RefreshReason,
-            ) -> RefreshOutcome {
-                self.calls.fetch_add(1, Ordering::SeqCst);
-                RefreshOutcome::Success(Box::new(GrokAuth {
-                    key: "fresh-from-authority".into(),
-                    auth_mode: AuthMode::Oidc,
-                    oidc_issuer: Some(XAI_OAUTH2_ISSUER.to_string()),
-                    refresh_token: Some("rt-rotated".into()),
-                    expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
-                    ..GrokAuth::test_default()
-                }))
-            }
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = crate::auth::GrokComConfig::default();
-        let scope = cfg.auth_scope();
-        let am = Arc::new(
-            AuthManager::new(dir.path(), cfg.clone()).with_proxy_base_url("http://127.0.0.1:1"),
-        );
-        let expired_session = GrokAuth {
-            auth_mode: AuthMode::Oidc,
-            oidc_issuer: Some(XAI_OAUTH2_ISSUER.to_string()),
-            refresh_token: Some("rt-valid-unconsumed".into()),
-            expires_at: Some(chrono::Utc::now() - chrono::Duration::hours(14)),
-            ..test_auth("expired-overnight")
-        };
-        am.hot_swap(expired_session.clone());
-        assert!(
-            !dir.path().join("auth.json").exists(),
-            "precondition: no auth.json on disk"
-        );
-        let calls = Arc::new(AtomicU32::new(0));
-        am.set_refresher(Arc::new(CountingRefresher {
-            calls: calls.clone(),
-        }));
-        let mut config = RelayConfig::for_session(&expired_session, &cfg, None, Some(am.clone()))
-            .expect("x.ai OIDC session is relay-eligible");
-        let cancel = CancellationToken::new();
-        let recovered = attempt_auth_recovery(&mut config, &cancel, "test 401").await;
-        assert!(recovered, "recovery must succeed via the shared refresher");
-        assert!(!cancel.is_cancelled(), "relay must keep running");
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "exactly one IdP refresh");
-        assert_eq!(config.auth.key, "fresh-from-authority");
-        let store = crate::auth::read_auth_json(&dir.path().join("auth.json"))
-            .expect("auth.json must be recreated");
-        let healed = store.get(&scope).expect("scope entry restored");
-        assert_eq!(healed.key, "fresh-from-authority");
-        assert_eq!(healed.refresh_token.as_deref(), Some("rt-rotated"));
-    }
-    /// Recovery returning the *unchanged* token (fresh-mint guard) must report no recovery, without cancelling the relay or touching the IdP.
-    /// The caller then backs off before reconnecting instead of tight-looping.
-    #[tokio::test]
-    async fn attempt_auth_recovery_same_key_backs_off_without_cancel() {
-        use crate::auth::XAI_OAUTH2_ISSUER;
-        use crate::auth::refresh::{RefreshOutcome, TokenRefresher};
-        struct PanicRefresher;
-        #[async_trait::async_trait]
-        impl TokenRefresher for PanicRefresher {
-            async fn refresh(
-                &self,
-                _reason: crate::auth::manager::RefreshReason,
-            ) -> RefreshOutcome {
-                panic!("fresh-mint guard must keep recovery away from the IdP");
-            }
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = crate::auth::GrokComConfig::default();
-        let am = Arc::new(AuthManager::new(dir.path(), cfg.clone()));
-        let fresh_session = GrokAuth {
-            auth_mode: AuthMode::Oidc,
-            oidc_issuer: Some(XAI_OAUTH2_ISSUER.to_string()),
-            refresh_token: Some("rt-valid".into()),
-            expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
-            ..test_auth("fresh-key")
-        };
-        am.hot_swap(fresh_session.clone());
-        am.set_refresher(Arc::new(PanicRefresher));
-        let mut config = RelayConfig::for_session(&fresh_session, &cfg, None, Some(am.clone()))
-            .expect("x.ai OIDC session is relay-eligible");
-        let cancel = CancellationToken::new();
-        let recovered = attempt_auth_recovery(&mut config, &cancel, "test 401").await;
-        assert!(!recovered, "same-key recovery must take the backoff path");
-        assert!(!cancel.is_cancelled(), "relay must keep reconnecting");
-        assert_eq!(config.auth.key, "fresh-key", "config auth stays unchanged");
-    }
-    #[tokio::test]
-    async fn test_auth_refresh_via_auth_manager_on_auth_error() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let connection_count = Arc::new(AtomicU32::new(0));
-        let count_clone = connection_count.clone();
-        tokio::spawn(async move {
-            loop {
-                let Ok((stream, _)) = listener.accept().await else {
-                    break;
-                };
-                let count = count_clone.clone();
-                tokio::spawn(async move {
-                    let Ok(ws) = tokio_tungstenite::accept_async(stream).await else {
-                        return;
-                    };
-                    let (mut tx, _rx) = ws.split();
-                    let n = count.fetch_add(1, Ordering::SeqCst);
-                    if n == 0 {
-                        let auth_err = json!({
-                            "jsonrpc": "2.0",
-                            "id": 1,
-                            "error": { "code": -32000, "message": "Token expired" }
-                        });
-                        let _ = tx
-                            .send(Message::Text(Utf8Bytes::from(auth_err.to_string())))
-                            .await;
-                    } else {
-                        tokio::time::sleep(Duration::from_secs(30)).await;
-                    }
-                });
-            }
-        });
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = crate::auth::GrokComConfig::default();
-        let scope = cfg.auth_scope();
-        let am = Arc::new(AuthManager::new(dir.path(), cfg));
-        am.hot_swap(test_auth("old-key"));
-        write_test_auth_to_disk(dir.path(), &scope, &test_auth("new-key"));
-        let config = RelayConfig {
-            ws_url: format!("ws://{}", addr),
-            ws_origin: format!("http://{}", addr),
-            token_header: "test-token".to_string(),
-            auth: test_auth("old-key"),
-            auth_manager: Some(am),
-        };
-        let cancel = CancellationToken::new();
-        let (from_relay_tx, _from_relay_rx) = mpsc::unbounded_channel();
-        let (_to_relay_tx, _handle) = spawn_relay_connection(config, from_relay_tx, cancel.clone());
-        tokio::time::sleep(Duration::from_secs(3)).await;
-        cancel.cancel();
-        assert!(
-            connection_count.load(Ordering::SeqCst) >= 2,
-            "should have connected at least twice (original + after refresh), got {}",
-            connection_count.load(Ordering::SeqCst)
-        );
-    }
-    #[tokio::test]
-    async fn test_auth_refresh_failure_continues_with_backoff() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let connection_count = Arc::new(AtomicU32::new(0));
-        let count_clone = connection_count.clone();
-        tokio::spawn(async move {
-            loop {
-                let Ok((stream, _)) = listener.accept().await else {
-                    break;
-                };
-                let count = count_clone.clone();
-                tokio::spawn(async move {
-                    let Ok(ws) = tokio_tungstenite::accept_async(stream).await else {
-                        return;
-                    };
-                    let (mut tx, _rx) = ws.split();
-                    count.fetch_add(1, Ordering::SeqCst);
-                    let auth_err = json!({
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "error": { "code": -32000, "message": "Token expired" }
-                    });
-                    let _ = tx
-                        .send(Message::Text(Utf8Bytes::from(auth_err.to_string())))
-                        .await;
-                });
-            }
-        });
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = crate::auth::GrokComConfig::default();
-        let scope = cfg.auth_scope();
-        let am = Arc::new(AuthManager::new(dir.path(), cfg));
-        am.hot_swap(test_auth("old-key"));
-        write_test_auth_to_disk(dir.path(), &scope, &test_auth("old-key"));
-        let config = RelayConfig {
-            ws_url: format!("ws://{}", addr),
-            ws_origin: format!("http://{}", addr),
-            token_header: "test-token".to_string(),
-            auth: test_auth("old-key"),
-            auth_manager: Some(am),
-        };
-        let cancel = CancellationToken::new();
-        let (from_relay_tx, _from_relay_rx) = mpsc::unbounded_channel();
-        let (_to_relay_tx, _handle) = spawn_relay_connection(config, from_relay_tx, cancel.clone());
-        tokio::time::sleep(Duration::from_secs(4)).await;
-        cancel.cancel();
-        assert!(
-            connection_count.load(Ordering::SeqCst) >= 2,
-            "should have retried after failed refresh, got {}",
-            connection_count.load(Ordering::SeqCst)
-        );
-    }
-}
+#[path = "relay_tests.rs"]
+mod tests;

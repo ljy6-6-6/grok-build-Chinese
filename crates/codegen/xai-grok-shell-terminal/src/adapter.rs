@@ -204,7 +204,26 @@ impl AcpTerminalAdapter {
     fn terminal_id(&self, task_id: &str) -> acp::TerminalId {
         acp::TerminalId::new(task_id)
     }
+
+    fn local_snapshot(&self, task_id: &str) -> Option<TaskSnapshot> {
+        let tasks = self.tasks.lock().unwrap();
+        let tracked = tasks.get(task_id)?;
+        Some(tracked.to_snapshot(
+            task_id,
+            SnapshotOutput {
+                output: tracked.last_output.clone(),
+                truncated: tracked.last_truncated,
+                exit_code: tracked.exit_code,
+                signal: tracked.signal.clone(),
+            },
+        ))
+    }
 }
+
+/// Per-task budget for live `terminal/output` during `list_tasks` (task/list).
+/// After this expires that id falls back to local metadata; remaining ids still
+/// get their own live attempt with a fresh budget.
+const TERMINAL_OUTPUT_RPC_BUDGET: Duration = Duration::from_secs(2);
 
 #[async_trait::async_trait]
 impl TerminalBackend for AcpTerminalAdapter {
@@ -531,11 +550,8 @@ impl TerminalBackend for AcpTerminalAdapter {
         match start {
             WaitStart::Immediate => return self.get_task(task_id).await,
             WaitStart::ProbeThenMaybeBlock => {
-                // Not tracked as running: one output probe
-                // A dead or unknown terminal must not burn the wait budget on WaitForTerminalExit
-                // Match kill's untracked probe: `get_task` maps every TerminalOutput error to None
-                // So a transport/channel blip on a still-live resumed terminal must not look like not-found
-                // Only a client that answered and disowned the id is a definitive miss
+                // Not tracked as running: one output probe A dead or unknown terminal must not burn the wait budget on WaitForTerminalExit Match kill's untracked probe: `get_task` maps every TerminalOutput error to None
+                // So a transport/channel blip on a still-live resumed terminal must not look like not-found Only a client that answered and disowned the id is a definitive miss
                 let probe = self
                     .gateway
                     .send(acp::TerminalOutputRequest::new(
@@ -612,17 +628,50 @@ impl TerminalBackend for AcpTerminalAdapter {
     }
 
     async fn list_tasks(&self) -> Vec<TaskSnapshot> {
+        // Preserve x.ai/task/list output for running rows via get_task (live terminal/output or log tail).
+        // Bound each RPC so a hung client cannot stall enumeration indefinitely; only the timed-out id
+        // falls back, and the remaining ids still get a live attempt with their own budget.
         let task_ids: Vec<String> = {
             let tasks = self.tasks.lock().unwrap();
             tasks.keys().cloned().collect()
         };
         let mut snapshots = Vec::new();
         for task_id in task_ids {
-            if let Some(snapshot) = self.get_task(&task_id).await {
-                snapshots.push(snapshot);
+            match tokio::time::timeout(TERMINAL_OUTPUT_RPC_BUDGET, self.get_task(&task_id)).await {
+                Ok(Some(snapshot)) => snapshots.push(snapshot),
+                Ok(None) => {}
+                Err(_) => {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        budget_ms = TERMINAL_OUTPUT_RPC_BUDGET.as_millis() as u64,
+                        "terminal/output RPC timed out; using local snapshot for this id only"
+                    );
+                    if let Some(local) = self.local_snapshot(&task_id) {
+                        snapshots.push(local);
+                    }
+                }
             }
         }
         snapshots
+    }
+
+    async fn list_tasks_metadata(&self) -> Vec<TaskSnapshot> {
+        // Snapshot path: one lock, no terminal/output RPCs, no log reads.
+        let tasks = self.tasks.lock().unwrap();
+        tasks
+            .iter()
+            .map(|(task_id, tracked)| {
+                tracked.to_snapshot(
+                    task_id,
+                    SnapshotOutput {
+                        output: String::new(),
+                        truncated: false,
+                        exit_code: tracked.exit_code,
+                        signal: tracked.signal.clone(),
+                    },
+                )
+            })
+            .collect()
     }
 
     async fn kill_all_background_tasks(&self) {

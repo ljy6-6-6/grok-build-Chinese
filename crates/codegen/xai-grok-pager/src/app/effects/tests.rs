@@ -1,5 +1,6 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 use super::*;
+use std::path::PathBuf;
 use xai_grok_shell::extensions::billing::{BillingConfig, Cent, UsagePeriod};
 /// The invalid-params server detail survives `attach_prompt_usage` wrapping `error.data` as `{message, promptUsage}`.
 #[test]
@@ -175,236 +176,6 @@ fn interject_params_omit_content_when_no_blocks() {
     assert_eq!(obj["text"], "steer");
     assert_eq!(obj["interjectionId"], "i1");
     assert_eq!(obj.len(), 3, "no extra keys on the legacy shape");
-}
-#[test]
-fn picker_keeps_conversation_with_empty_cwd_and_missing_updated_at() {
-    let payload = serde_json::json!({
-            "sessions": [{
-                "sessionId": "conv_abc",
-                "cwd": "",
-                "summary": "Compare GPU vendors",
-                "source": "conversation",
-                "_meta": { "x.ai/session": { "kind": "chat" } }
-            }]
-        });
-    let entries = parse_session_picker_entries(&payload);
-    assert_eq!(entries.len(), 1, "conversation must not vanish");
-    assert_eq!(entries[0].id, "conv_abc");
-    assert_eq!(entries[0].cwd, "");
-    assert_eq!(entries[0].source, "conversation");
-}
-#[test]
-fn picker_keeps_old_conversation_past_cutoff() {
-    let payload = serde_json::json!({
-            "sessions": [{
-                "sessionId": "conv_old",
-                "cwd": "",
-                "summary": "Ancient chat",
-                "source": "conversation",
-                "updatedAt": "2020-01-01T00:00:00Z",
-                "_meta": { "x.ai/session": { "kind": "chat" } }
-            }]
-        });
-    let entries = parse_session_picker_entries(&payload);
-    assert_eq!(entries.len(), 1, "old conversation must still render");
-    assert_eq!(entries[0].source, "conversation");
-}
-#[test]
-fn picker_drops_local_with_missing_updated_at() {
-    let payload = serde_json::json!({
-            "sessions": [{
-                "sessionId": "local_no_ts",
-                "cwd": "/Users/me/xai",
-                "summary": "no timestamp",
-                "source": "local"
-            }]
-        });
-    let entries = parse_session_picker_entries(&payload);
-    assert!(
-            entries.is_empty(),
-            "local rows still require a parseable updatedAt"
-        );
-}
-/// Untitled grok.com chats must stay listed, rendered as "Untitled".
-#[test]
-fn picker_keeps_untitled_conversation_as_untitled() {
-    let payload = serde_json::json!({
-            "sessions": [{
-                "sessionId": "conv_untitled",
-                "cwd": "",
-                "summary": "",
-                "source": "conversation",
-                "updatedAt": "2026-07-01T00:00:00Z",
-                "_meta": { "x.ai/session": { "kind": "chat" } }
-            }]
-        });
-    let entries = parse_session_picker_entries(&payload);
-    assert_eq!(entries.len(), 1, "untitled conversation must not vanish");
-    assert_eq!(entries[0].summary, "Untitled");
-    assert_eq!(entries[0].source, "conversation");
-}
-/// The recap and last-turn summary ride the session-list wire and land on the picker entry so the expanded card can show them.
-#[test]
-fn picker_parses_last_recap_and_last_turn_summary() {
-    let recent = chrono::Utc::now().to_rfc3339();
-    let payload = serde_json::json!({
-            "sessions": [{
-                "sessionId": "s_recap",
-                "cwd": "/Users/me/xai",
-                "summary": "Auth refactor",
-                "source": "local",
-                "updatedAt": recent,
-                "lastTurnSummary": "Wired retries into billing",
-                "lastRecap": "Where we left off: auth refactor across the API"
-            }]
-        });
-    let entries = parse_session_picker_entries(&payload);
-    assert_eq!(entries.len(), 1);
-    assert_eq!(
-            entries[0].last_turn_summary.as_deref(),
-            Some("Wired retries into billing")
-        );
-    assert_eq!(
-            entries[0].last_recap.as_deref(),
-            Some("Where we left off: auth refactor across the API")
-        );
-}
-/// `sessionKind` rides the session-list wire onto the entry; the picker's Headless page filter keys on it.
-#[test]
-fn picker_parses_session_kind() {
-    let recent = chrono::Utc::now().to_rfc3339();
-    let payload = serde_json::json!({
-            "sessions": [
-                {
-                    "sessionId": "s_headless",
-                    "cwd": "/Users/me/xai",
-                    "summary": "Classify clip",
-                    "source": "local",
-                    "updatedAt": recent,
-                    "sessionKind": "headless"
-                },
-                {
-                    "sessionId": "s_plain",
-                    "cwd": "/Users/me/xai",
-                    "summary": "Interactive work",
-                    "source": "local",
-                    "updatedAt": recent
-                }
-            ]
-        });
-    let entries = parse_session_picker_entries(&payload);
-    assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].session_kind.as_deref(), Some("headless"));
-    assert_eq!(entries[1].session_kind, None);
-}
-/// The empty-summary drop still applies to Build rows.
-#[test]
-fn picker_still_drops_build_row_with_empty_summary() {
-    let payload = serde_json::json!({
-            "sessions": [{
-                "sessionId": "local_empty",
-                "cwd": "/nonexistent/effects-test",
-                "summary": "",
-                "source": "local",
-                "updatedAt": "2026-07-01T00:00:00Z"
-            }]
-        });
-    let entries = parse_session_picker_entries(&payload);
-    assert!(entries.is_empty(), "empty-summary Build rows stay dropped");
-}
-#[test]
-fn session_list_partial_parses_reasons() {
-    let payload = |reason: &str| {
-        serde_json::json!({
-                "sessions": [],
-                "_meta": { "x.ai/partial": { "conversations": true, "reason": reason } }
-            })
-    };
-    assert_eq!(
-            parse_session_list_partial(&payload("no_oauth")),
-            Some(ConversationsPartial::NoOauth)
-        );
-    assert_eq!(
-            parse_session_list_partial(&payload("timeout")),
-            Some(ConversationsPartial::Timeout)
-        );
-    assert_eq!(
-            parse_session_list_partial(&payload("error")),
-            Some(ConversationsPartial::Error)
-        );
-    assert_eq!(
-            parse_session_list_partial(&payload("something_new")),
-            Some(ConversationsPartial::Error)
-        );
-}
-#[test]
-fn format_acp_error_localizes_exact_model_policy_denials_only() {
-    let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
-        locale: crate::locale::UiLocale::ZhCn,
-        source: crate::locale::LocaleSource::Cli,
-    });
-    let denial = "This model isn't allowed by your organization's policy. Contact your administrator.";
-    let exact = acp::Error::invalid_params().data(denial);
-    assert_eq!(
-        format_acp_error_with_locale(&exact, false, &locale),
-        "组织策略不允许使用此模型。请联系管理员。"
-    );
-
-    let near_miss = acp::Error::invalid_params().data(format!("{denial} extra"));
-    assert_eq!(
-        format_acp_error_with_locale(&near_miss, false, &locale),
-        format!("{denial} extra")
-    );
-}
-
-#[test]
-fn switch_model_error_localizes_policy_denial_at_direct_effect_boundary() {
-    let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
-        locale: crate::locale::UiLocale::ZhCn,
-        source: crate::locale::LocaleSource::Cli,
-    });
-    let denial =
-        "This model isn't allowed by your organization's policy. Contact your administrator.";
-    let error = acp::Error::invalid_params().data(denial);
-    let mapped = switch_model_error_from_acp(&error, &None, false, &locale);
-    match mapped {
-        SwitchModelError::Other(message) => {
-            assert_eq!(message, "组织策略不允许使用此模型。请联系管理员。");
-        }
-        SwitchModelError::IncompatibleAgent { .. } => {
-            panic!("policy denial must remain a regular switch-model error")
-        }
-    }
-}
-
-#[test]
-fn session_list_partial_notices_localize_only_the_fixed_copy() {
-    let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
-        locale: crate::locale::UiLocale::ZhCn,
-        source: crate::locale::LocaleSource::Cli,
-    });
-    assert_eq!(
-        ConversationsPartial::NoOauth.picker_notice_with_locale(Some(&locale)),
-        "无法加载聊天：请使用 /login 登录"
-    );
-    assert_eq!(
-        ConversationsPartial::Timeout.picker_notice_with_locale(Some(&locale)),
-        "无法加载会话：请重试"
-    );
-    assert_eq!(
-        ConversationsPartial::Error.picker_notice(),
-        "Couldn't load conversations: retry"
-    );
-}
-#[test]
-fn session_list_partial_absent_for_healthy_or_meta_less_responses() {
-    let healthy = serde_json::json!({
-            "sessions": [],
-            "_meta": { "x.ai/partial": { "conversations": false } }
-        });
-    assert_eq!(parse_session_list_partial(&healthy), None);
-    let legacy = serde_json::json!({ "sessions": [] });
-    assert_eq!(parse_session_list_partial(&legacy), None);
 }
 /// The agent serializes `ExtMethodResult<KillTaskResponse>`: the outcome lives at `result.outcome`.
 /// Probing the top level instead was why the tasks-pane ✗ never removed stale (`not_found`) rows after a session resume.
@@ -856,6 +627,26 @@ fn parse_worktree_restore_payload_rejects_unknown_degree() {
         });
     let (_, _, degree) = parse_worktree_restore_payload(&value);
     assert!(degree.is_none(), "typo must produce None");
+}
+#[test]
+fn parse_worktree_strategy_summary_grove_success_and_empty() {
+    let value = serde_json::json!({
+            "strategy": {
+                "requestedStrategy": "grove",
+                "resolvedStrategy": "grove-fuse",
+                "transport": "fuse",
+                "sourceMode": "local",
+                "daemonCapabilityClass": "current"
+            }
+        });
+    assert_eq!(
+            parse_worktree_strategy_summary(&value).as_deref(),
+            Some("Requested Grove; using `grove-fuse` (local objects).")
+        );
+    assert!(parse_worktree_strategy_summary(&serde_json::json!({})).is_none());
+    assert!(
+            parse_worktree_strategy_summary(&serde_json::json!({ "strategy": {} })).is_none()
+        );
 }
 #[test]
 fn parse_session_load_restore_meta_full_shape() {
@@ -1698,6 +1489,7 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
     use crate::views::session_picker_surface::SessionPickerHost;
     let mut tasks = run(Effect::FetchSessionList {
         host: SessionPickerHost::AgentModal,
+        cwd_override: None,
         generation: 41,
         query: Some("hit".into()),
         seq: 7,
@@ -1728,6 +1520,7 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
     }
     let mut tasks = run(Effect::FetchSessionList {
         host: SessionPickerHost::Welcome,
+        cwd_override: None,
         generation: 42,
         query: None,
         seq: 8,
@@ -1746,7 +1539,24 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
         other => panic!("expected SessionListLoaded, got {other:?}"),
     }
     let mut tasks = run(Effect::FetchSessionList {
+        host: SessionPickerHost::Dashboard,
+        cwd_override: Some("/dashboard-cwd".into()),
+        generation: 44,
+        query: None,
+        seq: 10,
+        kind_filter: Some(vec!["build".into()]),
+        headless_policy: Default::default(),
+    });
+    assert!(matches!(
+            tasks.join_next().await.expect("task").expect("no panic"),
+            TaskResult::SessionListLoaded {
+                host: SessionPickerHost::Dashboard,
+                ..
+            }
+        ));
+    let mut tasks = run(Effect::FetchSessionList {
         host: SessionPickerHost::Welcome,
+        cwd_override: None,
         generation: 43,
         query: Some("fail-me".into()),
         seq: 9,
@@ -1768,13 +1578,16 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
         other => panic!("expected SessionListFailed, got {other:?}"),
     }
     let captured = captured.lock().unwrap();
-    assert_eq!(captured.len(), 3);
+    assert_eq!(captured.len(), 4);
     assert_eq!(captured[0]["query"], "hit");
     assert_eq!(captured[0]["limit"], 30);
     assert_eq!(captured[0]["headless"], "exclude");
     assert_eq!(captured[1]["headless"], "exclude");
     assert_eq!(captured[2]["headless"], "exclude");
-    assert!(captured[0]["cwd"].is_string());
+    assert_eq!(captured[2]["limit"], 100);
+    assert_eq!(captured[2]["cwd"], "/dashboard-cwd");
+    assert_eq!(captured[3]["headless"], "exclude");
+    assert_eq!(captured[0]["cwd"], ".");
     assert!(
             captured[0].get("allowRelax").is_none(),
             "search fetches must not opt into relaxing: {:?}",
@@ -1789,7 +1602,7 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
             captured[1]["allowRelax"], true,
             "browse fetches opt into relaxing"
         );
-    assert_eq!(captured[2]["query"], "fail-me");
+    assert_eq!(captured[3]["query"], "fail-me");
 }
 #[tokio::test]
 async fn fetch_dashboard_sessions_explicitly_excludes_headless() {
@@ -1857,6 +1670,7 @@ async fn fetch_session_list_sends_kind_facet_filter() {
     execute(
         Effect::FetchSessionList {
             host: crate::views::session_picker_surface::SessionPickerHost::Welcome,
+            cwd_override: None,
             generation: 1,
             query: None,
             seq: 1,
@@ -2156,9 +1970,7 @@ fn subagents_without_plan_produces_no_profile() {
     assert_eq!(flags.agent_profile(), None);
 }
 /// Neutralize `GROK_AGENT` for the profile-matrix tests below.
-/// Agent-driven dev shells export it, which flips `to_meta` into the defer-to-shell escape hatch and drops `agentProfile`.
 /// The tests would then assert the wrong branch.
-/// Empty string counts as unset (`!s.trim().is_empty()`).
 /// Callers must be `#[serial_test::serial(GROK_AGENT)]` (process-global env).
 fn without_grok_agent() -> crate::test_util::EnvVarGuard {
     crate::test_util::EnvVarGuard::set("GROK_AGENT", "")
@@ -2873,6 +2685,7 @@ fn sanitize_user_error_collapses_disk_full() {
 /// Sanitizing the composed message would collapse a disk-full chain whole and erase the title hint for a deferred local-miss target.
 #[test]
 fn worktree_resume_failure_sanitizes_detail_before_hint() {
+    use crate::app::session_title_resolve::worktree_resume_failure_message;
     let raw = "failed to copy index: No space left on device (os error 28)";
     let msg = worktree_resume_failure_message(
         Some("typo title"),
@@ -2888,48 +2701,6 @@ fn worktree_resume_failure_sanitizes_detail_before_hint() {
     let id_msg = worktree_resume_failure_message(None, &sanitize_user_error(raw));
     assert_eq!(id_msg, "couldn't resume worktree session: No space left on device");
 }
-/// A resume-picker entry converts to a dormant dashboard roster row (the non-leader idle source).
-/// It preserves title, cwd, model, worktree flag, origin, and last-change time.
-#[test]
-fn session_picker_entry_maps_to_dormant_roster_row() {
-    use crate::app::app_view::SessionPickerEntry;
-    use crate::app::roster::RosterActivity;
-    let updated = chrono::Utc::now();
-    let entry = SessionPickerEntry {
-        id: "sess-1".to_string(),
-        summary: "Wire up dashboard".to_string(),
-        updated_at: updated,
-        created_at: updated,
-        cwd: "/repo/app".to_string(),
-        hostname: Some("box".to_string()),
-        source: "local".to_string(),
-        model_id: Some("grok-4".to_string()),
-        num_messages: 3,
-        last_active_at: Some(updated),
-        branch: None,
-        repo_name: "repo-app".to_string(),
-        worktree_label: Some("wt".to_string()),
-        last_turn_summary: Some("Fixed the parser".to_string()),
-        last_recap: None,
-        session_kind: None,
-        card_detail: None,
-    };
-    let roster = session_picker_entry_to_roster(&entry);
-    assert_eq!(roster.session_id, "sess-1");
-    assert_eq!(roster.title.as_deref(), Some("Wire up dashboard"));
-    assert_eq!(roster.cwd, "/repo/app");
-    assert!(roster.is_worktree, "worktree_label present → is_worktree");
-    assert_eq!(roster.model_id.as_deref(), Some("grok-4"));
-    assert_eq!(roster.activity, RosterActivity::Dormant);
-    assert_eq!(
-            roster.last_turn_summary.as_deref(),
-            Some("Fixed the parser")
-        );
-    assert!(!roster.resident);
-    assert_eq!(roster.last_change_unix_ms, updated.timestamp_millis());
-    assert_eq!(roster.origin.kind, "local");
-    assert_eq!(roster.origin.host.as_deref(), Some("box"));
-}
 #[test]
 fn rewind_execute_params_sends_conversation_only_with_force() {
     let params = rewind_execute_params("sess-1", 3);
@@ -2938,4 +2709,96 @@ fn rewind_execute_params_sends_conversation_only_with_force() {
     assert_eq!(params["force"], true);
     assert_eq!(params["mode"], REWIND_MODE_WIRE);
     assert_eq!(params["mode"], "conversation_only");
+}
+/// Exact wire bytes of the one-shot request: the shell's `upload_trace_offer_gate_allows`
+/// relaxation keys off this exact snake_case value, so the shape is a cross-crate contract.
+#[test]
+fn upload_trace_request_with_intent_exact_wire_shape() {
+    let request = UploadTraceRequest {
+        session_id: "sess-1".to_string(),
+        intent: Some(
+            crate::views::feedback_modal::FeedbackTraceUploadIntent::SendThisSession,
+        ),
+        trace_upload_token: Some("grant-1".to_string()),
+    };
+    assert_eq!(
+            serde_json::to_string(&request).unwrap(),
+            r#"{"sessionId":"sess-1","intent":"send_this_session","traceUploadToken":"grant-1"}"#
+        );
+}
+/// A legacy trace-card upload must stay byte-identical to the pre-intent request
+/// (no `"intent":null`), so an older shell's strict parsing cannot regress.
+#[test]
+fn upload_trace_request_without_intent_keeps_legacy_wire_shape() {
+    let request = UploadTraceRequest {
+        session_id: "sess-1".to_string(),
+        intent: None,
+        trace_upload_token: None,
+    };
+    assert_eq!(
+            serde_json::to_string(&request).unwrap(),
+            r#"{"sessionId":"sess-1"}"#
+        );
+}
+
+#[test]
+fn format_acp_error_localizes_exact_model_policy_denials_only() {
+    let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+        locale: crate::locale::UiLocale::ZhCn,
+        source: crate::locale::LocaleSource::Cli,
+    });
+    let denial = "This model isn't allowed by your organization's policy. Contact your administrator.";
+    let exact = acp::Error::invalid_params().data(denial);
+    assert_eq!(
+        format_acp_error_with_locale(&exact, false, &locale),
+        "组织策略不允许使用此模型。请联系管理员。"
+    );
+
+    let near_miss = acp::Error::invalid_params().data(format!("{denial} extra"));
+    assert_eq!(
+        format_acp_error_with_locale(&near_miss, false, &locale),
+        format!("{denial} extra")
+    );
+}
+
+
+#[test]
+fn switch_model_error_localizes_policy_denial_at_direct_effect_boundary() {
+    let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+        locale: crate::locale::UiLocale::ZhCn,
+        source: crate::locale::LocaleSource::Cli,
+    });
+    let denial =
+        "This model isn't allowed by your organization's policy. Contact your administrator.";
+    let error = acp::Error::invalid_params().data(denial);
+    let mapped = switch_model_error_from_acp(&error, &None, false, &locale);
+    match mapped {
+        SwitchModelError::Other(message) => {
+            assert_eq!(message, "组织策略不允许使用此模型。请联系管理员。");
+        }
+        SwitchModelError::IncompatibleAgent { .. } => {
+            panic!("policy denial must remain a regular switch-model error")
+        }
+    }
+}
+
+
+#[test]
+fn session_list_partial_notices_localize_only_the_fixed_copy() {
+    let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+        locale: crate::locale::UiLocale::ZhCn,
+        source: crate::locale::LocaleSource::Cli,
+    });
+    assert_eq!(
+        ConversationsPartial::NoOauth.picker_notice_with_locale(Some(&locale)),
+        "无法加载聊天：请使用 /login 登录"
+    );
+    assert_eq!(
+        ConversationsPartial::Timeout.picker_notice_with_locale(Some(&locale)),
+        "无法加载会话：请重试"
+    );
+    assert_eq!(
+        ConversationsPartial::Error.picker_notice(),
+        "Couldn't load conversations: retry"
+    );
 }

@@ -6,7 +6,6 @@ use std::collections::{HashMap, HashSet};
 use xai_grok_tools::implementations::search_tool::ServerFingerprint;
 
 /// Persisted announcement tracking state.
-///
 /// It is restored on session resume so the fresh actor "remembers" what was already announced.
 /// The existing delta/fingerprint comparison logic then handles changes (new/removed/updated servers or skills) without creating duplicates.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -71,13 +70,9 @@ pub(crate) struct FailedServer {
 pub(crate) struct McpAnnounced {
     /// Connected servers already announced, keyed by name; the fingerprint detects tool/description changes that warrant a delta announcement.
     pub(crate) fingerprints: HashMap<String, ServerFingerprint>,
-    /// Failure episodes already announced.
-    /// A failure is announced once per episode.
     /// The entry is removed, allowing a new announcement, only when the server connects or leaves the config.
     /// Background retries (and their reason flip-flops) therefore don't re-announce.
-    /// Two exceptions announce once more.
     /// One is escalation to [`AnnouncedFailure::AuthRequired`]: it needs user action and invalidates the announced "retries automatically" hint.
-    /// The other is an in-place config edit (changed fingerprint under the same name): a fresh config failing is a new episode.
     pub(crate) failed: HashMap<String, AnnouncedEpisode>,
 }
 
@@ -115,10 +110,6 @@ impl McpAnnounced {
     }
 
     /// One reconcile pass of the failure-episode state machine (the rules live on [`Self::failed`]).
-    /// It drops episodes whose server connected or left the config.
-    /// It then returns the servers to announce now: new episodes plus `Transport` to `AuthRequired` escalations.
-    /// It also returns whether the announced map changed (callers persist on change).
-    ///
     /// A handshaking server is absent from `currently_failed` but present in `unconnected_configured`, so its episode survives the retry attempt.
     pub(crate) fn note_failures(
         &mut self,

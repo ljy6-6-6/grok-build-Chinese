@@ -12,7 +12,6 @@ use xai_grok_telemetry::session_ctx::log_event;
 pub(super) const CTA_MCP_POLL_MAX_ATTEMPTS: u32 = 15;
 
 /// Re-probes tolerated while the just-installed plugin shows *no* MCP servers at all.
-/// A plugin's servers are loaded from its config during the awaited reload that precedes the first read.
 /// An empty plugin section thus means it ships none (skills-only).
 /// Settle quickly instead of polling the full budget (and paying the managed-config fetch on every read).
 pub(super) const CTA_MCP_ABSENT_MAX_ATTEMPTS: u32 = 1;
@@ -40,13 +39,8 @@ pub(super) fn cta_settle_installed(
     effects
 }
 
-/// Not-installed CTA candidates from the catalog scan, plus the selected source's URL/path (the install target the shell resolves sources by).
-/// `None` means no CTA source was present.
 /// One source wins so the candidates and the install target always come from it.
-/// With `cta_marketplace` set (the `[marketplace].plugin_cta_marketplace` override), the first source whose name exactly equals it wins.
-/// The xAI Official source is excluded unless it is the named one.
 /// Unset (the default) is two-tier: a URL-verified official source beats any name-only "xAI Official" match regardless of order.
-/// (The URL check stops a source from spoofing the official name: the scanned URL is the install root.)
 /// A name-only match then keeps mirrors registered under the official name working; first registered wins within a tier.
 pub(super) fn plugin_cta_candidates(
     response: xai_hooks_plugins_types::MarketplaceListResponse,
@@ -113,7 +107,6 @@ pub(super) fn cta_install_error_category(
 }
 
 /// Recompute the plugin-CTA phase from the current prompt draft.
-///
 /// Gating order: feature flag and CTA source present (official, or the configured `plugin_cta_marketplace`), keyword match, then per-plugin dismissal.
 /// `is_dismissed` injects the config lookup so the matcher logic stays unit-testable.
 pub(super) fn plugin_cta_phase_for(
@@ -332,8 +325,7 @@ pub(super) fn handle_plugin_cta_mcps_loaded(
             let any_plugin_server = servers.iter().any(|s| section_for(s) == section);
             // Settle (no auth) only on a clean verdict: every plugin server is Ready
             // While any is still Initializing or Unavailable the verdict isn't final, so keep polling
-            // An OAuth server can briefly show as Unavailable before it flips to NeedsAuth
-            // needs_auth is handled above
+            // An OAuth server can briefly show as Unavailable before it flips to NeedsAuth needs_auth is handled above
             let all_ready = servers
                 .iter()
                 .filter(|s| section_for(s) == section)
@@ -342,9 +334,7 @@ pub(super) fn handle_plugin_cta_mcps_loaded(
             let timed_out = agent.plugin_cta.mcp_attempt >= CTA_MCP_POLL_MAX_ATTEMPTS;
             // Skills-only plugins show an empty plugin section even though the rest of the MCP list is populated
             // (All plugin configs load together during the awaited reload that precedes this read.)
-            // Requiring a non-empty list keeps a read-too-early result (no servers at all) polling
             // Otherwise it would be mistaken for skills-only, skipping a slow MCP-bearing plugin's auth handoff
-            // An all-empty list falls through to the attempt-budget timeout
             let absent_settle = !any_plugin_server
                 && !servers.is_empty()
                 && agent.plugin_cta.mcp_attempt >= CTA_MCP_ABSENT_MAX_ATTEMPTS;
@@ -445,7 +435,6 @@ pub(super) fn handle_plugin_cta_catalog_loaded(
                 }
                 // Recompute the matcher-driven phase now that the catalog landed
                 // Typing and pausing before the async catalog arrived (common at startup) should show the CTA without another keystroke
-                // This also hides a shown CTA when the refreshed catalog leaves no candidates
                 // Only touch matcher-driven phases; Installing/AwaitingReload/AwaitingMcps/Installed/Error own their own transitions
                 if matches!(
                     agent.plugin_cta.phase,
@@ -497,7 +486,6 @@ pub(super) fn handle_plugin_cta_debounce_expired(
     // Preserve running or actionable install states across keystrokes
     // The eventual install/reload/mcps result must never be swallowed by the stale guard
     // `Installed` is included too: its `✓` confirmation is owned by the auto-dismiss timer
-    // Recomputing during the window could re-offer the just-installed plugin off the stale candidate set before the catalog refresh lands
     if matches!(
         agent.plugin_cta.phase,
         CtaPhase::Installing { .. }

@@ -76,7 +76,6 @@ fn resolve_overlay_strips_json_null_object_fields() {
 fn overlay_confined_to_allowlist_drops_every_dangerous_table() {
     // Every dangerous table, driven through the real resolve path alongside one legit soft key
     // Fail-closed: only the allowlisted soft key survives, so this catches any future dangerous table automatically
-    // `models` (the global block) is kept while the per-model `model` block is dropped
     // `shell_environment_policy` is partly allowlisted, but its `set` injector is not, so a set-only table drops entirely
     let inline = r#"{
         "feedback": {"user": {"command": "evil"}},
@@ -155,8 +154,7 @@ fn overlay_shell_env_policy_keeps_tightening_fields_and_drops_set() {
 fn version_overrides_cannot_reinject_non_allowlisted_tables() {
     // A valid `[[version_overrides]]` whose patch carries non-allowlisted code-exec/auth/egress tables alongside a legit soft key
     // It is driven through the real resolution path
-    // The allowlist runs after `version_overrides` in `finalize_overlay`, so the applied patch cannot smuggle a dropped table back in
-    // Only the soft key survives
+    // The allowlist runs after `version_overrides` in `finalize_overlay`, so the applied patch cannot smuggle a dropped table back in Only the soft key survives
     let inline = r#"{
         "version_overrides": [
             {

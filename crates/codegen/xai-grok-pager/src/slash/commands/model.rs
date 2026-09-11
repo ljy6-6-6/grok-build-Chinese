@@ -499,7 +499,6 @@ mod tests {
 
     /// The bare `/model <name>` form dispatches `Action::SetDefaultModel(<ModelId>)` instead of the legacy `Action::SwitchModel { effort: None }`.
     /// The dispatcher routes it through both `Effect::SwitchModel` (session mutation) and `Effect::PersistSetting` (next-session default).
-    ///
     /// The payload is the typed `acp::ModelId` (resolved at the slash boundary), not a String.
     #[test]
     fn run_bare_model_name_dispatches_set_default_model() {

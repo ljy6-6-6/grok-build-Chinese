@@ -25,11 +25,8 @@ pub(crate) const WORD_SELECT_TIP_TICKS: u16 = 600;
 /// Any prompt edit retires the tip, so the long TTL cannot shadow a kill-then-yank sequence.
 pub(crate) const WORD_SELECT_ACCEPT_CHORD: &str = "Ctrl+Y";
 
-/// Build "Want double-click to select? /settings → Text selection · Ctrl+Y: enable now".
-/// Shows are capped at [`WORD_SELECT_TIP_SEEN_CAP`] per session, counted in memory only.
-///
-/// The tip fires when double-click runs the fold/nav path (default `flash` / `hold`).
-/// Users who expected terminal-like word highlight learn about the setting, or flip it on the spot with the advertised chord.
+/// Build "Want double-click to select? Shows are capped at [`WORD_SELECT_TIP_SEEN_CAP`] per session, counted in
+/// memory only.
 pub fn word_select_tip() -> EphemeralTip {
     let theme = Theme::current();
     let dim = Style::default().fg(theme.gray);

@@ -134,7 +134,6 @@ impl GoalSummarizerSpawner for ChannelSpawner {
 }
 
 impl ChannelSpawner {
-    /// Send one spawn (model and harness override resolved by the caller) and await its terminal result.
     /// The subagent_type is always [`GOAL_SUMMARIZER_SUBAGENT_TYPE`].
     /// `harness_agent_type` selects the harness flavor (`None` means the session harness).
     /// Pins a read-only capability mode so the subagent can inspect but never edit or execute.
@@ -167,6 +166,7 @@ impl ChannelSpawner {
             fork_context: false,
             owner: SubagentOwner::Task,
             cancel_token: tokio_util::sync::CancellationToken::new(),
+            spawn_root: Default::default(),
         };
         let backend = ChannelBackend::new(self.event_tx.clone());
         let result = backend

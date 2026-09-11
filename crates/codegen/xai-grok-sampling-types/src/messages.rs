@@ -170,12 +170,8 @@ pub enum ToolChoiceParam {
     Tool { name: String },
 }
 
-/// Extended thinking configuration
-///
-/// Three modes per the Anthropic Messages API:
-/// - Adaptive: 4.6+ models, API decides budget
-/// - Enabled: 4.0-4.5 models, explicit budget_tokens
-/// - Disabled: pre-thinking models or thinking_budget=0
+/// Three modes per the Anthropic Messages API: Adaptive: 4.6+ models, API decides budget; Enabled: 4.0-4.5 models,
+/// explicit budget_tokens; Disabled: pre-thinking models or thinking_budget=0.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThinkingDisplay {

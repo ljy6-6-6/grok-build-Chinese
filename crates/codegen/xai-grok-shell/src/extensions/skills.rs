@@ -1,6 +1,7 @@
 use agent_client_protocol as acp;
 use serde::{Deserialize, Serialize};
 
+use crate::extensions::agent_runtime::AgentRuntime;
 use crate::util::config as cli_config;
 use xai_grok_agent::prompt::skills::{
     CompatConfig, SkillInfo, SkillsConfig, list_skills_with_plugins,
@@ -116,7 +117,10 @@ async fn reload_skills(
     compat: CompatConfig,
 ) -> Vec<SkillInfo> {
     let config = cli_config::load_config().await.skills;
-    let discovery = list_skills_with_plugins(Some(cwd), &config, plugin_registry, compat);
+    let project_trusted =
+        crate::agent::folder_trust::project_scope_allowed(std::path::Path::new(cwd));
+    let discovery =
+        list_skills_with_plugins(Some(cwd), &config, plugin_registry, compat, project_trusted);
     match tokio::time::timeout(std::time::Duration::from_secs(5), discovery).await {
         Ok(skills) => skills,
         Err(_) => {
@@ -262,7 +266,7 @@ fn extra_skill_dirs_from_config() -> Vec<String> {
 
 #[tracing::instrument(skip_all, fields(method = %args.method))]
 pub async fn handle(
-    agent: &crate::agent::mvp_agent::MvpAgent,
+    agent: &dyn AgentRuntime,
     args: &acp::ExtRequest,
     plugin_registry: Option<&xai_grok_agent::plugins::PluginRegistry>,
     compat: CompatConfig,
@@ -390,6 +394,9 @@ pub async fn handle(
         "x.ai/skills/list" => {
             let req: SkillsListRequest = serde_json::from_str(args.params.get())?;
             let skills = reload_skills(&req.cwd, plugin_registry, compat).await;
+            // Sessions otherwise learn about disk changes only from inotify,
+            // which misses writes made through another NFS client.
+            agent.refresh_skill_baseline_for_all_sessions();
             super::to_ext_response(Ok(SkillsListResponse { skills }))
         }
 

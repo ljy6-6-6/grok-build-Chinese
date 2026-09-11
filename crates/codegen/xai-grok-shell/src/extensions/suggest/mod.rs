@@ -50,12 +50,9 @@ struct GhostSuggestion {
     source: String,
 }
 
-/// One completion row. Wire-compat contract (leader mode and the cloud bridge mix shell/pager versions):
-/// - `insert_text` is ALWAYS a safe whole-line replacement: range-unaware pagers `set_text` it, so it must never be a bare token.
-/// - `replace_range` and `token_text` are the additive token-in-place upgrade:
-///   byte offsets `[start, end)` into the request `text` and the text that replaces that span.
-///   Range-aware pagers use them as an ATOMIC pair.
-///   A range without `token_text` (history/AI whole-line rows, `insert_text` doubles as the span replacement) degrades to the whole-line accept.
+/// One completion row. Wire-compat contract (leader mode and the cloud bridge mix shell/pager versions): `insert_text` is ALWAYS a safe whole-line replacement: range-unaware pagers `set_text` it, so it must never be a bare token.
+/// `replace_range` and `token_text` are the additive token-in-place upgrade: byte offsets `[start, end)` into the request `text` and the text that replaces that span. Range-aware pagers use them as an ATOMIC pair.
+/// A range without `token_text` (history/AI whole-line rows, `insert_text` doubles as the span replacement) degrades to the whole-line accept.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CompletionItem {
@@ -111,32 +108,21 @@ pub(crate) struct RankedSuggestion {
     pub(crate) truncated: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::AsRefStr, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub(crate) enum SuggestionSource {
     History,
     Path,
     File,
     AI,
 }
-
-impl SuggestionSource {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::History => "history",
-            Self::Path => "path",
-            Self::File => "file",
-            Self::AI => "ai",
-        }
-    }
-}
-
 impl From<RankedSuggestion> for CompletionItem {
     fn from(s: RankedSuggestion) -> Self {
         Self {
             display: s.display,
             description: s.description,
             insert_text: s.insert_text,
-            source: s.source.as_str().to_owned(),
+            source: s.source.as_ref().to_owned(),
             priority: s.priority,
             replace_range: s.replace_range,
             token_text: s.token_text,
@@ -192,8 +178,7 @@ struct SuggestPromptResponse {
     generation: u64,
 }
 
-/// Upper bound on the suggestion round-trip.
-/// Turn-end prediction is not latency-critical: the user is reading the agent's reply, and the idle window after a turn is typically long.
+/// Upper bound on the suggestion round-trip. Turn-end prediction is not latency-critical: the user is reading the agent's reply, and the idle window after a turn is typically long.
 /// But a hung call must not pin the oneshot forever. Reasoning models (e.g. `grok-4.6`) can take ~30s on a cold cache.
 /// A late suggestion is still useful; the pager's generation guard and empty-prompt gating discard it if the user moved on.
 const SUGGEST_PROMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
@@ -335,7 +320,7 @@ fn aggregate(
         GhostSuggestion {
             full_text: s.insert_text.clone(),
             suffix: suffix.to_owned(),
-            source: s.source.as_str().to_owned(),
+            source: s.source.as_ref().to_owned(),
         }
     });
 
@@ -594,11 +579,8 @@ mod tests {
         assert_eq!(results[0].token_text.as_deref(), Some("grep"));
     }
 
-    /// Equal-priority items must keep their provider-internal order.
-    /// The file provider ships pre-ranked rows (fuzzy tier/score/dirs-first) at ONE shared priority.
-    /// Its ranking reaches the wire only through this sort's stability.
-    /// The input is deliberately non-alphabetical, above the small-slice insertion-sort threshold, and interleaved with a second priority class.
-    /// A `sort_unstable_by` swap therefore turns this test red.
+    /// Equal-priority items must keep their provider-internal order. The file provider ships pre-ranked rows (fuzzy tier/score/dirs-first) at ONE shared priority. Its ranking reaches the wire only through this sort's stability.
+    /// The input is deliberately non-alphabetical, above the small-slice insertion-sort threshold, and interleaved with a second priority class. A `sort_unstable_by` swap therefore turns this test red.
     #[test]
     fn aggregate_preserves_provider_order_within_equal_priority() {
         let file: Vec<_> = (0..32)

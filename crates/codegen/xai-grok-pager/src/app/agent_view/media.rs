@@ -45,7 +45,6 @@ impl MediaFileStamp {
 
 /// Insert `bytes` into the bounded cache, evicting arbitrary entries to fit.
 /// An oversized payload (at or above `max_bytes`) is returned to the caller instead of inserted.
-/// It is used transiently for the current transmit/place.
 /// One giant image can thus neither flush the whole cache nor accumulate unbounded bytes across frames.
 fn cache_inline_media_bytes(
     cache: &mut std::collections::HashMap<std::path::PathBuf, Vec<u8>>,
@@ -225,14 +224,8 @@ impl AgentView {
     }
 
     /// Paint each visible Mermaid affordance row (`◇ mermaid [Open Image] [Copy Image Path] [Copy Source]`) and register its click hit-rects.
-    ///
-    /// The leading `◇ mermaid` label is a dim, non-clickable marker.
     /// Every button is always clickable (`[Open]`/`[Copy path]` render lazily on click).
-    /// A button whose hit-rect is under the mouse is highlighted, the rest are dim.
-    /// A trailing dim `rendering…` hint follows the buttons while an on-click render for that diagram is in flight.
-    /// The whole layout (label, button, and hint columns) comes from [`affordance_row`](crate::scrollback::blocks::mermaid_content::affordance_row).
     /// The painted labels and the hit-rects therefore can't drift.
-    /// Each segment is clipped to `screen_rect.width` (which excludes the timestamp reserve).
     pub(super) fn paint_diagram_affordances(
         &mut self,
         buf: &mut Buffer,
@@ -338,15 +331,8 @@ impl AgentView {
     }
 
     /// Drain this agent's inline-media placement tracking and return the Kitty delete escapes for every image it has placed on the GPU.
-    ///
     /// Kitty graphics are independent of the cell grid: they survive redraws until explicitly deleted.
     /// Every regular clear path lives inside [`AgentView::draw`].
-    /// When another view takes over the frame (e.g. the agent dashboard), those per-frame clears stop running.
-    /// The caller then uses this to delete whatever this agent left on screen.
-    /// Resetting `inline_media_ids` forces a fresh transmit when this agent next draws.
-    /// Any active inline playback is stopped, mirroring the scrolled-off-screen clear path.
-    ///
-    /// Returns `None` when this agent (and its subagent views) has no placements.
     pub(crate) fn take_inline_media_clear_escapes(&mut self) -> Option<String> {
         let mut clear_esc = self
             .take_own_inline_media_clear_escapes()
@@ -358,7 +344,6 @@ impl AgentView {
     }
 
     /// This view's own placements only, leaving `subagent_views` untouched.
-    /// The fullscreen-subagent takeover in [`AgentView::draw`] uses it.
     /// The parent's images must be deleted, but the child is about to draw and manages its own placements.
     /// Draining it too would just force a re-transmit.
     pub(super) fn take_own_inline_media_clear_escapes(&mut self) -> Option<String> {
@@ -416,8 +401,6 @@ impl AgentView {
 
     /// Refresh [`Self::media_link_paths`] (the absolute paths of media generated in this transcript) from scrollback.
     /// The refresh runs only when the scrollback generation has changed.
-    /// The model prints short session-relative paths (`images/1.jpg`).
-    /// Resolving them against the actual generated files ties each link to the file its message produced (correct across forks).
     /// It never opens an out-of-session or arbitrary file.
     pub(crate) fn ensure_media_link_paths(&mut self) {
         let generation = self.scrollback.generation();
@@ -589,7 +572,6 @@ impl AgentView {
 
     /// Route a Mermaid affordance-row click.
     /// `[Copy source]` copies the diagram source (no render).
-    /// `[Open]`/`[Copy path]` render it lazily at the live theme/width and then open the PNG / copy its path.
     /// `source` is moved into the renderer, never cloned. `copy_to_clipboard` owns the copy toast.
     fn on_mermaid_affordance_click(
         &mut self,

@@ -16,7 +16,7 @@ use tokio::{
 };
 
 use rmcp::{
-    ClientHandler, ServiceExt,
+    ClientHandler, ClientLifecycleMode, ClientServiceExt,
     model::{
         CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation,
         PaginatedRequestParams,
@@ -34,8 +34,10 @@ use rmcp::{
 
 pub use crate::auth_status::McpOauthDiscovery;
 use crate::auth_status::{HttpAuthDecision, decide_http_auth_from_disk};
+pub use crate::generation::{Generation, Replacement, Superseded};
 use crate::oauth::OAUTH_DISCOVERY_TIMEOUT;
 use crate::oauth_config::McpOAuthConfig;
+pub use crate::shared_mcp_state::SharedMcpState;
 
 use xai_grok_tools::types::{
     output::{MCPOutput, MCPOutputDetails, ToolOutput},
@@ -48,12 +50,8 @@ use xai_grok_tools::util::{ProcessGroup, ProcessScope};
 /// Canonical definition lives in `xai_grok_workspace_types`; re-exported here for callers that historically imported it from this module.
 pub use xai_grok_workspace_types::MCP_TOOL_NAME_DELIMITER;
 
-/// Routing hint for first-party local app MCP endpoints: which agent/session
-/// a request belongs to. **Advisory only, never authentication** — any local
-/// process can set it, so receivers must not treat it as proof of identity.
-/// Caller-supplied configs cannot smuggle it: the header is stripped from
-/// every HTTP/SSE config and re-added only when the spawn context asks for
-/// it (mirroring the `GROK_SESSION_ID` env protection on stdio servers).
+/// Routing hint for first-party local app MCP endpoints: which agent/session a request belongs to. **Advisory only, never authentication** — any local process can set it, so receivers must not treat it as proof of identity.
+/// Caller-supplied configs cannot smuggle it: the header is stripped from every HTTP/SSE config and re-added only when the spawn context asks for it (mirroring the `GROK_SESSION_ID` env protection on stdio servers).
 pub const GROK_AGENT_ID_HEADER: &str = "X-Grok-Agent-ID";
 
 /// Reqwest 0.13 twin of the 0.12 adapters in `xai_grok_extra_ca`.
@@ -73,12 +71,8 @@ fn with_extra_root_certificates(mut builder: reqwest::ClientBuilder) -> reqwest:
 }
 
 /// Regex for strictest cross-provider tool name validation.
-///
-/// Requirements across providers:
-/// - Anthropic/OpenAI: `^[a-zA-Z0-9_-]{1,64}$` (allows starting with digit/hyphen)
-/// - Google Gemini: `^[a-zA-Z_][a-zA-Z0-9_.-]{0,63}$` (must start with letter/underscore, allows dots)
-///
-/// Strictest common denominator: must start with letter/underscore, only alphanumeric/_/- allowed, max 64 chars.
+/// Some providers allow a leading digit or hyphen; others require a letter or underscore and allow dots.
+/// Strictest common denominator: start with a letter or underscore, only alphanumeric/_/-, max 64 chars.
 static TOOL_NAME_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_-]{0,63}$").unwrap());
 
@@ -222,75 +216,59 @@ pub struct McpConfigDiff {
     pub retained: Vec<McpServerName>,
 }
 
+/// A server-set change together with the claim for the pass that covers it, taken in one critical section.
+#[must_use = "dropping the change releases the successor pass's claim"]
+pub struct McpConfigChange {
+    pub diff: McpConfigDiff,
+    pub claim: InitClaimGuard,
+}
+
 /// MCP server name used as the key in client/tool maps (e.g. `"github"`, `"grok_com_linear"`).
 pub type McpServerName = String;
 
 /// Unqualified MCP tool name (e.g. `"create_issue"`, without the `server__` prefix).
 type ToolName = String;
 
-/// Typed state machine for MCP-pool initialization.
-///
-/// Lifecycle:
-///
-/// ```text
-///   ┌─────────────┐  try_start  ┌──────────────────────┐
-///   │  NotStarted │ ──────────▶ │  Starting{handshakes}│
-///   └─────────────┘ ◀── cancel ─┴──────────┬───────────┘
-///         ▲                                │ finish
-///         │ cancel                         ▼
-///         │                  ┌──────────────────────────┐
-///         └──────────────────┤  Finished{handshakes}    │
-///                            └──────────────────────────┘
-/// ```
-///
-/// `Starting` is the pre-`finish_init` window; `Finished` is the post-`finish_init` window where background handshakes may still be draining.
+/// Init state. `Starting` precedes `finish_init`, which fires early so the session is not blocked on MCP; `Finished`
+/// may still have handshakes draining; `Complete` is set by the pass once its last publication has landed.
 #[derive(Debug, Default)]
 pub enum InitProgress {
-    /// Init has never been started, or was cancelled / reset by a config change.
     #[default]
     NotStarted,
-    /// `try_start_init` was called; per-server tasks may be spawning; `finish_init` has NOT yet fired.
-    /// `handshaking` tracks the set of servers whose background handshake is in flight.
     Starting {
+        /// Set once `mark_handshaking` has seeded the set.
+        seeded: bool,
         handshaking: std::collections::HashSet<McpServerName>,
     },
-    /// `finish_init` fired (deliberately early, so the session is not blocked on MCP for non-MCP work).
-    /// Background per-server handshakes may still be running; `handshaking` shrinks as each completes.
-    /// `is_complete()` returns `true` only when it is empty.
     Finished {
         handshaking: std::collections::HashSet<McpServerName>,
     },
+    Complete,
 }
 
 impl InitProgress {
-    /// True iff every per-server handshake has settled and `finish_init` has fired.
-    /// Pairs with [`Self::is_in_progress`].
     pub fn is_complete(&self) -> bool {
-        matches!(self, Self::Finished { handshaking } if handshaking.is_empty())
+        matches!(self, Self::Complete)
     }
 
-    /// True iff any init work is outstanding: either we are pre-`finish_init`, or per-server handshakes are still in flight in the background.
+    /// Init work is outstanding, including the pass's final publication.
     pub fn is_in_progress(&self) -> bool {
-        match self {
-            Self::Starting { .. } => true,
-            Self::Finished { handshaking } => !handshaking.is_empty(),
-            Self::NotStarted => false,
-        }
+        matches!(self, Self::Starting { .. } | Self::Finished { .. })
     }
 
     /// True iff `finish_init` has fired, regardless of whether background handshakes are still draining.
     /// Used for diagnostic logging that tells the pre-finish window apart from finished with handshakes still draining.
     pub fn has_finished_init(&self) -> bool {
-        matches!(self, Self::Finished { .. })
+        matches!(self, Self::Finished { .. } | Self::Complete)
     }
 
     /// True iff the named server is currently handshaking.
     pub fn is_server_handshaking(&self, name: &str) -> bool {
         match self {
-            Self::Starting { handshaking } | Self::Finished { handshaking } => {
+            Self::Starting { handshaking, .. } | Self::Finished { handshaking } => {
                 handshaking.contains(name)
             }
-            Self::NotStarted => false,
+            Self::NotStarted | Self::Complete => false,
         }
     }
 
@@ -298,10 +276,10 @@ impl InitProgress {
     /// Empty when [`Self::NotStarted`] or fully complete.
     pub fn handshaking_servers(&self) -> impl Iterator<Item = &McpServerName> {
         match self {
-            Self::Starting { handshaking } | Self::Finished { handshaking } => {
+            Self::Starting { handshaking, .. } | Self::Finished { handshaking } => {
                 Some(handshaking.iter())
             }
-            Self::NotStarted => None,
+            Self::NotStarted | Self::Complete => None,
         }
         .into_iter()
         .flatten()
@@ -310,21 +288,10 @@ impl InitProgress {
     /// Number of in-flight per-server handshakes.
     pub fn handshaking_count(&self) -> usize {
         match self {
-            Self::Starting { handshaking } | Self::Finished { handshaking } => handshaking.len(),
-            Self::NotStarted => 0,
-        }
-    }
-
-    /// Transition `NotStarted` to `Starting` with an empty handshaking set.
-    /// Returns `true` on successful transition, `false` if init was already started or finished.
-    pub fn try_start(&mut self) -> bool {
-        if matches!(self, Self::NotStarted) {
-            *self = Self::Starting {
-                handshaking: std::collections::HashSet::new(),
-            };
-            true
-        } else {
-            false
+            Self::Starting { handshaking, .. } | Self::Finished { handshaking } => {
+                handshaking.len()
+            }
+            Self::NotStarted | Self::Complete => 0,
         }
     }
 
@@ -332,7 +299,7 @@ impl InitProgress {
     /// No-op if already `Finished`; warns and stays put if called from `NotStarted`, which would be a caller bug.
     pub fn finish(&mut self) {
         match self {
-            Self::Starting { handshaking } => {
+            Self::Starting { handshaking, .. } => {
                 // Move only the inner set, leaving the outer `&mut self` ready to be reassigned
                 // `mem::take(self)` would force a `NotStarted` placeholder and a redundant put-back in the already-Finished arm below
                 let handshaking = std::mem::take(handshaking);
@@ -340,13 +307,17 @@ impl InitProgress {
             }
             // Idempotent: already past the finish boundary
             // Per-server handshakes continue draining via `mark_handshake_complete`
-            Self::Finished { .. } => {}
+            Self::Finished { .. } | Self::Complete => {}
             Self::NotStarted => {
                 tracing::warn!(
                     "InitProgress::finish called from NotStarted; staying in NotStarted"
                 );
             }
         }
+    }
+
+    pub fn complete(&mut self) {
+        *self = Self::Complete;
     }
 
     /// Transition any state to `NotStarted`, clearing all per-server progress.
@@ -359,11 +330,18 @@ impl InitProgress {
     /// Warns if called from `NotStarted`: a handshake starting without `try_start_init` is a caller bug.
     pub fn mark_handshaking(&mut self, names: impl IntoIterator<Item = McpServerName>) {
         match self {
-            Self::Starting { handshaking } | Self::Finished { handshaking } => {
+            Self::Starting {
+                seeded,
+                handshaking,
+            } => {
+                *seeded = true;
                 handshaking.extend(names);
             }
-            Self::NotStarted => {
-                tracing::warn!("InitProgress::mark_handshaking called from NotStarted; ignoring");
+            Self::Finished { handshaking } => {
+                handshaking.extend(names);
+            }
+            Self::NotStarted | Self::Complete => {
+                tracing::warn!("InitProgress::mark_handshaking called outside a pass; ignoring");
             }
         }
     }
@@ -372,22 +350,10 @@ impl InitProgress {
     /// No-op if not present or if `NotStarted`.
     pub fn mark_handshake_complete(&mut self, name: &str) {
         match self {
-            Self::Starting { handshaking } | Self::Finished { handshaking } => {
+            Self::Starting { handshaking, .. } | Self::Finished { handshaking } => {
                 handshaking.remove(name);
             }
-            Self::NotStarted => {}
-        }
-    }
-
-    /// Clear the handshaking set entirely.
-    /// The proxy-mode and bg-handshake completion paths use it as a defensive sweep after the per-server `mark_handshake_complete` calls.
-    /// It leaves the set empty before/after `finish_init` fires.
-    pub fn clear_handshaking(&mut self) {
-        match self {
-            Self::Starting { handshaking } | Self::Finished { handshaking } => {
-                handshaking.clear();
-            }
-            Self::NotStarted => {}
+            Self::NotStarted | Self::Complete => {}
         }
     }
 }
@@ -403,9 +369,7 @@ pub struct AcpServerEntry {
 }
 
 /// The session's in-process SDK MCP servers (declared via `_meta["x.ai/mcp/servers"]`), bundled with the shared reverse-RPC invoker.
-/// Held as `McpState::acp_mcp: Option<_>` so the servers and the invoker are present or absent together.
 /// The registry survives `update_configs` clears; config reloads only touch `configs`/`owned_clients`.
-/// Per-server config.toml overrides are NOT cached here; they are re-resolved per init (see [`McpState::build_pending_acp_clients`]).
 struct AcpMcpRegistry {
     /// Registered servers (`name -> serverId`).
     servers: Vec<AcpServerEntry>,
@@ -413,14 +377,8 @@ struct AcpMcpRegistry {
     invoker: Arc<dyn crate::acp_transport::AcpReverseInvoker>,
 }
 
-/// Consolidated MCP state behind a single lock. Generation counter detects stale inits.
-/// Retry lifecycle of a server whose spawn failed as unreachable ([`McpError::Unreachable`]).
 /// `Cooling` waits out the backoff; `InFlight` marks a running respawn attempt and carries the token that attempt must present to settle.
 /// An in-flight server is never handed to another trigger, and a token invalidated by config teardown makes the stale attempt's results unusable.
-///
-/// `started_at` bounds an attempt's exclusivity: an attempt whose future was cancelled (turn cancel, session shutdown mid-await) never settles.
-/// After [`McpState::UNREACHABLE_ATTEMPT_LEASE`] such a server becomes takeable again with a fresh token.
-/// The zombie attempt's old token then no-ops on settle and its client (if any) is discarded on the failed `finish`.
 #[derive(Debug, Clone, Copy)]
 enum UnreachableRetry {
     Cooling {
@@ -432,10 +390,24 @@ enum UnreachableRetry {
     },
 }
 
+/// Ownership of init. [`McpState`] keeps only a `Weak` to it, so a dropped pass releases ownership and the next
+/// waiter re-owns.
+#[must_use = "dropping the guard releases init ownership"]
+pub struct InitClaimGuard {
+    token: std::sync::Arc<()>,
+    signal: std::sync::Arc<tokio::sync::Notify>,
+}
+
+impl Drop for InitClaimGuard {
+    fn drop(&mut self) {
+        self.signal.notify_waiters();
+    }
+}
+
+/// Consolidated MCP state behind a single lock.
 pub struct McpState {
     pub configs: Vec<acp::McpServer>,
     pub meta_config_map: McpMetaConfigMap,
-    /// Clients owned by this session; cleared on config changes.
     pub owned_clients: crate::owned_clients::OwnedClients,
     /// Clients inherited from parent via `SharedMcpPool`; never cleared by config changes.
     pub shared_clients: HashMap<McpServerName, Arc<McpClient>>,
@@ -445,7 +417,6 @@ pub struct McpState {
     /// Init lifecycle behind the [`InitProgress`] state machine, which rules out nonsensical combinations like "initialized AND initializing".
     /// Private on purpose: external callers must go through the typed transition methods, not poke the variant directly.
     init_progress: InitProgress,
-    pub generation: u64,
     /// Maps qualified tool name to its `_meta` from MCP tools/list. Populated during init.
     pub mcp_tool_meta: HashMap<String, serde_json::Value>,
     /// Maps qualified tool name to its protocol `icons` from MCP tools/list.
@@ -453,9 +424,7 @@ pub struct McpState {
     /// HTTP servers that support OAuth but haven't been authenticated yet.
     pub auth_required: std::collections::HashSet<McpServerName>,
     /// Servers whose background init failed (handshake error, `tools/list` error, or overall init timeout) even though a client object exists.
-    /// Each maps to a short failure cause surfaced to the model in the MCP reminder.
-    /// Surfaced as `Unavailable` in status snapshots, so a server that never finished init (e.g. wedged on `tools/list`) does not show as `Ready`.
-    /// Cleared when the server begins a fresh init attempt.
+    /// Surfaced as `Unavailable` in status snapshots, so a server that never finished init does not show as `Ready`.
     pub init_failed: std::collections::HashMap<McpServerName, String>,
     /// Servers whose last spawn failed because the endpoint was unreachable (connectivity, not auth; see [`McpError::Unreachable`]).
     /// Its keys are a subset of [`Self::init_failed`]'s; cleared together with it.
@@ -468,19 +437,14 @@ pub struct McpState {
     pub disabled_tools: HashMap<McpServerName, std::collections::HashSet<ToolName>>,
     /// Stashed registrations for disabled tools so they can be re-enabled without a full MCP re-init (no need to call `list_tools` again).
     pub disabled_tool_registrations: HashMap<String, McpToolRegistration>,
+    /// `Weak` to the live [`InitClaimGuard`]; dead once the owning pass drops it.
+    init_owner: std::sync::Weak<()>,
+    init_signal: std::sync::Arc<tokio::sync::Notify>,
+    generation: Generation,
     event_writer: xai_grok_session_events::EventWriter,
     /// Sender wired by the session actor to its `StatusDispatcher` task.
-    /// When `Some`, the state and every [`McpClient`] reached through [`Self::all_clients`] / [`Self::get_client`] forward [`McpClientEvent`]s here.
-    /// Events are coalesced and fanned out as ACP `x.ai/mcp/server_status` notifications.
-    ///
     /// Intentionally `None` in subagent-pool / shared-pool snapshots ([`SharedMcpPool`]), where the **parent** session owns the notification flow.
-    /// Clients in those snapshots inherit the parent's `Arc<McpClient>`, with the parent's `notify_tx` still pointing at the parent.
-    /// Duplicating event flow into a subagent would double-push every event.
-    ///
     /// **Private on purpose.** Callers MUST go through [`Self::set_client_event_tx`], which fans the sender into every `owned_clients` entry.
-    /// A direct field write would leave already-owned clients with `notify_tx = None`.
-    /// That silently drops their `tools/list_changed`, `Ready`, and `HandshakeFailed` emits.
-    /// Read access is via [`Self::client_event_tx`].
     client_event_tx: Option<tokio::sync::mpsc::UnboundedSender<McpClientEvent>>,
     elicitation_job_tx: Option<crate::elicitation::ElicitationInbox>,
 }
@@ -498,7 +462,6 @@ impl McpState {
             shared_clients: HashMap::new(),
             acp_mcp: None,
             init_progress: InitProgress::default(),
-            generation: 0,
             mcp_tool_meta: HashMap::new(),
             mcp_tool_icons: HashMap::new(),
             auth_required: std::collections::HashSet::new(),
@@ -507,20 +470,26 @@ impl McpState {
             unreachable_attempt_counter: 0,
             disabled_tools: HashMap::new(),
             disabled_tool_registrations: HashMap::new(),
+            init_owner: std::sync::Weak::new(),
+            init_signal: std::sync::Arc::new(tokio::sync::Notify::new()),
+            generation: Generation::current(),
             event_writer: xai_grok_session_events::EventWriter::noop(),
             client_event_tx: None,
             elicitation_job_tx: None,
         }
     }
 
+    pub fn init_wait_signal(&self) -> std::sync::Arc<tokio::sync::Notify> {
+        std::sync::Arc::clone(&self.init_signal)
+    }
+
+    pub fn notify_init_waiters(&self) {
+        self.init_signal.notify_waiters();
+    }
+
     /// Install (or remove) the [`McpClientEvent`] sender owned by the session-actor `StatusDispatcher`.
-    ///
-    /// Synchronous: the per-client slot is a `parking_lot::Mutex`, so the iteration does not hold `&mut McpState` across `.await`.
-    ///
-    /// Side effect: clones the sender into every existing client's shared `notify_tx` slot.
-    /// New clients added later (e.g. a config diff re-spawning a server) MUST be wired by the caller via [`McpClient::set_event_tx`].
+    /// New clients added later MUST be wired by the caller via [`McpClient::set_event_tx`].
     /// Do that before `get_tool_registrations` so `ensure_initialized`'s `Ready`/`HandshakeFailed` emit fires with `Some(tx)`.
-    /// The `GrokClientHandler` cloned during `try_handshake` then reads through the same Arc.
     pub fn set_client_event_tx(
         &mut self,
         tx: Option<tokio::sync::mpsc::UnboundedSender<McpClientEvent>>,
@@ -578,11 +547,27 @@ impl McpState {
         self.acp_mcp = Some(AcpMcpRegistry { servers, invoker });
     }
 
+    pub fn has_failure_record(&self, name: &str) -> bool {
+        self.auth_required.contains(name) || self.init_failed.contains_key(name)
+    }
+
+    /// Inherited shared clients count: their tools are part of this session's init, so a shared-only session must not skip the init waits.
+    pub fn has_mcp_servers(&self) -> bool {
+        !self.configs.is_empty() || self.has_acp_servers() || !self.shared_clients.is_empty()
+    }
+
     /// Whether any in-process SDK MCP servers are registered (so the session knows to run MCP init even with no `configs`).
     pub fn has_acp_servers(&self) -> bool {
         self.acp_mcp
             .as_ref()
             .is_some_and(|acp| !acp.servers.is_empty())
+    }
+
+    /// Whether `name` is a registered in-process SDK server. The registry survives config changes, so its namespaces stay claimed across generations.
+    pub fn is_acp_server(&self, name: &str) -> bool {
+        self.acp_mcp
+            .as_ref()
+            .is_some_and(|acp| acp.servers.iter().any(|entry| entry.name == name))
     }
 
     /// Registered SDK servers not yet connected (no owned/shared client): the ones an init pass should build.
@@ -604,9 +589,6 @@ impl McpState {
     }
 
     /// Build [`McpClient`]s for registered ACP servers not already connected.
-    /// Appended to the init handshake batch so they register tools and land in `owned_clients` on the SAME path as HTTP/stdio servers.
-    ///
-    /// `overrides` is the per-server config.toml tuning (keyed by server name), resolved by the caller per init.
     /// Kept caller-side so this method stays pure (no file I/O under the `McpState` lock).
     pub fn build_pending_acp_clients(
         &self,
@@ -649,16 +631,25 @@ impl McpState {
         self.mcp_tool_icons.clear();
         self.disabled_tool_registrations.clear();
         self.configs = new_configs;
-        self.init_progress.cancel();
+        self.cancel_any_init();
         self.auth_required.clear();
         self.init_failed.clear();
         self.unreachable_retry.clear();
-        self.generation = self.generation.wrapping_add(1);
+        self.advance_generation(Replacement::ServerSetChange);
         true
     }
 
-    /// Per-server teardown shared by config-update paths.
-    /// Forgets every piece of per-server state so a removed or changed server leaves nothing stale behind.
+    fn advance_generation(&mut self, by: Replacement) {
+        self.generation.replace(by);
+        self.generation = Generation::current();
+        self.init_signal.notify_waiters();
+    }
+
+    pub fn current_generation(&self) -> Generation {
+        self.generation.clone()
+    }
+
+    /// Forgets every piece of per-server state, so a removed or changed server leaves nothing stale behind.
     fn forget_server(&mut self, name: &str) {
         self.owned_clients.remove(name);
         self.auth_required.remove(name);
@@ -746,8 +737,8 @@ impl McpState {
         );
 
         self.configs = new_configs;
-        self.init_progress.cancel();
-        self.generation = self.generation.wrapping_add(1);
+        self.cancel_any_init();
+        self.advance_generation(Replacement::ServerSetChange);
 
         Some(McpConfigDiff {
             added,
@@ -756,26 +747,31 @@ impl McpState {
         })
     }
 
-    /// Returns `true` only when init reached [`InitProgress::Finished`] AND every per-server handshake has settled (success or failure).
-    ///
+    /// [`Self::update_configs_diff`], handing the caller the successor pass's claim before any waiter can take it.
+    pub fn change_configs(&mut self, new_configs: Vec<acp::McpServer>) -> Option<McpConfigChange> {
+        let diff = self.update_configs_diff(new_configs)?;
+        Some(McpConfigChange {
+            diff,
+            claim: self.start_init(),
+        })
+    }
+
     /// The strict per-server check matters because session actors call [`Self::finish_init`] **early**, right after spawning processes.
-    /// That way the session is not blocked on MCP for non-MCP work.
-    /// Callers that gate MCP-tool dispatch on "is MCP actually ready" therefore need the *combined* check.
-    /// Examples: the Blocking-strategy waits in `prepare_tool_definitions_timed`, `wait_for_mcp_initialized`, and the tool-dispatch fast path.
     /// Otherwise they would race the per-server handshakes and the first tool call would land inside the [`ClientState::Initializing`] window.
-    ///
-    /// Delegates to [`InitProgress::is_complete`]; see that doc for the full state machine.
     pub fn is_initialized(&self) -> bool {
         self.init_progress.is_complete()
     }
 
-    /// Returns `true` whenever any init work is still outstanding: pre-`finish_init` OR a per-server handshake still running in the background.
-    ///
     /// Pairs with [`Self::is_initialized`] across the window between the early [`Self::finish_init`] and the handshaking set draining.
     /// In that window `is_initialized()` is still `false` (per-server work remains) AND `is_initializing()` is `true`.
     /// So wait-loops keep waiting instead of kicking off a second init.
     pub fn is_initializing(&self) -> bool {
-        self.init_progress.is_in_progress()
+        self.init_progress.is_in_progress() && self.init_owner.strong_count() > 0
+    }
+
+    /// The pass that owned init is gone with handshakes still marked.
+    pub fn is_init_abandoned(&self) -> bool {
+        self.init_progress.is_in_progress() && self.init_owner.strong_count() == 0
     }
 
     /// Returns `true` once `finish_init` has fired, regardless of whether per-server background handshakes are still draining.
@@ -790,51 +786,92 @@ impl McpState {
     }
 
     /// Try to start initialization.
-    /// Returns `true` if we transitioned from [`InitProgress::NotStarted`] to [`InitProgress::Starting`].
-    /// Returns `false` if init is already in progress or finished.
-    pub fn try_start_init(&mut self) -> bool {
-        self.init_progress.try_start()
+    /// `None` while a live pass owns init or once init is complete.
+    pub fn try_start_init(&mut self) -> Option<InitClaimGuard> {
+        if self.is_initializing() || self.init_progress.is_complete() {
+            return None;
+        }
+        Some(self.start_init())
     }
 
-    /// Transition [`InitProgress::Starting`] to [`InitProgress::Finished`], preserving the per-server handshaking set.
+    /// Cancels any pass, starts a new generation, and hands the caller the claim before any waiter can take it.
+    pub fn restart_init(&mut self) -> InitClaimGuard {
+        self.cancel_any_init();
+        self.advance_generation(Replacement::Rebuild);
+        self.start_init()
+    }
+
+    fn start_init(&mut self) -> InitClaimGuard {
+        // A dead pass may have left handshakes marked.
+        self.init_progress = InitProgress::Starting {
+            seeded: false,
+            handshaking: std::collections::HashSet::new(),
+        };
+        let token = std::sync::Arc::new(());
+        self.init_owner = std::sync::Arc::downgrade(&token);
+        InitClaimGuard {
+            token,
+            signal: std::sync::Arc::clone(&self.init_signal),
+        }
+    }
+
+    /// A generation change releases every claim, so a holder that awaited asks again under the lock.
+    pub(crate) fn owns_init(&self, guard: &InitClaimGuard) -> bool {
+        self.init_owner
+            .upgrade()
+            .is_some_and(|live| std::sync::Arc::ptr_eq(&live, &guard.token))
+    }
+
+    /// The token is cancelled under this lock, so the check holds for every write in the same critical section.
+    pub(crate) fn is_current(&self, generation: &Generation) -> bool {
+        !generation.is_cancelled()
+    }
+
+    /// Transition [`InitProgress::Starting`] to [`InitProgress::Finished`], preserving the per-server handshaking set; no-op for a stale `generation`.
     /// Called early (before per-server handshakes complete) so the session is unblocked for non-MCP work.
     /// `is_initialized()` still returns `false` until every handshake has reported via [`Self::mark_server_ready`].
     pub fn finish_init(&mut self) {
         self.init_progress.finish();
+        self.init_signal.notify_waiters();
     }
 
-    /// Cancel initialization back to [`InitProgress::NotStarted`].
-    /// Used when generation changed during init (config change races with active init) and on full reset.
-    pub fn cancel_init(&mut self) {
+    pub fn cancel_any_init(&mut self) {
+        self.init_owner = std::sync::Weak::new();
         self.init_progress.cancel();
+        self.init_signal.notify_waiters();
     }
 
-    /// Add server names to the handshaking set; call after filtering `configs_to_start`, before spawning per-server tasks.
+    /// Add server names to the handshaking set; call after filtering `configs_to_start`, before spawning per-server tasks; no-op for a stale `generation`.
     /// Only meaningful in [`InitProgress::Starting`] / [`InitProgress::Finished`]; logs a warning otherwise.
     pub fn mark_servers_initializing(&mut self, names: impl IntoIterator<Item = McpServerName>) {
         let names: Vec<McpServerName> = names.into_iter().collect();
-        // A fresh init attempt clears any prior failure for these servers so a server that recovers on retry stops showing as `Unavailable`
-        // Goes through clear_init_failed so the unreachable-respawn schedule is dropped with it
-        // A fresh attempt supersedes the schedule; a failure re-records it
+        // A fresh attempt clears the prior verdicts (and the unreachable-respawn schedule); a failure re-records them.
         for name in &names {
             self.clear_init_failed(name);
+            self.auth_required.remove(name);
         }
         self.init_progress.mark_handshaking(names);
+        // Servers outside the set stop being pending here.
+        self.init_signal.notify_waiters();
     }
 
-    /// Remove a server from the handshaking set (on success or failure of its handshake). Safe if not present.
+    /// Remove a server from the handshaking set (on success or failure of its handshake). Safe if not present; no-op for a stale `generation`.
     pub fn mark_server_ready(&mut self, name: &str) {
         self.init_progress.mark_handshake_complete(name);
+        self.init_signal.notify_waiters();
+    }
+
+    /// A live pass may still hand `name` a client.
+    pub fn is_server_pending(&self, name: &str) -> bool {
+        self.is_initializing()
+            && match &self.init_progress {
+                InitProgress::Starting { seeded: false, .. } => true,
+                progress => progress.is_server_handshaking(name),
+            }
     }
 
     /// Record a per-server background-init failure for status reporting, routing it to the correct set so the two stay disjoint.
-    ///
-    /// `needs_auth` failures are owned by the auth state machine.
-    /// Its recovery paths (`handle_mcp_auth_trigger`, `retry_auth_required_servers`) re-handshake and clear `auth_required`.
     /// Such servers must NOT also land in `init_failed`, or a server that authenticates would stay reported as `Unavailable` with zero tools.
-    /// Every other failure (handshake / `tools/list` error or init timeout) goes to `init_failed` so the server surfaces as `Unavailable`.
-    ///
-    /// `detail` is a short cause stored for non-auth failures (the value in [`Self::init_failed`]); ignored for `needs_auth`.
     pub fn record_init_failure(&mut self, name: &str, needs_auth: bool, detail: Option<String>) {
         if needs_auth {
             self.auth_required.insert(name.to_string());
@@ -859,9 +896,7 @@ impl McpState {
     /// Far above any bounded spawn and handshake, so it only fires for attempts whose future was cancelled and can never settle.
     pub const UNREACHABLE_ATTEMPT_LEASE: std::time::Duration = std::time::Duration::from_secs(600);
 
-    /// Record a spawn failure caused by an unreachable endpoint ([`McpError::Unreachable`]).
-    /// Surfaces as `Unavailable` via [`Self::init_failed`] like any other init failure.
-    /// Additionally schedules the server for a respawn attempt after [`Self::UNREACHABLE_RETRY_COOLDOWN`].
+    /// Record a spawn failure caused by an unreachable endpoint ([`McpError::Unreachable`]); no-op for a stale `generation`.
     /// Never demotes an in-flight attempt: its settle call owns the next transition.
     pub fn record_unreachable_failure(&mut self, name: &str, detail: String) {
         self.record_unreachable_failure_at(
@@ -887,12 +922,7 @@ impl McpState {
     }
 
     /// Servers due for an unreachable-respawn attempt: cooling finished and the server is still configured.
-    /// Each returned server transitions to `InFlight` with a fresh attempt token.
     /// An in-flight server is not a candidate, so concurrent triggers cannot double-spawn even while an attempt outlives the cooldown.
-    /// The token is the attempt's proof of ownership: every settle path requires it.
-    /// Config teardown (`forget_server` / full replace) invalidates it.
-    /// A stale attempt can then neither install over a newer client nor re-pollute cleaned records.
-    /// The next cooldown starts when the attempt settles as failed.
     pub fn take_unreachable_retry_candidates(&mut self) -> Vec<(McpServerName, u64)> {
         self.take_unreachable_retry_candidates_at(std::time::Instant::now())
     }
@@ -981,11 +1011,13 @@ impl McpState {
         true
     }
 
-    /// Clear the entire handshaking set in one shot.
+    /// Clear the entire handshaking set in one shot; no-op for a stale `generation`.
     /// Used as a defensive sweep after the per-server [`Self::mark_server_ready`] calls; cheap no-op if already empty.
     /// Callers: the proxy-mode "init complete" path and the bg-handshake completion path.
-    pub fn mark_all_servers_ready(&mut self) {
-        self.init_progress.clear_handshaking();
+    /// A step the pass takes after its last publication, so a waiter released here searches the complete tool set.
+    pub fn complete_init(&mut self) {
+        self.init_progress.complete();
+        self.init_signal.notify_waiters();
     }
 
     /// True iff the named server's handshake is still in flight.
@@ -1011,17 +1043,18 @@ impl McpState {
         self.init_progress.handshaking_count()
     }
 
-    /// Get current generation (for stale check after async init)
-    pub fn generation(&self) -> u64 {
-        self.generation
-    }
-
     /// Look up a client by server name.
     /// Owned clients take priority (they can override inherited ones).
     pub fn get_client(&self, name: &str) -> Option<&Arc<McpClient>> {
         self.owned_clients
             .get(name)
             .or_else(|| self.shared_clients.get(name))
+    }
+
+    /// Whether `client` is still the one installed under `name`.
+    pub fn has_client(&self, name: &str, client: &Arc<McpClient>) -> bool {
+        self.get_client(name)
+            .is_some_and(|installed| Arc::ptr_eq(installed, client))
     }
 
     /// Iterate over all clients (owned first, then shared, skipping shared entries whose name is overridden by an owned client).
@@ -1047,9 +1080,6 @@ impl McpState {
 }
 
 /// Snapshot of an MCP connection pool, taken at subagent spawn time.
-///
-/// The HashMap is cloned (cheap, values are `Arc<McpClient>`), so the subagent's map is independent of the parent's.
-/// The `Arc<McpClient>` entries are shared: both parent and child use the same transport.
 /// This is intentionally snapshot-based, not live-updating.
 #[derive(Clone)]
 pub struct SharedMcpPool {
@@ -1097,9 +1127,7 @@ impl SharedMcpPool {
     }
 
     /// Retain only clients whose name satisfies `predicate`.
-    ///
     /// Only filters the `clients` map; `configs` and `meta_config_map` are left unchanged.
-    /// Callers that need config-level consistency should filter those separately.
     /// In the subagent inheritance path this is fine because `import_shared_clients` only iterates `clients`.
     pub fn retain_clients(&mut self, predicate: impl Fn(&str) -> bool) {
         self.clients.retain(|name, _| predicate(name));
@@ -1285,8 +1313,6 @@ impl McpError {
     }
 
     /// True for failures that say nothing about the server being broken (only about the path to it) and are therefore worth an automatic respawn.
-    /// Matches the typed connectivity verdicts ([`Self::Unreachable`], [`Self::Timeout`]).
-    /// Also matches handshake/client errors whose message is a transport-level failure (connection refused/reset mid-handshake).
     /// Protocol rejections and malformed responses stay non-retryable.
     pub fn is_transient_connectivity(&self) -> bool {
         match self {
@@ -1362,10 +1388,7 @@ fn is_transport_error_message(message: &str) -> bool {
 
 /// True when a failed refresh-token grant was a network-level failure that never reached the IdP (the token's validity is unknown, presumed good).
 /// IdP rejections and missing credentials stay terminal (escalate to browser).
-/// rmcp 2.1 collapses the error into `TokenRefreshFailed(String)`, so this anchors on the `oauth2` crate's stable `Display` texts via `starts_with`.
 /// An IdP error description can't spoof a `starts_with` match.
-/// `"Request failed"` means network; `"Failed to parse server response"` means non-OAuth 5xx/proxy bodies.
-/// `"Server returned error response: …"` does NOT match.
 pub(crate) fn mcp_refresh_failure_is_transient(err: &rmcp::transport::auth::AuthError) -> bool {
     match err {
         rmcp::transport::auth::AuthError::TokenRefreshFailed(msg) => {
@@ -1377,9 +1400,7 @@ pub(crate) fn mcp_refresh_failure_is_transient(err: &rmcp::transport::auth::Auth
 
 /// True if an MCP error *message* indicates an auth rejection (vs. a transport drop, timeout, or protocol error).
 /// Host recovery uses it to decide whether a credential re-fetch would help.
-///
 /// Matches auth wording and context-anchored 401 patterns only, so a bare digit ("took 401ms", ports) can't trip it.
-/// Excludes 403/forbidden: a non-auth policy denial here, not a credential problem.
 pub fn is_auth_rejection_message(s: &str) -> bool {
     let l = s.to_ascii_lowercase();
     // Auth wording has no numeric component, so plain substrings are safe.
@@ -1404,10 +1425,7 @@ pub fn is_auth_rejection_message(s: &str) -> bool {
 }
 
 /// Whether `haystack` contains `token` at a right word boundary.
-/// A digit-terminated token (`...401`) then doesn't match a longer run (`4012`) or an adjacent unit (`401ms`).
-///
 /// Invariant: `token` must be ASCII (all callers pass ASCII literals).
-/// A non-ASCII token could advance `from` mid-UTF-8 and panic on the next slice.
 fn token_at_word_boundary(haystack: &str, token: &str) -> bool {
     debug_assert!(
         token.is_ascii(),
@@ -1435,13 +1453,7 @@ pub struct McpTool {
 }
 
 /// Data needed to register an MCP tool via `register_erased()`.
-///
-/// MCP tools have two visibility audiences controlled by `_meta.ui.visibility`:
-///
-/// - **Model-visible** (default, or `["model", "app"]`): registered in `ToolBridge` so the LLM can invoke them during a conversation.
-/// - **App-visible only** (`["app"]`): not registered in `ToolBridge`, so the LLM never sees them.
-///   These are UI-only actions (e.g. refresh buttons) surfaced to the frontend via `x.ai/mcp/tools_changed` notifications.
-///   They are callable via `x.ai/mcp/call`.
+/// **Model-visible** (default, or `["model", "app"]`): registered in `ToolBridge` so the LLM can invoke them during a conversation; **App-visible only** (`["app"]`): not registered in `ToolBridge`, so the LLM never sees them. These are UI-only actions surfaced to the frontend via `x.ai/mcp/tools_changed` notifications. They are callable via `x.ai/mcp/call`.
 pub struct McpToolRegistration {
     pub name: String,
     pub description: String,
@@ -1474,7 +1486,6 @@ impl McpTool {
     }
 
     /// Convert into the data needed for `ToolBridge::register_erased()`.
-    ///
     /// Invalid or ambiguous qualified IDs and provider-invalid names are logged and skipped.
     /// The upstream connector must provide non-empty `server` and `tool` segments separated by exactly one `__` boundary.
     pub fn into_registration(self) -> Option<McpToolRegistration> {
@@ -1619,7 +1630,14 @@ impl xai_tool_runtime::Tool for McpErasedTool {
         let mut is_timeout = false;
         let ew = &event_writer;
         let dispatch_result = match self
-            .try_call_tool(&client, &raw, &mut reconnect_attempted, &mut is_timeout, ew)
+            .try_call_tool(
+                &client,
+                &raw,
+                &mut reconnect_attempted,
+                &mut is_timeout,
+                ew,
+                call_span.span(),
+            )
             .await
         {
             Ok(result) => Ok(result),
@@ -1632,11 +1650,18 @@ impl xai_tool_runtime::Tool for McpErasedTool {
                     success: reauth_ok,
                 });
                 if reauth_ok {
-                    self.try_call_tool(&client, &raw, &mut reconnect_attempted, &mut is_timeout, ew)
-                        .await
-                        .map_err(|e| {
-                            xai_tool_runtime::ToolError::custom("process_manager", e.to_string())
-                        })
+                    self.try_call_tool(
+                        &client,
+                        &raw,
+                        &mut reconnect_attempted,
+                        &mut is_timeout,
+                        ew,
+                        call_span.span(),
+                    )
+                    .await
+                    .map_err(|e| {
+                        xai_tool_runtime::ToolError::custom("process_manager", e.to_string())
+                    })
                 } else {
                     Err(first_err)
                 }
@@ -1750,8 +1775,6 @@ impl xai_tool_runtime::Tool for McpErasedTool {
 }
 
 /// Render an MCP image content block.
-/// The data URI is consumed by the session-layer `extract_base64_images` and rendered as vision tokens.
-/// When `expose_base64`, also emit a `<mcp_image_base64>` wrapper exposing the raw bytes to the agent for path-based forwarding.
 /// The wrapper survives extraction: it has no `data:image/` prefix, so the regex skips it.
 fn format_mcp_image(mime: &str, base64_data: &str, expose_base64: bool) -> String {
     if expose_base64 {
@@ -1803,10 +1826,7 @@ fn should_recover_service_error(
         )
 }
 
-/// How long a tool call may stay parked on `requestState`-only `input_required` rounds while an
-/// out-of-band URL elicitation completes in the browser. Matches the crate's browser OAuth
-/// deadline ([`crate::oauth`]'s `BROWSER_AUTH_TIMEOUT`): both wait on the same kind of user
-/// journey through an external page.
+/// How long a tool call may stay parked on `requestState`-only `input_required` rounds while an out-of-band URL elicitation completes in the browser. Matches the crate's browser OAuth deadline ([`crate::oauth`]'s `BROWSER_AUTH_TIMEOUT`): both wait on the same kind of user journey through an external page.
 const MRTR_PENDING_STATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Poll backoff for `requestState`-only rounds: 250ms doubling to a 5s ceiling.
@@ -1816,18 +1836,8 @@ fn mrtr_pending_poll_delay(pending_polls: u32) -> std::time::Duration {
 
 impl McpErasedTool {
     /// Dispatch one `tools/call`, driving SEP-2322 multi round-trip requests (protocol 2026-07-28).
-    ///
-    /// Each round is one wire request under the per-tool timeout; a round may come back as an
-    /// `input_required` result carrying elicitation requests plus an opaque `requestState`.
     /// The user-facing input gathering between rounds is deliberately not on the clock
-    /// (matching other HITL interactions), and the retry echoes `requestState` verbatim.
-    ///
-    /// Two budgets bound the loop:
-    /// - rounds that carry `inputRequests` are interactive re-prompts, capped by count
-    ///   ([`rmcp::model::DEFAULT_MRTR_MAX_ROUNDS`]);
-    /// - rounds carrying only `requestState` mean an out-of-band interaction (URL elicitation)
-    ///   is still pending server-side, so they are polled with capped backoff and bounded by
-    ///   [`MRTR_PENDING_STATE_TIMEOUT`] instead — a browser flow takes minutes, not rounds.
+    /// rounds that carry `inputRequests` are interactive re-prompts, capped by count ([`rmcp::model::DEFAULT_MRTR_MAX_ROUNDS`]); rounds carrying only `requestState` mean an out-of-band interaction (URL elicitation) is still pending server-side, so they are polled with capped backoff and bounded by [`MRTR_PENDING_STATE_TIMEOUT`] instead — a browser flow takes minutes, not rounds.
     async fn try_call_tool(
         &self,
         client: &Arc<McpClient>,
@@ -1835,6 +1845,7 @@ impl McpErasedTool {
         reconnect_attempted: &mut bool,
         is_timeout: &mut bool,
         ew: &xai_grok_session_events::EventWriter,
+        call_span: &tracing::Span,
     ) -> Result<rmcp::model::CallToolResult, xai_tool_runtime::ToolError> {
         let tool_timeout = client.tool_timeout_for(&self.tool.name);
         let timeout_duration = std::time::Duration::from_secs(tool_timeout);
@@ -1844,7 +1855,12 @@ impl McpErasedTool {
         let mut input_rounds = 0usize;
         let mut pending_polls = 0u32;
         let mut pending_since: Option<std::time::Instant> = None;
+        let mut attempt: i64 = 0;
         loop {
+            attempt += 1;
+            let attempt_span = xai_grok_telemetry::region::Region::from_span(
+                tracing::info_span!(parent: call_span, "mcp.call_attempt", attempt),
+            );
             let response = self
                 .call_tool_round(
                     client,
@@ -1856,6 +1872,7 @@ impl McpErasedTool {
                     ew,
                 )
                 .await?;
+            attempt_span.close();
             let input_required = match response {
                 rmcp::model::CallToolResponse::Complete(call_result) => return Ok(call_result),
                 rmcp::model::CallToolResponse::InputRequired(input_required) => input_required,
@@ -1913,10 +1930,7 @@ impl McpErasedTool {
         }
     }
 
-    /// One wire round of [`Self::try_call_tool`]: timeout, transport recovery, and error
-    /// classification apply per round trip. The live session is re-resolved every round
-    /// because recovery (and re-initialization after long elicitation waits) replaces the
-    /// client's `RunningService` between rounds.
+    /// One wire round of [`Self::try_call_tool`]: timeout, transport recovery, and error classification apply per round trip. The live session is re-resolved every round because recovery (and re-initialization after long elicitation waits) replaces the client's `RunningService` between rounds.
     #[allow(clippy::too_many_arguments)]
     async fn call_tool_round(
         &self,
@@ -2391,10 +2405,7 @@ async fn decide_http_auth_over_network(
 pub struct HttpConfig {
     pub url: String,
     pub headers: Vec<(String, String)>,
-    /// This server is a first-party local app endpoint addressed by
-    /// [`GROK_AGENT_ID_HEADER`]. Set only from the spawn context — never
-    /// inferred from headers — and it keys the transport hardening (no
-    /// proxy, no redirects) and the OAuth skip.
+    /// This server is a first-party local app endpoint addressed by [`GROK_AGENT_ID_HEADER`]. Set only from the spawn context — never inferred from headers — and it keys the transport hardening (no proxy, no redirects) and the OAuth skip.
     pub local_agent_endpoint: bool,
 }
 
@@ -2407,19 +2418,8 @@ impl HttpConfig {
 }
 
 /// Newline-delimited JSON-RPC stdio transport whose read side survives a single undecodable line.
-///
-/// Used instead of rmcp's `AsyncRwTransport` for two reasons:
-/// - **Wire silence:** a bad line is skipped without replying, whereas rmcp answers shape-mismatched JSON with a -32600 error.
-///   An off-spec server could echo that reply back as more invalid input.
-/// - **Telemetry:** each skip emits an `McpTransportDecodeError` event (with a truncated sample of the offending line).
-///   The failure is then visible in the session trace; rmcp's own tracing is not captured there.
-///
 /// We read lines ourselves (rather than via `FramedRead` and rmcp's codec) so reading continues after a bad line.
-/// Only a genuine end-of-stream returns `None`.
 /// A stray non-JSON stdout line, a JSON-RPC batch array, or an off-spec response therefore never collapses the transport.
-/// A collapse would mean "Transport closed" failing every in-flight request, the "connector shows but doesn't work" report.
-///
-/// Generic over `R`/`W` so it can be unit-tested with in-memory pipes; the production transport binds `ChildStdout`/`ChildStdin`.
 struct ResilientRwTransport<R, W>
 where
     R: AsyncRead,
@@ -2567,13 +2567,7 @@ where
 }
 
 /// Stdio MCP transport with a non-panicking cleanup path.
-///
-/// `rmcp`'s `TokioChildProcess` `tokio::spawn`s from `Drop` and so panics when dropped without an entered runtime.
-/// This wrapper's `Drop` is best-effort: it reaps via the current runtime if present, else a short-lived cleanup thread.
 /// The child therefore never leaks as a zombie.
-/// The caller's `detach_command` `setsid`s the child into its own group.
-/// Teardown `killpg`s the whole group via [`ProcessGroup`] before reaping the leader.
-/// That avoids orphaning grandchildren (e.g. the `node` an `npx` started).
 pub struct SafeTokioChildProcess {
     child: Option<tokio::process::Child>,
     /// Strong `Arc` owner; the scope holds only a `Weak`, dropped on reap.
@@ -2582,9 +2576,7 @@ pub struct SafeTokioChildProcess {
 }
 
 /// Holds a newly launched stdio child and its process group until ownership moves to [`SafeTokioChildProcess`].
-/// It is built on the background thread that launches the child.
 /// If the launch is cancelled partway (the session is closing), this value is still dropped.
-/// Dropping it stops the whole group: the child and anything it started.
 /// The caller sets `kill_on_drop(true)` so the child itself is also cleaned up on that path.
 struct SpawnGuard {
     child: Option<tokio::process::Child>,
@@ -2821,6 +2813,16 @@ impl Transport<RoleClient> for SafeTokioChildProcess {
 }
 
 /// Transport configuration before connection is established.
+/// Outcome of the `server/discover` probe phase (see `McpClient::probe_modern`).
+enum ProbeVerdict {
+    /// Modern negotiation succeeded; this running service IS the connection.
+    Modern(Box<rmcp::service::RunningService<RoleClient, GrokClientHandler>>),
+    /// The server was reached but is not a usable modern server; run the
+    /// legacy handshake. The probe's error is kept so a subsequent legacy
+    /// failure can log both phases together.
+    Legacy { probe_error: String },
+}
+
 enum PendingTransport {
     Stdio(Box<SafeTokioChildProcess>),
     Http(HttpConfig),
@@ -2839,8 +2841,6 @@ enum PendingTransport {
 /// A connected MCP service (rmcp's RunningService wrapped in Arc).
 /// Uses [`GrokClientHandler`] rather than rmcp's default `ClientInfo` handler.
 /// rmcp 2.1 parameterizes `RunningService` over the handler type, and `ClientInfo` is only a `ClientHandler` impl with no notification routing.
-/// The custom handler keeps the same protocol behavior (same `get_info`).
-/// It passes `tools/list_changed` / `resources/list_changed` notifications through to the session-actor dispatcher.
 pub type McpService = Arc<RunningService<RoleClient, GrokClientHandler>>;
 
 pub(crate) static MCP_SERVERS_CONNECTED: xai_grok_telemetry::activity::ActivityGauge =
@@ -2849,24 +2849,14 @@ pub(crate) static MCP_SERVERS_CONNECTED: xai_grok_telemetry::activity::ActivityG
     );
 
 /// MCP client connection state machine.
-///
 /// Single-flight handshake invariant: at most one task at a time may run the handshake.
-/// While the handshake is in flight the state is [`ClientState::Initializing`].
-/// The holder owns the transport for the duration of [`McpClient::try_handshake`].
-/// Concurrent callers of [`McpClient::ensure_initialized`] observe [`ClientState::Initializing`].
-/// They park on [`McpClient::init_done`] until the holder publishes a result.
 enum ClientState {
-    /// No transport configured. Reachable from:
-    /// - [`McpClient::stub`] (test placeholder; `ensure_initialized` returns a configuration error).
-    /// - Stdio handshake failure: the spawned child process is consumed by `client.serve` and cannot be reused.
-    ///   Http/HttpAuth keep their `HttpConfig` clone and transition back to `Pending`.
+    /// [`McpClient::stub`] (test placeholder; `ensure_initialized` returns a configuration error); Stdio handshake failure: the spawned child process is consumed by `client.serve` and cannot be reused. Http/HttpAuth keep their `HttpConfig` clone and transition back to `Pending`.
     Empty,
     /// Transport is configured and ready for the next handshake.
     Pending(PendingTransport),
     /// A caller is currently inside [`McpClient::try_handshake`] and owns the transport.
     /// New callers MUST park on [`McpClient::init_done`] (with a bounded timeout) rather than attempt a parallel handshake.
-    /// If the holder is cancelled or panics before publishing a result, an [`InitGuard`] restores the transport on a best-effort basis.
-    /// Other callers can then retry.
     Initializing,
     /// Handshake completed; the service is reference-counted via `Arc`.
     Ready {
@@ -2886,10 +2876,6 @@ pub enum ClientStateKind {
 }
 
 /// Classification used by [`crate::liveness::spawn_transport_liveness`].
-///
-/// Returned by [`McpClient::liveness_check`] under a single state-mutex acquisition, so the watcher's per-tick predicate is atomic.
-///
-/// `Transient` covers states the watcher should silently exit on (re-handshake races, externally-reset transports, post-failure `Empty` slots).
 /// Only `Ready + transport closed` produces a `TransportClosed` ACP push.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LivenessCheck {
@@ -2903,16 +2889,8 @@ pub enum LivenessCheck {
 }
 
 /// Events emitted by a live MCP client to its session-side dispatcher.
-///
-/// Produced by three sources:
-///
-/// 1. [`crate::liveness::spawn_transport_liveness`], when an `is_healthy` poll observes the rmcp service loop shut down (`TransportClosed`).
-/// 2. [`GrokClientHandler`] when the server pushes a notification we care about.
-///    Currently `notifications/tools/list_changed` and `notifications/resources/list_changed`.
-/// 3. The session/managed-config layer when a server is added, removed, or successfully (re-)initialized.
-///
+/// [`crate::liveness::spawn_transport_liveness`], when an `is_healthy` poll observes the rmcp service loop shut down (`TransportClosed`); [`GrokClientHandler`] when the server pushes a notification we care about. Currently `notifications/tools/list_changed` and `notifications/resources/list_changed`; The session/managed-config layer when a server is added, removed, or successfully (re-)initialized.
 /// Consumers fan these out to ACP `x.ai/mcp/server_status` after 50 ms of tumbling-window coalescing keyed by `(server, kind)`.
-/// See the session-actor `StatusDispatcher`.
 #[derive(Debug, Clone)]
 pub enum McpClientEvent {
     /// The rmcp service loop has terminated; the client is no longer usable for tool calls and must be torn down (or restarted).
@@ -2950,7 +2928,6 @@ pub enum McpClientEvent {
     /// Per-server `(server, ConfigAdded)` fan-out variant produced by the dispatcher from a [`Self::ConfigDiff`].
     /// Keeps the invariant that the stored payload matches its `kind` key.
     /// Storing a fake `Ready` payload at a `ConfigAdded` key would be a footgun.
-    /// A real `Ready` and a `ConfigDiff` can collide in the same coalesce window.
     ConfigAdded { server: McpServerName },
     /// Per-server `(server, ConfigRemoved)` fan-out variant.
     /// The dispatched analogue of [`Self::ConfigAdded`] for the removed set of a [`Self::ConfigDiff`].
@@ -2958,9 +2935,7 @@ pub enum McpClientEvent {
 }
 
 /// Discriminant for [`McpClientEvent`], used as the second half of the coalescing key `(server, kind)`.
-/// Two events with the same `(server, kind)` collapse into the latest one inside the dispatcher's 50 ms window.
-///
-/// Distinct from [`McpClientEvent`] because the latter carries payload (e.g. `reason` on `HandshakeFailed`).
+/// Distinct from [`McpClientEvent`] because the latter carries payload.
 /// Payload must not participate in equality / hashing.
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
 pub enum McpClientEventKind {
@@ -2976,8 +2951,6 @@ pub enum McpClientEventKind {
 
 impl McpClientEvent {
     /// Server name carried by the event, if any.
-    ///
-    /// Returns `None` only for [`McpClientEvent::ConfigDiff`].
     /// That variant is fanned out per-server by the dispatcher into [`Self::ConfigAdded`] / [`Self::ConfigRemoved`].
     /// Each fan-out child has a single server name.
     pub fn server_name(&self) -> Option<&str> {
@@ -2996,17 +2969,8 @@ impl McpClientEvent {
 }
 
 /// RAII guard that restores [`ClientState::Pending`] when the handshake holder is dropped before publishing a result (task cancellation, panic).
-/// Without it a cancellation mid-handshake would leave `state` stuck in [`ClientState::Initializing`].
-/// Every subsequent caller would then block until the wait-timeout fallback fires and return an error.
-/// The caller would have to call [`McpClient::reset_transport`] manually to recover.
-///
-/// On the success path the holder calls [`Self::disarm`] before storing `Ready`/`Empty` under the lock, which converts the `Drop` into a no-op.
 /// The guard never restores on the success path.
-///
 /// Drop uses [`tokio::sync::Mutex::try_lock`] because `Drop` runs synchronously and we cannot block the runtime here.
-/// If the lock is contended, the restore is skipped and the inflight-wait timeout in `ensure_initialized` becomes the last-resort recovery path.
-/// Contention is extremely rare: the only competing locker is another `ensure_initialized` caller.
-/// That caller holds the lock only for the duration of a match arm (microseconds).
 struct InitGuard<'a> {
     state: &'a Mutex<ClientState>,
     init_done: &'a Notify,
@@ -3042,10 +3006,8 @@ impl Drop for InitGuard<'_> {
 }
 
 /// Build a restorable handle for a pending transport, or `None` if the transport cannot be reused after a handshake failure.
-///
 /// `PendingTransport` deliberately does not implement `Clone`.
 /// The `Stdio` variant owns a [`tokio::process::Child`] that is consumed by `client.serve`, and a "restored" Stdio entry would be a dead handle.
-/// HTTP and HttpAuth, by contrast, only carry config and an `Arc` to a shared auth manager, so a clone is the canonical way to retry.
 fn restorable_transport(pending: &PendingTransport) -> Option<PendingTransport> {
     match pending {
         PendingTransport::Http(cfg) => Some(PendingTransport::Http(cfg.clone())),
@@ -3078,10 +3040,6 @@ pub struct McpClient {
     server_name: McpServerName,
     state: Mutex<ClientState>,
     /// Wakes [`Self::ensure_initialized`] callers that observed [`ClientState::Initializing`] and parked.
-    /// Notified after each handshake attempt finishes (success **or** failure) and `state` has been updated.
-    /// See [`ClientState`] for the single-flight invariant this preserves.
-    ///
-    /// The model's first tool dispatch can race the background `get_tool_registrations` handshake.
     /// Parking here (instead of failing fast) keeps that race from leaking an error into model-visible tool results.
     init_done: Notify,
     startup_timeout_sec: u64,
@@ -3105,32 +3063,13 @@ pub struct McpClient {
     /// `None` for transports that can't reconnect, e.g. Stdio (whose child process is consumed by the handshake and can't be restarted from here).
     reconnect: Option<PendingTransport>,
     /// Event sink for transport-closed pollers, server-pushed `tools/list_changed` / `resources/list_changed` notifications, and handshake failures.
-    ///
-    /// The slot is `Some` after [`Self::set_event_tx`] is called and `None` otherwise.
-    /// The `Arc<Mutex<...>>` is **shared with [`GrokClientHandler`]** constructed by [`Self::make_client_handler`].
-    /// The handler holds a clone of the same Arc and reads through it on every notification.
-    /// Snapshotting the slot at handshake time would mean a session that wired `notify_tx` post-handshake silently lost every notification.
-    /// That loss would last for the life of the connection.
-    ///
-    /// `None` in three cases:
-    /// 1. Test stubs and standalone-pool fixtures that don't need cross-component event flow.
-    /// 2. Subagent / shared-pool snapshots: only the **parent** session owns these events.
-    ///    A subagent that inherits a shared `Arc<McpClient>` reads tools through it but does not install its own dispatcher.
-    ///    The parent's [`crate::liveness::TransportLivenessHandle`] already covers it.
-    /// 3. Brand-new clients before the session's per-server task has called [`Self::set_event_tx`].
-    ///
+    /// `None` in three cases: Test stubs and standalone-pool fixtures that don't need cross-component event flow; Subagent / shared-pool snapshots: only the **parent** session owns these events. A subagent that inherits a shared `Arc<McpClient>` reads tools through it but does not install its own dispatcher. The parent's [`crate::liveness::TransportLivenessHandle`] already covers it; Brand-new clients before the session's per-server task has called [`Self::set_event_tx`].
     /// `parking_lot::Mutex` is sufficient: the lock is never held across an `.await`, and the handler's `emit` path is short and allocation-free.
     notify_tx: SharedEventTx,
     elicitation_tx: crate::elicitation::SharedElicitationTx,
     /// RAII handle for the per-client transport-liveness poller.
-    ///
     /// `Some` after [`Self::arm_liveness_watcher`] succeeds; `None` initially.
-    /// The poller clears the slot itself when it exits (on `TransportClosed`, or when the state drifts out of `Ready` during a re-handshake).
-    /// See [`crate::liveness::spawn_transport_liveness`].
-    /// Clearing keeps subsequent `arm_liveness_watcher` calls from being silently blocked by a dead-but-still-present handle.
-    ///
     /// `parking_lot::Mutex` is sufficient because the lock is only ever held for the duration of a slot swap.
-    /// The poller task uses an internal `Arc` clone of this mutex (the same memory) so it can clear the slot before `break`.
     liveness_handle: Arc<parking_lot::Mutex<Option<crate::liveness::TransportLivenessHandle>>>,
 }
 
@@ -3141,12 +3080,7 @@ pub type SharedEventTx =
     Arc<parking_lot::Mutex<Option<tokio::sync::mpsc::UnboundedSender<McpClientEvent>>>>;
 
 /// External-config overrides for an MCP server.
-/// Surfaced to xai-grok-mcp from whatever loader the host crate uses (e.g. the host's `config.toml` parser).
-///
 /// [`McpClient::load_timeouts`] and [`McpClient::load_expose_image_base64`] still apply the `_meta > overrides > default` precedence on top.
-/// Owning these types here keeps MCP transport state free of the host's TOML schema.
-///
-/// Name retained for call-site stability; struct now carries non-timeout config too (e.g. [`Self::expose_image_base64`]).
 #[derive(Default, Debug, Clone)]
 pub struct McpClientTimeoutOverrides {
     /// Server startup timeout in seconds.
@@ -3213,8 +3147,6 @@ impl McpClient {
     }
 
     /// The ONLY place that writes the `McpClient { .. }` struct literal.
-    /// Every constructor funnels through here so adding a field touches one site.
-    /// `reconnect` is snapshotted from the transport before it is moved into [`ClientState::Pending`].
     /// It is `None` for non-reconnectable transports like Stdio; see [`restorable_transport`].
     #[allow(clippy::too_many_arguments)]
     fn new_with_transport(
@@ -3281,7 +3213,6 @@ impl McpClient {
     }
 
     /// Try to recover tokens from disk or via refresh; no browser flow.
-    ///
     /// Returns true if valid tokens were found (from another session/process writing to the credential store, or a successful token refresh).
     /// Used by `retry_auth_required_servers` on overlay refresh.
     pub async fn try_reauth_from_disk(&self) -> bool {
@@ -3332,14 +3263,7 @@ impl McpClient {
     }
 
     /// Force token acquisition and reset the transport so the next `ensure_initialized` rebuilds it with the fresh token.
-    ///
-    /// Tries in order:
-    /// 1. Reload from disk (picks up tokens from background auth task)
-    /// 2. Refresh via refresh_token grant
-    /// 3. Full browser-based OAuth flow, unless the refresh failure was a pure network failure ([`mcp_refresh_failure_is_transient`]).
-    ///    The stored refresh token is then still presumed valid.
-    ///    Opening a browser tab / re-running DCR for a Wi-Fi blip right after wake-from-sleep is both useless and destructive.
-    ///    Useless because the IdP is unreachable for the browser too; destructive because it discards a working credential.
+    /// Reload from disk (picks up tokens from background auth task); Refresh via refresh_token grant; Full browser-based OAuth flow, unless the refresh failure was a pure network failure ([`mcp_refresh_failure_is_transient`]). The stored refresh token is then still presumed valid. Opening a browser tab / re-running DCR for a Wi-Fi blip right after wake-from-sleep is both useless and destructive. Useless because the IdP is unreachable for the browser too; destructive because it discards a working credential.
     pub async fn force_reauth(&self, force: bool) -> bool {
         let (Some(auth_mgr), Some(config)) = (&self.auth_manager, &self.http_config) else {
             return false;
@@ -3444,12 +3368,8 @@ impl McpClient {
     }
 
     /// Reset the transport so the next `ensure_initialized` rebuilds it with a fresh connection.
-    ///
     /// Called when a tool call fails with a transport error (`TransportClosed`, `TransportSend`).
     /// The underlying connection is dead but the server's addressing (URL/headers for HTTP, `server_id`/invoker for ACP) is still valid.
-    ///
-    /// Returns `true` if the transport was reset: HTTP/HttpAuth/ACP rebuild from the `reconnect` snapshot taken at construction.
-    /// Returns `false` for clients whose `reconnect` is `None` (e.g. Stdio; dead child processes can't be restarted from here).
     async fn reset_transport(&self) -> bool {
         let Some(t) = self.reconnect.as_ref().and_then(restorable_transport) else {
             return false;
@@ -3483,12 +3403,7 @@ impl McpClient {
     }
 
     /// Recover a dead transport in place: reset, re-handshake, then restart the liveness watcher. Returns the live [`McpService`].
-    ///
-    /// The single recovery path for both the proactive HTTP recovery (`SessionActor::reset_http_client`) and the lazy `try_call_tool` retry.
-    /// The proactive path is gated on [`Self::is_http`].
-    /// Rebuilds from the `reconnect` snapshot, so it covers HTTP/HttpAuth/ACP; `arm_liveness_watcher` self-gates for ACP.
-    ///
-    /// `Err` for a client with no restorable transport (e.g. Stdio; its child was consumed by the handshake).
+    /// `Err` for a client with no restorable transport.
     pub async fn recover(self: &Arc<Self>) -> Result<McpService, McpError> {
         // Coalesce concurrent recoveries: reset only when Ready
         // If already non-Ready a recovery is in flight, so join its single-flight ensure_initialized instead of racing a reset
@@ -3518,11 +3433,6 @@ impl McpClient {
     }
 
     /// Replace [`Self::state`] under the lock and wake any [`Self::ensure_initialized`] callers parked on [`Self::init_done`].
-    /// Woken callers re-check the new state on their next loop iteration.
-    ///
-    /// Use this for *external* state transitions that need to invalidate in-flight waits (re-auth completions, transport resets).
-    /// A parked waiter then doesn't sit on a stale [`ClientState::Initializing`] view of the world.
-    /// `ensure_initialized` itself doesn't go through this helper.
     /// It already mints the new state under the lock it's holding and notifies waiters once at the end of the handshake attempt.
     async fn replace_state(&self, new_state: ClientState) {
         {
@@ -3615,16 +3525,8 @@ impl McpClient {
     }
 
     /// Resolve the timeout for a specific tool.
-    ///
-    /// Precedence (highest to lowest):
-    /// 1. `_meta.mcpConfig.<server>.toolTimeoutsMs.<tool>`
-    /// 2. `config.toml [mcp_servers.<server>].tool_timeouts.<tool>`
-    /// 3. `_meta.mcpConfig.<server>.toolTimeoutMs`
-    /// 4. `config.toml [mcp_servers.<server>].tool_timeout_sec`
-    /// 5. Default (60s)
-    ///
+    /// Precedence (highest to lowest): `_meta.mcpConfig.<server>.toolTimeoutsMs.<tool>`; `config.toml [mcp_servers.<server>].tool_timeouts.<tool>`; `_meta.mcpConfig.<server>.toolTimeoutMs`; `config.toml [mcp_servers.<server>].tool_timeout_sec`; Default (60s).
     /// Steps 1 and 2 are already merged into `self.tool_timeouts` at construction.
-    /// Steps 3 through 5 are already resolved into `self.tool_timeout_sec`.
     pub fn tool_timeout_for(&self, tool_name: &str) -> u64 {
         self.tool_timeouts
             .get(tool_name)
@@ -3633,36 +3535,15 @@ impl McpClient {
     }
 
     /// Drive the MCP handshake to completion, or return the cached service if one is already established.
-    /// Single-flight semantics are safe under arbitrary concurrent callers.
-    ///
-    /// ## Concurrency contract
-    ///
-    /// At most one task at a time runs [`Self::try_handshake`]; that task holds the transport and observes [`ClientState::Initializing`].
-    /// Other concurrent callers park on [`Self::init_done`] (with a bounded timeout) instead of issuing parallel handshakes or failing immediately.
-    /// When the holder publishes a result, all parked waiters re-check `state` and either:
-    ///
-    /// - return the freshly-stored [`McpService`] (handshake succeeded),
-    /// - take ownership of the freshly-restored transport and run their own handshake (handshake failed but transport is restorable),
-    /// - or surface the error (a failed Stdio handshake leaves no restorable transport, so [`ClientState::Empty`]).
-    ///
-    /// ## Cancellation safety
-    ///
-    /// [`InitGuard`]'s `Drop` best-effort restores the transport if the holder is dropped (parent task cancelled, panic) before publishing a result.
-    /// Future callers can then retry without an explicit `reset_transport`; parked waiters are woken.
-    /// The restore uses [`tokio::sync::Mutex::try_lock`] because `Drop` is synchronous.
-    /// On rare contention the slot stays `Initializing`; the wait-timeout fallback below then surfaces a clear error rather than blocking forever.
+    /// Concurrent callers park on `init_done` instead of issuing a parallel handshake.
+    /// If the holder is dropped before publishing, `InitGuard` restores the transport so a later caller can retry; `Drop` uses `try_lock` because it is synchronous.
     pub async fn ensure_initialized(&self) -> Result<McpService, McpError> {
-        // Bound how long a parked caller waits on `init_done` before surfacing an error
-        // `try_handshake` is itself bounded by `startup_timeout_sec`
-        // Anything beyond that plus a 1 s margin means the holder was dropped without restoring the transport (cancellation under heavy contention)
-        // Wedging silently would recreate the exact "stuck client" failure mode
+        // Bound how long a parked caller waits on `init_done` before surfacing an error; wedging silently would recreate the exact "stuck client" failure mode
         let inflight_wait =
-            std::time::Duration::from_secs(self.startup_timeout_sec.saturating_add(1));
+            std::time::Duration::from_secs(self.handshake_worst_case_secs().saturating_add(1));
 
         // Drive the loop body until we either return directly or break out with an owned `PendingTransport`
         // We deliberately use a labelled `loop` with a `break <expr>`
-        // The compiler then proves every arm of the inner match either diverges (return / continue) or yields the transport
-        // No `unreachable!()` escape hatch needed
         let pending: PendingTransport = loop {
             // Subscribe to `init_done` BEFORE inspecting `state` so a wake-up fired between our state check and the wait can't be lost
             // `tokio::sync::Notify` only delivers a permit to notify-futures that exist at the time of `notify_waiters`
@@ -3671,11 +3552,8 @@ impl McpClient {
 
             let mut guard = self.state.lock().await;
             // Swap the current state for `Initializing` up front and match on the OWNED previous value
-            // This avoids the match-by-ref, `mem::replace`, re-match, `unreachable!()` dance
             // The compiler can bind `ClientState::Pending(t)` directly from an owned value with no irrefutable-let hole
             // Non-Pending arms restore their original variant before falling through
-            // The lock is held the entire window so the brief `Initializing` placeholder is invisible to other callers
-            // Cost is one trivial unit-variant write per non-Pending call (plus an `Arc::clone` on the Ready path); negligible
             match std::mem::replace(&mut *guard, ClientState::Initializing) {
                 ClientState::Ready {
                     service,
@@ -3735,14 +3613,25 @@ impl McpClient {
             restore: restore_for_guard,
         };
 
+        let transport_type = match &pending {
+            PendingTransport::Stdio(_) => "stdio",
+            PendingTransport::Http(_) => "http",
+            PendingTransport::HttpAuth { .. } => "http_auth",
+            PendingTransport::Acp { .. } => "acp",
+        };
+        let handshake_span = xai_grok_telemetry::region::Region::from_span(tracing::info_span!(
+            "mcp.handshake",
+            server_name = %self.server_name,
+            transport_type,
+            elapsed_ms = tracing::field::Empty,
+        ));
         let handshake_start = std::time::Instant::now();
         let mut result = self.try_handshake(pending).await;
 
         let handshake_elapsed = handshake_start.elapsed().as_micros() as u64;
-        tracing::info!(target: xai_grok_telemetry::instrumentation::TARGET, event = "timing", name = "mcp_try_handshake", elapsed_us = handshake_elapsed);
+        tracing::info!(target: xai_grok_telemetry::instrumentation::TARGET, event = "timing", name = "mcp_try_handshake", server_name = %self.server_name, elapsed_us = handshake_elapsed);
         // On handshake failure, if we have an auth_manager, try refreshing the token and retrying once
-        // Handles expired access tokens loaded from disk: the handshake fails at the transport layer before rmcp's transparent 401 refresh kicks in
-        // We attempt refresh on any failure (not just auth errors): the cost is low
+        // Handles expired access tokens loaded from disk: the handshake fails at the transport layer before rmcp's transparent 401 refresh kicks in We attempt refresh on any failure (not just auth errors): the cost is low
         // Also, error strings from different MCP servers are not reliable to match
         if result.is_err()
             && let (Some(auth_mgr), Some(config)) = (&self.auth_manager, &self.http_config)
@@ -3766,18 +3655,17 @@ impl McpClient {
                 result = self.try_handshake(retry_transport).await;
             }
         }
+        handshake_span
+            .span()
+            .record("elapsed_ms", handshake_start.elapsed().as_millis() as i64);
+        handshake_span.close();
 
         // Disarm before publishing the result so the drop guard doesn't double-restore on the success path
         // Disarming also keeps it from fighting the failure-path assignment below
         init_guard.disarm();
 
         // Snapshot the event sender before we commit Ready/Pending/Empty under the lock
-        // We want to emit `HandshakeFailed` (on `Err`) or signal the dispatcher to set status=ready (on `Ok`) AFTER releasing the state lock
         // That way a `state.lock().await` inside the dispatcher (should one ever exist; none today) can't deadlock
-        //
-        // The snapshot reads through the SHARED `Arc<Mutex<...>>` slot
-        // `acp_session.rs` wires [`Self::set_event_tx`] BEFORE invoking `get_tool_registrations`
-        // With that ordering the snapshot picks up the sender even for the very first handshake
         let event_tx = self.event_tx_clone();
 
         let outcome = {
@@ -3844,115 +3732,266 @@ impl McpClient {
         &self,
         pending: PendingTransport,
     ) -> Result<rmcp::service::RunningService<RoleClient, GrokClientHandler>, McpError> {
-        let timeout = std::time::Duration::from_secs(self.startup_timeout_sec);
-        let name = &self.server_name;
-
         match pending {
-            PendingTransport::Stdio(process) => {
-                let handler = self.make_client_handler();
-                tokio::time::timeout(timeout, handler.serve(*process))
-                    .await
-                    .map_err(|_| McpError::timeout(name, timeout))?
-                    .map_err(|e| McpError::HandshakeFailed {
-                        server: name.to_string(),
-                        source: Box::new(e),
-                    })
-            }
+            // Stdio stays on the legacy `initialize`-only handshake. Probing it is unsafe on two counts: a slow-starting server can answer the abandoned `server/discover` after rmcp has already sent
+            // `initialize` on the SAME byte stream, and rmcp rejects that late response as uncorrelated; and unlike the other transports the child process cannot be rebuilt here for a clean fallback.
+            // Modern-only stdio servers stay unsupported until rmcp tolerates late responses to abandoned requests.
+            PendingTransport::Stdio(process) => self.serve_legacy(*process).await,
             PendingTransport::Http(config) => {
-                let transport =
-                    Self::build_http_transport(&config, name, self.warn_budget.clone())?;
-                let handler = self.make_client_handler();
-                tokio::time::timeout(timeout, handler.serve(transport))
-                    .await
-                    .map_err(|_| McpError::timeout(name, timeout))?
-                    .map_err(|e| McpError::HandshakeFailed {
-                        server: name.to_string(),
-                        source: Box::new(e),
-                    })
+                // One reqwest client for both phases: the probe and the legacy transports stay separate rmcp sessions, but share the connection pool, so a responsive legacy server doesn't pay a second TCP+TLS setup.
+                let http_client =
+                    Self::build_http_client(&config, &self.server_name, self.warn_budget.clone())?;
+                self.probe_then_legacy(|| {
+                    StreamableHttpClientTransport::with_client(
+                        http_client.clone(),
+                        StreamableHttpClientTransportConfig::with_uri(config.url.as_str()),
+                    )
+                })
+                .await
             }
             PendingTransport::HttpAuth {
                 config,
                 auth_manager,
             } => {
-                // Local app endpoints skip OAuth outright (`start_mcp_server`
-                // routes them to `NoOauthSupport`), so this transport must
-                // never see one — its client is built without the local
-                // no-proxy/no-redirect hardening.
-                debug_assert!(
-                    !config.local_agent_endpoint,
-                    "a local agent endpoint must not reach the OAuth transport"
-                );
-                // Authorization is injected per-request by `AuthClient`, never
-                // carried in `default_headers`.
-                let mut headers = parse_config_headers(
-                    name,
-                    "oauth-transport",
-                    config
-                        .headers
-                        .iter()
-                        .filter(|(key, _)| !key.eq_ignore_ascii_case("Authorization"))
-                        .map(|(key, value)| (key.as_str(), value.as_str())),
-                );
-                apply_user_agent_policy(&mut headers, name, &config.url);
-                // reqwest 0.13; the policy chokepoint is typed for 0.12 and cannot wrap this builder.
-                #[allow(clippy::disallowed_methods)]
-                let http_client = with_extra_root_certificates(
-                    reqwest::Client::builder()
-                        .default_headers(headers)
-                        .connect_timeout(HTTP_CONNECT_TIMEOUT),
-                )
-                .build()
-                .map_err(|e| McpError::ClientError(format!("Failed to build HTTP client: {e}")))?;
-                // `AuthClient::new` wants an owned manager, but ours is shared (`Arc`) with the OAuth flow
-                // The struct is non_exhaustive, so build with a throwaway manager and swap in the shared one
-                let placeholder_manager =
-                    rmcp::transport::auth::AuthorizationManager::new(config.url.as_str())
-                        .await
-                        .map_err(|e| {
-                            McpError::ClientError(format!("Failed to build OAuth client: {e}"))
-                        })?;
-                let mut auth_client =
-                    rmcp::transport::auth::AuthClient::new(http_client, placeholder_manager);
-                auth_client.auth_manager = auth_manager.clone();
-                let mcp_http_client = crate::mcp_http_client::McpHttpClient::new(
-                    auth_client,
-                    name.as_str(),
-                    self.warn_budget.clone(),
-                );
-                let transport_config =
-                    StreamableHttpClientTransportConfig::with_uri(config.url.as_str());
-                let transport =
-                    StreamableHttpClientTransport::with_client(mcp_http_client, transport_config);
-                let handler = self.make_client_handler();
-                tokio::time::timeout(timeout, handler.serve(transport))
-                    .await
-                    .map_err(|_| McpError::timeout(name, timeout))?
-                    .map_err(|e| McpError::HandshakeFailed {
-                        server: name.to_string(),
-                        source: Box::new(e),
-                    })
+                let http_client = self.build_oauth_http_client(&config, &auth_manager).await?;
+                self.probe_then_legacy(|| {
+                    StreamableHttpClientTransport::with_client(
+                        http_client.clone(),
+                        StreamableHttpClientTransportConfig::with_uri(config.url.as_str()),
+                    )
+                })
+                .await
             }
             PendingTransport::Acp { server_id, invoker } => {
-                // Per-reverse-call backstop on `x.ai/mcp/sdk_call`: the larger of the startup and tool timeouts
-                // It never undercuts the real outer bound: the handshake `initialize` is bounded by the serve `timeout` below
-                // Tool calls are bounded by `tool_timeout_for` in `try_call_tool`
-                // The bridge forwards raw JSON-RPC without the tool name, so per-TOOL overrides aren't applied here in v1
-                // The HTTP path still honors them
-                let invoke_timeout = std::time::Duration::from_secs(
-                    self.startup_timeout_sec.max(self.tool_timeout_sec),
-                );
-                let transport =
-                    crate::acp_transport::acp_bridge_transport(server_id, invoker, invoke_timeout);
-                let handler = self.make_client_handler();
-                tokio::time::timeout(timeout, handler.serve(transport))
+                self.probe_then_legacy(|| self.build_acp_transport(server_id.clone(), &invoker))
                     .await
-                    .map_err(|_| McpError::timeout(name, timeout))?
-                    .map_err(|e| McpError::HandshakeFailed {
-                        server: name.to_string(),
-                        source: Box::new(e),
-                    })
             }
         }
+    }
+
+    /// Probe for a modern server, then run the legacy handshake on a fresh transport when the probe says "legacy". Shared by every transport that can rebuild its transport (all but stdio).
+    /// When both phases fail, the probe's error is warned alongside the legacy error so diagnostics show the whole story, while [`McpError`] carries only the legacy error (the actionable one for a legacy-majority world).
+    async fn probe_then_legacy<T, E, A>(
+        &self,
+        mut make_transport: impl FnMut() -> T,
+    ) -> Result<rmcp::service::RunningService<RoleClient, GrokClientHandler>, McpError>
+    where
+        T: rmcp::transport::IntoTransport<RoleClient, E, A>,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        let mut probe_failure = None;
+        if self.probe_fits_budget() {
+            match self.probe_modern(make_transport()).await? {
+                ProbeVerdict::Modern(service) => return Ok(*service),
+                ProbeVerdict::Legacy { probe_error } => probe_failure = Some(probe_error),
+            }
+        }
+        let result = self.serve_legacy(make_transport()).await;
+        if let (Err(legacy_error), Some(probe_error)) = (&result, &probe_failure) {
+            tracing::warn!(
+                server = %self.server_name,
+                %probe_error,
+                %legacy_error,
+                "both handshake phases failed (surfacing the legacy error)"
+            );
+        }
+        result
+    }
+
+    /// Cap on the `server/discover` probe phase. Mirrors rmcp's private
+    /// `DEFAULT_AUTO_DISCOVER_TIMEOUT` so a server that swallows the probe
+    /// (never answers unknown methods) costs at most this much extra startup latency before the legacy handshake runs with its full budget.
+    pub(crate) const DISCOVER_PROBE_TIMEOUT_SECS: u64 = 10;
+
+    /// Whether the startup budget justifies a `server/discover` probe.
+    /// The probe phase is bounded separately, so it never eats the legacy handshake's budget — but against a probe-swallowing server it still adds up to [`Self::DISCOVER_PROBE_TIMEOUT_SECS`] of wall time before the legacy attempt starts. A budget at or under the probe timeout asks for a snappier startup than the probe can guarantee, so such clients skip it and stay on the legacy handshake (no modern negotiation, and therefore no SEP-2322 MRTR, for them).
+    fn probe_fits_budget(&self) -> bool {
+        self.startup_timeout_sec > Self::DISCOVER_PROBE_TIMEOUT_SECS
+    }
+
+    /// Worst-case wall time of one [`Self::try_handshake`] attempt: the probe phase (when the budget runs it) plus the legacy phase's full startup budget. Anything that waits on a handshake holder must use this bound, not `startup_timeout_sec` alone — a swallowed probe legitimately keeps the holder busy past the startup budget.
+    fn handshake_budget_secs(&self) -> u64 {
+        let probe_secs = if self.probe_fits_budget() {
+            Self::DISCOVER_PROBE_TIMEOUT_SECS
+        } else {
+            0
+        };
+        self.startup_timeout_sec.saturating_add(probe_secs)
+    }
+
+    /// Worst case for [`Self::ensure_initialized`]: one attempt, or for an OAuth-capable client a failed attempt, a
+    /// token refresh, and a full retry.
+    fn handshake_worst_case_secs(&self) -> u64 {
+        if self.auth_manager.is_some() && self.http_config.is_some() {
+            self.handshake_budget_secs()
+                .saturating_mul(2)
+                .saturating_add(Self::OAUTH_REFRESH_RETRY_ALLOWANCE_SECS)
+        } else {
+            self.handshake_budget_secs()
+        }
+    }
+
+    /// Waiter allowance for the token-refresh interlude between an OAuth client's two handshake attempts: metadata/credential hydration is bounded by [`OAUTH_DISCOVERY_TIMEOUT`]-sized steps, plus the refresh
+    /// POST itself. The POST rides rmcp's own OAuth client without a total request deadline, so this covers the nominal path; a pathological hung refresh can still outlast waiters, which predates the probe split and needs a deadline inside rmcp's refresh to close fully.
+    const OAUTH_REFRESH_RETRY_ALLOWANCE_SECS: u64 = 15;
+
+    /// Largest `startup_timeout_sec` whose worst-case handshake
+    /// ([`Self::handshake_budget_secs`]) still fits inside `deadline_secs`.
+    /// For deadline-driven callers: deriving the override from this keeps the invariant that a hung handshake fails on its own before the outer deadline has to cancel it — a swallowed probe can no longer burn the legacy phase's window. Deadlines that cannot fit a probe plus a same-sized legacy window stay probe-free with the largest legacy window the probe gate allows.
+    pub fn max_startup_within_deadline(deadline_secs: u64) -> u64 {
+        if deadline_secs > Self::DISCOVER_PROBE_TIMEOUT_SECS.saturating_mul(2) {
+            // Probes (result > probe timeout); probe + startup == deadline.
+            deadline_secs - Self::DISCOVER_PROBE_TIMEOUT_SECS
+        } else {
+            // Never probes (result <= probe timeout); the whole window is the
+            // legacy phase's, capped at the probe gate.
+            deadline_secs.min(Self::DISCOVER_PROBE_TIMEOUT_SECS)
+        }
+    }
+
+    /// Phase 1: probe `server/discover` so 2026-07-28 (SEP-2575 session-less +
+    /// [`ProbeVerdict::Legacy`] means "run the legacy handshake on a fresh transport". Every probe outcome showing the SERVER was reached maps there: immediate rejections (correlated JSON-RPC errors like method-not-found, the middleware 4xx shapes rmcp classifies itself, and non-JSON 5xx / SSE error events surfaced as transport errors) fall back at once, while servers that ACCEPT the probe but never answer it
+    /// Connect-phase failures are the exception: the probe never reached a server, so a legacy attempt against the same endpoint would only double the time-to-error on a blackholed host. Those surface as `Err` directly, through the same typed/message classification
+    async fn probe_modern<T, E, A>(&self, transport: T) -> Result<ProbeVerdict, McpError>
+    where
+        T: rmcp::transport::IntoTransport<RoleClient, E, A>,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        let probe_timeout = std::time::Duration::from_secs(Self::DISCOVER_PROBE_TIMEOUT_SECS);
+        let handler = self.make_client_handler();
+        let lifecycle = ClientLifecycleMode::Discover {
+            preferred_versions: vec![rmcp::model::ProtocolVersion::V_2026_07_28],
+        };
+        match tokio::time::timeout(
+            probe_timeout,
+            handler.serve_with_lifecycle(transport, lifecycle),
+        )
+        .await
+        {
+            Ok(Ok(service)) => Ok(ProbeVerdict::Modern(Box::new(service))),
+            Ok(Err(probe_error)) => {
+                if init_error_is_connect_phase(&probe_error)
+                    || is_connect_failure_message(&probe_error.to_string())
+                {
+                    return Err(McpError::HandshakeFailed {
+                        server: self.server_name.to_string(),
+                        source: Box::new(probe_error),
+                    });
+                }
+                tracing::debug!(
+                    server = %self.server_name,
+                    %probe_error,
+                    "server/discover probe failed; falling back to the legacy initialize handshake"
+                );
+                Ok(ProbeVerdict::Legacy {
+                    probe_error: probe_error.to_string(),
+                })
+            }
+            Err(_) => {
+                tracing::debug!(
+                    server = %self.server_name,
+                    "server/discover probe timed out; falling back to the legacy initialize handshake"
+                );
+                Ok(ProbeVerdict::Legacy {
+                    probe_error: format!(
+                        "server/discover probe timed out after {}s",
+                        Self::DISCOVER_PROBE_TIMEOUT_SECS
+                    ),
+                })
+            }
+        }
+    }
+
+    /// Phase 2 (and the only phase for stdio / short budgets): the legacy
+    /// `initialize` handshake, on its own fresh transport with the FULL startup budget — the probe phase never erodes it, so `startup_timeout_sec` keeps its pre-probe meaning for legacy servers. Its failure is surfaced directly (never wrapped in a fallback-specific error), so the auth and transport classifiers on [`McpError::HandshakeFailed`] see the same errors they saw before the probe existed.
+    /// The `initialize` names 2025-11-25 (pinned once, in [`Self::make_client_info`]) — the newest revision that HAS an initialize handshake. Never 2026-07-28: that revision removed the handshake, and version-strict servers reject it with `UnsupportedProtocolVersionException` instead of counter-offering.
+    async fn serve_legacy<T, E, A>(
+        &self,
+        transport: T,
+    ) -> Result<rmcp::service::RunningService<RoleClient, GrokClientHandler>, McpError>
+    where
+        T: rmcp::transport::IntoTransport<RoleClient, E, A>,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        let timeout = std::time::Duration::from_secs(self.startup_timeout_sec);
+        let handler = self.make_client_handler();
+        tokio::time::timeout(
+            timeout,
+            handler.serve_with_lifecycle(transport, ClientLifecycleMode::Initialize),
+        )
+        .await
+        .map_err(|_| McpError::timeout(&self.server_name, timeout))?
+        .map_err(|e| McpError::HandshakeFailed {
+            server: self.server_name.to_string(),
+            source: Box::new(e),
+        })
+    }
+
+    fn build_acp_transport(
+        &self,
+        server_id: String,
+        invoker: &Arc<dyn crate::acp_transport::AcpReverseInvoker>,
+    ) -> crate::acp_transport::AcpBridgeTransport {
+        // Per-reverse-call backstop on `x.ai/mcp/sdk_call`: the larger of the startup and tool timeouts
+        // It never undercuts the real outer bound: the handshake is bounded per phase in `try_handshake`
+        let invoke_timeout =
+            std::time::Duration::from_secs(self.startup_timeout_sec.max(self.tool_timeout_sec));
+        crate::acp_transport::acp_bridge_transport(server_id, Arc::clone(invoker), invoke_timeout)
+    }
+
+    /// OAuth flavor of [`Self::build_http_client`]: one shared, cloneable
+    /// client for both handshake phases, with per-request `Authorization`
+    /// injected by the shared [`rmcp::transport::auth::AuthClient`].
+    async fn build_oauth_http_client(
+        &self,
+        config: &HttpConfig,
+        auth_manager: &Arc<tokio::sync::Mutex<rmcp::transport::auth::AuthorizationManager>>,
+    ) -> Result<
+        crate::mcp_http_client::McpHttpClient<rmcp::transport::auth::AuthClient<reqwest::Client>>,
+        McpError,
+    > {
+        let name = &self.server_name;
+        // Local app endpoints skip OAuth outright (`start_mcp_server` routes them to `NoOauthSupport`), so this transport must never see one — its client is built without the local no-proxy/no-redirect hardening.
+        debug_assert!(
+            !config.local_agent_endpoint,
+            "a local agent endpoint must not reach the OAuth transport"
+        );
+        // Authorization is injected per-request by `AuthClient`, never
+        // carried in `default_headers`.
+        let mut headers = parse_config_headers(
+            name,
+            "oauth-transport",
+            config
+                .headers
+                .iter()
+                .filter(|(key, _)| !key.eq_ignore_ascii_case("Authorization"))
+                .map(|(key, value)| (key.as_str(), value.as_str())),
+        );
+        apply_user_agent_policy(&mut headers, name, &config.url);
+        // reqwest 0.13; the policy chokepoint is typed for 0.12 and cannot wrap this builder.
+        #[allow(clippy::disallowed_methods)]
+        let http_client = with_extra_root_certificates(
+            reqwest::Client::builder()
+                .default_headers(headers)
+                .connect_timeout(HTTP_CONNECT_TIMEOUT),
+        )
+        .build()
+        .map_err(|e| McpError::ClientError(format!("Failed to build HTTP client: {e}")))?;
+        // `AuthClient::new` wants an owned manager, but ours is shared (`Arc`) with the OAuth flow
+        // The struct is non_exhaustive, so build with a throwaway manager and swap in the shared one
+        let placeholder_manager =
+            rmcp::transport::auth::AuthorizationManager::new(config.url.as_str())
+                .await
+                .map_err(|e| McpError::ClientError(format!("Failed to build OAuth client: {e}")))?;
+        let mut auth_client =
+            rmcp::transport::auth::AuthClient::new(http_client, placeholder_manager);
+        auth_client.auth_manager = auth_manager.clone();
+        let mcp_http_client = crate::mcp_http_client::McpHttpClient::new(
+            auth_client,
+            name.as_str(),
+            self.warn_budget.clone(),
+        );
+        Ok(mcp_http_client)
     }
 
     fn make_client_info(server_name: &str, advertise_elicitation: bool) -> ClientInfo {
@@ -3984,14 +4023,11 @@ impl McpClient {
                 xai_grok_version::VERSION.to_string(),
             ),
         )
-        // This pin currently equals rmcp 3.2 LATEST
-        // The explicit setter must remain so a future rmcp bump cannot silently move the wire
-        // 2026-07-28 brings SEP-2322 multi round-trip requests (`input_required` results); older
-        // servers negotiate down and keep the server-initiated `elicitation/create` flow
-        .with_protocol_version(rmcp::model::ProtocolVersion::V_2026_07_28)
+        // The newest initialize-era revision — the single pin `serve_legacy`'s handshake names. Never pin 2026-07-28 here: that revision removed the initialize handshake, and version-strict servers reject an `initialize` that names it. 2026-07-28 is only negotiated via `server/discover` (see `probe_modern`). The explicit setter must remain so a future rmcp bump cannot silently move the wire.
+        .with_protocol_version(rmcp::model::ProtocolVersion::V_2025_11_25)
     }
 
-    /// Build the [`GrokClientHandler`] that drives `client.serve(...)`.
+    /// Build the [`GrokClientHandler`] that drives `client.serve_with_lifecycle(...)`.
     ///
     /// The handler holds a **clone of `Arc<Mutex<Option<Sender>>>`**, not a snapshot, so a later [`Self::set_event_tx`] reaches the live handler.
     fn make_client_handler(&self) -> GrokClientHandler {
@@ -4007,12 +4043,17 @@ impl McpClient {
     }
 
     /// Wire a sender for [`McpClientEvent`]s emitted by this client.
-    ///
-    /// Mutates the shared slot synchronously.
-    /// The [`GrokClientHandler`] handed to `client.serve` and the [`crate::liveness::spawn_transport_liveness`] task read through the same Arc.
     /// So the change is observed session-wide on the next event.
     pub fn set_event_tx(&self, tx: Option<tokio::sync::mpsc::UnboundedSender<McpClientEvent>>) {
         *self.notify_tx.lock() = tx;
+    }
+
+    /// For a client that will never be installed: drops the watcher's strong `Arc` and the senders that could still
+    /// reach the session.
+    pub fn discard(&self) {
+        self.set_liveness_handle(None);
+        self.set_event_tx(None);
+        self.set_elicitation_tx(None);
     }
 
     pub fn set_elicitation_tx(&self, tx: Option<crate::elicitation::ElicitationInbox>) {
@@ -4030,43 +4071,20 @@ impl McpClient {
     }
 
     /// Snapshot the current event sender, if any.
-    ///
-    /// Used by [`crate::liveness::spawn_transport_liveness`], which captures a `Sender` clone at spawn time.
-    /// Also used by [`Self::ensure_initialized`]'s post-handshake emit.
     /// Synchronous because the shared slot is a `parking_lot::Mutex`.
     pub fn event_tx_clone(&self) -> Option<tokio::sync::mpsc::UnboundedSender<McpClientEvent>> {
         self.notify_tx.lock().clone()
     }
 
     /// Install or replace this client's transport-liveness handle.
-    /// Dropping the previous handle (if any) cancels its task; the new handle starts polling on its own schedule.
     /// Pass `None` to stop watching without installing a new one.
-    ///
-    /// Synchronous: the slot is a `parking_lot::Mutex`.
-    /// The poller task uses an `Arc` clone of this same mutex so it can clear the slot from inside the task before exiting.
     pub fn set_liveness_handle(&self, handle: Option<crate::liveness::TransportLivenessHandle>) {
         *self.liveness_handle.lock() = handle;
     }
 
     /// Start the per-client transport-liveness watcher.
-    ///
-    /// Idempotent and gated:
-    /// - Returns `false` for in-process SDK ([`Self::is_acp`]) clients: the watcher's only output is `TransportClosed`.
-    ///   The dispatcher can't recover that for ACP (not in `configs`), so it would evict the client.
-    ///   ACP recovers lazily via [`Self::reset_transport`] instead. Gated here so no caller can forget it.
-    /// - Returns `false` if there's no `notify_tx` wired (subagent snapshot or pre-dispatcher state); nothing to do.
-    /// - Returns `false` if the client isn't `Ready`.
-    ///   A poller spawned then would just exit silently on its first poll; skipping the spawn entirely is cheaper.
-    /// - Returns `false` if a live handle is already installed.
-    /// - Otherwise spawns the poller and stores the handle.
-    ///
-    /// **TOCTOU note**: the state check is performed before the liveness lock is acquired.
-    /// A concurrent re-handshake could move the state to `Initializing` between the check and the spawn.
-    /// This is benign: the poller's first tick observes the non-`Ready` state and exits silently without emitting.
+    /// Returns `false` for in-process SDK ([`Self::is_acp`]) clients: the watcher's only output is `TransportClosed`. The dispatcher can't recover that for ACP (not in `configs`), so it would evict the client. ACP recovers lazily via [`Self::reset_transport`] instead. Gated here so no caller can forget it; Returns `false` if there's no `notify_tx` wired (subagent snapshot or pre-dispatcher state); nothing to do; Returns `false` if the client isn't `Ready`. A poller spawned then would just exit silently on its first poll; skipping the spawn entirely is cheaper; Returns `false` if a live handle is already installed; Otherwise spawns the poller and stores the handle.
     /// So the worst case under TOCTOU is "the poller starts and immediately stops"; it never produces a spurious `TransportClosed`.
-    ///
-    /// Lifecycle: when the watcher emits `TransportClosed` it clears the slot itself.
-    /// The next `arm_liveness_watcher` call can install a fresh handle without a manual [`Self::set_liveness_handle`] reset.
     pub async fn arm_liveness_watcher(
         self: &Arc<Self>,
         poll_interval: std::time::Duration,
@@ -4095,14 +4113,12 @@ impl McpClient {
         true
     }
 
-    fn build_http_transport(
+    /// One shared, cloneable HTTP client for a server's handshake: the probe and the legacy transports are separate rmcp sessions built from clones of this client, so they share its connection pool instead of paying a second TCP+TLS setup.
+    fn build_http_client(
         config: &HttpConfig,
         server_name: &str,
         warn_budget: crate::mcp_http_client::WarnBudget,
-    ) -> Result<
-        StreamableHttpClientTransport<crate::mcp_http_client::McpHttpClient<reqwest::Client>>,
-        McpError,
-    > {
+    ) -> Result<crate::mcp_http_client::McpHttpClient<reqwest::Client>, McpError> {
         let mut headers = parse_config_headers(
             server_name,
             "transport",
@@ -4131,31 +4147,16 @@ impl McpClient {
         let client = builder
             .build()
             .map_err(|e| McpError::ClientError(format!("Failed to build HTTP client: {e}")))?;
-        let mcp_http_client =
-            crate::mcp_http_client::McpHttpClient::new(client, server_name, warn_budget);
-        let transport_config = StreamableHttpClientTransportConfig::with_uri(config.url.as_str());
-        Ok(StreamableHttpClientTransport::with_client(
-            mcp_http_client,
-            transport_config,
+        Ok(crate::mcp_http_client::McpHttpClient::new(
+            client,
+            server_name,
+            warn_budget,
         ))
     }
 
     /// Cheap, non-blocking liveness predicate.
-    ///
     /// Inspects the current [`ClientState`] under the state mutex only.
     /// It MUST NOT call [`Self::ensure_initialized`] or any other path that can trigger a network round-trip.
-    /// Going through `ensure_initialized` could block UI callers (e.g. an MCP status modal) for up to `startup_timeout_sec` on a dead stdio server.
-    ///
-    /// Semantics:
-    /// - `Ready(service)` with an open transport is `true`.
-    /// - `Ready(service)` whose receiver-side has been dropped (typically because the rmcp service loop terminated) is `false`.
-    ///   rmcp 2.1 `Peer::is_transport_closed` reports `self.tx.is_closed()` at `service.rs:703-705`.
-    ///   `RunningService` derefs to `Peer` at `service.rs:716-722`.
-    /// - Any other variant (`Empty`, `Pending`, `Initializing`) is `false`.
-    ///
-    /// HTTP idle caveat: for [`StreamableHttpClientTransport`] the rmcp service loop only terminates on send failure or explicit shutdown.
-    /// A long-idle HTTP server therefore keeps `is_transport_closed()` returning `false`, and this method continues to report `true`.
-    /// That is the desired semantics; a liveness probe would belong in a separate watcher, not here.
     pub async fn is_healthy(&self) -> bool {
         let guard = self.state.lock().await;
         match &*guard {
@@ -4165,9 +4166,6 @@ impl McpClient {
     }
 
     /// Atomic classification for the liveness watcher.
-    ///
-    /// Reads `state` once and projects onto [`LivenessCheck`]:
-    /// distinguishes "transport actually closed" (emit and exit) from "state moved out of `Ready`" (exit silently).
     /// The watcher depends on this distinction: a plain `is_healthy`-based predicate cannot tell the cases apart.
     /// It would false-fire `TransportClosed` on re-handshake transitions.
     pub async fn liveness_check(&self) -> LivenessCheck {
@@ -4183,9 +4181,11 @@ impl McpClient {
             _ => LivenessCheck::Transient,
         }
     }
+    pub async fn is_ready(&self) -> bool {
+        self.state_kind().await == ClientStateKind::Ready
+    }
 
     /// State-machine snapshot for diagnostics and downstream UI.
-    ///
     /// Like [`Self::is_healthy`], this is a cheap state inspection (no handshake, no network I/O).
     /// Maps [`ClientState`] onto a `Copy` enum so callers can match without holding a reference to the inner [`McpService`] / [`PendingTransport`].
     pub async fn state_kind(&self) -> ClientStateKind {
@@ -4199,14 +4199,8 @@ impl McpClient {
     }
 
     /// Write this server's tool descriptors as JSON files under `<server_dir>/tools/`.
-    ///
-    /// The model reads these before issuing an MCP tool call.
-    /// Each tool becomes `<server_dir>/tools/<sanitized_tool_name>.json` with `{name, description, inputSchema}`.
-    /// Resources are intentionally left out: this harness exposes only MCP tool calls.
     /// Resource descriptors would advertise MCP-resource tools the model can't use.
-    ///
     /// Best-effort: errors writing individual descriptors are logged but don't abort the run.
-    /// Returns the number of files written.
     pub async fn materialize_descriptors(
         &self,
         server_dir: &std::path::Path,
@@ -4310,7 +4304,25 @@ impl McpClient {
         }
     }
 
+    /// The handshake plus the first `tools/list`, bounded so a server that connects and then stalls cannot hold a
+    /// caller indefinitely.
     pub async fn get_tool_registrations(
+        &self,
+        mcp_state: Arc<Mutex<McpState>>,
+    ) -> Result<Vec<McpToolRegistration>, McpError> {
+        let list_window = self
+            .startup_timeout_sec
+            .max(Self::DISCOVER_PROBE_TIMEOUT_SECS);
+        let budget = std::time::Duration::from_secs(
+            self.handshake_worst_case_secs().saturating_add(list_window),
+        );
+        match tokio::time::timeout(budget, self.list_tool_registrations(mcp_state)).await {
+            Ok(result) => result,
+            Err(_) => Err(McpError::timeout(&self.server_name, budget)),
+        }
+    }
+
+    async fn list_tool_registrations(
         &self,
         mcp_state: Arc<Mutex<McpState>>,
     ) -> Result<Vec<McpToolRegistration>, McpError> {
@@ -4318,6 +4330,13 @@ impl McpClient {
         // holds a Chrome-mode span guard that must not cross an await
         // (`!Send`, and tracing's span stack is per-thread).
         let mcp_service = self.ensure_initialized().await?;
+
+        let list_tools_start = std::time::Instant::now();
+        let list_tools_span = xai_grok_telemetry::region::Region::from_span(tracing::info_span!(
+            "mcp.list_tools",
+            tools_count = tracing::field::Empty,
+            elapsed_ms = tracing::field::Empty,
+        ));
 
         let mut all_tools = Vec::new();
         let mut cursor: Option<String> = None;
@@ -4336,6 +4355,13 @@ impl McpClient {
                 None => break,
             }
         }
+        list_tools_span
+            .span()
+            .record("tools_count", all_tools.len() as i64);
+        list_tools_span
+            .span()
+            .record("elapsed_ms", list_tools_start.elapsed().as_millis() as i64);
+        list_tools_span.close();
 
         let registrations: Vec<_> = all_tools
             .into_iter()
@@ -4350,9 +4376,8 @@ impl McpClient {
                 let mut schema = serde_json::to_value(tool.input_schema.as_ref())
                     .unwrap_or_else(|_| serde_json::json!({"type": "object"}));
                 // Ensure the schema has "type": "object"
-                // Some MCP servers (e.g., VSCode) send `inputSchema: {}` for tools with no parameters
-                // Azure's OpenAI API rejects schemas without a `type` field with:
-                // 'schema must be a JSON Schema of type: "object", got type: "None"'
+                // Some MCP servers send `inputSchema: {}` for tools with no parameters
+                // Azure's OpenAI API rejects schemas without a `type` field with: 'schema must be a JSON Schema of type: "object", got type: "None"'
                 if let Some(obj) = schema.as_object_mut() {
                     obj.entry("type")
                         .or_insert_with(|| serde_json::json!("object"));
@@ -4506,13 +4531,8 @@ fn expand_session_id_headers(
 }
 
 /// Decide the actual (program, args) to spawn for a stdio MCP server.
-///
-/// On Windows, npm ships launchers like `npx`/`npm`/`pnpm`/`yarn` as `.cmd` batch shims (there is no `npx.exe`).
 /// `CreateProcessW` only appends `.exe` and ignores `PATHEXT`, so `Command::new("npx")` fails with "file not found".
-/// We resolve the bare name on `PATH` (honoring `PATHEXT`, via the `resolve` closure) so std spawns the real launcher path (e.g. `npx.cmd`).
-/// std then runs `.cmd`/`.bat` through `cmd.exe` with hardened arg escaping.
 /// On non-Windows we never touch the command. A command containing a path separator is used as-is.
-/// The resolved path is returned as an `OsString` so it reaches `Command::new` without a lossy UTF-8 round-trip.
 fn plan_stdio_spawn(
     command: &str,
     args: &[String],
@@ -4583,8 +4603,6 @@ fn apply_user_agent_policy(headers: &mut reqwest::header::HeaderMap, server_name
 }
 
 /// Convert configured header pairs to a `HeaderMap` for every MCP streamable-HTTP request path.
-/// Invalid pairs are warned and skipped; for duplicate names the last valid value wins (`HeaderMap::insert`).
-/// `stage` disambiguates the warning.
 /// One bad configured pair is reported by both the anonymous probe and the transport build on a single connection attempt.
 fn parse_config_headers<'a>(
     server_name: &str,
@@ -4684,11 +4702,7 @@ pub async fn start_mcp_server(
     byo_config: Option<&McpOAuthConfig>,
     ctx: &McpSpawnCtx<'_>,
 ) -> Result<McpClient, McpError> {
-    // No whole-start timer here: `InstrumentationTimer` holds a
-    // Chrome-mode span guard that must not cross an await (it is `!Send`
-    // and tracing's span stack is per-thread), and this fn awaits on every
-    // transport. Durations are carried by the per-transport telemetry
-    // events instead.
+    // No whole-start timer here: `InstrumentationTimer` holds a Chrome-mode span guard that must not cross an await (it is `!Send` and tracing's span stack is per-thread), and this fn awaits on every transport. Durations are carried by the per-transport telemetry events instead.
     match mcp_server {
         acp::McpServer::Stdio(acp::McpServerStdio {
             name,
@@ -4707,8 +4721,9 @@ pub async fn start_mcp_server(
             // Scoped to the sync spawn-planning prologue: the timer's
             // Chrome-mode span guard must not cross the spawn await below.
             let cmd = {
-                let _stdio_spawn_timer =
+                let mut stdio_spawn_timer =
                     xai_grok_telemetry::instrumentation::timer("mcp_stdio_spawn");
+                stdio_spawn_timer.with_server(name.as_str());
                 let path_override = stdio_path_override(&env);
                 let (program, spawn_args) =
                     plan_stdio_spawn(&command_str, &args, cfg!(windows), |c| {
@@ -4728,14 +4743,25 @@ pub async fn start_mcp_server(
                 cmd
             };
 
-            let (transport, stderr_handle) = SafeTokioChildProcess::spawn(
+            let spawn_child_start = std::time::Instant::now();
+            let spawn_child_span =
+                xai_grok_telemetry::region::Region::from_span(tracing::info_span!(
+                    "mcp.spawn_child",
+                    server_name = %name,
+                    elapsed_ms = tracing::field::Empty,
+                ));
+            let spawn_result = SafeTokioChildProcess::spawn(
                 cmd,
                 ctx.scope,
                 name.clone(),
                 ctx.event_writer.clone(),
             )
-            .await
-            .map_err(|e| {
+            .await;
+            spawn_child_span
+                .span()
+                .record("elapsed_ms", spawn_child_start.elapsed().as_millis() as i64);
+            spawn_child_span.close();
+            let (transport, stderr_handle) = spawn_result.map_err(|e| {
                 tracing::error!("Failed to spawn MCP server '{}': {}", name, e);
                 xai_grok_telemetry::session_ctx::log_event(
                     xai_grok_telemetry::events::McpServerFailed {
@@ -4776,11 +4802,8 @@ pub async fn start_mcp_server(
             }
 
             let mut headers = expand_session_id_headers(headers, ctx.session_id);
-            // Stripped unconditionally: the agent-id header identifies the
-            // session to first-party app endpoints, and a caller-supplied
-            // config must not be able to impersonate one (see
-            // [`GROK_AGENT_ID_HEADER`]). Re-added only from the spawn
-            // context, like `GROK_SESSION_ID` on stdio servers.
+            // Stripped unconditionally: the agent-id header identifies the session to first-party app endpoints, and a caller-supplied config must not be able to impersonate one (see
+            // [`GROK_AGENT_ID_HEADER`]). Re-added only from the spawn context, like `GROK_SESSION_ID` on stdio servers.
             headers.retain(|(name, _)| !name.eq_ignore_ascii_case(GROK_AGENT_ID_HEADER));
             let local_agent_endpoint = ctx.send_grok_agent_id_header;
             if local_agent_endpoint && let Some(session_id) = ctx.session_id {
@@ -4933,7 +4956,6 @@ impl McpClient {
         // Route through the single constructor (so new fields never need touching here), then downgrade to the no-transport placeholder
         // `Empty` state makes `ensure_initialized` error, and `reconnect = None` makes `reset_transport` return false
         // That is a client that can't reconnect, like a dead Stdio child
-        // Overrides preserve the historical stub timeouts (10s startup / 60s tool)
         let overrides = McpClientTimeoutOverrides {
             startup_timeout_sec: Some(10),
             tool_timeout_sec: Some(60),
@@ -4960,23 +4982,6 @@ impl McpClient {
 }
 
 /// rmcp [`ClientHandler`] used by all MCP transports.
-///
-/// Routes server-pushed notifications through an [`tokio::sync::mpsc::UnboundedSender<McpClientEvent>`].
-/// The session-actor dispatcher fans them out as ACP `x.ai/mcp/server_status` events.
-///
-/// ## RPIT, not `#[async_trait]`
-///
-/// rmcp 2.1's [`ClientHandler`] declares its async methods as return-position `impl Future`.
-/// See `~/.cargo/registry/src/.../rmcp-2.1.0/src/handler/client.rs`, lines 202-217.
-/// Applying `#[async_trait]` here would produce methods whose signature mismatches the trait, and the impl would not satisfy the bound.
-/// The macro path is also unnecessary: the trait already supports `async fn` syntax indirectly via `impl Future<Output = ()> + Send + '_`.
-///
-/// Future contributor reading this: do **not** add `#[async_trait]`.
-/// The methods below intentionally return `impl Future` directly.
-///
-/// ## Notification routing
-///
-/// `on_tool_list_changed` / `on_resource_list_changed` push an [`McpClientEvent`] into [`Self::notify_tx`].
 /// If the receiver has been dropped (subagent teardown, session shutdown, or never wired; see [`McpClient::notify_tx`]), the send fails silently.
 /// rmcp must not see an error from a notification handler or the service loop tears down.
 #[derive(Debug)]
@@ -4995,8 +5000,6 @@ pub struct GrokClientHandler {
 
 impl GrokClientHandler {
     /// Best-effort event emit.
-    /// Reads the shared `notify_tx` slot on every call (so the handler picks up any post-handshake wiring done by [`McpClient::set_event_tx`]).
-    /// Drops the send error: if the receiver is gone, the consumer has shut down and there's nothing useful to do here.
     /// Splitting this out keeps the trait methods short.
     fn emit(&self, ev: McpClientEvent) {
         let sender = self.notify_tx.lock().clone();
@@ -5008,10 +5011,7 @@ impl GrokClientHandler {
 
 impl ClientHandler for GrokClientHandler {
     // NOTE: `async fn` here is sugar for the trait's `-> impl Future<Output = ()> + Send + '_`
-    // We INTENTIONALLY do not use `#[async_trait]`
-    // rmcp 2.1's `ClientHandler` declares its notification methods as return-position `impl Future`
-    // async_trait would produce a different (incompatible) signature.
-    // See the [`GrokClientHandler`] doc-comment for the full RPIT contract
+    // We INTENTIONALLY do not use `#[async_trait]` rmcp 2.1's `ClientHandler` declares its notification methods as return-position `impl Future` async_trait would produce a different (incompatible) signature.
     async fn on_tool_list_changed(&self, _context: NotificationContext<RoleClient>) {
         self.emit(McpClientEvent::ToolsChanged {
             server: self.server_name.clone(),
@@ -5050,10 +5050,7 @@ impl ClientHandler for GrokClientHandler {
         }
     }
 
-    // rmcp 3.x dropped the typed URL-elicitation completion handler; the
-    // notification (either the 2026-07-28 `notifications/elicitation/response`
-    // or the 2025-11-25 `notifications/elicitation/complete` spelling) now
-    // arrives through the custom-notification catch-all.
+    // rmcp 3.x dropped the typed URL-elicitation completion handler; the notification (either the 2026-07-28 `notifications/elicitation/response` or the 2025-11-25 `notifications/elicitation/complete` spelling) now arrives through the custom-notification catch-all.
     async fn on_custom_notification(
         &self,
         notification: rmcp::model::CustomNotification,

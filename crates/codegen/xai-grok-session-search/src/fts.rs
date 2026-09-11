@@ -102,14 +102,9 @@ pub fn with_index<R>(
 }
 
 impl SessionSearchIndex {
-    /// Open (or create) the FTS index at `db_path`.
-    ///
-    /// Creates the schema and triggers on first use.
-    /// When the stored schema version is older than [`SCHEMA_VERSION`], drops and recreates all tables (the index can be rebuilt).
-    /// The drop also deletes the `last_bootstrap_at` marker so the wipe is visible to bootstrap and staleness checks.
-    /// A newer stored version is tolerated read/write without dropping.
-    ///
-    /// If the existing file is corrupt or not a database, quarantines it and opens a fresh empty index (see `recovery::heal_unusable`).
+    /// When the stored schema version is older than [`SCHEMA_VERSION`], drops and recreates all tables (the index can be
+    /// rebuilt). A newer stored version is tolerated read/write without dropping. If the existing file is corrupt or not a
+    /// database, quarantines it and opens a fresh empty index (see `recovery::heal_unusable`).
     pub fn open_or_create(db_path: &Path) -> Result<Self, rusqlite::Error> {
         if let Some(parent) = db_path.parent() {
             // The parent is usually the sessions root; never (re)create it with loose permissions
@@ -155,22 +150,18 @@ impl SessionSearchIndex {
             .optional()
             .unwrap_or(None);
 
-        // One-way ratchet: drop only on UPGRADE (stored < current)
-        // Multiple grok generations share this DB (stable vs alpha)
-        // An equality check made each binary wipe the other's index in turn, leaving search empty mid-rebootstrap
-        // A newer index is safe to read: bumps regenerate content only (the table schema is column-identical)
-        // The newer binary re-upserts any rows we write via content-hash mismatch
-        // `None` means a fresh DB; a non-integer stored value is legacy or corrupt and parses as 0
+        // One-way ratchet: drop only on UPGRADE (stored < current). A newer index is safe to read: bumps regenerate content only
+        // (the table schema is column-identical). The newer binary re-upserts any rows we write via content-hash mismatch `None`
+        // means a fresh DB; a non-integer stored value is legacy or corrupt and parses as 0
         let current: u64 = SCHEMA_VERSION
             .parse()
             .expect("SCHEMA_VERSION is an integer");
         let stored: Option<u64> = stored_version.as_deref().map(|v| v.parse().unwrap_or(0));
         let owned_by_newer = stored.is_some_and(|s| s > current);
         if stored.is_some_and(|s| s < current) {
-            // The marker and claim die with the tables
-            // A surviving marker reads as "bootstrap complete" over an empty index, and a stale claim blocks the rebuild until the lease expires
-            // Other `meta` keys are preserved
-            // Immediate: a deferred begin can fail with SQLITE_BUSY_SNAPSHOT, which skips the busy handler
+            // The marker and claim die with the tables A surviving marker reads as "bootstrap complete" over an empty index, and a
+            // stale claim blocks the rebuild until the lease expires. Other `meta` keys are preserved. Immediate: a deferred begin
+            // can fail with SQLITE_BUSY_SNAPSHOT, which skips the busy handler
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             tx.execute_batch(
                 "
@@ -274,10 +265,9 @@ impl SessionSearchIndex {
         Ok(())
     }
 
-    /// Insert a session document only if no row exists for its `session_id`.
-    ///
-    /// Atomic alternative to a check-then-insert: the index DB is shared across processes.
-    /// A separate check and insert could clobber a full-content row written between them.
+    /// Insert a session document only if no row exists for its `session_id`. Atomic alternative to a check-then-insert: the
+    /// index DB is shared across processes. A separate check and insert could clobber a full-content row written between
+    /// them.
     pub fn insert_doc_if_absent(&self, doc: &SessionDoc) -> Result<(), rusqlite::Error> {
         self.db.execute(
             "INSERT INTO session_docs(session_id, cwd, updated_at, title, content, content_hash)
@@ -449,14 +439,9 @@ impl SessionSearchIndex {
         Ok(ids)
     }
 
-    /// Run a BM25-ranked FTS5 query over indexed sessions.
-    ///
-    /// Multi-token queries require every token (AND) first.
-    /// When that intersection matches nothing the query reruns as an OR, so partial matches still show up.
-    ///
-    /// A query shaped like a session id (a full UUID or a hyphenated hex prefix) matches `session_docs.session_id` directly.
-    /// FTS only indexes title and content, and a hyphenated UUID `MATCH` looks for tokens that were never indexed.
-    /// So `/resume` search by id returned nothing while `grok --resume <id>` still loaded the session.
+    /// When that intersection matches nothing the query reruns as an OR, so partial matches still show up. A query shaped
+    /// like a session id (a full UUID or a hyphenated hex prefix) matches `session_docs.session_id` directly. FTS only
+    /// indexes title and content, and a hyphenated UUID `MATCH` looks for tokens that were never indexed.
     pub fn query(
         &self,
         query: &str,
@@ -671,12 +656,9 @@ impl SessionSearchIndex {
             .filter(|part| part.chars().any(|c| c.is_ascii_alphanumeric()))
     }
 
-    /// One quoted FTS5 prefix per token, stemmed on the query side only.
-    ///
-    /// Plural queries reach singular docs by searching the shorter stem (`sessions` becomes `session*`, `caches` becomes `cach*`).
-    /// The trailing `*` covers the reverse direction and typed stems like `ing`/`ed`, so no OR-group is needed.
-    /// A `(base OR stem)` group double-counts bm25 and ranks inflected docs above exact matches.
-    /// Words shorter than four letters, identifiers with digits/`_`/`-`, and words ending in `ss` (`pass`, `class`) stay exact.
+    /// One quoted FTS5 prefix per token, stemmed on the query side only. Plural queries reach singular docs by searching the
+    /// shorter stem (`sessions` becomes `session*`, `caches` becomes `cach*`). Words shorter than four letters, identifiers
+    /// with digits/`_`/`-`, and words ending in `ss` (`pass`, `class`) stay exact.
     fn token_prefix(token: &str) -> String {
         let stem = if token.len() < 4 || !token.chars().all(|c| c.is_ascii_alphabetic()) {
             token
@@ -1055,10 +1037,9 @@ mod tests {
         assert_eq!(qr.results.len(), 1, "the retried op's write is persisted");
     }
 
-    /// Repro: the on-disk state left behind by a pre-ratchet binary that wiped the shared DB and ran its own bootstrap.
-    /// That leaves a v3-stamped index with a *recent* bootstrap marker.
-    /// Pins that the current binary's open drops the tables and deletes the marker together (see the drop batch in `open_or_create`).
-    /// A surviving marker would suppress re-bootstrap over empty tables.
+    /// Repro: the on-disk state left behind by a pre-ratchet binary that wiped the shared DB and ran its own bootstrap. Pins
+    /// that the current binary's open drops the tables and deletes the marker together (see the drop batch in
+    /// `open_or_create`). A surviving marker would suppress re-bootstrap over empty tables.
     #[test]
     fn test_upgrade_drop_invalidates_completed_bootstrap_marker() {
         let tmp = TempDir::new().unwrap();

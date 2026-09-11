@@ -67,7 +67,6 @@ pub(crate) const DARK_SURFACE: Rgba = Rgba::new(0x18, 0x18, 0x1B, 0xFF);
 
 impl MermaidTheme {
     /// The default opaque surface color a diagram blends into for this theme.
-    ///
     /// Used as the raster background when the caller supplies no explicit [`RenderParams::background`].
     /// The color approximates a typical terminal scrollback surface so the PNG sits flush with the grid.
     pub fn surface_background(self) -> Rgba {

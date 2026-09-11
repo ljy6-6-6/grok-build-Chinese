@@ -4,7 +4,6 @@ use tokio::sync::{mpsc, oneshot};
 use crate::extensions::notification::SessionNotification as XaiSessionNotification;
 use acp::SessionNotification as AcpSessionNotification;
 
-/// A notification headed through `event_tx` into the high-frequency `ReplayBuffer`.
 /// The buffer debounces and merges everything, then `emit_buffered` emits it without firing per-chunk hooks or persistence writes.
 /// The two variants stay separate because ACP and xAI chunks merge under different rules and wire envelopes.
 /// One-shot xAI events (RetryState, ImageCompressed, HookExecution, etc.) instead take `send_xai_notification` for per-event hooks and persistence.
@@ -118,10 +117,7 @@ pub(crate) enum FlushReplayError {
 }
 
 /// Flush replay-buffered notifications through the session actor loop.
-///
-/// This must only be used from callers that are *outside* `run_session()`.
 /// The `FlushComplete` command runs inside the actor loop, so it flushes `replay_buffer` inline instead.
-/// That avoids waiting on a mailbox event that the same loop would need to process.
 pub(crate) async fn flush_replay_actor(
     event_tx: &mpsc::UnboundedSender<SessionEvent>,
 ) -> Result<(), FlushReplayError> {

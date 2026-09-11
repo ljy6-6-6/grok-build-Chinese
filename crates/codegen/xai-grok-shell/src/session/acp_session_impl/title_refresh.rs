@@ -24,10 +24,9 @@ impl SessionActor {
         if self.next_title_refresh_idx.get() >= session_summary::TITLE_REFRESH_TURNS.len() {
             return;
         }
-        // One refresh at a time: a whole-conversation title doesn't need the very latest turn
-        // Letting the in-flight call finish (rather than aborting and respawning every turn) guarantees the checkpoint is eventually consumed
-        // That holds even when the model keeps failing
-        // The check is `is_finished` (not just `is_some`) so a panicked task can't wedge the slot shut
+        // One refresh at a time: a whole-conversation title doesn't need the very latest turn.
+        // Letting the in-flight call finish (rather than aborting and respawning every turn) guarantees the checkpoint is eventually consumed.
+        // The check is `is_finished` (not just `is_some`) so a panicked task can't wedge the slot shut.
         if self
             .title_refresh_task
             .borrow()
@@ -47,7 +46,6 @@ impl SessionActor {
         *self.title_refresh_task.borrow_mut() = Some(task);
     }
 
-    /// React to a `/rename`.
     /// A manual rename freezes the auto refresh (so a racing in-flight refresh can't flip the title and no later refresh fights the user's title).
     /// `/rename --auto` reopens it so the whole-conversation refresh can re-title.
     /// Aborts any in-flight refresh either way and persists the new checkpoint so the decision survives resume.
@@ -75,13 +73,9 @@ impl SessionActor {
         }
     }
 
-    /// If the real-user-turn count has reached the next refresh checkpoint, generate a whole-conversation title and persist it.
-    ///
     /// `generation` is the spawn-time token.
-    /// A completed attempt consumes the checkpoint (advancing the index, freezing once past the last one) even when generation *failed*.
     /// A persistently failing model therefore cannot keep spawning side-calls forever.
     /// Only a stale attempt, one whose generation was bumped by an abort (prompt, rewind, shutdown), bails without consuming.
-    /// The newer path then retries.
     async fn refresh_title(&self, generation: u64) {
         let conversation = self.chat_state_handle.get_conversation().await;
         let turns = session_recap::main_turn_count(&conversation);

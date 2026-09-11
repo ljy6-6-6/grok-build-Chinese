@@ -185,11 +185,8 @@ pub(crate) fn resolve_active_campaigns_from_layers(
 }
 
 /// Campaigns eligible for dismissal when the user persists a choice (loads the layers, the remote cache, and the dismiss state).
-///
 /// Unlike the apply path this deliberately **ignores the kill switch**: dismissing a suppressed campaign is harmless.
-/// Skipping the dismissal lets a later re-enabled campaign override a choice the user already made ("user pick wins, forever").
-/// A layer-load failure likewise falls back to the remote cache instead of failing closed: remote campaigns still get dismissed on that path.
-/// Disk-layer campaigns can be missed until the transient failure clears (they re-dismiss on the next pick).
+/// Skipping the dismissal lets a later re-enabled campaign override a choice the user already made ("user pick wins, forever"). A layer-load failure likewise falls back to the remote cache instead of failing closed: remote campaigns still get dismissed on that path. Disk-layer campaigns can be missed until the transient failure clears (they re-dismiss on the next pick).
 fn resolve_dismissable_campaigns() -> Vec<CampaignEntry> {
     let dismissed = load_dismissed_ids();
     if let Some(over) = campaigns_override() {
@@ -235,11 +232,8 @@ pub struct CampaignModelsDefault {
 }
 
 /// `None` unless an active (non-dismissed, kill-switch-respecting, requirements-losing) campaign changes the effective `models.default`.
-/// Session creation uses this to apply a campaign to `/new` even when remote settings arrived only after boot.
-/// The `ModelsManager`'s `current_model_id` was resolved pre-campaign.
-/// `ModelsManager::apply_config` deliberately never re-targets it on a campaign-only flip, so `/new` re-evaluates here.
-/// Reading the dismiss state fresh makes a `/model` pick win instantly.
-/// [`persist_user_choice`] records the dismissal before the config write, so the very next `/new` resolves campaign-free.
+/// Session creation uses this to apply a campaign to `/new` even when remote settings arrived only after boot. The `ModelsManager`'s `current_model_id` was resolved pre-campaign.
+/// `ModelsManager::apply_config` deliberately never re-targets it on a campaign-only flip, so `/new` re-evaluates here. Reading the dismiss state fresh makes a `/model` pick win instantly. [`persist_user_choice`] records the dismissal before the config write, so the very next `/new` resolves campaign-free.
 pub fn campaign_driven_models_default() -> Option<CampaignModelsDefault> {
     let layers = ConfigLayers::load().ok()?;
     campaign_driven_models_default_from(&layers, &cached_remote_campaigns(), &load_dismissed_ids())
@@ -291,10 +285,8 @@ struct CampaignFieldValue {
     recovery: Option<toml::Value>,
 }
 
-/// A config field a campaign may temporarily override until the user sets it.
-/// `apply_campaign_fields` drives every [`CAMPAIGN_FIELDS`] entry, so the resolve pass is one row here.
-/// A field still needs its runtime state and a `persist_*` writer through [`persist_user_choice`].
-/// It also needs any field-specific reaction (e.g. the model catalog-miss/live-session handling in `agent::models`).
+/// A config field a campaign may temporarily override until the user sets it. `apply_campaign_fields` drives every [`CAMPAIGN_FIELDS`] entry, so the resolve pass is one row here.
+/// A field still needs its runtime state and a `persist_*` writer through [`persist_user_choice`]. It also needs any field-specific reaction (e.g. the model catalog-miss/live-session handling in `agent::remote_config`).
 struct CampaignField {
     /// Path into the effective config; also the dismiss key shared with the writer.
     path: PatchPath,
@@ -378,17 +370,13 @@ pub fn sync_campaign_fields(cfg: &mut crate::agent::config::Config) {
 
 /// Dismiss any active campaign whose patch touches `path`, then persist the setting via `update_config`.
 /// This is the single field-keyed chokepoint: a new campaign-governable field is one call here with no per-field dismiss wiring.
-///
-/// The dismiss is recorded **before** the config write so a crash between the two can't leave the campaign active over the user's just-saved value.
-/// If the dismiss lands but the write fails, the dismiss stands: failure leans toward not nudging.
+/// The dismiss is recorded **before** the config write so a crash between the two can't leave the campaign active over the user's just-saved value. If the dismiss lands but the write fails, the dismiss stands: failure leans toward not nudging.
 pub(super) async fn persist_user_choice(
     path: PatchPath,
     write: impl FnOnce(&mut super::mcp::Config),
 ) -> anyhow::Result<()> {
-    // Config-layer reads and the flock'd read-modify-write are blocking I/O; keep them off the async worker
-    // The task is awaited before the config write so the dismiss-before-write ordering above holds
-    // A panicked/cancelled dismiss task must NOT abort the user's write
-    // Bookkeeping failure is logged and the write proceeds (the campaign may re-nudge; the pick is never lost)
+    // Config-layer reads and the flock'd read-modify-write are blocking I/O; keep them off the async worker The task is awaited before the config write so the dismiss-before-write ordering above holds
+    // A panicked/cancelled dismiss task must NOT abort the user's write Bookkeeping failure is logged and the write proceeds (the campaign may re-nudge; the pick is never lost)
     let dismissed = tokio::task::spawn_blocking(move || {
         let ids = ids_touching_paths(&resolve_dismissable_campaigns(), &[path]);
         if !ids.is_empty() {

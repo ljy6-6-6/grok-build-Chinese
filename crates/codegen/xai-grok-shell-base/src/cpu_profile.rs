@@ -335,7 +335,6 @@ impl CpuProfileManager {
     }
 
     /// Finalize an active CPU profile synchronously during shutdown.
-    ///
     /// If a stop is already in progress this returns `Ok(None)` without waiting for it.
     /// Callers that must not exit before that stop finishes should wait via `subscribe_stop_completion`.
     pub fn finalize_on_shutdown(&mut self) -> Result<Option<CpuProfileStopResult>, ControlError> {
@@ -572,10 +571,8 @@ mod platform {
         }
     }
 
-    /// Serialize a pprof report as folded stacks: one `thread;frame;frame;… count` line per unique stack.
-    /// This is the same format pprof's `flamegraph` feature feeds to inferno.
-    /// Emitting it ourselves keeps inferno (CDDL-1.0) out of shipped binaries.
-    /// Render externally with speedscope.app, `inferno-flamegraph`, or flamegraph.pl.
+    /// Serialize a pprof report as folded stacks: one `thread;frame;frame;… count` line per unique stack. This is the same format pprof's `flamegraph` feature feeds to inferno.
+    /// Emitting it ourselves keeps inferno (CDDL-1.0) out of shipped binaries. Render externally with speedscope.app, `inferno-flamegraph`, or flamegraph.pl.
     fn folded_stacks(report: &pprof::Report) -> String {
         let mut lines: Vec<String> = report
             .data
@@ -649,10 +646,8 @@ mod platform {
     }
 
     pub(super) fn profile_formats() -> &'static [ProfileArtifactFormat] {
-        // Advertise nothing for now: old clients deserialize this enum strictly inside the Registered handshake
-        // A new variant (e.g. `folded`) would break their connect entirely.
-        // Start advertising `Folded` once the whole fleet knows the variant
-        // The artifact itself is already folded stacks
+        // Advertise nothing for now: old clients deserialize this enum strictly inside the Registered handshake A new variant (e.g. `folded`) would break their connect entirely.
+        // Start advertising `Folded` once the whole fleet knows the variant The artifact itself is already folded stacks
         &[]
     }
 

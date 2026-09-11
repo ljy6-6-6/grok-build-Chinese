@@ -8,9 +8,18 @@ pub use xai_grok_sampling_types::types::*;
 
 use xai_grok_tools::types::output::ImageContent as ToolsImageContent;
 
+/// Which flow is applying a reasoning-effort hint, for logging and gating.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::AsRefStr, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
+pub(crate) enum EffortTarget {
+    NewSession,
+    ModelSwitch,
+    #[strum(serialize = "summary")]
+    SummaryClient,
+}
+
 /// Render an `ImageContent` produced by the read-file tool as a URL string suitable for an `image_url` content block.
 /// Passes the explicit `uri` through if present, otherwise builds a `data:<mime>;base64,<data>` URI.
-///
 /// Lives in the shell (rather than `xai-grok-sampling-types` or `xai-grok-tools`) so neither crate needs a dep on `agent-client-protocol`.
 pub fn get_image_content_url(image_content: &ToolsImageContent) -> String {
     if let Some(uri) = &image_content.uri {

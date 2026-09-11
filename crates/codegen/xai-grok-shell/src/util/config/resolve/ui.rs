@@ -93,12 +93,8 @@ pub fn resolve_collapsed_edit_blocks(
     )
 }
 
-/// When enabled, the pager registers `Ctrl+R` (scrollback-focused only) so the user can flip terminal mouse capture.
-/// Turning capture off hands selection back to the terminal for native click-drag copy/paste.
-///
-/// Precedence: `GROK_MOUSE_REPORTING_TOGGLE` env > `[ui] mouse_reporting_toggle` > the parsed [`UiConfig`] field > default (`false`).
-/// The [`UiConfig`] fallback defends against a partial deserialize.
-///
+/// When enabled, the pager registers `Ctrl+R` (scrollback-focused only) so the user can flip terminal mouse capture. Turning capture off hands selection back to the terminal for native click-drag copy/paste.
+/// Precedence: `GROK_MOUSE_REPORTING_TOGGLE` env > `[ui] mouse_reporting_toggle` > the parsed [`UiConfig`] field > default (`false`). The [`UiConfig`] fallback defends against a partial deserialize.
 /// [`UiConfig`]: crate::agent::config::UiConfig
 pub fn resolve_mouse_reporting_toggle(
     effective_config: Option<&TomlValue>,

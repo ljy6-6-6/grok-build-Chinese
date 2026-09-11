@@ -11,10 +11,9 @@ use tempfile::TempDir;
 const TEST_API_KEY: &str = "test-key-for-ci";
 const REDACTED: &str = "<redacted>";
 
-/// One test's isolated filesystem tree and canonical child environment.
-///
-/// Construction never mutates the process environment.
-/// Child commands start from `env_clear()` and receive only platform essentials, sandbox paths, grok network kill switches, and explicit overrides.
+/// One test's isolated filesystem tree and canonical child environment. Construction never mutates the process
+/// environment. Child commands start from `env_clear()` and receive only platform essentials, sandbox paths, grok network
+/// kill switches, and explicit overrides.
 pub struct TestSandbox {
     root: TempDir,
     home: PathBuf,
@@ -141,11 +140,9 @@ impl TestSandbox {
         cmd
     }
 
-    /// Values that must be removed from captured child-output diagnostics.
-    ///
-    /// This intentionally returns values only, never keys.
-    /// Process diagnostics never print the child's environment.
-    /// A failing child can still echo endpoint URLs, credentials, and sandbox-owned private paths.
+    /// Values that must be removed from captured child-output diagnostics. This intentionally returns values only, never
+    /// keys. Process diagnostics never print the child's environment. A failing child can still echo endpoint URLs,
+    /// credentials, and sandbox-owned private paths.
     pub(crate) fn diagnostic_redactions(&self) -> Vec<String> {
         self.env
             .iter()
@@ -331,6 +328,11 @@ fn baseline_env_from_parent(
     }
     for (key, value) in [
         ("GROK_TELEMETRY_ENABLED", "false"),
+        // A test that re-enables the mode must still have no production sink: the pager bakes in the analytics token and events URL.
+        ("GROK_TELEMETRY_MIXPANEL_ENABLED", "false"),
+        ("GROK_TELEMETRY_MIXPANEL_TOKEN", ""),
+        ("GROK_TELEMETRY_EVENTS_URL", ""),
+        ("GROK_TELEMETRY_EVENTS_API_KEY", ""),
         ("GROK_TELEMETRY_TRACE_UPLOAD", "false"),
         ("GROK_FEEDBACK_ENABLED", "false"),
         ("GROK_TRACE_UPLOAD", "false"),
@@ -712,6 +714,18 @@ mod tests {
             env_value(&sandbox, "GROK_TELEMETRY_TRACE_UPLOAD").as_deref(),
             Some(OsStr::new("false"))
         );
+        for (sink, value) in [
+            ("GROK_TELEMETRY_MIXPANEL_ENABLED", "false"),
+            ("GROK_TELEMETRY_MIXPANEL_TOKEN", ""),
+            ("GROK_TELEMETRY_EVENTS_URL", ""),
+            ("GROK_TELEMETRY_EVENTS_API_KEY", ""),
+        ] {
+            assert_eq!(
+                env_value(&sandbox, sink).as_deref(),
+                Some(OsStr::new(value)),
+                "{sink} must be pinned off so GROK_TELEMETRY_ENABLED=true cannot reach a production sink"
+            );
+        }
         assert_eq!(
             env_value(&sandbox, "NO_PROXY").as_deref(),
             Some(OsStr::new("127.0.0.1,localhost,::1"))

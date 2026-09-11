@@ -562,7 +562,6 @@ fn sync_inline_ghost_to_selection(inner: &mut SlashSnapshot) {
 // ---------------------------------------------------------------------------
 
 /// Immutable snapshot of the slash completion state.
-///
 /// Produced by `SlashController::refresh()`, consumed by the dropdown renderer.
 /// Cloned on read (cheap: small vecs).
 #[derive(Debug, Clone, Default)]
@@ -624,7 +623,6 @@ impl SlashSnapshot {
 }
 
 /// Mutable holder for [`SlashSnapshot`].
-///
 /// Uses `RefCell` for interior mutability: the controller writes it, the renderer reads it.
 /// Not a trait, just a state container.
 #[derive(Debug, Default)]
@@ -667,7 +665,6 @@ impl SlashState {
 // ---------------------------------------------------------------------------
 
 /// Derives slash completion state from prompt text and cursor.
-///
 /// Owns a `CommandRegistry` (mutable for ACP sync) and a `FuzzyMatcher`.
 /// The prompt widget calls `refresh()` on every text change.
 pub struct SlashController {
@@ -706,7 +703,6 @@ pub struct SlashController {
 
 impl SlashController {
     /// Create a new controller with the given registry and working directory.
-    ///
     /// The MRU store defaults to an isolated, in-memory (non-persisting) store.
     /// Production injects the shared store via [`Self::set_mru`].
     pub fn new(registry: CommandRegistry, cwd: std::path::PathBuf) -> Self {
@@ -887,11 +883,8 @@ impl SlashController {
         self.registry.set_auto_mode_available(available);
     }
 
-    /// Suppress (or restore) session-scoped commands in completion.
-    ///
-    /// Called once on session-less surfaces (the agent dashboard's dispatch input).
-    /// Commands that act on a single session then never appear in the dropdown or inline ghost.
-    /// See [`SlashCommand::session_scoped`].
+    /// Suppress (or restore) session-scoped commands in completion. Commands that act on a single session then never
+    /// appear in the dropdown or inline ghost.
     pub fn set_hide_session_scoped(&mut self, hide: bool) {
         self.hide_session_scoped = hide;
     }
@@ -964,10 +957,8 @@ impl SlashController {
             recognized_tokens: Vec::new(),
         };
 
-        // Cursor inside the command token opens the command menu even when args follow, same as mid-text tokens
-        // That covers `/` typed at the start of existing text via ctrl-a
-        // The query is cursor-clamped, so `/` before existing text shows the full list like an empty composer
-        // The two branches partition: analyze_input sets args_range exactly when the cursor is past the command token
+        // Cursor inside the command token opens the command menu even when args follow, same as mid-text tokens. The two
+        // branches partition: analyze_input sets args_range exactly when the cursor is past the command token.
         if input.cursor_in_command {
             let matches = self.command_suggestions(&input.query, models);
             snapshot.selected = Self::carry_selection(&previous, &matches, true, &input);
@@ -1000,10 +991,9 @@ impl SlashController {
             }
         }
 
-        // Also scan for mid-text slash tokens (after the first one)
-        // Prompts like "/model foo /comm" then get ghost text and teal highlighting on the second and subsequent `/` tokens
-        // compute_inline_slash only supplies recognized-token highlights now
-        // The inline ghost is derived solely from the dropdown selection (one ranker, shared with Tab) via sync_inline_ghost_to_selection below
+        // Also scan for mid-text slash tokens (after the first one). Prompts like "/model foo /comm" then get ghost text
+        // and teal highlighting on the second and subsequent `/` tokens compute_inline_slash only supplies
+        // recognized-token highlights now.
         let inline = self.compute_inline_slash(text, models);
         snapshot.recognized_tokens = inline.recognized_tokens;
         sync_inline_ghost_to_selection(&mut snapshot);
@@ -1255,11 +1245,9 @@ impl SlashController {
         previous.selected.min(matches.len().saturating_sub(1))
     }
 
-    /// Byte ranges of recognized `/command` tokens anywhere in `text`.
-    ///
-    /// Both the composer's teal token highlighting and the scrollback echo of submitted prompts read this.
-    /// A token counts when it is a whitespace-preceded `/{word}` whose name resolves to a command offered on this surface.
-    /// See [`scan_inline_slash_tokens`] and [`command_offered`]. Cursor-independent. Empty when nothing is recognized.
+    /// Byte ranges of recognized `/command` tokens anywhere in `text`. Both the composer's teal token highlighting and
+    /// the scrollback echo of submitted prompts read this. See [`scan_inline_slash_tokens`] and [`command_offered`].
+    /// Cursor-independent. Empty when nothing is recognized.
     pub fn recognized_token_ranges(&self, text: &str, models: &ModelState) -> Vec<Range<usize>> {
         let tokens = scan_inline_slash_tokens(text, 0);
         if tokens.is_empty() {
@@ -1279,7 +1267,6 @@ impl SlashController {
     }
 
     /// Compute inline slash state for text that doesn't start with `/`.
-    ///
     /// Recognized-token highlights only ([`Self::recognized_token_ranges`]).
     /// Ghost for partial commands comes solely from [`sync_inline_ghost_to_selection`] (dropdown selection).
     fn compute_inline_slash(&self, text: &str, models: &ModelState) -> SlashSnapshot {
@@ -1574,26 +1561,9 @@ impl SlashController {
     }
 }
 
-/// Whether `command` should be offered for completion **or execution** on the current surface.
-///
-/// Combines the command's own [`SlashCommand::visible`] gate with the controller's session-scope policy.
-/// `hide_session_scoped` is set on session-less surfaces such as the agent dashboard's dispatch input.
-/// There, commands that act on a single session (`/compact`, `/fork`, `/rewind`) are suppressed: no "current session" exists for them to operate on.
-///
-/// Commands that opt in via [`SlashCommand::offered_when_session_less`] (`/model`, `/plan`, `/multiline`) are exempt from this suppression.
-/// They configure the next spawn or the dashboard input surface itself.
-///
-/// Conversely, [`SlashCommand::dashboard_only`] commands (`/cd`) are offered only when `hide_session_scoped` is set (the dashboard surface).
-/// They are suppressed on every session surface.
-///
-/// Commands are also filtered by the render mode they declare support for ([`SlashCommand::mode_support`]).
-/// A fullscreen-only command (`/find`, `/theme`, …) is not offered under `--minimal`.
-/// A minimal-only command (`/expand`) is not offered in the full TUI.
-/// This gate is completion-only: [`registry::CommandRegistry::get_for_dispatch`] still resolves such a command.
-/// A fully-typed invocation thus reaches the central dispatch gate's [`ModeSupport::refusal`] instead of leaking to the model as a raw prompt.
-///
-/// Callers that execute slash commands on a session-less surface (e.g. `dispatch_dashboard_dispatch_slash`) must consult this before `command.run`.
-/// Typed tokens that were filtered from the dropdown then fall through as ordinary prompt text rather than running invisibly.
+/// Conversely, [`SlashCommand::dashboard_only`] commands (`/cd`) are offered only when `hide_session_scoped` is set
+/// (the dashboard surface). A fullscreen-only command (`/find`, `/theme`, …) is not offered under `--minimal`. A
+/// minimal-only command (`/expand`) is not offered in the full TUI.
 pub(crate) fn command_offered(
     command: &dyn SlashCommand,
     ctx: &AppCtx,
@@ -1738,17 +1708,9 @@ pub fn parse_invocation(line: &str) -> Option<SlashInvocation<'_>> {
 // Completeness check
 // ---------------------------------------------------------------------------
 
-/// Check if a slash command line is complete (ready to execute on Enter).
-///
-/// Uses the two-bit model: `takes_args()` and `args_required()`.
-///
-/// | `takes_args` | `args_required` | Enter with no args |
-/// |-------------|----------------|-------------------|
-/// | `false`     | `false`        | Executes          |
-/// | `true`      | `false`        | Executes          |
-/// | `true`      | `true`         | Blocks            |
-///
-/// Unknown commands (not in registry) are treated as complete; they will pass through to the shell.
+/// Check if a slash command line is complete (ready to execute on Enter). | `takes_args` | `args_required` | Enter
+/// with no args |. | `false` | `false` | Executes |. | `true` | `false` | Executes |. | `true` | `true` | Blocks |.
+/// Unknown commands (not in registry) are treated as complete. they will pass through to the shell.
 pub fn is_command_complete(line: &str, registry: &CommandRegistry) -> bool {
     let Some(invocation) = parse_invocation(line) else {
         return false;
@@ -1771,14 +1733,8 @@ pub fn is_command_complete(line: &str, registry: &CommandRegistry) -> bool {
     !invocation.args.trim().is_empty()
 }
 
-/// True when `text` is a complete invocation of a pager builtin, a name only this process honors.
-///
-/// The criterion is ownership, not outcome. A pager-owned name must never be sent to the model as
-/// text: the agent's `resolve()` reserves those names without handling them. ACP, skill, and
-/// unknown names belong to that `resolve()` and already round-trip correctly as queue text, so they
-/// are excluded. Restricted commands are excluded too: `get_for_dispatch` returns `None` for them.
-///
-/// Some builtins enqueue rather than execute (`/compact`, `/imagine`, `/loop`): dispatch re-adds
+/// A pager-owned name must never be sent to the model as text: the agent's `resolve()` reserves those names without
+/// handling them. Some builtins enqueue rather than execute (`/compact`, `/imagine`, `/loop`): dispatch re-adds
 /// those at the tail of the local queue, so the row's position is not preserved.
 pub(crate) fn is_complete_builtin_invocation(text: &str, registry: &CommandRegistry) -> bool {
     let trimmed = text.trim();
@@ -1791,7 +1747,6 @@ pub(crate) fn is_complete_builtin_invocation(text: &str, registry: &CommandRegis
 }
 
 /// True when Enter should send `text` unchanged.
-///
 /// Accept turns `/doctor` into `/doctor ` and opens the arg menu.
 /// Skip accept only when the highlighted row is the typed command (or an alias of it).
 pub(crate) fn is_typed_slash_selected(
@@ -1930,7 +1885,6 @@ fn should_use_mid_text_refresh(
 }
 
 /// Scan input for all `/word` tokens at any position.
-///
 /// A slash token is `/` followed by one or more non-whitespace chars.
 /// The `/` must be at position 0 or preceded by whitespace, which avoids matching file paths like `foo/bar`.
 pub fn scan_inline_slash_tokens(text: &str, cursor: usize) -> Vec<InlineSlashToken> {

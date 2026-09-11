@@ -594,6 +594,11 @@ impl InstrumentationTimer {
         self
     }
 
+    pub fn with_server(&mut self, server: &str) -> &mut Self {
+        self.timer_span.record("server_name", server);
+        self
+    }
+
     /// Route this timer's elapsed into a typed startup sub-phase field on drop (while startup is active).
     /// The mapping from producer to field is checked at compile time.
     pub fn with_subphase(&mut self, sp: crate::startup::Subphase) -> &mut Self {
@@ -603,6 +608,10 @@ impl InstrumentationTimer {
             self.subphase_span = Some(crate::startup::subphase_span(sp, &self.timer_span));
         }
         self
+    }
+
+    pub fn subphase_span(&self) -> Option<tracing::Span> {
+        self.subphase_span.clone()
     }
 }
 
@@ -616,6 +625,7 @@ impl Drop for InstrumentationTimer {
             &mut self.timer_span,
             tracing::Span::none(),
         ));
+        crate::startup::record_sub_timing(self.name, elapsed);
         // Mirror into `unified.jsonl` while startup is active, so a slow-launch report needs no env vars or repro
         // The first usable session latches this off
         if crate::startup::is_active() {
@@ -737,13 +747,13 @@ mod timer_parents {
 
     pub(super) fn open(name: &'static str) -> (tracing::Span, Option<Guard>) {
         let span = if let Some(parent) = top().or_else(crate::startup::current_phase_span) {
-            tracing::info_span!(parent: &parent, "timer", name = name)
+            tracing::info_span!(parent: &parent, "timer", name = name, server_name = tracing::field::Empty)
         } else {
             let current = tracing::Span::current();
             if current.is_disabled() {
-                tracing::info_span!("timer", name = name)
+                tracing::info_span!("timer", name = name, server_name = tracing::field::Empty)
             } else {
-                tracing::info_span!(parent: &current, "timer", name = name)
+                tracing::info_span!(parent: &current, "timer", name = name, server_name = tracing::field::Empty)
             }
         };
         let guard = push(&span);

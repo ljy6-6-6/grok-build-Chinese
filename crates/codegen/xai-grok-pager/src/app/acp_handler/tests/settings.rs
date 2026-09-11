@@ -132,128 +132,6 @@
         assert!(!app.voice_mode_enabled);
     }
 
-    /// Build an `x.ai/settings/update` carrying only the scheduler flag.
-    fn scheduler_background_loops_update(value: bool) -> acp::ExtNotification {
-        acp::ExtNotification::new(
-            "x.ai/settings/update",
-            std::sync::Arc::from(
-                serde_json::value::to_raw_value(&serde_json::json!({
-                    "scheduler_background_loops": value
-                }))
-                .unwrap(),
-            ),
-        )
-    }
-
-    /// Drain the `/loop` instruction the pager actually stored for a session.
-    fn loop_instruction(app: &mut AppView, args: &str) -> String {
-        use crate::app::actions::Action;
-
-        // `/loop` is `required_tools()`-gated and the registry fails closed until the toolset is advertised, so a bare test agent never reaches the command
-        if let Some(agent) = app.agents.get_mut(&AgentId(0)) {
-            agent
-                .prompt
-                .slash_controller
-                .registry_mut()
-                .set_available_tools(
-                    [xai_grok_tools::implementations::grok_build::SCHEDULER_CREATE_TOOL_NAME]
-                        .into_iter()
-                        .map(str::to_string)
-                        .collect(),
-                );
-        }
-        let effects =
-            crate::app::dispatch::dispatch(Action::SendPrompt(format!("/loop {args}")), app);
-        let blocks = effects
-            .iter()
-            .find_map(|e| match e {
-                Effect::SendPromptBlocks { blocks, .. } => Some(blocks),
-                _ => None,
-            })
-            .expect("/loop must enqueue an instruction and drain it");
-        match &blocks[0] {
-            acp::ContentBlock::Text(text) => text.text.clone(),
-            other => panic!("expected a text prompt block, got {other:?}"),
-        }
-    }
-
-    /// `/loop`'s wording must describe THIS session's fires.
-    /// The shell pins the fire mode when a session's actor spawns.
-    /// A mid-session settings push carrying the opposite value must not change the instruction.
-    /// Describing detached fires as in-session drops the self-contained state those fires need.
-    #[test]
-    fn loop_fire_mode_follows_session_not_later_settings_push() {
-        use crate::app::actions::{Action, TaskResult};
-        use xai_grok_tools::implementations::grok_build::{
-            LoopFireMode, loop_schedule_instruction,
-        };
-
-        let mut app = make_app_with_agent("sess-loop");
-        // Seed says detached; only the session's own answer can produce the in-session wording asserted below
-        app.scheduler_background_loops_seed = true;
-        crate::app::dispatch::dispatch(
-            Action::TaskComplete(TaskResult::SessionCreated {
-                agent_id: AgentId(0),
-                session_id: acp::SessionId::new("sess-loop"),
-                models: None,
-                scheduler_background_loops: Some(false),
-            }),
-            &mut app,
-        );
-
-        assert!(handle_ext_notification(
-            &scheduler_background_loops_update(true),
-            &mut app
-        ));
-
-        assert_eq!(
-            loop_instruction(&mut app, "5m check ci"),
-            loop_schedule_instruction("5m check ci", LoopFireMode::InSession),
-            "a pushed flip must not re-describe fires this session already pinned"
-        );
-    }
-
-    /// The value is session-scoped, not frozen for the process: resuming a session adopts the mode that resume's spawn pinned.
-    #[test]
-    fn loop_fire_mode_adopts_the_loaded_session_value() {
-        use crate::app::actions::{Action, TaskResult};
-        use xai_grok_tools::implementations::grok_build::{
-            LoopFireMode, loop_schedule_instruction,
-        };
-
-        let mut app = make_app_with_agent("sess-loop-load");
-        // Opposite of both the seed and the pre-resume value, so only the load response can produce the detached wording asserted below
-        app.scheduler_background_loops_seed = false;
-        crate::app::dispatch::dispatch(
-            Action::TaskComplete(TaskResult::SessionCreated {
-                agent_id: AgentId(0),
-                session_id: acp::SessionId::new("sess-loop-load"),
-                models: None,
-                scheduler_background_loops: Some(false),
-            }),
-            &mut app,
-        );
-        crate::app::dispatch::dispatch(
-            Action::TaskComplete(TaskResult::SessionLoaded {
-                agent_id: AgentId(0),
-                session_id: acp::SessionId::new("sess-loop-load"),
-                models: None,
-                code_restored: false,
-                restore_summary: None,
-                restore_degree: None,
-                running_prompt_id: None,
-                scheduler_background_loops: Some(true),
-            }),
-            &mut app,
-        );
-
-        assert_eq!(
-            loop_instruction(&mut app, "5m check ci"),
-            loop_schedule_instruction("5m check ci", LoopFireMode::Detached),
-            "resume must adopt the value its own spawn pinned"
-        );
-    }
-
     #[test]
     fn settings_update_clearing_group_tool_verbs_reverts_to_default() {
         // Expected values come from the same chain the handler resolves, so the test holds regardless of host config/env
@@ -289,7 +167,6 @@
             "remote Some(true) must re-resolve into the cache"
         );
 
-        // remote settings clears the remote tier (an absent field parses as None)
         // Seed the cache opposite to the expected outcome (the latched remote enable) so only a real re-resolve can pass
         // The update must revert it to the local/default resolution instead of skipping the field
         // An old payload without the field takes this same path
@@ -342,7 +219,6 @@
             "remote Some(true) must re-resolve into the cache"
         );
 
-        // remote settings clears the remote tier (an absent field parses as None)
         // Seed the cache opposite to the expected outcome (the latched remote enable) so only a real re-resolve can pass
         // The update must revert it to the local/default resolution instead of skipping the field
         // An old payload without the field takes this same path
@@ -449,7 +325,6 @@
         // Two agents both in auto; the active tab's global mirror reads "ask" (a tab switch or Shift+Tab re-anchored it away from auto)
         // A mid-session gate kill-switch (`auto_permission_mode_enabled=false`) must clear the per-session auto flag on BOTH agents
         // The old code gated this fan-out on `current_ui.permission_mode == "auto"`, so it skipped background agents
-        // The stale `auto_mode` left behind let `switch_to_agent` re-anchor back to "auto" on return
         let mut app = make_app_two_agents();
         app.auto_mode_gate = true;
         for agent in app.agents.values_mut() {
@@ -483,7 +358,7 @@
         // The notification is CLIENT-scoped, so exactly ONE fires regardless of how many tabs were in auto
         // It omits `yolo_mode` so a sibling always-approve tab is preserved
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = AppView::new(tx, ModelState::default(), Vec::new());
+        let mut app = AppView::new(tx, ModelState::default(), Vec::new(), crate::render::draw::EscapeWriter::disconnected());
         // Two auto agents and one always-approve sibling, all with live sessions
         app.agents.insert(AgentId(0), make_agent(Some("sess-0")));
         app.agents.insert(AgentId(1), make_agent(Some("sess-1")));

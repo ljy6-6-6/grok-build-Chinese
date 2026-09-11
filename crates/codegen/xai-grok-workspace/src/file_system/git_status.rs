@@ -59,7 +59,19 @@ pub async fn git_status_short_pinned(
     // Held for the whole run to bound ODB contention.
     let _permit = crate::git_odb::try_acquire_odb();
 
+    // libgit2 config walk is blocking; keep it off the async scheduler.
+    let pin_cwd = working_directory.clone();
+    let filter_pins = tokio::task::spawn_blocking(move || {
+        crate::git_content_filters::content_filter_config_pins(&pin_cwd)
+    })
+    .await
+    .map_err(|e| FsError::Other(format!("git config pin task failed: {e}")))?
+    .ok_or_else(|| FsError::Other("unreadable git config".to_string()))?;
+
     let mut cmd = xai_tty_utils::git_command();
+    for pin in &filter_pins {
+        cmd.args(["-c", pin.as_str()]);
+    }
     cmd.args(["-c", fsmonitor.git_config_arg()]);
     cmd.args(["status", "--short", "--branch", "--untracked-files=normal"])
         .current_dir(&working_directory)
@@ -207,14 +219,17 @@ fn git_status_impl(working_directory: &Path) -> Result<String, FsError> {
     Ok(output)
 }
 
-/// Run a read-only git command and return its stdout, trimmed.
-/// Returns None on failure.
-///
-/// Uses `--no-optional-locks` to avoid creating `index.lock` for stat-cache refreshes.
-/// This function is called from background tasks (system prompt generation) and must never contend with foreground git operations.
+/// Run a read-only git command and return trimmed stdout, or `None` on failure.
+/// `--no-optional-locks` avoids `index.lock`: this runs from background tasks and must not contend with foreground git.
 #[tracing::instrument(level = "debug", skip(cwd))]
 fn run_git(cwd: &Path, args: &[&str]) -> Option<String> {
-    let output = xai_tty_utils::git_command()
+    // Caller is already on a blocking pool (`git_status_impl`); do not nest spawn_blocking.
+    let filter_pins = crate::git_content_filters::content_filter_config_pins(cwd)?;
+    let mut cmd = xai_tty_utils::git_command();
+    for pin in &filter_pins {
+        cmd.args(["-c", pin.as_str()]);
+    }
+    let output = cmd
         .args(args)
         .current_dir(cwd)
         .stdout(std::process::Stdio::piped())
@@ -244,6 +259,81 @@ mod tests {
         assert!(!git_status_exceeds_buffer(GIT_STATUS_BUFFER_LIMIT - 1));
         assert!(git_status_exceeds_buffer(GIT_STATUS_BUFFER_LIMIT));
         assert!(git_status_exceeds_buffer(GIT_STATUS_BUFFER_LIMIT + 1));
+    }
+
+    #[cfg(unix)]
+    fn init_attributed_repo(tmp: &Path) -> git2::Repository {
+        let repo = git2::Repository::init(tmp).unwrap();
+        std::fs::write(tmp.join(".gitattributes"), "data.txt filter=Pwn\n").unwrap();
+        std::fs::write(tmp.join("data.txt"), "hello\n").unwrap();
+        // Commit before installing the filter so commit itself does not run it.
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new(".gitattributes")).unwrap();
+        index.add_path(Path::new("data.txt")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let sig = git2::Signature::now("t", "t@t").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
+        drop(tree);
+        repo
+    }
+
+    #[cfg(unix)]
+    fn write_filter_script(tmp: &Path, marker: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let script = tmp.join("pwn.sh");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\ntouch '{}'\nexec cat\n", marker.display()),
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+        script
+    }
+
+    // Same length as the committed body plus index mtime: status re-hashes via clean.
+    #[cfg(unix)]
+    fn dirty_for_clean_filter(tmp: &Path) {
+        std::fs::write(tmp.join("data.txt"), "HELLO\n").unwrap();
+        let data = std::fs::File::open(tmp.join("data.txt")).unwrap();
+        let index = std::fs::File::open(tmp.join(".git/index")).unwrap();
+        let mtime = index.metadata().unwrap().modified().unwrap();
+        data.set_modified(mtime).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn git_status_short_does_not_run_content_filters() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _repo = init_attributed_repo(tmp.path());
+        let marker = tmp.path().join("pwned");
+        let script = write_filter_script(tmp.path(), &marker);
+        let cfg_path = tmp.path().join(".git/config");
+        let mut cfg = std::fs::read_to_string(&cfg_path).unwrap();
+        cfg.push_str(&format!(
+            "\n[filter \"Pwn\"]\n\tclean = {}\n",
+            script.display()
+        ));
+        std::fs::write(&cfg_path, cfg).unwrap();
+        dirty_for_clean_filter(tmp.path());
+
+        let _ = std::fs::remove_file(&marker);
+        xai_tty_utils::git_command()
+            .args(["status", "--short"])
+            .current_dir(tmp.path())
+            .output()
+            .expect("unpinned status");
+        assert!(marker.exists(), "unpinned status must run the filter");
+        std::fs::remove_file(&marker).unwrap();
+
+        git_status_short_pinned(tmp.path(), FsmonitorOverride::Disabled)
+            .await
+            .expect("pinned status");
+        assert!(!marker.exists(), "pinned status must not run the filter");
     }
 
     /// Staged entries collapse the porcelain double space, while leading single spaces and ` -> ` are preserved.

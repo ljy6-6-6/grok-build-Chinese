@@ -4,12 +4,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 
 /// Run `f` with the env var `name` set to `value` (or unset if `value` is `None`), restoring the previous value on return.
-///
-/// Uses `catch_unwind` so a panic inside `f` does not leak the env var into the rest of the test process.
-///
-/// `cargo test` runs tests in parallel by default.
 /// Process env vars are process-global, so callers should pick uniquely-named vars to avoid inter-test races; nothing here enforces that.
-/// The save, set, run, restore sequence here is panic-safe but not race-safe.
 pub(crate) fn with_env_var<R>(name: &str, value: Option<&str>, f: impl FnOnce() -> R) -> R {
     let previous = std::env::var_os(name);
     // SAFETY: env-var writes are not thread-safe. Callers use uniquely

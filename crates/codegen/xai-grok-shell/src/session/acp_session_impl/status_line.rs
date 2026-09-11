@@ -106,7 +106,6 @@ fn build_context_window(
 
 /// The turn in flight, `None` between turns.
 /// Chat state keeps the start stamp after a turn ends because the laziness classifier reads it.
-/// So the stamp alone would report a turn that finished.
 /// The prompt id is what a guard clears when the turn does.
 fn live_turn(started_at_ms: Option<i64>, prompt_id: Option<&str>) -> Option<StatusLineTurn> {
     started_at_ms
@@ -270,9 +269,7 @@ impl SessionActor {
     }
 }
 
-/// Seeds the row, then rebuilds it once per wake.
 /// The single enforcement point for the capability: every other trigger only wakes this loop.
-/// The capability is re-read each pass, since a resident session outlives the client that created it.
 /// `is_subagent` cannot change, so it is read once.
 /// The session is held only across a build, so an idle emitter does not keep a finished one and its MCP clients alive.
 pub(super) async fn run_status_emitter(session: std::sync::Weak<SessionActor>) {

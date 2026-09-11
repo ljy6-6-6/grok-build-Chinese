@@ -236,10 +236,8 @@ pub(super) fn build_insert_token(
 ) -> String {
     let mut out = String::with_capacity(raw_dir.len() + name.len() + 4);
     out.push_str(raw_dir);
-    // A completed component starting with `-` would otherwise insert a flag-looking argument
-    // Tab on `rm ` could produce `rm -rf`, invisible when the single-candidate insta-accept skips the dropdown
-    // Quoting wouldn't help (`rm "-rf"` is still a flag to rm)
-    // Anchor bare names as explicit paths, deliberately stricter than bash
+    // A completed component starting with `-` would otherwise insert a flag-looking argument Tab on `rm ` could produce `rm -rf`, invisible when the single-candidate insta-accept skips the dropdown
+    // Quoting wouldn't help (`rm "-rf"` is still a flag to rm) Anchor bare names as explicit paths, deliberately stricter than bash
     if raw_dir.is_empty() && name.starts_with('-') {
         out.push_str("./");
     }

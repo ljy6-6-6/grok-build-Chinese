@@ -16,12 +16,9 @@ use xai_grok_tools::implementations::grok_build::task::types::{
 
 // Shared per-role model override and spawn-and-retry-once fail-open wrapper
 
-/// Every `/goal` role (planner, strategist, each verifier skeptic) spawns its subagent as `general-purpose`.
 /// The role's configured `agent_type` selects only the harness, threaded as [`SubagentRuntimeOverrides::harness_agent_type`].
 /// The subagent_type stays fixed so the role keeps a capable toolset on whichever harness is chosen.
 /// The three role spawners and the parent-side `describe_subagent_type` probe all read it, so the gated/probed toolset matches the spawned one.
-///
-/// [`SubagentRuntimeOverrides::harness_agent_type`]: xai_grok_tools::implementations::grok_build::task::types::SubagentRuntimeOverrides::harness_agent_type
 pub(crate) const GOAL_ROLE_SUBAGENT_TYPE: &str = "general-purpose";
 pub(crate) const GOAL_ROLE_AWAIT_BUDGET_EXCEEDED: &str =
     "goal role subagent exceeded foreground wait budget";
@@ -32,14 +29,12 @@ const GOAL_PLANNER_CANCEL_ACK_TIMEOUT: std::time::Duration = std::time::Duration
 /// `None`/`None` inherits the current model and the session harness (the historic `SubagentRuntimeOverrides::default()` behavior).
 /// When either field is `Some` the pair is "explicit".
 /// The spawn-and-retry-once wrapper ([`spawn_with_fail_open_retry`]) retries on the current model and session harness if the first attempt fails.
-/// The planner, strategist, and per-skeptic classifier spawners share it.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RoleSpawnOverride {
     /// Resolved, post-auth, post-fail-open model id, or `None` to inherit.
     pub model: Option<String>,
-    /// Resolved harness `agent_type` (e.g. `"grok-build-plan"`), applied REGARDLESS of the parent agent.
+    /// Resolved harness `agent_type`, applied REGARDLESS of the parent agent.
     /// Its `AgentDefinition` decides the spawned subagent's harness flavor (system prompt and toolset).
-    /// `None` inherits the session harness.
     /// NOT a subagent type: the subagent_type stays fixed at [`GOAL_ROLE_SUBAGENT_TYPE`].
     pub agent_type: Option<String>,
 }
@@ -62,7 +57,6 @@ pub(crate) fn effective_role_model_id<'a>(
 }
 
 /// The explicit-pair retry re-runs on the default/parent toolset.
-/// So its tool-name placeholders (`{READ_TOOL}`, `{WRITE_TOOL}`, …) must name THAT toolset, not the configured pair's.
 /// The caller renders both up front and [`spawn_with_fail_open_retry`] picks the matching one per attempt.
 /// On the inherit path no retry occurs and `fallback` is never read, so callers on that path may leave it empty.
 pub(crate) struct RoleRenderedPrompt {
@@ -93,19 +87,9 @@ impl RetryableSpawnError for SpawnError {
     }
 }
 
-/// An inherit override makes exactly one attempt on the current model and session harness.
-/// An explicit override makes one attempt with the configured `{model, harness}` pair.
 /// If that returns a NON-cancellation `Err`, the wrapper emits `GoalRoleModelFailOpen { reason: spawn_failed }`.
-/// It then retries ONCE with `model = None` and harness `None` (the current-model and session-harness fallback); only a SECOND failure propagates.
 /// A cancellation propagates as-is (no retry), so a bad configured pair can never change the failure behavior.
-/// For example it can never regress the fail-CLOSED planner into a goal-pause.
-///
-/// The `spawn` closure receives `(model, harness_agent_type, prompt)` and owns the fixed subagent_type ([`GOAL_ROLE_SUBAGENT_TYPE`]).
 /// The second arg is the harness override (`None` inherits the session harness), NOT a subagent type.
-///
-/// The first attempt uses `prompt.primary` (rendered for the configured harness's toolset).
-/// The retry uses `prompt.fallback` (rendered for the session-harness toolset it actually runs on).
-/// Each render is moved into its attempt, with no clone on any path.
 pub(crate) async fn spawn_with_fail_open_retry<E, F, Fut>(
     role: &'static str,
     skeptic_idx: Option<u32>,
@@ -320,6 +304,7 @@ impl ChannelSpawner {
             fork_context: true,
             owner: SubagentOwner::Task,
             cancel_token: self.cancel_token.clone(),
+            spawn_root: Default::default(),
         };
         let backend = ChannelBackend::new(self.event_tx.clone());
         let cancel = self.cancel_token.clone();

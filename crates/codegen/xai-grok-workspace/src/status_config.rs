@@ -457,11 +457,8 @@ impl StatusConfig {
         (ms != 0).then_some(ms)
     }
 
-    /// Warn on (and, where load-bearing, repair) inconsistent values.
-    ///
-    /// `keepalive` can't be validated against the server's idle window (unknown here), so it only warns.
-    /// The preview scraper must poll strictly more often than the withhold window, else the withhold lapses between scrapes.
-    /// A zero interval would busy-loop it, so any misconfiguration is repaired into `1ms <= scrape < window`.
+    /// Warn on inconsistent values, and repair load-bearing ones.
+    /// `keepalive` can only warn (server idle window is unknown). The preview scraper must poll strictly inside the withhold window, repaired into `1ms <= scrape < window`.
     fn validate(&mut self) {
         if self.keepalive <= self.heartbeat {
             tracing::warn!(

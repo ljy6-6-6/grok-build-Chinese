@@ -42,11 +42,6 @@ fn jaccard_similarity(a: &HashSet<&str>, b: &HashSet<&str>) -> f64 {
 }
 
 /// Re-rank results using Maximal Marginal Relevance.
-///
-/// Reorders `results` in-place to balance relevance with diversity.
-/// No-op when `config.enabled` is false, `lambda` is 1.0, or there are fewer than 2 results.
-///
-/// `relevance` is the per-result unclamped ranking score, aligned index-for-index with `results` on entry.
 /// It is passed separately because the clamped `SearchResult.score` saturates top chunks to 1.0 and loses the access-frequency boost tiebreak.
 pub fn mmr_rerank(results: &mut Vec<SearchResult>, relevance: &[f64], config: &MmrConfig) {
     if !config.enabled || results.len() <= 1 {

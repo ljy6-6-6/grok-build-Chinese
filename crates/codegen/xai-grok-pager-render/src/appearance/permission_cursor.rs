@@ -12,13 +12,7 @@ use std::cell::Cell;
 use agent_client_protocol as acp;
 use xai_grok_workspace::permission::is_enable_always_approve_option;
 
-/// Which row the approval-menu cursor preselects (the highlighted row).
-///
-/// Persisted as `[ui].default_selected_permission`.
-/// The four variants map onto the rows a permission prompt can show.
-///
-/// The configured value only steers the **first** prompt of a session.
-/// After the user confirms a prompt, [`resolve_initial_cursor`] sticks to the last-used kind (recorded via [`set_last_used_permission`]).
+/// Persisted as `[ui].default_selected_permission`. Steers only the first prompt; later prompts stick to the last-used kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DefaultSelectedPermission {
     /// The global "Always allow on all sessions" (enable-always-approve) row.
@@ -67,11 +61,8 @@ impl DefaultSelectedPermission {
         }
     }
 
-    /// Whether this preselection targets the given ACP option kind.
-    ///
-    /// [`AlwaysAllowAllSessions`](Self::AlwaysAllowAllSessions) targets no specific kind; [`resolve_initial_cursor`] matches its row by identity.
-    /// [`Reject`](Self::Reject) matches **both** reject kinds so a sticky reject lands on whichever reject row a given prompt offers.
-    /// Some prompts carry only `RejectAlways`.
+    /// [`AlwaysAllowAllSessions`](Self::AlwaysAllowAllSessions) matches by row identity, not kind.
+    /// [`Reject`](Self::Reject) matches both reject kinds so a sticky reject lands on whichever reject row is offered.
     pub fn matches_kind(self, kind: &acp::PermissionOptionKind) -> bool {
         matches!(
             (self, kind),
@@ -87,10 +78,7 @@ impl DefaultSelectedPermission {
         )
     }
 
-    /// Map a confirmed ACP option kind onto the sticky "last used" target.
-    /// Both reject kinds collapse to [`Reject`](Self::Reject).
-    /// It is total over every ACP kind and never yields [`AlwaysAllowAllSessions`](Self::AlwaysAllowAllSessions).
-    /// That row is the enable-always-approve option, which callers exclude from sticky recording.
+    /// Both reject kinds collapse to [`Reject`](Self::Reject). Never yields [`AlwaysAllowAllSessions`](Self::AlwaysAllowAllSessions); that row is excluded from sticky recording.
     pub fn from_kind(kind: &acp::PermissionOptionKind) -> Self {
         match kind {
             acp::PermissionOptionKind::AllowOnce => Self::AllowOnce,
@@ -105,11 +93,8 @@ impl DefaultSelectedPermission {
     }
 }
 
-// ── Configured value cache: `[ui].default_selected_permission` ──────────────
-//
-// Read when queueing the first prompt of a session
-// Seeded by `prime` at startup (and lazily on first read) so the path never hits disk mid-session
-// `AlwaysAllowAllSessions` represents the effective default (unset).
+// First-prompt config cache. Seeded at startup so mid-session reads never hit disk.
+// `AlwaysAllowAllSessions` is the unset default.
 
 thread_local! {
     static CONFIG_CURRENT: Cell<DefaultSelectedPermission> =
@@ -117,15 +102,8 @@ thread_local! {
     static CONFIG_LOADED: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Read the cached `[ui].default_selected_permission`, seeding on first call.
-///
-/// Precedence (mirrors `appearance::cache::load_scroll_speed`):
-///
-/// 1. `GROK_DEFAULT_SELECTED_PERMISSION` env var (headless / agent testing; overrides `config.toml` without editing it),
-/// 2. `[ui].default_selected_permission` in the layered effective config,
-/// 3. [`AlwaysAllowAllSessions`](DefaultSelectedPermission::AlwaysAllowAllSessions) (the effective default).
-///
-/// Unrecognised / empty values at any layer fall through to the next.
+/// Env `GROK_DEFAULT_SELECTED_PERMISSION`, then `[ui].default_selected_permission`, then AlwaysAllowAllSessions.
+/// Empty or unrecognised values fall through. Env exists so tests override without editing config.
 pub fn load_default_selected_permission() -> DefaultSelectedPermission {
     CONFIG_LOADED.with(|loaded| {
         if !loaded.get() {
@@ -157,12 +135,8 @@ pub fn prime() {
     let _ = load_default_selected_permission();
 }
 
-// ── Sticky "last used" cursor target ────────────────────────────────────────
-//
-// Process-wide ephemeral state: the kind the user most recently confirmed.
-// After the first prompt, `resolve_initial_cursor` prefers this over the configured value
-// `AlwaysAllowAllSessions` is the sentinel meaning nothing has been confirmed yet (`from_kind` never produces it)
-// The TUI renders and dispatches on a single thread, so a thread-local `Cell` is fine
+// Ephemeral last-confirmed kind; after the first prompt it beats the configured value.
+// `AlwaysAllowAllSessions` means nothing confirmed yet. Single-threaded TUI, so a thread-local Cell is enough.
 
 thread_local! {
     static LAST_USED: Cell<DefaultSelectedPermission> =
@@ -184,18 +158,8 @@ pub fn set_last_used_permission(kind: DefaultSelectedPermission) {
 
 // ── Resolution ──────────────────────────────────────────────────────────────
 
-/// Pick the initially-highlighted row for a freshly-queued permission prompt.
-///
-/// Precedence:
-///
-/// 1. the sticky last-used kind (once the user has confirmed any prompt),
-/// 2. the configured `[ui].default_selected_permission`,
-/// 3. the global "Always allow on all sessions" row, matched by identity via `is_enable_always_approve_option`, not by list position,
-/// 4. index 0 (clients that don't get the YOLO row prepended).
-///
-/// The YOLO row is skipped while a concrete target kind is in play, so a configured / sticky preselection never lands on it.
-/// When the target kind has no matching row (the always-allow row may be suppressed as unhonorable), the cursor degrades to the one-shot allow row.
-/// It never escalates to the global always-approve row.
+/// Sticky last-used, then configured default, then the YOLO row by identity, else index 0.
+/// A concrete target skips YOLO. A missing target kind degrades to one-shot allow, never to global always-approve.
 pub fn resolve_initial_cursor(options: &[acp::PermissionOption]) -> usize {
     let target = match last_used_permission() {
         DefaultSelectedPermission::AlwaysAllowAllSessions => load_default_selected_permission(),

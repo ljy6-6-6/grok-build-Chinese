@@ -21,56 +21,49 @@ pub const SCOPE_NAME: &str = "ai.xai.grok_code";
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// External event names (`event.name` on the OTLP log record); the set is closed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumCount)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, strum::EnumCount, strum::AsRefStr, strum::IntoStaticStr,
+)]
 pub enum ExternalEventName {
+    #[strum(serialize = "grok_code.session_start")]
     SessionStart,
+    #[strum(serialize = "grok_code.session_end")]
     SessionEnd,
+    #[strum(serialize = "grok_code.user_prompt")]
     UserPrompt,
+    #[strum(serialize = "grok_code.turn_completed")]
     TurnCompleted,
+    #[strum(serialize = "grok_code.api_request")]
     ApiRequest,
+    #[strum(serialize = "grok_code.api_error")]
     ApiError,
+    #[strum(serialize = "grok_code.tool_result")]
     ToolResult,
+    #[strum(serialize = "grok_code.tool_decision")]
     ToolDecision,
+    #[strum(serialize = "grok_code.mcp_server_connection")]
     McpServerConnection,
+    #[strum(serialize = "grok_code.permission_mode_changed")]
     PermissionModeChanged,
+    #[strum(serialize = "grok_code.skill_activated")]
     SkillActivated,
+    #[strum(serialize = "grok_code.plugin_loaded")]
     PluginLoaded,
+    #[strum(serialize = "grok_code.compaction")]
     Compaction,
+    #[strum(serialize = "grok_code.subagent")]
     Subagent,
+    #[strum(serialize = "grok_code.auth")]
     Auth,
+    #[strum(serialize = "grok_code.internal_error")]
     InternalError,
+    #[strum(serialize = "grok_code.model_switched")]
     ModelSwitched,
+    #[strum(serialize = "grok_code.contextual_tip")]
     ContextualTip,
+    #[strum(serialize = "grok_code.assistant_response")]
     AssistantResponse,
 }
-
-impl ExternalEventName {
-    /// These wire names are a public schema commitment (documented in the monitoring-usage page); renames require a `SCHEMA_VERSION` bump.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::SessionStart => "grok_code.session_start",
-            Self::SessionEnd => "grok_code.session_end",
-            Self::UserPrompt => "grok_code.user_prompt",
-            Self::TurnCompleted => "grok_code.turn_completed",
-            Self::ApiRequest => "grok_code.api_request",
-            Self::ApiError => "grok_code.api_error",
-            Self::ToolResult => "grok_code.tool_result",
-            Self::ToolDecision => "grok_code.tool_decision",
-            Self::McpServerConnection => "grok_code.mcp_server_connection",
-            Self::PermissionModeChanged => "grok_code.permission_mode_changed",
-            Self::SkillActivated => "grok_code.skill_activated",
-            Self::PluginLoaded => "grok_code.plugin_loaded",
-            Self::Compaction => "grok_code.compaction",
-            Self::Subagent => "grok_code.subagent",
-            Self::Auth => "grok_code.auth",
-            Self::InternalError => "grok_code.internal_error",
-            Self::ModelSwitched => "grok_code.model_switched",
-            Self::ContextualTip => "grok_code.contextual_tip",
-            Self::AssistantResponse => "grok_code.assistant_response",
-        }
-    }
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Attribute keys
 // ─────────────────────────────────────────────────────────────────────────────
@@ -78,18 +71,29 @@ impl ExternalEventName {
 /// Every attribute key the external stream can attach to a log record.
 /// You cannot attach an attribute the schema doesn't name.
 /// Adding a variant trips the [`EXTERNAL_ALLOWED_KEYS`] pin test.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumCount)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, strum::EnumCount, strum::AsRefStr, strum::IntoStaticStr,
+)]
+#[strum(serialize_all = "snake_case")]
 pub enum ExternalKey {
     // Context / correlation (injected by emit.rs)
+    #[strum(serialize = "session.id")]
     SessionId,
     TurnNumber,
+    #[strum(serialize = "prompt.id")]
     PromptId,
+    #[strum(serialize = "event.sequence")]
     EventSequence,
     // Identity (injected per-record from the identity snapshot)
+    #[strum(serialize = "user.id")]
     UserId,
+    #[strum(serialize = "user.email")]
     UserEmail,
+    #[strum(serialize = "organization.id")]
     OrganizationId,
+    #[strum(serialize = "team.id")]
     TeamId,
+    #[strum(serialize = "deployment.id")]
     DeploymentId,
     // Session lifecycle
     Model,
@@ -145,7 +149,9 @@ pub enum ExternalKey {
     ToolCount,
     ErrorType,
     ErrorMessage,
+    #[strum(serialize = "mcp_server.name")]
     McpServerName,
+    #[strum(serialize = "mcp_tool.name")]
     McpToolName,
     // Permission mode
     FromMode,
@@ -153,6 +159,7 @@ pub enum ExternalKey {
     Trigger,
     // Skills / plugins
     SkillSource,
+    #[strum(serialize = "skill.name")]
     SkillName,
     InstallKind,
     PluginScope,
@@ -176,96 +183,6 @@ pub enum ExternalKey {
     Tip,
     Action,
 }
-
-impl ExternalKey {
-    /// Stable wire name for this key.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::SessionId => "session.id",
-            Self::TurnNumber => "turn_number",
-            Self::PromptId => "prompt.id",
-            Self::EventSequence => "event.sequence",
-            Self::UserId => "user.id",
-            Self::UserEmail => "user.email",
-            Self::OrganizationId => "organization.id",
-            Self::TeamId => "team.id",
-            Self::DeploymentId => "deployment.id",
-            Self::Model => "model",
-            Self::PermissionMode => "permission_mode",
-            Self::McpServerCount => "mcp_server_count",
-            Self::PluginCount => "plugin_count",
-            Self::SkillCount => "skill_count",
-            Self::HookCount => "hook_count",
-            Self::MemoryEnabled => "memory_enabled",
-            Self::IsGitRepo => "is_git_repo",
-            Self::ClientIdentifier => "client_identifier",
-            Self::DurationSecs => "duration_secs",
-            Self::TurnCount => "turn_count",
-            Self::ToolCallCount => "tool_call_count",
-            Self::CompactionCount => "compaction_count",
-            Self::PromptLength => "prompt_length",
-            Self::Prompt => "prompt",
-            Self::ResponseLength => "response_length",
-            Self::Response => "response",
-            Self::ScreenMode => "screen_mode",
-            Self::CommandName => "command_name",
-            Self::Outcome => "outcome",
-            Self::DurationMs => "duration_ms",
-            Self::ErrorCategory => "error_category",
-            Self::CancellationCategory => "cancellation_category",
-            Self::StopReason => "stop_reason",
-            Self::InputTokens => "input_tokens",
-            Self::OutputTokens => "output_tokens",
-            Self::ReasoningTokens => "reasoning_tokens",
-            Self::CacheReadTokens => "cache_read_tokens",
-            Self::CacheCreationTokens => "cache_creation_tokens",
-            Self::CostUsdMicros => "cost_usd_micros",
-            Self::StatusCode => "status_code",
-            Self::ToolName => "tool_name",
-            Self::Success => "success",
-            Self::HookRewrote => "hook_rewrote",
-            Self::FileExtension => "file_extension",
-            Self::ToolParameters => "tool_parameters",
-            Self::ToolInput => "tool_input",
-            Self::ToolOutput => "tool_output",
-            Self::FullCommand => "full_command",
-            Self::ToolUseId => "tool_use_id",
-            Self::FilePath => "file_path",
-            Self::Decision => "decision",
-            Self::AccessKind => "access_kind",
-            Self::Source => "source",
-            Self::Status => "status",
-            Self::TransportType => "transport_type",
-            Self::ToolCount => "tool_count",
-            Self::ErrorType => "error_type",
-            Self::ErrorMessage => "error_message",
-            Self::McpServerName => "mcp_server.name",
-            Self::McpToolName => "mcp_tool.name",
-            Self::FromMode => "from_mode",
-            Self::ToMode => "to_mode",
-            Self::Trigger => "trigger",
-            Self::SkillSource => "skill_source",
-            Self::SkillName => "skill.name",
-            Self::InstallKind => "install_kind",
-            Self::PluginScope => "plugin_scope",
-            Self::PluginName => "plugin_name",
-            Self::PluginVersion => "plugin_version",
-            Self::CompactionTrigger => "compaction_trigger",
-            Self::CompactionOutcome => "compaction_outcome",
-            Self::TokensBefore => "tokens_before",
-            Self::TokensAfter => "tokens_after",
-            Self::Phase => "phase",
-            Self::SubagentType => "subagent_type",
-            Self::AuthMethod => "auth_method",
-            Self::FromModel => "from_model",
-            Self::ToModel => "to_model",
-            Self::ErrorCode => "error_code",
-            Self::Tip => "tip",
-            Self::Action => "action",
-        }
-    }
-}
-
 /// Every [`ExternalKey`] variant, for allowlist construction.
 /// The `EnumCount` assertion below keeps it complete.
 pub(crate) const ALL_KEYS: &[ExternalKey] = &[
@@ -359,7 +276,7 @@ const _: () = assert!(ALL_KEYS.len() == <ExternalKey as strum::EnumCount>::COUNT
 /// Pinned by an independent literal copy in the test module (mirroring `otel_layer::redact::allowlist_contents_are_pinned`).
 pub(crate) fn external_allowed_keys() -> &'static std::collections::HashSet<&'static str> {
     static SET: std::sync::LazyLock<std::collections::HashSet<&'static str>> =
-        std::sync::LazyLock::new(|| ALL_KEYS.iter().map(|k| k.as_str()).collect());
+        std::sync::LazyLock::new(|| ALL_KEYS.iter().map(|k| k.as_ref()).collect());
     &SET
 }
 
@@ -467,6 +384,16 @@ pub enum MetricIncrement {
         outcome: &'static str,
         model: String,
     },
+    /// `grok_code.turn.ttft` (ms from turn start to the first token of any channel: reasoning, text, or a tool call).
+    TurnTtft {
+        duration_ms: u64,
+        model: String,
+    },
+    /// `grok_code.turn.ttfm` (ms from turn start to the first assistant text message; reasoning and tool calls are excluded).
+    TurnTtfm {
+        duration_ms: u64,
+        model: String,
+    },
     /// `grok_code.tool.decision`.
     ToolDecision {
         tool_name: String,
@@ -478,6 +405,7 @@ pub enum MetricIncrement {
     ToolUsage {
         tool_name: String,
         outcome: &'static str,
+        model: String,
     },
     /// `grok_code.error.count`.
     ErrorCount {
@@ -498,6 +426,16 @@ pub enum MetricIncrement {
     },
     /// `grok_code.startup.total` (ms from process start to a usable session).
     StartupTotal {
+        duration_ms: u64,
+        outcome: String,
+        auth_mode: String,
+    },
+    StartupInteractive {
+        duration_ms: u64,
+        auth_mode: String,
+    },
+    StartupSubTimerDuration {
+        phase: String,
         duration_ms: u64,
         outcome: String,
         auth_mode: String,
@@ -567,12 +505,16 @@ pub(crate) const METRIC_SESSION_COUNT: &str = "grok_code.session.count";
 pub(crate) const METRIC_TOKEN_USAGE: &str = "grok_code.token.usage";
 pub(crate) const METRIC_COST_USAGE: &str = "grok_code.cost.usage";
 pub(crate) const METRIC_TURN_COUNT: &str = "grok_code.turn.count";
+pub(crate) const METRIC_TURN_TTFT: &str = "grok_code.turn.ttft";
+pub(crate) const METRIC_TURN_TTFM: &str = "grok_code.turn.ttfm";
 pub(crate) const METRIC_TOOL_DECISION: &str = "grok_code.tool.decision";
 pub(crate) const METRIC_TOOL_USAGE: &str = "grok_code.tool.usage";
 pub(crate) const METRIC_ERROR_COUNT: &str = "grok_code.error.count";
 pub(crate) const METRIC_STARTUP_PHASE_DURATION: &str = "grok_code.startup.phase_duration";
 pub(crate) const METRIC_STARTUP_TIMEOUT: &str = "grok_code.startup.timeout";
 pub(crate) const METRIC_STARTUP_TOTAL: &str = "grok_code.startup.total";
+pub(crate) const METRIC_STARTUP_INTERACTIVE: &str = "grok_code.startup.interactive";
+pub(crate) const METRIC_STARTUP_SUBTIMER_DURATION: &str = "grok_code.startup.subtimer_duration";
 
 /// Every attribute key that may appear on a metric data point: the instrument-specific keys plus the per-increment identity/cardinality keys.
 /// `prompt.id` is deliberately absent: its cardinality is unbounded, so it appears on events only.
@@ -920,6 +862,8 @@ pub fn map_turn_completed(ev: &events::TurnCompleted) -> Option<ExternalRecord> 
         .attr(ExternalKey::DurationMs, ev.duration_ms)
         .attr(ExternalKey::ToolCallCount, ev.tool_call_count)
         .attr(ExternalKey::Model, ev.model_id.as_str())
+        // `emit_record` falls back to the ambient ctx when this is absent.
+        .attr_opt(ExternalKey::SessionId, ev.session_id.as_deref())
         .attr_opt(ExternalKey::ErrorCategory, ev.error_category.as_deref())
         .attr_opt(
             ExternalKey::CancellationCategory,
@@ -939,6 +883,25 @@ pub fn map_turn_completed(ev: &events::TurnCompleted) -> Option<ExternalRecord> 
         });
     }
     Some(rec)
+}
+
+/// Exports the per-turn first-response histograms, each gated independently: a turn with no model
+/// output records no ttft, and a reasoning-only or tool-only turn records ttft but no ttfm.
+pub fn map_prompt_latency(ev: &events::PromptLatency) -> Option<ExternalRecord> {
+    let mut rec = ExternalRecord::default();
+    if let Some(duration_ms) = ev.ttft_ms {
+        rec = rec.metric(MetricIncrement::TurnTtft {
+            duration_ms,
+            model: ev.model_id.clone(),
+        });
+    }
+    if let Some(duration_ms) = ev.ttfm_ms {
+        rec = rec.metric(MetricIncrement::TurnTtfm {
+            duration_ms,
+            model: ev.model_id.clone(),
+        });
+    }
+    (!rec.metrics.is_empty()).then_some(rec)
 }
 
 /// `ModelResponseReceived` maps to `grok_code.api_request` and increments `token.usage`.
@@ -990,10 +953,9 @@ pub fn map_rate_limit_hit(ev: &events::RateLimitHit) -> Option<ExternalRecord> {
     )
 }
 
-/// `ApiError` maps to `grok_code.api_error`.
-/// It carries category/class enums only, no message text.
-/// Deliberately no `error.count` increment: `ApiError` is emitted alongside `TurnCompleted{outcome: Error}` for the same failure.
-/// The metric's increment sources are exactly `TurnCompleted{Error}` and `RateLimitHit`; adding one here would double-count every failed turn.
+/// It carries category/class enums only, no message text. Deliberately no `error.count` increment: `ApiError` is emitted
+/// alongside `TurnCompleted{outcome: Error}` for the same failure. The metric's increment sources are exactly
+/// `TurnCompleted{Error}` and `RateLimitHit`; adding one here would double-count every failed turn.
 pub fn map_api_error(ev: &events::ApiError) -> Option<ExternalRecord> {
     Some(
         ExternalRecord::event(ExternalEventName::ApiError)
@@ -1015,6 +977,7 @@ pub fn map_tool_result(ev: &events::ToolCallCompleted) -> Option<ExternalRecord>
         .attr(ExternalKey::Success, ev.outcome.ran_successfully())
         .attr(ExternalKey::HookRewrote, ev.hook_rewrote)
         .attr(ExternalKey::DurationMs, ev.duration_ms)
+        .attr(ExternalKey::Model, ev.model_id.as_str())
         .gated(
             ExternalKey::ToolName,
             Gate::ToolDetails,
@@ -1023,6 +986,7 @@ pub fn map_tool_result(ev: &events::ToolCallCompleted) -> Option<ExternalRecord>
         .metric(MetricIncrement::ToolUsage {
             tool_name: sanitized.to_owned(),
             outcome,
+            model: ev.model_id.clone(),
         });
     rec = attach_mcp_names(rec, &ev.tool_name);
     if let Some(path) = ev.file_path.as_deref() {
@@ -1050,7 +1014,7 @@ pub fn map_tool_result(ev: &events::ToolCallCompleted) -> Option<ExternalRecord>
 /// ride [`events::ExternalToolInput`] into [`attach_tool_input`].
 pub fn map_tool_decision(ev: &events::PermissionDecisionRecord) -> Option<ExternalRecord> {
     let sanitized = sanitize_tool_name(&ev.payload.tool_name);
-    let decision = ev.payload.decision.as_str();
+    let decision: &'static str = ev.payload.decision.into();
     let access_kind = access_kind_label(ev.payload.access_kind);
     let permission_mode = permission_mode_label(ev.payload.permission_mode);
     let rec = ExternalRecord::event(ExternalEventName::ToolDecision)
@@ -1118,7 +1082,7 @@ pub fn map_mcp_server_failed(ev: &events::McpServerFailed) -> Option<ExternalRec
     Some(
         ExternalRecord::event(ExternalEventName::McpServerConnection)
             .attr(ExternalKey::Status, "failed")
-            .attr(ExternalKey::ErrorType, ev.error_type.as_str())
+            .attr(ExternalKey::ErrorType, ev.error_type.as_ref())
             .attr(ExternalKey::DurationMs, ev.duration_ms)
             .attr(ExternalKey::McpServerName, "mcp_server")
             .gated(
@@ -1210,7 +1174,7 @@ pub fn map_skill_activated(ev: &events::SkillDispatched) -> Option<ExternalRecor
 pub fn map_plugin_installed(ev: &events::PluginInstalled) -> Option<ExternalRecord> {
     Some(
         ExternalRecord::event(ExternalEventName::PluginLoaded)
-            .attr(ExternalKey::InstallKind, ev.install_kind.as_str())
+            .attr(ExternalKey::InstallKind, ev.install_kind.as_ref())
             .attr(ExternalKey::Success, ev.success)
             .attr_opt(ExternalKey::ErrorCategory, ev.error_category.as_deref()),
     )
@@ -1298,12 +1262,37 @@ pub fn map_agent_connect(ev: &events::AgentConnect) -> Option<ExternalRecord> {
     Some(rec)
 }
 
+pub fn map_startup_sub_timers(ev: &events::StartupSubTimers) -> Option<ExternalRecord> {
+    if ev.timings.is_empty() {
+        return None;
+    }
+    let mut rec = ExternalRecord::default();
+    for (phase, duration_ms) in &ev.timings {
+        rec = rec.metric(MetricIncrement::StartupSubTimerDuration {
+            phase: phase.clone(),
+            duration_ms: *duration_ms,
+            outcome: ev.outcome.label().to_string(),
+            auth_mode: ev.auth_mode.label().to_string(),
+        });
+    }
+    Some(rec)
+}
+
 /// `StartupCompleted` maps to the total histogram (no external log event).
 pub fn map_startup_completed(ev: &events::StartupCompleted) -> Option<ExternalRecord> {
     Some(
         ExternalRecord::default().metric(MetricIncrement::StartupTotal {
             duration_ms: ev.total_ms,
             outcome: ev.outcome.label().to_string(),
+            auth_mode: ev.auth_mode.label().to_string(),
+        }),
+    )
+}
+
+pub fn map_startup_interactive(ev: &events::StartupInteractive) -> Option<ExternalRecord> {
+    Some(
+        ExternalRecord::default().metric(MetricIncrement::StartupInteractive {
+            duration_ms: ev.interactive_ms,
             auth_mode: ev.auth_mode.label().to_string(),
         }),
     )

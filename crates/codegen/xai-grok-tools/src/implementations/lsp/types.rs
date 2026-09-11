@@ -70,11 +70,9 @@ pub trait LspBackend: Send + Sync + 'static {
         kind: DiskChangeKind,
     );
 
-    /// Read diagnostics for specific file paths.
-    ///
-    /// For each path, opens the file with the LSP if not already open,
-    /// waits briefly for diagnostics to settle, then returns all
-    /// ERROR/WARNING diagnostics grouped by file.
+    /// Read diagnostics for specific file paths. For each path, opens the file with the LSP if not
+    /// already open, waits briefly for diagnostics to settle, then returns all ERROR/WARNING
+    /// diagnostics grouped by file.
     async fn read_diagnostics(&self, paths: &[std::path::PathBuf]) -> Vec<FileDiagnosticEntry>;
 }
 

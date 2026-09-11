@@ -16,9 +16,8 @@ use crate::scrollback::block::RenderBlock;
 /// Maximum characters of a derived first-prompt title.
 const MAX_TITLE_CHARS: usize = 60;
 
-/// Derive the display title for an agent (rename, then generated title, then first-prompt, then id).
-///
-/// Centralised so every place that shows a session name agrees on the same precedence.
+/// Derive the display title for an agent (rename, then generated title, then first-prompt, then
+/// id). Centralised so every place that shows a session name agrees on the same precedence.
 /// Trimming and truncation happen in this single place to avoid drift.
 pub fn entry_title(agent: &AgentView) -> String {
     if let Some(name) = agent.display_name.as_deref() {
@@ -54,11 +53,8 @@ pub fn entry_title(agent: &AgentView) -> String {
     }
 }
 
-/// Real session title for rename prefill / `/rename` ghost-prefill.
-///
-/// Deliberately **not** [`entry_title`]: that chain falls back to the first prompt and `"session <id8>"`.
-/// Accepting the prefill with Tab would then commit a synthetic label (and a 60-char truncation).
-/// Same derivation as the dashboard `Ctrl+R` editor: non-blank `display_name`, else `generated_session_title`.
+/// Real session title for rename prefill / `/rename` ghost-prefill. Deliberately not
+/// [`entry_title`]: that chain falls back to the first prompt and `"session <id8>"`.
 pub fn rename_source_title(agent: &AgentView) -> Option<String> {
     rename_source_title_raw(agent).map(|s| sanitize_display_text(s).into_owned())
 }
@@ -80,9 +76,6 @@ pub(crate) fn rename_source_title_raw(agent: &AgentView) -> Option<&str> {
 }
 
 /// Take the first scrollback `UserPrompt` block's text, if any.
-///
-/// Skips indices whose `entry()` returns `None` (defensive: the indexed range matches `scrollback.len()` so this should not happen in practice).
-/// Bailing out with `?` instead would conflate "no UserPrompt anywhere" with "hit an unexpected gap mid-scan".
 fn first_user_prompt_text(agent: &AgentView) -> Option<String> {
     for i in 0..agent.scrollback.len() {
         if let Some(entry) = agent.scrollback.entry(i)
@@ -114,9 +107,6 @@ pub(crate) fn last_user_prompt_line(agent: &AgentView) -> Option<String> {
 }
 
 /// First renderable line of the newest agent message, ANSI-stripped and sanitised.
-/// Returns `None` when a `UserPrompt` is newer than every agent message.
-/// (That prompt is unanswered; an older reply would misrepresent the latest exchange.)
-/// Also `None` when the message has no renderable line (older messages are not scanned).
 pub(crate) fn last_agent_message_line(agent: &AgentView) -> Option<String> {
     let len = agent.scrollback.len();
     for idx in (0..len).rev() {
@@ -156,11 +146,8 @@ fn truncate_title(text: &str) -> String {
     format!("{head}...")
 }
 
-/// Strip C0/C1 and bidi/format controls that could inject terminal escape sequences or spoof the title.
-/// Replaces them with `U+FFFD` so the caller can still see something was there.
-/// Same character class as [`xai_grok_shell::session::persistence::is_forbidden_title_char`]; persist drops, display replaces.
-///
-/// Returns `Cow::Borrowed(s)` when no sanitization is needed, so the common per-render call on a clean cached display_name does not allocate.
+/// Strip C0/C1 and bidi/format controls that could inject terminal escape sequences or spoof the
+/// title.
 pub(crate) fn sanitize_display_text(s: &str) -> Cow<'_, str> {
     use xai_grok_shell::session::persistence::is_forbidden_title_char;
     if s.chars().any(is_forbidden_title_char) {

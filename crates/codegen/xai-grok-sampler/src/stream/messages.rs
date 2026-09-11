@@ -53,9 +53,7 @@ enum BlockType {
 }
 
 /// Transform a raw Anthropic Messages API stream into a stream of [`SamplingEvent`]s.
-///
 /// Yields exactly one terminal event ([`SamplingEvent::Completed`] or [`SamplingEvent::Failed`]) per request.
-/// Server-side `Error` events translate to `SamplingError::Api { status: 500, .. }`.
 /// The actor's retry loop treats them as retryable transport-level errors.
 pub fn stream_messages<'a>(
     raw_stream: BoxStream<'a, Result<MessageStreamEvent, SamplingError>>,
@@ -66,6 +64,13 @@ pub fn stream_messages<'a>(
     async_stream::stream! {
         use messages::{ContentBlock, StreamDelta};
 
+        let decode_region = crate::span_timing::Region::from_span(tracing::info_span!(
+            "sampling.stream_decode",
+            ttft_ms = tracing::field::Empty,
+            ttlb_ms = tracing::field::Empty,
+            output_tokens = tracing::field::Empty,
+            chunk_count = tracing::field::Empty,
+        ));
         let stream_start = Instant::now();
         let mut chunk_timestamps: Vec<Instant> = Vec::new();
 
@@ -524,6 +529,22 @@ pub fn stream_messages<'a>(
         let stream_end = Instant::now();
         let metrics =
             InferenceLatencyStats::from_timestamps(stream_start, &chunk_timestamps, stream_end);
+
+        decode_region
+            .span()
+            .record("ttlb_ms", metrics.time_to_last_byte_ms as i64);
+        decode_region
+            .span()
+            .record("chunk_count", metrics.chunk_count as i64);
+        if let Some(ttft) = metrics.time_to_first_token_ms {
+            decode_region.span().record("ttft_ms", ttft as i64);
+        }
+        if let Some(u) = usage.as_ref() {
+            decode_region
+                .span()
+                .record("output_tokens", u.completion_tokens as i64);
+        }
+        drop(decode_region);
 
         let response = ConversationResponse {
             items,

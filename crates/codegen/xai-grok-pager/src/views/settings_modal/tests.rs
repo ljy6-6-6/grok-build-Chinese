@@ -450,6 +450,8 @@ fn contextual_hints_group_sub_sheet_flow() {
 /// Other choices are unaffected.
 #[test]
 fn effective_enum_choices_hides_auto_for_permission_mode_when_gated_off() {
+    // effective_enum_choices reads the terminal-theme rollout gate global, which is off until seeded.
+    let _guard = crate::theme::cache::pin_theme();
     let reg = SettingsRegistry::defaults();
     let meta = reg
         .find("permission_mode")
@@ -482,7 +484,7 @@ fn effective_enum_choices_hides_auto_for_permission_mode_when_gated_off() {
         "Auto must be selectable when the gate is on"
     );
 
-    // A non-gated key is never filtered.
+    // The theme keys are only filtered by the terminal-theme rollout gate, seeded on above.
     let theme = reg.find("theme").expect("theme registered");
     if let SettingKind::Enum {
         choices: theme_choices,
@@ -492,49 +494,60 @@ fn effective_enum_choices_hides_auto_for_permission_mode_when_gated_off() {
         assert_eq!(
             effective_enum_choices("theme", theme_choices, &gated_off).len(),
             theme_choices.len(),
-            "non-permission_mode keys are never filtered"
+            "the auto gate must not filter theme keys"
         );
     }
 }
 
-/// `voice_capture_mode`'s "hold" choice is gated off without key releases and available with them; "toggle" is never gated.
-/// Permission_mode's "auto" gating is preserved.
-/// Pure; no process-global mutation.
+/// `voice_capture_mode`'s "hold" choice is gated off without key releases and available with them;
+/// "toggle" is never gated. Permission_mode's "auto" gating is preserved. The theme keys'
+/// "terminal" choice is gated on the rollout flag. Pure; no process-global mutation.
 #[test]
-fn enum_choice_gated_off_covers_voice_and_permission() {
+fn enum_choice_gated_off_covers_voice_permission_and_terminal_theme() {
+    let on = EnumChoiceGates {
+        auto_mode: true,
+        kitty_releases: true,
+        terminal_theme: true,
+    };
     // voice "hold": gated iff no key releases.
     assert!(enum_choice_gated_off(
         "voice_capture_mode",
         "hold",
-        true,
-        false
+        EnumChoiceGates {
+            kitty_releases: false,
+            ..on
+        }
     ));
-    assert!(!enum_choice_gated_off(
-        "voice_capture_mode",
-        "hold",
-        true,
-        true
-    ));
+    assert!(!enum_choice_gated_off("voice_capture_mode", "hold", on));
     // voice "toggle": never gated.
     assert!(!enum_choice_gated_off(
         "voice_capture_mode",
         "toggle",
-        true,
-        false
+        EnumChoiceGates {
+            kitty_releases: false,
+            ..on
+        }
     ));
     // permission_mode "auto": gated iff the auto gate is off.
     assert!(enum_choice_gated_off(
         "permission_mode",
         "auto",
-        false,
-        true
+        EnumChoiceGates {
+            auto_mode: false,
+            ..on
+        }
     ));
-    assert!(!enum_choice_gated_off(
-        "permission_mode",
-        "auto",
-        true,
-        true
-    ));
+    assert!(!enum_choice_gated_off("permission_mode", "auto", on));
+    // Each theme key's "terminal": gated iff the rollout flag is off; other themes unaffected.
+    let theme_off = EnumChoiceGates {
+        terminal_theme: false,
+        ..on
+    };
+    for key in ["theme", "auto_dark_theme", "auto_light_theme"] {
+        assert!(enum_choice_gated_off(key, "terminal", theme_off));
+        assert!(!enum_choice_gated_off(key, "terminal", on));
+        assert!(!enum_choice_gated_off(key, "groknight", theme_off));
+    }
 }
 
 fn meta_for(reg: &SettingsRegistry, key: SettingKey) -> &SettingMeta {
@@ -661,13 +674,9 @@ fn every_setting_has_action_for_bool_arm() {
     }
 }
 
-/// Mirror of `every_setting_has_action_for_bool_arm` for Enum settings.
-/// Every canonical choice of every preview-supporting registered Enum must have an `action_for_enum` arm.
-/// A missing arm silently degrades the picker (nav advances, no Action emitted, preview never fires).
-/// Non-preview Enums (e.g. `permission_mode`) skip `action_for_enum` entirely (gated by `supports_preview` in `set_picker_idx`).
-/// So they are excluded here.
-/// The commit-arm test below covers them.
-/// With no Enum entries registered the check passes vacuously.
+/// Mirror of `every_setting_has_action_for_bool_arm` for Enum settings. Every canonical choice of
+/// every preview-supporting registered Enum must have an `action_for_enum` arm. A missing arm
+/// silently degrades the picker (nav advances, no Action emitted, preview never fires).
 #[test]
 fn every_preview_enum_setting_has_action_for_enum_arm() {
     let reg = SettingsRegistry::defaults();
@@ -696,11 +705,9 @@ fn every_preview_enum_setting_has_action_for_enum_arm() {
     }
 }
 
-/// Mirror of `every_setting_has_action_for_bool_arm` for `SettingKind::String`.
-/// Without an `action_for_string` arm the editor's commit path returns `None` and Enter silently no-ops.
-/// Empty input is the "clear default" entry point, so every String setting must produce SOME action for it.
-/// No production setting uses `SettingKind::String` today, so this passes vacuously.
-/// It fires the first time a change registers a String setting without an arm.
+/// Mirror of `every_setting_has_action_for_bool_arm` for `SettingKind::String`. Without an
+/// `action_for_string` arm the editor's commit path returns `None` and Enter silently no-ops. It
+/// fires the first time a change registers a String setting without an arm.
 #[test]
 fn every_string_setting_has_action_for_string_arm() {
     let reg = SettingsRegistry::defaults();
@@ -822,9 +829,78 @@ fn every_enum_setting_has_action_for_enum_commit_arm() {
     }
 }
 
-/// The row renders the FULL label whenever label + value fit on one logical line.
-/// Truncation is reserved for the pathological case where even the label alone is wider than the row.
-/// `pathologically_narrow_truncates_label_with_ellipsis` covers that case.
+/// Paint-level, because the helper-only test missed a layout branch once.
+#[test]
+fn render_setting_row_selected_is_reversed_on_terminal_theme() {
+    let meta = SettingMeta {
+        key: "test-key",
+        category: SettingCategory::Appearance,
+        owner: crate::settings::SettingOwner::Shared,
+        label: "Compact mode",
+        description: "Test description.",
+        keywords: &["test"],
+        kind: SettingKind::Bool { default: false },
+        restart_required: false,
+        hidden_in_minimal: false,
+    };
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 1,
+    };
+    let _guard = crate::theme::cache::pin_theme();
+
+    crate::theme::cache::set(crate::theme::ThemeKind::Terminal);
+    let theme = Theme::current();
+    let mut buf = Buffer::empty(area);
+    render_setting_row(
+        &mut buf,
+        area,
+        &meta,
+        &SettingValue::Bool(false),
+        15,
+        true, // selected
+        &theme,
+        false,
+        false,
+        None,
+    );
+    for x in [0u16, 4, 40, 79] {
+        assert!(
+            buf[(x, 0)]
+                .style()
+                .add_modifier
+                .contains(ratatui::style::Modifier::REVERSED),
+            "cell {x} must be reversed"
+        );
+    }
+
+    crate::theme::cache::set(crate::theme::ThemeKind::GrokNight);
+    let theme = Theme::current();
+    let mut buf = Buffer::empty(area);
+    render_setting_row(
+        &mut buf,
+        area,
+        &meta,
+        &SettingValue::Bool(false),
+        15,
+        true,
+        &theme,
+        false,
+        false,
+        None,
+    );
+    assert!(
+        !buf[(4, 0)]
+            .style()
+            .add_modifier
+            .contains(ratatui::style::Modifier::REVERSED),
+        "RGB keeps the unreversed band"
+    );
+    assert_eq!(buf[(4, 0)].style().bg, Some(theme.bg_visual));
+}
+
 /// At an 80-col area a 42-col label fits on one line, so the full label renders without an ellipsis.
 #[test]
 fn render_setting_row_shows_full_label_when_one_line_fits() {
@@ -877,9 +953,6 @@ fn render_setting_row_shows_full_label_when_one_line_fits() {
 }
 
 /// The default registry contains Appearance settings (3 bools + 3 enums + 1 int = 7 entries).
-/// It also holds the Editor entry `multiline_mode`, the Agent entries `permission_mode` and `plan_mode`, and the Privacy entry `coding_data_sharing`.
-/// The Models entry `default_model` and the Advanced entries `show_tips` and `auto_update` complete the list.
-/// `default_reasoning_effort` and `auto_compact_threshold_percent` are not exposed in the modal.
 #[test]
 fn rows_contain_categories_and_settings_through_pr_14() {
     let prev_voice = crate::app::voice_mode_enabled();
@@ -1161,9 +1234,6 @@ fn modified_i_does_not_enter_filter() {
 }
 
 /// Wiring check: the Browse footer carries the shared `i search` hint under vim nav mode.
-/// The gate itself is covered centrally by `modal_window::tests::vim_nav_search_hint_only_in_vim_nav_mode`.
-/// The explicit `set_vim_mode` pin (a thread-local that, once set, blocks disk-seeding) keeps this independent of the dev's on-disk `[ui].vim_mode`.
-/// Reset afterward since libtest reuses worker threads.
 #[test]
 fn browse_footer_advertises_i_search_under_vim() {
     crate::appearance::cache::set_vim_mode(true);
@@ -1276,13 +1346,23 @@ fn selected_browse_row_label_is_bold() {
 }
 
 #[test]
-fn settings_list_row_bg_terminal_native_elevates_selection() {
+fn settings_list_row_bg_reset_palette_is_bandless_with_reverse_overlay() {
     let theme = Theme::terminal_default();
     assert!(matches!(theme.bg_visual, Color::Reset));
-    assert_eq!(settings_list_row_bg(&theme, true, false), Color::DarkGray);
-    assert_eq!(settings_list_row_bg(&theme, false, true), Color::DarkGray);
-    assert_eq!(settings_list_row_bg(&theme, false, false), Color::Reset);
-    assert_eq!(settings_list_row_bg(&theme, true, true), Color::DarkGray);
+    // Zero opaque cells: no band at any selection state.
+    for (sel, hov) in [(true, false), (false, true), (false, false), (true, true)] {
+        assert_eq!(settings_list_row_bg(&theme, sel, hov), Color::Reset);
+    }
+    // The cue is the reverse-video overlay instead.
+    let ov = super::render::settings_row_overlay(&theme, true, false).expect("selected overlay");
+    assert!(ov.add_modifier.contains(ratatui::style::Modifier::REVERSED));
+    assert!(super::render::settings_row_overlay(&theme, false, true).is_some());
+    assert!(super::render::settings_row_overlay(&theme, false, false).is_none());
+
+    // RGB themes keep the band and get no overlay.
+    let rgb = Theme::groknight();
+    assert_eq!(settings_list_row_bg(&rgb, true, false), rgb.bg_visual);
+    assert!(super::render::settings_row_overlay(&rgb, true, false).is_none());
 }
 
 /// `MouseEventKind::Moved` over a setting row's hit-rect sets `state.hover_row` to that row's index.
@@ -1641,19 +1721,12 @@ fn scroll_wheel_advances_selection() {
     assert!(matches!(outcome, SettingsKeyOutcome::Changed));
 }
 
-// -- routing scaffold tests --
-//
-// The enum chooser and string/int editor declare their mode variants alongside Browse and route Esc to Browse
-// The scaffold therefore ships no dead `unimplemented!()` panics
-// These tests pin the routing
+// The enum chooser and string/int editor declare their mode variants alongside Browse and route.
+// Esc to Browse. The scaffold therefore ships no dead `unimplemented!()` panics. These tests pin
+// the routing.
 
-/// `render_setting_row` produces the "restart" pill when `meta.restart_required == true` AND the row is expanded.
-/// When no registered setting sets `restart_required`, this test still exercises the render path via a synthetic setting with the flag set.
-///
-/// The pill is a property label, not a "restart pending" tracker.
-/// A collapsed non-default row showing it forever misreads as pending.
-/// So only `is_expanded` gates it (the "(restart to apply)" toast covers change-time feedback).
-/// Arms: expanded (pill) and edited-but-collapsed (no pill; the exact reported repro).
+/// `render_setting_row` produces the "restart" pill when `meta.restart_required == true` AND the
+/// row is expanded. The pill is a property label, not a "restart pending" tracker.
 #[test]
 fn render_setting_row_emits_restart_pill_when_required() {
     let meta = SettingMeta {
@@ -2546,12 +2619,8 @@ fn picking_enum_esc_returns_to_browse() {
     assert!(matches!(s.mode(), SettingsModalMode::Browse));
 }
 
-// -- picker machinery tests --
-//
-// When the chooser sub-pane ships with no Enum entries in `default_settings()`, these tests build a synthetic registry with one Enum entry
-// They exercise the picker's render and keypress paths directly
-// When `action_for_enum` returns `None` for a key, the preview/revert dispatch returns `SettingsKeyOutcome::Changed` rather than `Action(_)`
-// A concrete `action_for_enum("theme", _)` arm makes it emit an Action
+// When `action_for_enum` returns `None` for a key, the preview/revert dispatch returns
+// `SettingsKeyOutcome::Changed` rather than `Action(_)`.
 
 /// Static synthetic Enum metadata for picker tests.
 /// Choice display names are deliberately mid-length, sized close to the real theme catalog widths.
@@ -2677,10 +2746,9 @@ fn picker_arrow_keys_advance_choices_idx() {
     assert!(matches!(outcome, SettingsKeyOutcome::Unchanged));
 }
 
-/// Enter commits the current preview by dispatching a typed COMMIT Action AND transitioning back to Browse.
-/// The synthetic `test_enum` key has no `action_for_enum_commit` arm, so the outcome is `Changed` (state mutation only).
-/// The theme keys land real `Action::SetTheme(...)` variants, exercised by the e2e tests at `tests/settings_e2e.rs`.
-/// The explicit commit Action makes the persist path run once per picker open-close cycle.
+/// Enter commits the current preview by dispatching a typed COMMIT Action AND transitioning back to
+/// Browse. The synthetic `test_enum` key has no `action_for_enum_commit` arm, so the outcome is
+/// `Changed` (state mutation only).
 #[test]
 fn picker_enter_returns_to_browse() {
     let mut s = picker_test_state();
@@ -3136,12 +3204,8 @@ fn picker_string_original_value_fills_committed_marker() {
 
 // -- try_enter_picking_enum coverage --
 
-/// Browse-mode Enter on an Enum row transitions to PickingEnum mode.
-/// `choices_idx` seeds from the row's current value (resolved by `current_value_for`).
-///
-/// The synthetic "test_enum" key has no `current_value_for` arm, so `value_for` returns None.
-/// The fallback path picks `choices_idx = 0` and `original_value = SettingValue::Enum(first_canonical)`.
-/// This pins the fallback behavior.
+/// Browse-mode Enter on an Enum row transitions to PickingEnum mode. The synthetic "test_enum" key
+/// has no `current_value_for` arm, so `value_for` returns None.
 #[test]
 fn browse_enter_on_enum_row_transitions_to_picking_enum() {
     let mut s = picker_test_state_in_browse();
@@ -3193,10 +3257,8 @@ fn browse_enter_on_bool_row_does_not_enter_picking_enum() {
     );
 }
 
-/// `try_enter_picking_enum` directly: with a synthetic Enum where `value_for` returns the second choice's canonical, `choices_idx` must seed to 1.
-/// That index is the canonical's position in the choice list.
-/// This exercises the `choices.iter().position(...)` resolution branch.
-/// That branch is structurally unreachable when no real Enum entries are registered but is hit by the theme path.
+/// `try_enter_picking_enum` directly: with a synthetic Enum where `value_for` returns the second
+/// choice's canonical, `choices_idx` must seed to 1.
 #[test]
 fn try_enter_picking_enum_seeds_choices_idx_from_current_value() {
     // The synthetic "test_enum" key isn't in `current_value_for`
@@ -3370,10 +3432,9 @@ fn render_picker_at_height_2_renders_title_no_choices() {
     );
 }
 
-/// Narrow-viewport edge case for the word-wrap path.
-/// When a fully-wrapped description would exceed the picker's height, the `has_description = … >= 2 + desc_rows` gate skips the description.
-/// The choices then stay renderable.
-/// This test pins that fallback at an intermediate height.
+/// Narrow-viewport edge case for the word-wrap path. When a fully-wrapped description would exceed
+/// the picker's height, the `has_description = … >= 2 + desc_rows` gate skips the description. The
+/// choices then stay renderable. This test pins that fallback at an intermediate height.
 #[test]
 fn render_picker_drops_description_when_wrap_block_exceeds_height() {
     // Synthetic registry with a description that, at width=20, would wrap to at least 5 lines
@@ -4216,7 +4277,7 @@ fn picker_mode_scroll_wheel_is_noop_and_preserves_browse_selection() {
     assert_eq!(s.selected, selected_before);
 }
 
-/// Mouse click in PickingEnum mode is a no-op (click-to-pick is handled elsewhere).
+/// A click with no choice hit-rects is a no-op (nothing to focus or select).
 #[test]
 fn picker_mode_mouse_click_is_noop() {
     let mut s = picker_test_state();
@@ -4229,6 +4290,200 @@ fn picker_mode_mouse_click_is_noop() {
     );
     assert!(matches!(outcome, SettingsKeyOutcome::Unchanged));
     assert_eq!(s.selected, selected_before);
+}
+
+fn picker_choice_idx(s: &SettingsModalState) -> usize {
+    match s.mode() {
+        SettingsModalMode::PickingEnum { choices_idx, .. } => choices_idx,
+        other => panic!("expected PickingEnum, got {other:?}"),
+    }
+}
+
+fn install_picker_choice_rects(s: &mut SettingsModalState) {
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 30,
+    };
+    let mut buf = Buffer::empty(area);
+    render_picking_enum(&mut buf, area, s, &Theme::current());
+    s.picker_choice_rects = take_picker_choice_rects();
+}
+
+fn click_picker_choice(s: &mut SettingsModalState, idx: usize) -> SettingsKeyOutcome {
+    let rect = s.picker_choice_rects[idx];
+    assert!(
+        rect.width > 0 && rect.height > 0,
+        "choice {idx} must be visible, got {rect:?}"
+    );
+    handle_settings_mouse(
+        s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        rect.x.saturating_add(2),
+        rect.y,
+    )
+}
+
+fn unfocused_visible_choice(s: &SettingsModalState) -> usize {
+    let focused = picker_choice_idx(s);
+    s.picker_choice_rects
+        .iter()
+        .enumerate()
+        .find(|(i, r)| *i != focused && r.height > 0)
+        .map(|(i, _)| i)
+        .expect("need a visible unfocused radio")
+}
+
+/// A click on the focused radio does not select. A click on another radio only focuses it.
+/// The second click on that radio selects and leaves the chooser.
+#[test]
+fn picker_double_click_selects_radio() {
+    let mut s = enter_picker_for("coding_data_sharing");
+    install_picker_choice_rects(&mut s);
+    let focused = picker_choice_idx(&s);
+    let target = unfocused_visible_choice(&s);
+
+    let on_focused = click_picker_choice(&mut s, focused);
+    assert!(
+        matches!(on_focused, SettingsKeyOutcome::Unchanged),
+        "click on the focused radio must not select, got {on_focused:?}"
+    );
+    assert_eq!(picker_choice_idx(&s), focused);
+
+    let first = click_picker_choice(&mut s, target);
+    assert!(
+        matches!(first, SettingsKeyOutcome::Changed),
+        "first click on another radio must only focus, got {first:?}"
+    );
+    assert_eq!(picker_choice_idx(&s), target);
+
+    let second = click_picker_choice(&mut s, target);
+    match second {
+        SettingsKeyOutcome::Action(Action::SetCodingDataSharing { opted_in }) => {
+            assert!(
+                opted_in,
+                "opt-in is the unfocused radio on the default snapshot"
+            );
+        }
+        other => panic!("double-click must select like Enter, got {other:?}"),
+    }
+    assert!(
+        matches!(s.mode(), SettingsModalMode::Browse),
+        "select must leave the chooser"
+    );
+}
+
+/// Two quick clicks on different radios move focus only; they are not a double-click.
+#[test]
+fn picker_clicks_on_different_radios_do_not_select() {
+    let mut s = enter_picker_for("coding_data_sharing");
+    install_picker_choice_rects(&mut s);
+    let first_idx = unfocused_visible_choice(&s);
+    let second_idx = picker_choice_idx(&s);
+    assert_ne!(first_idx, second_idx);
+
+    let _ = click_picker_choice(&mut s, first_idx);
+    let outcome = click_picker_choice(&mut s, second_idx);
+    assert!(
+        !matches!(
+            outcome,
+            SettingsKeyOutcome::Action(_) | SettingsKeyOutcome::ActionThenClose(_)
+        ),
+        "clicking a different radio must not select, got {outcome:?}"
+    );
+    assert_eq!(picker_choice_idx(&s), second_idx);
+}
+
+/// Click A, move focus with the keyboard, then click A again is a new single click.
+#[test]
+fn picker_keyboard_move_cancels_double_click() {
+    let mut s = enter_picker_for("coding_data_sharing");
+    install_picker_choice_rects(&mut s);
+    let first = unfocused_visible_choice(&s);
+    let _ = click_picker_choice(&mut s, first);
+    assert_eq!(picker_choice_idx(&s), first);
+
+    let nav = if picker_choice_idx(&s) + 1 < s.picker_choice_rects.len() {
+        KeyCode::Down
+    } else {
+        KeyCode::Up
+    };
+    let _ = handle_settings_key(&mut s, &KeyEvent::new(nav, KeyModifiers::NONE));
+    assert_ne!(picker_choice_idx(&s), first);
+    assert!(
+        s.picker_last_click.is_none(),
+        "keyboard focus move must clear the pending double-click"
+    );
+
+    let outcome = click_picker_choice(&mut s, first);
+    assert!(
+        !matches!(
+            outcome,
+            SettingsKeyOutcome::Action(_) | SettingsKeyOutcome::ActionThenClose(_)
+        ),
+        "click after keyboard nav must not select, got {outcome:?}"
+    );
+    assert_eq!(picker_choice_idx(&s), first);
+}
+
+/// A click outside the double-click window focuses only, even on the same radio.
+#[test]
+fn picker_stale_click_does_not_select() {
+    let mut s = enter_picker_for("coding_data_sharing");
+    install_picker_choice_rects(&mut s);
+    let target = unfocused_visible_choice(&s);
+    s.picker_last_click = Some((
+        target,
+        std::time::Instant::now() - std::time::Duration::from_millis(301),
+    ));
+
+    let outcome = click_picker_choice(&mut s, target);
+    assert!(
+        matches!(outcome, SettingsKeyOutcome::Changed),
+        "stale click must only focus, got {outcome:?}"
+    );
+    assert_eq!(picker_choice_idx(&s), target);
+}
+
+/// Deep-link choosers close the modal on double-click, same as Enter.
+#[test]
+fn picker_double_click_deep_link_closes() {
+    let mut s = enter_picker_for("coding_data_sharing");
+    s.close_on_picker_exit = true;
+    install_picker_choice_rects(&mut s);
+    let focused = picker_choice_idx(&s);
+
+    let _ = click_picker_choice(&mut s, focused);
+    let outcome = click_picker_choice(&mut s, focused);
+    match outcome {
+        SettingsKeyOutcome::ActionThenClose(Action::SetCodingDataSharing { opted_in }) => {
+            assert!(!opted_in);
+        }
+        other => panic!("deep-link double-click must close, got {other:?}"),
+    }
+}
+
+/// Preview enums still preview on the first click; the second click commits.
+#[test]
+fn picker_double_click_commits_preview_enum() {
+    let mut s = enter_picker_for("theme");
+    install_picker_choice_rects(&mut s);
+    let target = unfocused_visible_choice(&s);
+
+    let first = click_picker_choice(&mut s, target);
+    match first {
+        SettingsKeyOutcome::Action(Action::PreviewTheme(_)) => {}
+        other => panic!("first click must preview, not select, got {other:?}"),
+    }
+    assert!(matches!(s.mode(), SettingsModalMode::PickingEnum { .. }));
+
+    let second = click_picker_choice(&mut s, target);
+    match second {
+        SettingsKeyOutcome::Action(Action::SetTheme(_)) => {}
+        other => panic!("double-click must commit the previewed theme, got {other:?}"),
+    }
+    assert!(matches!(s.mode(), SettingsModalMode::Browse));
 }
 
 /// Random keypresses in PickingEnum mode are Unchanged and don't leak to other handlers (e.g., the filter query).
@@ -4365,11 +4620,8 @@ fn editing_value_esc_returns_to_browse() {
     assert!(matches!(s.mode(), SettingsModalMode::Browse));
 }
 
-// -- Direct unit tests for compute_filtered --
-//
-// The free function is module-private; integration tests can only reach it through key presses
-// These unit tests pin structural cases that are not naturally reachable that way
-// Example: a category whose settings all fail the filter (header excluded)
+// Direct unit tests for compute_filtered. The free function is module-private; integration tests
+// can only reach it through key presses.
 
 #[test]
 fn compute_filtered_empty_query_returns_identity() {
@@ -4505,10 +4757,9 @@ fn advance_prev_recovers_when_selection_is_hidden() {
     assert_eq!(s.selected, simple_idx);
 }
 
-// -- blank line above category section headers --
-//
-// The renderer reserves one empty visual line ABOVE every section header EXCEPT the one that lands first in the viewport
-// These tests render the modal directly to a buffer and inspect the y-positions of the rendered category labels
+// The renderer reserves one empty visual line ABOVE every section header EXCEPT the one that lands
+// first in the viewport. These tests render the modal directly to a buffer and inspect the
+// y-positions of the rendered category labels.
 
 /// Scan one row of the buffer and return its text content (no styles) with leading/trailing whitespace preserved.
 fn buf_row_text(buf: &Buffer, y: u16, x: u16, width: u16) -> String {
@@ -4521,14 +4772,8 @@ fn buf_row_text(buf: &Buffer, y: u16, x: u16, width: u16) -> String {
     s
 }
 
-/// Find the absolute column index where `needle` begins on row `y` of `buf`, scanning from `x_start` to `x_end - 1`.
-/// Walks cells one at a time and compares each cell's symbol.
-/// The returned column is therefore the actual buffer position, not a byte offset projected onto width as `text.find(needle)` would give.
-/// Returns `None` if `needle` doesn't appear on the row.
-///
-/// Use this in any test that needs to assert per-cell style for a text fragment.
-/// Earlier tests cast `string.find(needle) as u16` which only matched the cell position for ASCII content.
-/// Once a unicode glyph entered the row's label/value, the byte offset diverged from the column.
+/// The returned column is therefore the actual buffer position, not a byte offset projected onto
+/// width as `text.find(needle)` would give. Returns `None` if `needle` doesn't appear on the row.
 fn find_text_col(buf: &Buffer, y: u16, needle: &str) -> Option<u16> {
     if needle.is_empty() {
         return None;
@@ -4687,10 +4932,9 @@ fn row_rects_shift_down_for_blank_lines_above_headers() {
     }
 }
 
-// -- two-line layout when label + value don't fit --
-//
-// The `row_layout` helper decides one-line vs two-line vs two-line-with-label-truncation based on the full label width
-// These tests pin the behaviour at three width budgets that exercise each layout variant
+// The `row_layout` helper decides one-line vs two-line vs two-line-with-label-truncation based on
+// the full label width. These tests pin the behaviour at three width budgets that exercise each
+// layout variant.
 
 /// Unit test for the extracted `wrap_description` helper.
 /// Pins its behavior in one place so each of the three callers doesn't have to assert it indirectly through a modal-render check.
@@ -4763,11 +5007,9 @@ fn synthetic_enum_chevron_meta() -> SettingMeta {
     }
 }
 
-/// Render a long label at a narrow area; expect the value to drop to line 2 right-aligned, while the full label stays on line 1.
-///
-/// "Disable vim mode (experimental)" is 31 cells.
-/// One-line total (with `off` + chrome = 38 cells) doesn't fit at width=35, so the row picks `TwoLine`.
-/// The label alone (with triangle + right pad = 34 cells) DOES fit, so it stays on line 1 without truncation.
+/// One-line total (with `off` + chrome = 38 cells) doesn't fit at width=35, so the row picks
+/// `TwoLine`. The label alone (with triangle + right pad = 34 cells) DOES fit, so it stays on line
+/// 1 without truncation.
 #[test]
 fn narrow_terminal_drops_value_to_second_line() {
     let meta = synthetic_long_label_meta();
@@ -4805,10 +5047,8 @@ fn narrow_terminal_drops_value_to_second_line() {
         line2.contains("off"),
         "value `off` must render on line 2 (right-aligned): {line2:?}"
     );
-    // Value should be right-aligned: the `off` text ends just before the (reserved-but-empty) chevron column AND the 1-cell right pad
-    // Line-2 reserves the same `ROW_RIGHT_PAD_W + ROW_CHEVRON_COL_W` suffix as line 1
-    // So the chevron column is at a constant right offset from the area's right edge regardless of whether a row went one-line or two-line
-    // We allow 1 extra cell of slack for the gap between value and the chevron column
+    // Value should be right-aligned: the `off` text ends just before the (reserved-but-empty) chevron
+    // column AND the 1-cell right pad.
     let last_idx = line2.rfind("off").expect("line2 contains `off`");
     let slack = (ROW_CHEVRON_COL_W as usize) + (ROW_RIGHT_PAD_W as usize) + 1;
     assert!(
@@ -4902,10 +5142,9 @@ fn pathologically_narrow_truncates_label_with_ellipsis() {
     );
 }
 
-/// Two-line rows expand `state.row_rects` to span BOTH lines so mouse clicks on either line trigger the same default action.
-///
-/// `coding_data_sharing`'s label plus the value "Opt out", the chevron, and the row chrome are far wider than the width=28 we render at.
-/// So the row drops to two lines.
+/// Two-line rows expand `state.row_rects` to span BOTH lines so mouse clicks on either line trigger
+/// the same default action. `coding_data_sharing`'s label plus the value "Opt out", the chevron,
+/// and the row chrome are far wider than the width=28 we render at. So the row drops to two lines.
 #[test]
 fn two_line_row_hit_rect_spans_both_lines() {
     let mut s = make_state();
@@ -5024,10 +5263,8 @@ fn two_line_row_with_expansion_renders_three_segments() {
     );
 }
 
-/// The contextual-hints group row carries no value.
-/// When its key is in `expanded_keys` (Right/l) it must still paint its description below the chevron row, like normal expanded rows do.
-/// Regression guard: before the fix the group short-circuited out of both the height and render loops.
-/// So Right/l set `expanded_keys` but painted nothing.
+/// The contextual-hints group row carries no value. When its key is in `expanded_keys` (Right/l) it
+/// must still paint its description below the chevron row, like normal expanded rows do.
 #[test]
 fn group_row_renders_expanded_description() {
     let mut s = make_state();
@@ -5103,14 +5340,9 @@ fn row_layout_bool_without_chevron() {
     assert_eq!(row_layout(39, label, value, false), RowLayout::TwoLine);
 }
 
-// -- User-feedback follow-up: always reserve a blank line between
-//    the "Tip · Ask Grok…" docs footer and the keybindings hints.
-//
-// The chrome sets `footer_lines` to `predicted_hint_rows + 1`, so a blank row always separates the tip from the first hint line
-// This holds even when the hints wrap to 2 rows at narrow modal widths
-//
-// The no-wrap fixture uses FilterFocused mode: its shortcut set (~76 cells) fits on a single row at the modal's max_width=110
-// Browse-mode hints (~114 cells) wrap at every modal width `render_settings_modal` supports, so they cannot serve as a no-wrap fixture
+// User-feedback follow-up: always reserve a blank line between the "Tip · Ask Grok…" docs footer
+// and the keybindings hints. The chrome sets `footer_lines` to `predicted_hint_rows + 1`, so a
+// blank row always separates the tip from the first hint line.
 
 /// Find the y of the buffer row containing `needle` (first match, scanning top to bottom). Returns `None` if no row matches.
 fn find_row_y(buf: &Buffer, area: Rect, needle: &str) -> Option<u16> {
@@ -5160,10 +5392,9 @@ fn footer_has_blank_line_between_tip_and_hints_when_hints_wrap() {
     let popup_area = s.window.popup_area.expect("modal must have rendered");
 
     let tip_y = find_row_y(&buf, area, "Tip").expect("tip row must render");
-    // Sanity-check that the hints actually wrap
-    // If a future PR trims the hint string enough that they fit on one row at this width the test passes for the wrong reason
-    // Look for the first hint label (`nav`) AND the last (`F2/Esc`); they must land on different y if the hints wrapped
-    // Use `j/k nav` (hint-unique) rather than `nav` alone, which also matches the `vim_mode` row's "navigation" keyword
+    // Sanity-check that the hints actually wrap. Look for the first hint label (`nav`) AND the last
+    // (`F2/Esc`); they must land on different y if the hints wrapped. Use `j/k nav` (hint-unique)
+    // rather than `nav` alone, which also matches the `vim_mode` row's "navigation" keyword.
     let first_hint_y = find_row_y(&buf, area, "j/k nav").expect("first hint line must render");
     let last_hint_y = find_row_y(&buf, area, "F2/Esc").expect("close hint must render");
     assert!(
@@ -5189,9 +5420,6 @@ fn footer_has_blank_line_between_tip_and_hints_when_hints_wrap() {
 }
 
 /// Wide modal in FilterFocused mode: hints fit on a single line.
-/// Same blank-gap contract as the wrap case.
-/// The chrome's baseline `footer_lines: 2` already provides this gap.
-/// But the test pins the contract so a future change that drops the baseline (or shrinks `predicted_rows + 1` to `predicted_rows`) is caught.
 #[test]
 fn footer_has_blank_line_between_tip_and_hints_when_hints_dont_wrap() {
     let mut s = make_state();
@@ -5235,14 +5463,8 @@ fn footer_has_blank_line_between_tip_and_hints_when_hints_dont_wrap() {
     );
 }
 
-/// When the hints transition from 1 row to 2 rows (e.g. a width reduction), the row-list area shrinks by exactly 1 row.
-/// That makes room for the second hint row.
-/// Pinned so anyone "reclaiming" the gap row later sees the spec violation.
-///
-/// Uses FilterFocused mode for both renders because Browse-mode hints don't fit on a single row at any width supported by the modal.
-/// There'd be no "1-row" baseline to compare against.
-/// The narrow viewport (100 cols gives modal_width=70, footer_width=64) is tuned so the FilterFocused hints wrap to exactly 2 rows.
-/// The hints are ~76 cells including separators; a more-aggressive narrow would split them into 3+ rows and trip the multi-row delta assertion.
+/// Uses FilterFocused mode for both renders because Browse-mode hints don't fit on a single row at
+/// any width supported by the modal.
 #[test]
 fn footer_total_height_grows_when_hints_wrap() {
     // Wide modal: FilterFocused-mode hints fit on 1 row. footer_lines = 1 (hints) + 1 (gap) = 2, matching the baseline.
@@ -5369,10 +5591,9 @@ fn section_header_style_matches_palette() {
     );
 }
 
-/// Search bar renders the palette's prefix and cursor style: the ` search: ` prefix in `gray`.
-/// When focused, an inverse-video cursor (bg = text_primary, fg = bg_base) sits at the next-input position.
-///
-/// Hint path renders ` / to search` in `gray_dim`.
+/// Search bar renders the palette's prefix and cursor style: the ` search: ` prefix in `gray`. When
+/// focused, an inverse-video cursor (bg = text_primary, fg = bg_base) sits at the next-input
+/// position. Hint path renders ` / to search` in `gray_dim`.
 #[test]
 fn search_bar_focused_style_matches_palette() {
     let area = Rect {
@@ -5416,10 +5637,9 @@ fn search_bar_focused_style_matches_palette() {
     );
 }
 
-/// An empty, unfocused search bar shows ` / to search` in `gray_dim`; same wording the palette uses.
-///
-/// Sample multiple cells of the hint span (not just col 1).
-/// A regression that styled only the first few cells in gray_dim and left the rest at default would otherwise be missed.
+/// An empty, unfocused search bar shows ` / to search` in `gray_dim`; same wording the palette
+/// uses. Sample multiple cells of the hint span (not just col 1). A regression that styled only the
+/// first few cells in gray_dim and left the rest at default would otherwise be missed.
 #[test]
 fn search_bar_placeholder_matches_palette() {
     let area = Rect {
@@ -5840,10 +6060,9 @@ fn chevron_column_aligns_across_one_and_two_line_layouts() {
     );
 }
 
-/// The docs-footer tip text centers itself horizontally within its row.
-///
-/// Also exercise the SHORT-fallback path (LONG doesn't fit) and the truncation path (even SHORT doesn't fit).
-/// A regression that moved the centering math into the LONG branch only would then fail.
+/// The docs-footer tip text centers itself horizontally within its row. Also exercise the
+/// SHORT-fallback path (LONG doesn't fit) and the truncation path (even SHORT doesn't fit). A
+/// regression that moved the centering math into the LONG branch only would then fail.
 #[test]
 fn docs_footer_tip_is_centered() {
     let theme = Theme::current();
@@ -5969,10 +6188,8 @@ fn enter_picker_for(key: &'static str) -> SettingsModalState {
     s
 }
 
-/// Long enum description word-wraps across multiple buffer rows in the picker sub-pane; no `…` truncation.
-/// The synthetic registry carries a description long enough to force the wrap.
-/// The live `theme` description fits one line at width=30 and never engages it.
-/// Asserts at least 2 description rows, that the LAST word renders (the wrap reached the end), and that no `…` appears anywhere.
+/// Long enum description word-wraps across multiple buffer rows in the picker sub-pane; no `…`
+/// truncation. The live `theme` description fits one line at width=30 and never engages it.
 #[test]
 fn picker_description_word_wraps_no_ellipsis() {
     // Synthetic enum setting with a description forced to wrap.
@@ -6051,10 +6268,9 @@ fn picker_description_word_wraps_no_ellipsis() {
          (proves word-wrap reached the end): {all_text}",
     );
 
-    // 3. Multiple description rows render.
-    // Find the title row (first row containing "Wrap test")
-    // Then count consecutive subsequent rows containing non-empty, non-choice-marker text; those are the description rows
-    // We expect at least 2
+    // Multiple description rows render. Find the title row (first row containing "Wrap test"). Then
+    // count consecutive subsequent rows containing non-empty, non-choice-marker text; those are the
+    // description rows. We expect at least 2.
     let title_y = rows
         .iter()
         .position(|r| r.contains("Wrap test"))
@@ -6088,12 +6304,8 @@ fn picker_description_word_wraps_no_ellipsis() {
     );
 }
 
-/// `render_settings_modal` populates `settings_breadcrumb_rect` in sub-pane modes; clears it in Browse / FilterFocused.
-///
-/// Exercises both `PickingEnum` AND `EditingValue` since the field name says "sub_pane_modes" (plural).
-/// Also pins the rect's x and y.
-/// A future modal-chrome refactor that shifts the title origin then trips a test rather than silently breaking the breadcrumb.
-/// The hit-rect spans the FULL breadcrumb (`Settings › <label>`) so any click on the breadcrumb routes back to Browse.
+/// A future modal-chrome refactor that shifts the title origin then trips a test rather than
+/// silently breaking the breadcrumb.
 #[test]
 fn settings_breadcrumb_rect_set_in_sub_pane_modes() {
     let area = Rect {
@@ -6159,10 +6371,7 @@ fn settings_breadcrumb_rect_set_in_sub_pane_modes() {
     );
 }
 
-/// Clicking inside the breadcrumb rect while in PickingEnum mode dispatches the preview-revert action AND transitions back to Browse.
-/// Two variants pin (a) the no-preview path where original == current value and (b) the preview-then-click path.
 /// The revert Action MUST carry the original value, not the navigated-to value.
-/// A loose `Action(_)` match would mask a forgotten revert.
 #[test]
 fn click_settings_breadcrumb_collapses_picker_to_browse() {
     let area = Rect {
@@ -6355,11 +6564,8 @@ fn d_key_in_picking_enum_dispatches_open_reset_confirm() {
     );
 }
 
-/// `d` in the Int stepper dispatches `Action::OpenResetConfirm` for the active setting AND transitions back to Browse.
-///
-/// Also verifies the pending buffer is discarded.
-/// A user who stepped to a new value then pressed `d` should not have the in-flight value leak past the mode transition.
-/// Asserts the mode is structurally `Browse` with no lingering pending buffer.
+/// `d` in the Int stepper dispatches `Action::OpenResetConfirm` for the active setting AND
+/// transitions back to Browse.
 #[test]
 fn d_key_in_int_stepper_dispatches_open_reset_confirm() {
     let mut s = int_stepper_fixture(75);
@@ -6403,10 +6609,8 @@ fn d_key_in_int_stepper_dispatches_open_reset_confirm() {
     );
 }
 
-/// `d` in the String editor is a typeable character, NOT a reset shortcut.
-/// The picker and Int stepper get `d reset`; the String editor doesn't, a deliberate asymmetry.
-/// This guards against a future change that "adds `d` interception for consistency".
-/// Such a change would silently break String editing of any value containing a `d`.
+/// `d` in the String editor is a typeable character, NOT a reset shortcut. The picker and Int
+/// stepper get `d reset`; the String editor doesn't, a deliberate asymmetry.
 #[test]
 fn d_key_in_string_editor_inserts_into_buffer() {
     let mut s = editor_render_fixture("Gro", 3);
@@ -6556,7 +6760,7 @@ fn consent_chooser_drops_tip_and_reset() {
         "consent chooser must not offer reset:\n{text}"
     );
     assert!(
-        text.contains("Enter select"),
+        text.contains("Enter select") && text.contains("double-click select"),
         "the other footer hints must survive:\n{text}"
     );
 
@@ -6581,7 +6785,9 @@ fn consent_chooser_drops_tip_and_reset() {
         "ordinary pickers keep the tip and the reset hint:\n{text}"
     );
     assert!(
-        text.contains("Enter select") && !text.contains("Enter commit"),
+        text.contains("Enter select")
+            && text.contains("double-click select")
+            && !text.contains("Enter commit"),
         "every chooser selects an answer rather than committing a value:\n{text}"
     );
 }
@@ -6658,13 +6864,8 @@ fn search_bar_renders_divider_below() {
     );
 }
 
-// ---------- max_thoughts_width live wrap preview ----------
-//
-// The preview block renders below the Int stepper inside the EditingValue sub-pane when the active setting key is `max_thoughts_width`
-// Tests cover render presence and the title/content style contracts (bold-italic-lowercase title, italic content)
-// They cover the bg-tint distinction between title and content rows and the wrap-width contract (no content row wider than `pending_value`)
-// They cover the clamp when the terminal is narrower than the pending value and omission on too-narrow or too-short viewports
-// They cover gating to the `max_thoughts_width` key alone and the live re-wrap on stepper change
+// The preview block renders below the Int stepper inside the EditingValue sub-pane when the active
+// setting key is `max_thoughts_width`.
 
 /// Helper: render the EditingValue sub-pane for `max_thoughts_width` at a given starting buffer value into a fresh `Buffer` of the supplied area.
 /// Returns `(buf, state)`.
@@ -6690,8 +6891,6 @@ fn find_text_row(buf: &Buffer, area: Rect, needle: &str) -> Option<u16> {
 
 /// Test 1: the preview renders directly below the stepper with exactly 1 blank row of separation.
 /// The implementation no longer renders in-pane stepper hints.
-/// So the spec's "1 blank row above preview" anchors to the stepper row itself: `preview_title_y == stepper_y + 2`.
-/// This replaces a prior bottom-anchor placement; the assertion locks the corrected top-anchor in place.
 #[test]
 fn max_thoughts_width_preview_renders_below_stepper() {
     let area = Rect {
@@ -6807,9 +7006,8 @@ fn max_thoughts_width_preview_content_is_italic() {
 }
 
 /// Test 4: the title row distinguishes itself from the content rows via two independent signals.
-/// One signal is a different `bg` token (`bg_visual` vs `bg_highlight`).
-/// The other is `Modifier::UNDERLINED`, which keeps the visual weight when the bg luma delta is small (TokyoNight).
-/// "Darker" is not the contract; on the dark themes `bg_visual` is lighter than `bg_highlight`, and only GrokDay renders the title darker.
+/// "Darker" is not the contract; on the dark themes `bg_visual` is lighter than `bg_highlight`, and
+/// only GrokDay renders the title darker.
 #[test]
 fn max_thoughts_width_preview_title_styling_distinguishes_from_content() {
     let area = Rect {
@@ -6861,6 +7059,10 @@ fn max_thoughts_width_preview_title_styling_distinguishes_from_content() {
         crate::theme::ThemeKind::RosePineMoon => crate::theme::Theme::rosepine_moon(),
         // Resolved via `Theme::current()` rather than a constructor because `theme::oscura` is a private module
         crate::theme::ThemeKind::OscuraMidnight => crate::theme::Theme::current(),
+        // Both bg tokens are Reset (bandless palette), so the two-tone
+        // assertion below does not apply — the preview reads via the
+        // underline cue instead.
+        crate::theme::ThemeKind::Terminal => return,
         crate::theme::ThemeKind::Auto => crate::theme::Theme::groknight(),
     };
     assert_ne!(
@@ -6911,10 +7113,8 @@ fn max_thoughts_width_preview_wraps_at_pending_value() {
     }
 }
 
-/// Test 6: when the terminal area is narrower than the pending value, the preview clamps to `area.width`.
-/// The title stays plain `preview` (no suffix); the clamp signal has been moved to a note row rendered below the content.
-/// See `clamped_preview_renders_note_below_content` for the note assertion.
-/// This test focuses on the wrap shape itself.
+/// Test 6: when the terminal area is narrower than the pending value, the preview clamps to
+/// `area.width`.
 #[test]
 fn max_thoughts_width_preview_clamps_when_terminal_narrower_than_value() {
     // 60-wide area, pending = 85, so clamp to 60
@@ -7061,15 +7261,8 @@ fn clamped_preview_renders_note_below_content() {
 /// The wrap content keeps rendering at the full vertical budget; content takes priority.
 #[test]
 fn clamped_note_omitted_when_insufficient_height() {
-    // The stepper consumes the first ~5 rows (title + 1-line desc + gap + stepper)
-    // At width 60 the wrap of the sample text produces at least 6 wrap lines
-    // We pick an area height that allows the stepper + gap + title + content to fill every remaining row with NO slack for the note
-    //
-    // Concretely: total area height = stepper_header (~4) + preview_block (gap 1 + title 1 + content N)
-    // We want content_rows == area.height - 2 (no slack)
-    // Pick a height that's exactly tight enough
-    //
-    // We sweep upward to find the largest height at which no note renders, and assert the area's wrap content fills every available content row
+    // The stepper consumes the first ~5 rows (title + 1-line desc + gap + stepper). At width 60 the
+    // wrap of the sample text produces at least 6 wrap lines.
     let mut tight_height: Option<u16> = None;
     for h in 5u16..30u16 {
         let area = Rect {
@@ -7185,9 +7378,6 @@ fn max_thoughts_width_preview_omitted_when_modal_too_narrow() {
 }
 
 /// Test 9: the preview is gated on `setting_key == "max_thoughts_width"`.
-/// We build a synthetic Int setting under a different key and assert no preview renders even though the editor sub-pane opens successfully.
-///
-/// This guards future Int settings from accidentally inheriting the preview behaviour.
 #[test]
 fn max_thoughts_width_preview_only_renders_for_max_thoughts_width_key() {
     let synthetic_meta = SettingMeta {

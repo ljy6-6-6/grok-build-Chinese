@@ -135,6 +135,19 @@ fn set_text_preserves_cursor_clamped_across_grow_and_shrink() {
 }
 
 #[test]
+fn restore_elements_skips_out_of_bounds_ranges() {
+    let mut textarea = ta_with("short");
+    textarea.restore_elements([(0..5, ElementKind(1), None), (0..6, ElementKind(1), None)]);
+
+    let ranges: Vec<_> = textarea
+        .elements()
+        .iter()
+        .map(|element| element.range.clone())
+        .collect();
+    assert_eq!(ranges, vec![0..5]);
+}
+
+#[test]
 fn set_text_restores_zero_length_element_metadata_through_history() {
     let mut textarea = TextArea::new();
     let id = textarea.insert_element("", ElementKind(7), None);
@@ -296,10 +309,9 @@ fn is_undo_input_accepts_ctrl_and_cmd_z() {
 
 #[test]
 fn is_undo_input_rejects_redo_and_plain_z() {
-    // Uppercase 'Z' (redo) stays excluded so the guard is disjoint from
-    // the redo arm regardless of match order.
+    // Kitty terminals spell Ctrl+Shift+Z as a lowercase 'z' with Shift, and that chord is redo.
     assert!(!is_undo_input(&KeyEvent::new(
-        KeyCode::Char('Z'),
+        KeyCode::Char('z'),
         KeyModifiers::CONTROL | KeyModifiers::SHIFT
     )));
     // A bare 'z' (no chord modifier) is plain typing, not undo.
@@ -311,6 +323,22 @@ fn is_undo_input_rejects_redo_and_plain_z() {
         KeyCode::Char('z'),
         KeyModifiers::SHIFT
     )));
+}
+
+/// Terminals speaking the kitty keyboard protocol send Ctrl+Shift+Z as a lowercase 'z' with the Shift flag set.
+#[test]
+fn kitty_spelled_ctrl_shift_z_redoes_instead_of_undoing() {
+    let mut textarea = TextArea::new();
+    textarea.insert_str("kept");
+    textarea.input(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+    assert_eq!(textarea.text(), "");
+
+    textarea.input(KeyEvent::new(
+        KeyCode::Char('z'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+
+    assert_eq!(textarea.text(), "kept");
 }
 
 #[test]
@@ -822,10 +850,9 @@ fn render_element_with_prefix_text() {
 
 #[test]
 fn render_text_after_element_uses_display_width() {
-    // User scenario: "foo " + element("Clean build", display="[📎 Pasted 1 line, 11 chars]") + " abcde"
-    // Display: "[📎 Pasted 1 line, 11 chars]" = 1+2+1+23+1 = 28 display cols
-    // Buffer: "Clean build" = 11 bytes
-    // Without fix, text after element renders at buffer x, overlapping with element display.
+    // User scenario: "foo " + element("Clean build", display="[📎 Pasted 1 line, 11 chars]") + " abcde". Display: "[📎 Pasted
+    // 1 line, 11 chars]" = 1+2+1+23+1 = 28 display cols. Buffer: "Clean build" = 11 bytes. Without fix, text after element
+    // renders at buffer x, overlapping with element display.
     let mut t = TextArea::new();
     t.insert_str("foo ");
     let display = Line::from(vec![
@@ -1365,11 +1392,8 @@ fn kill_to_eol_removes_element_in_range() {
     assert!(t.elements().is_empty());
 }
 
-// ===== Element newline skipping in BOL/EOL =====
-//
-// Elements with multi-line buffer text (e.g. paste blocks) should be
-// treated as atomic for line navigation. Newlines inside elements are
-// NOT line boundaries.
+// ===== Element newline skipping in BOL/EOL =====. Elements with multi-line buffer text (e.g. paste blocks) should be
+// treated as atomic for line navigation. Newlines inside elements are NOT line boundaries.
 
 #[test]
 fn ctrl_e_skips_newline_inside_element() {
@@ -1557,10 +1581,9 @@ fn wrapping_element_without_display_uses_buffer_width() {
 
 #[test]
 fn wrapping_element_display_renders_on_correct_lines() {
-    // End-to-end: wrapping + rendering with display element.
-    // "abc " (4) + element("xy", display="[ELEM]" = 6 cols) + " d" (2)
-    // At width 8: "abc " (4) + "[ELEM]" (6) = 10 > 8 → wrap before element
-    // Line 1: "abc " (4 cols), Line 2: "[ELEM] d" (8 cols)
+    // End-to-end: wrapping + rendering with display element. "abc " (4) + element("xy", display="[ELEM]" = 6 cols) + " d"
+    // (2). At width 8: "abc " (4) + "[ELEM]" (6) = 10 > 8 → wrap before element. Line 1: "abc " (4 cols), Line 2: "[ELEM] d"
+    // (8 cols)
     let mut t = TextArea::new();
     t.insert_str("abc ");
     let display = Line::from("[ELEM]");
@@ -1600,12 +1623,9 @@ fn wrapping_element_display_renders_on_correct_lines() {
 
 #[test]
 fn wrapping_element_with_newlines_stays_single_line() {
-    // When an element's buffer text contains \n, wrapping must NOT split at those
-    // newlines. The element's display is a single-line chip; the \n is internal.
-    // Scenario: "hello " + element("line1\nline2\nline3", display="[paste]") + " world"
-    // Buffer: "hello line1\nline2\nline3 world"  (contains \n inside element)
-    // Display: "hello [paste] world" = 6 + 7 + 6 = 19 cols
-    // At width 40: should be 1 visual line.
+    // When an element's buffer text contains \n, wrapping must NOT split at those newlines. The element's display is a
+    // single-line chip; the \n is internal. Buffer: "hello line1\nline2\nline3 world" (contains \n inside element). Display:
+    // "hello [paste] world" = 6 + 7 + 6 = 19 cols. At width 40: should be 1 visual line.
     let mut t = TextArea::new();
     t.insert_str("hello ");
     let display = Line::from("[paste]"); // 7 display cols
@@ -2380,10 +2400,9 @@ fn screen_spans_of_range_uses_display_width() {
 
 #[test]
 fn screen_spans_of_range_clamps_to_content_edge() {
-    // Overflowing content puts the scrollbar up, so content is only
-    // `tw = width - 1` columns. Row 0's byte range keeps its trailing
-    // wrap spaces ("ab   " measures 5), but the reported span must stop
-    // at the content edge (4), never reaching the scrollbar column.
+    // Overflowing content puts the scrollbar up, so content is only `tw = width - 1` columns. Row 0's byte range keeps its
+    // trailing wrap spaces ("ab " measures 5), but the reported span must stop at the content edge (4), never reaching the
+    // scrollbar column.
     let mut t = ta_with("ab   cd ef gh");
     t.set_cursor(0);
     let area = Rect::new(0, 0, 5, 2);
@@ -2667,10 +2686,9 @@ fn buffer_pos_at_screen_wide_unicode() {
     assert_eq!(t.buffer_pos_at_screen(0, 0, area, state), Some(0));
     // col 1 → first column of 🦀 → pos 1
     assert_eq!(t.buffer_pos_at_screen(1, 0, area, state), Some(1));
-    // col 2 → second column of 🦀 → still pos 1 (within the 2-wide grapheme;
-    // display_col_to_buffer_pos snaps to start of grapheme since target_col < width_so_far)
-    // Actually: width_so_far after 'a' is 1, then 🦀 adds 2 → width_so_far=3 > target_col=2
-    // → returns pos 1 (start of 🦀)
+    // col 2 → second column of 🦀 → still pos 1 (within the 2-wide grapheme; display_col_to_buffer_pos snaps to start of
+    // grapheme since target_col < width_so_far). Actually: width_so_far after 'a' is 1, then 🦀 adds 2 → width_so_far=3 >
+    // target_col=2 → returns pos 1 (start of 🦀)
     assert_eq!(t.buffer_pos_at_screen(2, 0, area, state), Some(1));
     // col 3 → 'b' at pos 5 (1 + 4 bytes for 🦀)
     assert_eq!(t.buffer_pos_at_screen(3, 0, area, state), Some(5));
@@ -3755,10 +3773,9 @@ fn drag_across_element_expands_to_element_boundaries() {
     ta.insert_element("ELEM", ElementKind(0), None);
     ta.insert_str("cd");
 
-    // Now test partial overlap: drag from col 0 to col 3 (into the element).
-    // display_col_to_buffer_pos snaps col 3 to element start (2) since dist
-    // to start (1) < dist to end (3). Raw selection 0..2 → but element at
-    // 2..6 is NOT overlapped, so no expansion.
+    // Now test partial overlap: drag from col 0 to col 3 (into the element). display_col_to_buffer_pos snaps col 3 to
+    // element start (2) since dist to start (1) < dist to end (3). Raw selection 0..2 → but element at 2..6 is NOT
+    // overlapped, so no expansion.
     ta.handle_mouse(mouse_down(0, 0), area, state);
     ta.handle_mouse(mouse_drag(3, 0), area, state);
     let range = ta.selection_range().unwrap();
@@ -3926,10 +3943,8 @@ fn ctrl_x_with_zero_width_selection_falls_through() {
     ta.set_cursor(5);
     ta.set_selection(5, 5);
 
-    // Ctrl-X on zero-width selection shouldn't eat the key.
-    // It should clear selection and fall through to normal handling
-    // (which for Ctrl-X without selection is a no-op, but the selection
-    // must be cleared).
+    // Ctrl-X on zero-width selection shouldn't eat the key. It should clear selection and fall through to normal handling
+    // (which for Ctrl-X without selection is a no-op, but the selection must be cleared).
     ta.input(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
     assert!(ta.selection.is_none());
 }
@@ -4338,10 +4353,9 @@ fn drag_below_area_scrolls_down_and_extends_selection() {
     let action = ta.handle_mouse(mouse_drag(0, 5), area, state);
     assert_eq!(action, MouseAction::SelectionUpdated);
 
-    // Cursor should have moved past the visible area.
-    // With scroll=0 and height=3, visible lines are 0,1,2 (aaa,bbb,ccc).
-    // Dragging below → target_line = visible_end = 3 → "ddd" starts at byte 12.
-    // At col 0, cursor should be at byte 12 (start of "ddd").
+    // Cursor should have moved past the visible area. With scroll=0 and height=3, visible lines are 0,1,2 (aaa,bbb,ccc).
+    // Dragging below → target_line = visible_end = 3 → "ddd" starts at byte 12. At col 0, cursor should be at byte 12 (start
+    // of "ddd").
     assert!(ta.cursor() >= 12);
 
     // Selection should extend from anchor (0) to the new cursor position.
@@ -4363,10 +4377,9 @@ fn drag_above_area_scrolls_up_and_extends_selection() {
     // Click on bottom visible line (row 2).
     ta.handle_mouse(mouse_down(1, 2), area, state);
 
-    // Drag above the visible area (row is before area.y).
-    // Since area.y = 0, dragging to row=0 when scroll=2 means the row
-    // is at the top edge. We need a row *above* the area. With area.y=0,
-    // we can't go negative, but we can use an area with area.y > 0.
+    // Drag above the visible area (row is before area.y). Since area.y = 0, dragging to row=0 when scroll=2 means the row is
+    // at the top edge. We need a row *above* the area. With area.y=0, we can't go negative, but we can use an area with
+    // area.y > 0.
     let area2 = Rect::new(0, 5, 40, 3); // area starts at row 5
     ta.handle_mouse(mouse_down(1, 7), area2, state); // click at row 7 (visible)
 
@@ -4406,16 +4419,8 @@ fn drag_below_area_moves_cursor_past_last_visible_line() {
 
 #[test]
 fn drag_above_wide_column_still_scrolls_up() {
-    // Bug: when dragging above the area with a column wider than the
-    // target line, display_col_to_buffer_pos returns line_end which
-    // equals the *next* line's start.  wrapped_line_index_by_start
-    // then resolves to the next line, so effective_scroll sees the
-    // cursor as still within the viewport and doesn't scroll.
-    //
-    // Scenario: 10 short lines ("ab"), area is 3 rows tall with
-    // area.y = 2 (so we can drag above).  Scroll starts at line 5.
-    // We drag to row 1 (above area.y = 2) at column 50 (way past
-    // each 3-byte line).  The cursor must land ON the target line
+    // Scenario: 10 short lines ("ab"), area is 3 rows tall with area.y = 2 (so we can drag above). Scroll starts at line 5.
+    // We drag to row 1 (above area.y = 2) at column 50 (way past each 3-byte line). The cursor must land ON the target line
     // (line 4), not spill over to line 5.
     let text = "ab\nab\nab\nab\nab\nab\nab\nab\nab\nab";
     let mut ta = ta_with(text);
@@ -4464,10 +4469,8 @@ fn drag_below_wide_column_still_scrolls_down() {
     let action = ta.handle_mouse(mouse_drag(50, 5), area, state);
     assert_eq!(action, MouseAction::SelectionUpdated);
 
-    // visible_end = 0 + 3 = 3.  dist = 5 - 3 + 1 = 3.
-    // n = drag_scroll_lines_for_distance(3) = 2.
-    // target_line = (3 + 2 - 1) = 4.  Line 4 spans bytes 12..15.
-    // Cursor must be within [12, 14], not at 15.
+    // visible_end = 0 + 3 = 3. dist = 5 - 3 + 1 = 3. n = drag_scroll_lines_for_distance(3) = 2. target_line = (3 + 2 - 1) =
+    // 4. Line 4 spans bytes 12..15. Cursor must be within [12, 14], not at 15.
     let cursor = ta.cursor();
     assert!(
         (12..15).contains(&cursor),
@@ -4547,11 +4550,9 @@ fn click_on_text_with_multibyte_chars_does_not_panic() {
 
 #[test]
 fn selecting_wrapped_line_ending_with_multibyte_char_does_not_panic() {
-    // Regression: when a line wraps and '│' (3-byte char) ends up right
-    // at the wrap boundary, the wrapping code (or rendering) can produce
-    // a byte position inside the multi-byte character.
-    //
-    // Reproduce: enough spaces so '│' is pushed to the next wrapped line.
+    // Regression: when a line wraps and '│' (3-byte char) ends up right at the wrap boundary, the wrapping code (or
+    // rendering) can produce a byte position inside the multi-byte character. Reproduce: enough spaces so '│' is pushed to
+    // the next wrapped line.
     let text = format!("{}│", " ".repeat(29)); // 29 spaces + '│' = 30 display cols
     let mut ta = ta_with(&text);
     let area = Rect::new(0, 0, 30, 5); // width 30 → '│' wraps to next line
@@ -5646,11 +5647,7 @@ fn scroll_override_survives_render_cycles() {
 
 #[test]
 fn scroll_override_save_restore_round_trip() {
-    // Simulates the collapsed-prompt pattern:
-    // 1. Render normally (cursor-follow)
-    // 2. Save state.scroll + scroll_override
-    // 3. Override to 0, render collapsed
-    // 4. Restore both → next render shows original viewport
+    // Render normally (cursor-follow); Save state.scroll + scroll_override; Override to 0, render collapsed.
     let text = (0..30)
         .map(|i| format!("line {i}"))
         .collect::<Vec<_>>()

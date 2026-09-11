@@ -123,10 +123,9 @@ pub fn install_allocator_dump_provider(provider: fn() -> String) {
     let _ = DUMP_PROVIDER.set(provider);
 }
 
-/// Install the threshold hook: `(jsonl_trace_path, crossed_threshold_bytes)`.
-/// This is the attachment point for the GCS trace-upload pipeline.
-/// It fires at most once per bucket per growth cycle (buckets re-arm after the footprint halves).
-/// Idempotent; first caller wins.
+/// Install the threshold hook: `(jsonl_trace_path, crossed_threshold_bytes)`. This is the attachment point for the
+/// GCS trace-upload pipeline. It fires at most once per bucket per growth cycle (buckets re-arm after the footprint
+/// halves). Idempotent; first caller wins.
 pub fn install_threshold_hook(hook: fn(&Path, u64)) {
     let _ = THRESHOLD_HOOK.set(hook);
 }
@@ -412,12 +411,9 @@ fn first_threshold_from_env() -> u64 {
         .saturating_mul(1 << 20)
 }
 
-/// Start memory tracing: install the process-global sink under `dir` (e.g. `$GROK_HOME/memtrace/`) and spawn the detached sampler thread.
-/// Call once from the composition-root binary, AFTER the intercepts for short-lived children (the mermaid render worker), so helpers don't trace.
-/// Inert when `GROK_MEMTRACE=0`.
-///
-/// The trace file is created lazily on the first event, and the first sample is taken after one full interval.
-/// Short-lived CLI invocations (`grok --version`, `grok trace …`) therefore leave no files behind.
+/// Start memory tracing: install the process-global sink under `dir` and spawn the detached sampler thread. Call
+/// once from the composition-root binary, AFTER the intercepts for short-lived children (the mermaid render
+/// worker), so helpers don't trace.
 pub fn start(dir: PathBuf) {
     if !enabled_by_env() {
         return;

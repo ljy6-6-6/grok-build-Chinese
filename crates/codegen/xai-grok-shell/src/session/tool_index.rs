@@ -123,10 +123,8 @@ pub(crate) struct ToolMetadataSnapshot {
 }
 
 /// Holds a shared snapshot of MCP tool metadata behind a `std::sync::Mutex`.
-/// It uses a sync mutex (not TokioMutex) because:
-/// - The lock is held only to clone the snapshot (fast, no I/O)
-/// - `search_snapshot()` is a sync trait method called from async context
-/// - `TokioMutex::blocking_lock()` panics on single-threaded runtimes
+/// The lock is held only to clone the snapshot (fast, no I/O).
+/// `search_snapshot()` is a sync trait method called from async context.
 pub(crate) struct Bm25ToolSearchIndex {
     snapshot: Arc<Mutex<ToolMetadataSnapshot>>,
 }

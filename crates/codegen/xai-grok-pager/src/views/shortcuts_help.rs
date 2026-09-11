@@ -174,7 +174,7 @@ Covers typing, deletes, line/word kills, and clearing a draft.";
 
 const REDO_LONG_HELP: &str = "\
 Redoes the last undone change in the prompt editor.\n\
-Ctrl+Shift+Z is primary; Ctrl+R is an alternate.";
+The second chord is the fallback for terminals that cannot send the first one.";
 
 // Prompt history is not an ActionRegistry entry: Up is an inline key handler and /history is a slash command
 // List both here so users can find them
@@ -244,11 +244,9 @@ pub fn build_entries(
             if def.default_key == crate::key!(Null) && def.alt_keys.is_empty() {
                 continue;
             }
-            // The voice chord (`Ctrl+Space`) is hidden when the voice gate is off or the user turned the Voice shortcut setting off
-            // The gate goes off via the remote kill switch or `GROK_VOICE_MODE=0`; don't advertise keys that do nothing
-            // `Ctrl+Space` decodes the same with or without the Kitty keyboard protocol (it just toggles instead of hold-to-talk)
-            // It is therefore shown on every terminal once the gates are on
-            // EnableVoiceMode is slash-only and already dropped above.
+            // The gate goes off via the remote kill switch or `GROK_VOICE_MODE=0`; don't advertise keys that
+            // do nothing `Ctrl+Space` decodes the same with or without the Kitty keyboard protocol (it just
+            // toggles instead of hold-to-talk). It is therefore shown on every terminal once the gates are on.
             if def.id == crate::actions::ActionId::VoiceToggle
                 && (!crate::app::voice_mode_enabled() || !crate::app::voice_keybind_enabled())
             {
@@ -370,11 +368,10 @@ pub fn build_entries(
             undo.description = Some("Undo the last prompt edit".into());
             push_pseudo(&mut entries, undo, Some(UNDO_LONG_HELP));
 
-            // Textarea: Ctrl+Shift+Z, with Ctrl+R as alt
-            // Ctrl+R is prompt-only; scrollback may bind it to mouse reporting when that toggle is on
+            // Alt+Z is the fallback on terminals that send Ctrl+Shift+Z as plain Ctrl+Z
             let mut redo = HintItem::new(crate::key!('z', CONTROL | SHIFT), "redo");
             redo.description = Some("Redo the last undone prompt edit".into());
-            redo.keys.push(crate::key!('r', CONTROL));
+            redo.keys.push(crate::key!('z', ALT));
             push_pseudo(&mut entries, redo, Some(REDO_LONG_HELP));
 
             // Prompt history (Up / /history)
@@ -422,10 +419,9 @@ pub fn build_initial_picker_state(entries: &[ShortcutsHelpEntry]) -> PickerState
 // Search filtering
 // ---------------------------------------------------------------------------
 
-/// Filter ShortcutsHelp entries by search query.
-///
-/// Returns the original-index list of entries that pass the filter.
-/// Section headers are kept only when at least one hint in their section matches; this mirrors the palette's `filter_palette_entries` behavior.
+/// Filter ShortcutsHelp entries by search query. Returns the original-index list of entries that
+/// pass the filter. Section headers are kept only when at least one hint in their section matches;
+/// this mirrors the palette's `filter_palette_entries` behavior.
 pub fn filter_entries(
     entries: &[ShortcutsHelpEntry],
     query: &str,
@@ -525,10 +521,9 @@ fn hint_key_display(h: &HintItem) -> String {
     }
 }
 
-/// Pretty key display for the cheatsheet modal.
-///
-/// Uses `custom_display` when set (for special representations like "Esc Esc" that can't be derived from the key list).
-/// Otherwise renders the actual keys with pretty formatting (e.g. "Ctrl+Q", "Tab / i / Space").
+/// Pretty key display for the cheatsheet modal. Uses `custom_display` when set (for special
+/// representations like "Esc. EscEsc" that can't be derived from the key list). Otherwise renders the
+/// actual keys with pretty formatting (e.g. "Ctrl+Q", "Tab / i / Space").
 fn hint_key_pretty(h: &HintItem) -> String {
     if let Some(d) = h.custom_display {
         return d.to_string();
@@ -672,10 +667,9 @@ impl ShortcutsHelpMode {
     }
 }
 
-/// Build detail mode state from a cheatsheet entry (title/keys/body for the man page).
-///
-/// Registry rows always open.
-/// Pseudo-rows (`action_id: None`) open only when they ship `long_help`; one without it stays list-only (browse-only).
+/// Build detail mode state from a cheatsheet entry (title/keys/body for the man page). Registry
+/// rows always open. Pseudo-rows (`action_id: None`) open only when they ship `long_help`; one
+/// without it stays list-only (browse-only).
 pub fn detail_from_entry(entry: &ShortcutsHelpEntry) -> Option<ShortcutsHelpMode> {
     let ShortcutsHelpEntry::Hint {
         item,
@@ -1531,14 +1525,8 @@ impl CheatsheetRows {
     }
 }
 
-/// Render the cheatsheet modal in full (chrome and picker content).
-///
-/// Pulled out of `AgentView::draw` so the dashboard can paint the exact same modal without repeating the `ModalWindowConfig` and picker setup.
-/// The agent view continues to drive its own modal via `views::modal::ActiveModal::ShortcutsHelp`.
-/// This function consumes the same fields by reference.
-///
-/// The signature mirrors the destructured `ActiveModal::ShortcutsHelp` fields one-to-one so callers can pass them directly.
-/// Packing these into a wrapper struct would force every call site to build an intermediate to take it apart again at the chrome/picker boundary.
+/// Pulled out of `AgentView::draw` so the dashboard can paint the exact same modal without
+/// repeating the `ModalWindowConfig` and picker setup.
 #[allow(clippy::too_many_arguments)]
 pub fn render_modal(
     buf: &mut ratatui::buffer::Buffer,
@@ -1694,11 +1682,8 @@ pub enum ModalKeyOutcome {
 }
 
 /// Route a key through the cheatsheet's modal-window chrome and the picker `handle_input`.
-/// Mirrors the agent view's per-modal handler so keys behave exactly the same on the dashboard.
-/// The caller owns `filter_active` / `collapsed_sections` so the result mutations stay local to the wrapping struct.
-///
-/// Args follow the same one-to-one shape as the field set behind `ActiveModal::ShortcutsHelp`.
-/// Dashboards and agents can thus call it via plain destructuring instead of building and unpacking a wrapper struct.
+/// Dashboards and agents can thus call it via plain destructuring instead of building and unpacking
+/// a wrapper struct.
 #[allow(clippy::too_many_arguments)]
 pub fn handle_modal_key(
     key: &crossterm::event::KeyEvent,

@@ -2,21 +2,8 @@ use ratatui::layout::{Constraint, Layout, Rect};
 
 use crate::appearance::LayoutConfig;
 
-/// Horizontal layout columns for scrollback entries.
-///
-/// ```text
-/// │A│PL│    Content    │PR│
-/// │1│ 2│     flex      │ 1│
-/// ```
-///
-/// Where:
-/// - A = Accent line (1 char)
-/// - PL = Left padding (configurable, default 2)
-/// - Content = Flexible width
-/// - PR = Right padding (configurable, default 1)
-///
-/// Selection borders are drawn INTO the outer viewport padding, not as part of this layout.
-/// Scrollbar is handled separately.
+/// Horizontal layout columns for scrollback entries. Selection borders are drawn INTO the outer viewport padding,
+/// not as part of this layout. Scrollbar is handled separately.
 #[derive(Debug, Clone)]
 pub struct HorizontalLayout {
     pub accent: Rect,
@@ -56,7 +43,6 @@ impl HorizontalLayout {
     }
 
     /// Get the area for rendering entry content (accent through right padding).
-    ///
     /// This is the area passed to `EntryRenderer`.
     /// Layout: `│A│PL│Content│PR│`
     pub fn entry_content_area(&self) -> Rect {
@@ -84,11 +70,8 @@ impl HorizontalLayout {
         self.entry_content_area()
     }
 
-    /// Get the selection area (extends 1 column into outer padding on both sides).
-    ///
-    /// The selection border is drawn INTO the padding areas:
-    /// - Left edge: 1 column before accent (in outer_hpad_left)
-    /// - Right edge: 1 column after right_padding (in gap_left area before scrollbar)
+    /// Get the selection area (extends 1 column into outer padding on both sides). The selection border is drawn INTO
+    /// the padding areas.
     pub fn selection_area(&self) -> Rect {
         // Selection extends 1 column left of accent into outer padding and 1 column right of entry into gap_left area
         let x = self.accent.x.saturating_sub(1);

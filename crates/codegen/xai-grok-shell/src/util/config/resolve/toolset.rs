@@ -3,13 +3,8 @@ use toml::Value as TomlValue;
 use xai_grok_tools::implementations::grok_build::ask_user_question;
 
 /// Resolve whether the bash-harness shadows that swap `find` for `bfs` and `grep` for `ugrep` are enabled.
-/// Precedence (highest first): `requirements.toml` (org policy, wins outright) > a truthy `DISABLE_EMBEDDED_SEARCH_TOOLS` master (forces off)
-/// > env > `config.toml` `[toolset.bash]` > `managed_config.toml` > default-on.
-///
-/// Pass the **merged** requirements ([`crate::config::load_merged_requirements`])
-/// so an org policy in any requirements layer — not only
-/// `~/.grok/requirements.toml` — is honored. Returns `(find_bfs, grep_ugrep)`,
-/// which the caller bakes into a [`xai_grok_tools::computer::local::SearchShadowConfig`] on the local terminal backend.
+/// Precedence (highest first): `requirements.toml` (org policy, wins outright) > a truthy `DISABLE_EMBEDDED_SEARCH_TOOLS` master (forces off) > env > `config.toml` `[toolset.bash]` > `managed_config.toml` > default-on.
+/// Pass the **merged** requirements ([`crate::config::load_merged_requirements`]) so an org policy in any requirements layer — not only `~/.grok/requirements.toml` — is honored. Returns `(find_bfs, grep_ugrep)`, which the caller bakes into a [`xai_grok_tools::computer::local::SearchShadowConfig`] on the local terminal backend.
 pub(crate) fn resolve_search_tools_enabled(
     requirements: Option<&TomlValue>,
     user: Option<&TomlValue>,
@@ -121,8 +116,7 @@ struct LoginShellCaptureTiers<'a> {
     remote: Option<bool>,
 }
 
-/// Precedence (highest first): requirements/MDM (clamp, via [`crate::config::load_merged_requirements`]) > `GROK_LOGIN_ENV` env
-/// > `GROK_CONFIG` overlay > user `config.toml` > managed layers > remote > default `true`.
+/// Precedence (highest first): requirements/MDM (clamp, via [`crate::config::load_merged_requirements`]) > `GROK_LOGIN_ENV` env > `GROK_CONFIG` overlay > user `config.toml` > managed layers > remote > default `true`.
 /// `login_shell_capture` is a soft key, so the overlay is merged just above user config, mirroring its place in the disk merge.
 /// That lets a `GROK_CONFIG` toggle reach it while requirements/MDM still clamp the value.
 fn resolve_login_shell_capture_tiers(tiers: LoginShellCaptureTiers<'_>) -> bool {
@@ -294,142 +288,8 @@ mod login_shell_capture_tests {
     }
 }
 
-const ENV_SCHEDULER_BACKGROUND_LOOPS: &str = "GROK_SCHEDULER_BACKGROUND_LOOPS";
-
-fn scheduler_background_loops_from_toml(v: Option<&TomlValue>) -> Option<bool> {
-    v?.get("scheduler")?.get("background_loops")?.as_bool()
-}
-
-/// Resolve whether scheduled task fires run in background loop subagents.
-///
-/// Precedence: requirements > env (`GROK_SCHEDULER_BACKGROUND_LOOPS`) > user `config.toml` `[scheduler] background_loops`
-/// > managed layers > remote settings > default `true`.
-pub fn resolve_scheduler_background_loops(remote: Option<bool>) -> bool {
-    let requirements = crate::config::load_merged_requirements();
-    let layers = match crate::config::ConfigLayers::load() {
-        Ok(l) => Some(l),
-        Err(e) => {
-            tracing::warn!(error = %e, "scheduler_background_loops: failed to load config layers");
-            None
-        }
-    };
-    resolve_scheduler_background_loops_tiers(
-        requirements.as_ref(),
-        layers.as_ref().map(|l| &l.user),
-        layers.as_ref().map(|l| &l.managed),
-        layers.as_ref().map(|l| &l.system_managed),
-        remote,
-    )
-}
-
-fn resolve_scheduler_background_loops_tiers(
-    requirements: Option<&TomlValue>,
-    user: Option<&TomlValue>,
-    managed: Option<&TomlValue>,
-    system_managed: Option<&TomlValue>,
-    remote: Option<bool>,
-) -> bool {
-    use crate::agent::config::BoolFlag;
-    BoolFlag::env(ENV_SCHEDULER_BACKGROUND_LOOPS)
-        .requirement(scheduler_background_loops_from_toml(requirements))
-        .config(scheduler_background_loops_from_toml(user))
-        .managed(
-            scheduler_background_loops_from_toml(managed)
-                .or_else(|| scheduler_background_loops_from_toml(system_managed)),
-        )
-        .feature_flag(remote)
-        .default(true)
-        .resolve()
-        .value
-}
-
-#[cfg(test)]
-mod scheduler_background_loops_tests {
-    use super::{ENV_SCHEDULER_BACKGROUND_LOOPS, resolve_scheduler_background_loops_tiers};
-    use toml::Value as TomlValue;
-
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    fn guard() -> std::sync::MutexGuard<'static, ()> {
-        let g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        unsafe { std::env::remove_var(ENV_SCHEDULER_BACKGROUND_LOOPS) };
-        g
-    }
-
-    fn cfg(enabled: bool) -> TomlValue {
-        toml::from_str(&format!("[scheduler]\nbackground_loops = {enabled}\n")).unwrap()
-    }
-
-    #[test]
-    fn defaults_on() {
-        let _g = guard();
-        assert!(resolve_scheduler_background_loops_tiers(
-            None, None, None, None, None
-        ));
-    }
-
-    #[test]
-    fn remote_flag_can_disable() {
-        let _g = guard();
-        assert!(!resolve_scheduler_background_loops_tiers(
-            None,
-            None,
-            None,
-            None,
-            Some(false)
-        ));
-    }
-
-    #[test]
-    fn user_config_beats_remote() {
-        let _g = guard();
-        assert!(resolve_scheduler_background_loops_tiers(
-            None,
-            Some(&cfg(true)),
-            None,
-            None,
-            Some(false)
-        ));
-        assert!(!resolve_scheduler_background_loops_tiers(
-            None,
-            Some(&cfg(false)),
-            None,
-            None,
-            Some(true)
-        ));
-    }
-
-    #[test]
-    fn env_beats_config_and_remote() {
-        let _g = guard();
-        unsafe { std::env::set_var(ENV_SCHEDULER_BACKGROUND_LOOPS, "0") };
-        let off = resolve_scheduler_background_loops_tiers(
-            None,
-            Some(&cfg(true)),
-            None,
-            None,
-            Some(true),
-        );
-        unsafe { std::env::remove_var(ENV_SCHEDULER_BACKGROUND_LOOPS) };
-        assert!(!off);
-    }
-
-    #[test]
-    fn requirements_win_outright() {
-        let _g = guard();
-        unsafe { std::env::set_var(ENV_SCHEDULER_BACKGROUND_LOOPS, "1") };
-        let off = resolve_scheduler_background_loops_tiers(
-            Some(&cfg(false)),
-            Some(&cfg(true)),
-            None,
-            None,
-            Some(true),
-        );
-        unsafe { std::env::remove_var(ENV_SCHEDULER_BACKGROUND_LOOPS) };
-        assert!(!off);
-    }
-}
-
-/// The secs env var lives in the tools crate (`RESPONSE_TIMEOUT_ENV`), parsed once there.
+/// Env override for `[toolset.ask_user_question] timeout_enabled`. The secs env
+/// var lives in the tools crate (`RESPONSE_TIMEOUT_ENV`), parsed once there.
 const ENV_ASK_USER_QUESTION_TIMEOUT_ENABLED: &str = "GROK_ASK_USER_QUESTION_TIMEOUT_ENABLED";
 
 fn ask_user_question_timeout_enabled_from_toml(v: Option<&TomlValue>) -> Option<bool> {
@@ -518,7 +378,6 @@ fn resolve_ask_user_question_timeout_secs(
 }
 
 /// Resolve the full `[toolset.ask_user_question]` params injected into the tool as `Params<AskUserQuestionParams>` at agent build/rebuild.
-///
 /// Reads the raw requirements / user / managed / system-managed layers from disk, not the effective merge, so a managed-only value stays below env.
 /// Both fields resolve to concrete values, so the tool's legacy env fallback only runs for consumers that skip this resolver.
 pub(crate) fn resolve_ask_user_question_params_from_disk(
@@ -611,8 +470,7 @@ fn cap_web_search_domains(list: Option<Vec<String>>, field: &str) -> Option<Vec<
     })
 }
 
-/// Layer precedence and the allow/exclude atomicity are handled **upstream** by `ConfigLayers`:
-/// per-layer normalization couples the two keys, then the normal `deep_merge_toml` picks the whole policy from the winning layer.
+/// Layer precedence and the allow/exclude atomicity are handled **upstream** by `ConfigLayers`: per-layer normalization couples the two keys, then the normal `deep_merge_toml` picks the whole policy from the winning layer.
 /// This only shapes the already-merged `[toolset.web_search]` section.
 /// Returns `None` when neither filter is set.
 pub(crate) fn resolve_web_search_domains_from_disk()

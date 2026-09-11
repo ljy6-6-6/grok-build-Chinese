@@ -20,10 +20,8 @@ pub use xai_grok_env::EnvVarGuard;
 /// When set to a parseable URL, `session/new` / `session/load` spawns a per-session `gateway_bridge` actor in the shell.
 /// When unset the process stays in local mode.
 pub const GROK_GATEWAY_URL_ENV: &str = "GROK_GATEWAY_URL";
-/// Client kill switch for the gateway-bridge custom-method passthrough.
-/// Set to `1` / `true` to force every `custom_method` call back onto agent-local dispatch regardless of the routing table or negotiated capability.
-/// That gives an instant revert without a redeploy if the channel misbehaves.
-/// Unset, `0`, or `false` keeps normal routing.
+/// Client kill switch for the gateway-bridge custom-method passthrough. Set to `1` / `true` to force every `custom_method` call back onto agent-local dispatch regardless of the routing table or negotiated capability.
+/// That gives an instant revert without a redeploy if the channel misbehaves. Unset, `0`, or `false` keeps normal routing.
 pub const GROK_DISABLE_CUSTOM_BRIDGE_ENV: &str = "GROK_DISABLE_CUSTOM_BRIDGE";
 /// `true` when the custom-method bridge passthrough is force-disabled via [`GROK_DISABLE_CUSTOM_BRIDGE_ENV`].
 /// Accepts `1`/`true` (case-insensitive).

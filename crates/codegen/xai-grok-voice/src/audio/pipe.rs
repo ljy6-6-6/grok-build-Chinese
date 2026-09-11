@@ -41,10 +41,9 @@ impl ChildCaptureHandle {
 
 impl Drop for ChildCaptureHandle {
     fn drop(&mut self) {
-        // Always kill the child so the mic is released even when `stop()` was never called (e.g. the STT session ended on its own).
-        // Killing closes the child's stdout, so the reader thread's blocking `read` returns 0 and it exits
-        // `Drop` must never block (it may run on an async executor), so the reap happens on a detached thread
-        // Without it, a teardown that comes through `Drop` would leave a zombie until the pager exits
+        // Always kill the child so the mic is released even when `stop()` was never called (e.g. the STT session ended on its
+        // own). Killing closes the child's stdout, so the reader thread's blocking `read` returns 0 and it exits `Drop` must
+        // never block (it may run on an async executor), so the reap happens on a detached thread.
         self.stop.store(true, Ordering::Release);
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();

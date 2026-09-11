@@ -255,10 +255,7 @@ thread_local! {
     static VIM_MODE_LOADED: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Read cached `vim_mode`, seeding from disk on first call.
-///
-/// `vim_mode` is ephemeral: this cache is the process-wide source of truth and no `Effect` writes it back to disk.
-/// The first read still seeds from `[ui].vim_mode` so historical configs keep working.
+/// Ephemeral process-wide source of truth; no Effect writes it back. First read seeds from `[ui].vim_mode`.
 pub fn load_vim_mode() -> bool {
     VIM_MODE_LOADED.with(|loaded| {
         if !loaded.get() {
@@ -350,10 +347,7 @@ thread_local! {
     static COLLAPSED_EDIT_BLOCKS_LOADED: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Read cached `collapsed_edit_blocks`, seeding from `[ui]` on first call.
-/// Settings resolution at startup may override the seeded value.
-/// This is consulted only when the pager.toml `[scrollback.blocks.edit]` shape keys are unset.
-/// See `EditBlockConfig::effective_expanded` and `effective_line_summary`.
+/// Seeds from `[ui]`; consulted only when `[scrollback.blocks.edit]` shape keys are unset. Startup settings may override.
 pub fn load_collapsed_edit_blocks() -> bool {
     COLLAPSED_EDIT_BLOCKS_LOADED.with(|loaded| {
         if !loaded.get() {
@@ -594,10 +588,8 @@ thread_local! {
     static RENDER_MERMAID_LOADED: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Read the cached `render_mermaid` preference, seeding from `[ui].render_mermaid` on first call.
-///
-/// The cache is the render path's source of truth: the settings modal updates it optimistically and `PersistSetting` writes it to disk.
-/// Render and dispatch share the one main thread (see the module docs); a render on another thread would seed from disk and miss modal overrides.
+/// Render-path source of truth: the modal updates it optimistically, `PersistSetting` writes disk.
+/// Must stay on the main thread; another thread would seed from disk and miss modal overrides.
 pub fn load_render_mermaid() -> RenderMermaid {
     RENDER_MERMAID_LOADED.with(|loaded| {
         if !loaded.get() {
@@ -672,11 +664,8 @@ fn load_bool_option_from_effective_config(key: &str) -> Option<bool> {
         .and_then(|v| v.as_bool())
 }
 
-/// Resolve the unified text-selection mode from a parsed `UiConfig`.
-///
-/// An explicit `[ui].keep_text_selection` always wins, so Settings and hand-edits stick even when a retired `double_click_action` key is on disk.
-/// `double_click_action` is retired; it survives only in configs that predate the unified key, and Settings clears it on any write.
-/// The remote soft default is layered on top at startup via [`apply_remote_keep_text_selection_default`]; it does not change this resolution.
+/// Explicit `keep_text_selection` wins over a retired on-disk `double_click_action`.
+/// The remote soft default is applied at startup and does not change this resolution.
 fn text_selection_from_ui(ui: &UiConfig) -> TextSelection {
     if let Some(kind) = ui
         .keep_text_selection

@@ -53,7 +53,6 @@ fn width_bucket(target_width_cols: u16) -> u16 {
 }
 
 /// Output quality tier for a rendered Mermaid PNG.
-///
 /// `[Open Image]` / `[Copy Image Path]` use [`Open`] so the PNG is sharp in an OS image viewer.
 /// A future terminal-budget path can use [`Terminal`] without sharing cache files with the open tier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -102,7 +101,6 @@ fn mermaid_spans<'a>(
 }
 
 /// Filter a rendered view's code-block spans down to Mermaid fences.
-///
 /// Returns one [`MermaidBlock`] per closed ` ```mermaid ` fence, in document order, carrying the clean de-prefixed diagram source.
 /// Allocates a `source` String per block; for the per-frame render path that only needs line positions use [`mermaid_block_ranges`] instead.
 pub fn mermaid_blocks(view: &MarkdownRenderView) -> Vec<MermaidBlock> {
@@ -123,18 +121,14 @@ pub fn mermaid_block_ranges(view: &MarkdownRenderView) -> Vec<Range<usize>> {
         .collect()
 }
 
-/// Whether a theme renders diagrams on a dark surface.
-///
-/// `GrokDay` is the only light theme.
-/// Every other concrete theme (and the `GrokNight` default that `Auto` resolves to before it reaches the cache) is dark.
-/// The render worker maps this to `xai_grok_mermaid::MermaidTheme`.
-/// It lives here (not in the engine crate) so the always-compiled detection module stays independent of the optional `mermaid` feature.
+/// `GrokDay` is the only light theme. `Terminal` has no polarity of its own — a rendered diagram is a raster with a
+/// baked background, so it takes the dark treatment that minimal mode already gets. It lives here (not in the
+/// engine crate) so the always-compiled detection module stays independent of the optional `mermaid` feature.
 pub fn theme_is_dark(theme: ThemeKind) -> bool {
     !matches!(theme, ThemeKind::GrokDay)
 }
 
 /// Cache key for a rendered diagram: content hash, theme, quality tier, and (for the terminal tier) bucketed width.
-///
 /// Keys the rendered-PNG cache. Theme, quality, and width are part of the key.
 /// A theme switch, resize, or open-vs-terminal tier is then a lookup (usually a hit) or a fresh render, never a stale-color/size diagram.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -172,7 +166,6 @@ impl MermaidCacheKey {
     }
 
     /// Stable, filesystem-safe filename for this key's on-disk PNG.
-    ///
     /// The name carries the content hash, theme, width bucket, quality tag, and render revision.
     /// The same diagram at the same theme/width/tier reuses one file and never leaks the source in the name.
     pub fn cache_filename(&self) -> String {
@@ -198,11 +191,9 @@ impl MermaidCacheKey {
 /// Bump whenever the renderer's output changes for the same source/theme/width/tier.
 const RENDER_REVISION: u8 = 3;
 
-/// Detected Mermaid diagrams for one agent message.
-///
-/// A detection skeleton: it records detection results and exposes each diagram's source, but never renders and tracks no per-diagram render state.
-/// Constructed once at message construction/finish (never per streaming chunk), like the image/video references.
-/// Rendering is lazy, driven by the affordance row's `[Open]`/`[Copy path]` click, not by this type.
+/// Detected Mermaid diagrams for one agent message. A detection skeleton: it records detection results and exposes
+/// each diagram's source, but never renders and tracks no per-diagram render state. Constructed once at message
+/// construction/finish (never per streaming chunk), like the image/video references.
 #[derive(Debug, Clone, Default)]
 pub struct MermaidContent {
     blocks: Vec<MermaidBlock>,
@@ -243,12 +234,9 @@ pub enum MermaidDisplay {
     Affordances,
 }
 
-/// Decide how to present a Mermaid block's affordance row from the user setting.
-///
-/// `off` shows the inline art alone; `auto`/`on` add the clickable affordance row.
-/// The render engine is always compiled in, so engine availability is not a factor.
-/// Terminal graphics capability is intentionally not consulted either: the affordance row is text plus mouse hit-rects, so it works everywhere.
-/// (The rendered PNG opens in the OS viewer, never inline.)
+/// The render engine is always compiled in, so engine availability is not a factor. Terminal graphics capability is
+/// intentionally not consulted either: the affordance row is text plus mouse hit-rects, so it works everywhere.
+/// (The rendered PNG opens in the OS viewer, never inline.).
 pub fn mermaid_display(setting: RenderMermaid) -> MermaidDisplay {
     match setting {
         RenderMermaid::Off => MermaidDisplay::SourceOnly,
@@ -256,10 +244,9 @@ pub fn mermaid_display(setting: RenderMermaid) -> MermaidDisplay {
     }
 }
 
-/// [`mermaid_display`], forced to [`MermaidDisplay::SourceOnly`] when the scrollback commits as static text (`static_commit = true`, minimal mode).
-/// The clickable affordance row is painted by the interactive draw loop, which minimal never runs.
-/// It would commit as a blank reserved line and its buttons would be inert.
-/// Suppressing it keeps the inline diagram art (the source stays natively selectable) without the dead row.
+/// The clickable affordance row is painted by the interactive draw loop, which minimal never runs. It would commit
+/// as a blank reserved line and its buttons would be inert. Suppressing it keeps the inline diagram art (the source
+/// stays natively selectable) without the dead row.
 pub fn mermaid_display_static(setting: RenderMermaid, static_commit: bool) -> MermaidDisplay {
     if static_commit {
         MermaidDisplay::SourceOnly
@@ -376,7 +363,6 @@ pub(crate) fn affordance_row_with_locale(
 }
 
 /// A diagram's clickable affordance row, anchored within a block's output.
-///
 /// Carries no raster, only the row position plus the diagram source the affordance buttons act on.
 /// Rendering is lazy, driven from the source on click, so no rendered path is tracked here.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -387,11 +373,8 @@ pub struct DiagramAffordance {
     pub source: String,
 }
 
-/// Post-wrap end row of every pre-wrap line, indexed by pre-wrap line number.
-///
-/// `out[p]` is one past the last display row of pre-wrap line `p`.
-/// Built from the shared [`prewrap_index_per_row`](crate::scrollback::types::prewrap_index_per_row) walk.
-/// It can't drift from the media-row / hyperlink mappings.
+/// Post-wrap end row of every pre-wrap line, indexed by pre-wrap line number. It can't drift from the media-row /
+/// hyperlink mappings.
 fn prewrap_end_rows(lines: &[BlockLine]) -> Vec<usize> {
     let mut ends = Vec::new();
     for (row, prewrap) in crate::scrollback::types::prewrap_index_per_row(lines)
@@ -408,10 +391,7 @@ fn prewrap_end_rows(lines: &[BlockLine]) -> Vec<usize> {
 }
 
 /// Row in `lines` at which a continuation row sits right after each non-empty pre-wrap range's last body row.
-/// Each is paired with the range's document-order index.
-///
-/// Returned in ascending insertion order so callers can derive a final post-wrap offset (`insert_at + k` for the k-th entry).
-/// Callers insert back-to-front without invalidating earlier positions. Anchors each diagram's affordance row.
+/// Callers insert back-to-front without invalidating earlier positions.
 fn diagram_insert_rows(lines: &[BlockLine], ranges: &[Range<usize>]) -> Vec<(usize, usize)> {
     let ends = prewrap_end_rows(lines);
     ranges
@@ -423,21 +403,14 @@ fn diagram_insert_rows(lines: &[BlockLine], ranges: &[Range<usize>]) -> Vec<(usi
 }
 
 /// A non-selectable continuation row inserted beneath a diagram.
-///
 /// `separator` means not selectable (excluded from copy).
 /// The empty joiner marks it a continuation of the diagram's last logical line, so the pre-wrap to post-wrap walk for hyperlinks is unaffected.
 fn continuation_row(line: Line<'static>) -> BlockLine {
     BlockLine::separator(line).with_joiner(Some(String::new()))
 }
 
-/// Insert a blank, non-selectable affordance row beneath each detected diagram
-/// and return one [`DiagramAffordance`] per inserted row (document order).
-///
-/// The blank row reserves the vertical space the draw loop paints the `◇ mermaid [Open Image] [Copy Image Path] [Copy Source]` row into.
-/// It is a joiner-continuation of the diagram's last body line, exactly like the fallback caption.
-/// So it neither shifts pre-wrap line indices nor reaches the clipboard.
-/// Each returned `row_offset` is the row's final post-wrap index, accounting for the rows inserted above it.
-/// `source_for` is invoked once per non-empty diagram to supply its Mermaid source.
+/// Insert a blank, non-selectable affordance row beneath each detected diagram and return one [`DiagramAffordance`]
+/// per inserted row (document order). So it neither shifts pre-wrap line indices nor reaches the clipboard.
 pub(crate) fn apply_affordance_rows(
     output: &mut BlockOutput,
     prewrap_ranges: &[Range<usize>],

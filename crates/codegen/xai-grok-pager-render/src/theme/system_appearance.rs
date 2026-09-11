@@ -36,10 +36,7 @@ impl SystemAppearance {
     }
 }
 
-/// Detect the current system appearance without probing the TTY.
-///
-/// Runs the detection chain from the module docs, except the OSC 11 step reuses the cached startup result instead of probing.
-/// In `#[cfg(test)]` builds, the mock replaces the full chain so tests can control the watcher loop (which calls `detect()`).
+/// Same chain as startup, but OSC 11 reuses the cached result instead of probing. Tests replace the whole chain via the mock.
 #[must_use]
 pub fn detect() -> Option<SystemAppearance> {
     #[cfg(any(test, feature = "test-support"))]
@@ -50,10 +47,8 @@ pub fn detect() -> Option<SystemAppearance> {
     detect_without_mock()
 }
 
-/// Detect system appearance with OSC 11 terminal background fallback: a live query when desktop APIs and env stamps give nothing.
-///
-/// **Startup-only**: the OSC 11 step requires raw-mode stdin access and must NOT be called once crossterm's `EventStream` is active.
-/// The live [`SystemAppearanceWatcher`] uses [`detect`] (without a new OSC 11 probe) but still prefers a cached startup OSC 11 hit over `COLORFGBG`.
+/// Startup-only: OSC 11 needs raw-mode stdin and must not run once `EventStream` is active.
+/// The watcher uses [`detect`] and still prefers a cached OSC 11 hit over `COLORFGBG`.
 #[must_use]
 pub fn detect_with_osc11_fallback() -> Option<SystemAppearance> {
     #[cfg(any(test, feature = "test-support"))]
@@ -83,10 +78,7 @@ fn resolve_appearance_chain(
     desktop.or(explicit).or(osc11).or(colorfgbg)
 }
 
-/// Desktop-session APIs only (no env, no OSC 11).
-///
-/// Used by `grok wrap` to stamp the *local* OS theme into the child env before SSH.
-/// Must not consult env hints; those may be a previous wrap hop's snapshot.
+/// Desktop APIs only. `grok wrap` stamps the local OS theme before SSH; env hints may be a previous hop's snapshot.
 #[must_use]
 pub fn detect_desktop() -> Option<SystemAppearance> {
     match dark_light::detect() {
@@ -113,10 +105,7 @@ fn mock_override() -> Option<Option<SystemAppearance>> {
     *MOCK_APPEARANCE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Map system appearance to a theme kind using config-driven overrides.
-///
-/// `dark_theme` and `light_theme` come from `[ui].auto_dark_theme` and `[ui].auto_light_theme` in `config.toml`.
-/// When `None`, defaults to `GrokNight` / `GrokDay`.
+/// `[ui].auto_dark_theme` / `auto_light_theme`; `None` defaults to `GrokNight` / `GrokDay`.
 #[must_use]
 pub fn to_theme_kind(
     appearance: SystemAppearance,
@@ -136,10 +125,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 #[cfg(test)]
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Watches for system appearance changes via polling.
-///
-/// The spawned polling task only reads system state and sends via `watch::channel`; it never mutates `theme_cache::CURRENT` or `AUTO_MODE`.
-/// The watcher does NOT use OSC 11 for polling, only [`detect()`].
+/// Polls via [`detect()`] only (no OSC 11) and never mutates `theme_cache::CURRENT` or `AUTO_MODE`.
 pub struct SystemAppearanceWatcher {
     rx: watch::Receiver<Option<SystemAppearance>>,
     _handle: tokio::task::JoinHandle<()>,

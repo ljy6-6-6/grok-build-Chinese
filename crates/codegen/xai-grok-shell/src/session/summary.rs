@@ -42,10 +42,8 @@ impl SummaryGenerator {
     }
 
     /// Generate a session summary from the first content chunk.
-    ///
-    /// - **Idle**: checks disk for an existing summary, spawns a background task for LLM title generation so the persistence actor is not blocked.
-    ///   Empty content is skipped (stays Idle) so the next chunk can retry.
-    /// - **Done**: no-op.
+    /// Idle: checks disk for an existing summary, spawns a background task for LLM title generation so the persistence actor is not blocked.
+    /// Empty content is skipped (stays Idle) so the next chunk can retry.
     pub(crate) fn update(&mut self, content: String) {
         match self.state {
             State::Done => {}

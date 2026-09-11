@@ -217,10 +217,8 @@ fn on_outcome_success_is_silent() {
 }
 
 /// Snapshot the full structured field set on a Closed->Open transition.
-/// Analytics queries depend on `target=circuit_breaker` + the named
-/// fields `{breaker, old, new, reason}`. A rename of `?old` -> `?prev`
-/// (or a dropped `reason` field) at the emit site must fail this test
-/// before silently breaking analytics dashboards.
+/// Analytics queries depend on `target=circuit_breaker` and `{breaker, old, new, reason}`.
+/// A rename or dropped field must fail this test before breaking dashboards.
 #[test]
 fn opened_event_field_set_is_stable() {
     let events = run_with_capture(|| {

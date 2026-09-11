@@ -45,10 +45,7 @@ impl GraphicsProtocol {
 
 static GRAPHICS_PROTOCOL: OnceLock<GraphicsProtocol> = OnceLock::new();
 
-/// When set, scrollback inline-media overlays are forced **off** process-wide, regardless of the terminal's graphics capability.
-/// The scrollback-native minimal mode (`grok --minimal`) sets this once at startup because it never runs the interactive draw loop.
-/// In that mode, committed media blocks must always fall back to the `[Open …]` text affordance and must not reserve blank image rows.
-/// See [`set_inline_overlay_force_off`].
+/// Minimal mode never runs the draw loop, so overlays stay off and media uses the text affordance instead of blank image rows.
 static INLINE_OVERLAY_FORCE_OFF: AtomicBool = AtomicBool::new(false);
 
 /// Force scrollback inline-media overlays off (`off = true`) or restore the capability-based default (`off = false`) process-wide.
@@ -85,12 +82,7 @@ pub fn detect_graphics_protocol() -> GraphicsProtocol {
     })
 }
 
-/// Whether the current terminal can safely host scrollback inline-media overlays.
-///
-/// This is narrower than "supports Kitty graphics".
-/// Scrollback media uses Kitty image ids, placement ids, z-index, clearing, and source cropping so images scroll with the text grid.
-/// Warp accepts some Kitty image escapes but does not reliably support that placement/scrollback model.
-/// That leaves stale or corrupted pixels while scrolling.
+/// Narrower than Kitty graphics support. Warp accepts some escapes but not the placement/scrollback model, leaving stale pixels.
 pub fn scrollback_inline_overlay_active() -> bool {
     // Minimal mode forces this off process-wide: it never paints inline images, so media must always use the text affordance
     if INLINE_OVERLAY_FORCE_OFF.load(Ordering::Relaxed) {
@@ -158,10 +150,7 @@ pub fn protocol_for_brand(brand: TerminalName, is_windows: bool) -> GraphicsProt
         TerminalName::Ghostty => GraphicsProtocol::Kitty,
         TerminalName::WezTerm => GraphicsProtocol::Kitty,
         TerminalName::WarpTerminal => GraphicsProtocol::Kitty,
-        // iTerm2's OSC 1337 inline-image protocol lacks the image-id, z-index, source-crop, and clear primitives the Kitty protocol has
-        // So overlay images don't track the text grid: they paint wrong or never appear (leaving a stuck "Loading…" hint)
-        // The text/metadata fallback is used instead
-        // The prompt-box preview overlay is the one place where OSC 1337 is safe; it opts in separately via [`prompt_preview_graphics_protocol`]
+        // OSC 1337 lacks placement/clear primitives, so scrollback images do not track the grid. Preview opts in separately.
         TerminalName::Iterm2 => GraphicsProtocol::None,
         _ => GraphicsProtocol::None,
     }
@@ -169,13 +158,7 @@ pub fn protocol_for_brand(brand: TerminalName, is_windows: bool) -> GraphicsProt
 
 static PROMPT_PREVIEW_PROTOCOL: OnceLock<GraphicsProtocol> = OnceLock::new();
 
-/// Wider than [`detect_graphics_protocol`]: iTerm2 is allowed here.
-/// It stays disabled everywhere else (modal viewers, scrollback inline media).
-/// The preview overlay is the one place OSC 1337's missing primitives don't matter:
-///
-/// - the box always sits above the prompt input, never on the bottom screen row, so the cursor advance after the image cannot scroll the screen;
-/// - closing the preview repaints every cell the image occupied (the box has its own background), which iTerm2 treats as erasing the image.
-///   No clear escape is needed.
+/// iTerm2 is allowed only here: the box never sits on the bottom row, and closing it repaints every occupied cell so no clear escape is needed.
 pub fn prompt_preview_graphics_protocol() -> GraphicsProtocol {
     let base = detect_graphics_protocol();
     if base != GraphicsProtocol::None || test_protocol_override_active() {
@@ -195,15 +178,7 @@ pub fn prompt_preview_graphics_protocol() -> GraphicsProtocol {
     })
 }
 
-/// Pure capability helper for the prompt preview overlay.
-///
-/// iTerm2 is gated on the `TERM_FEATURES` FILE capability (`F`).
-/// When "Allow Terminal-Initiated Display" is off, OSC 1337 File escapes leak their raw base64 payload as visible text.
-/// iTerm2 advertises `F` only when the setting is on (<https://iterm2.com/feature-reporting/>).
-///
-/// `TERM_FEATURES` is not an `LC_*` variable, so it never crosses SSH (the brand marker `LC_TERMINAL=iTerm2` does).
-/// An absent variable on an SSH session is therefore expected, not a denial.
-/// So allow iTerm2 there; a remote user who disabled the default-on display setting sees base64 text instead of a preview.
+/// iTerm2 needs `TERM_FEATURES` `F` or OSC 1337 leaks base64. That var does not cross SSH, so absence there is not a denial.
 pub fn prompt_preview_protocol_for_brand(
     brand: TerminalName,
     is_windows: bool,
@@ -255,12 +230,7 @@ pub fn kitty_mime_is_directly_supported(mime_type: &str) -> bool {
     mime_type == "image/png"
 }
 
-/// Kitty accepts encoded PNG bytes via `f=100`, but not encoded JPEG/WebP/etc.
-/// Convert other decodable images to PNG before handing them to the centered overlay renderer.
-/// Callers must keep this out of draw paths.
-///
-/// On macOS, uses `sips` (Apple CoreGraphics) which handles ICC colour profiles correctly.
-/// Falls back to the `image` crate on other platforms.
+/// Kitty `f=100` accepts PNG only. Keep off the draw path. macOS uses `sips` so ICC profiles survive; elsewhere the `image` crate.
 pub fn prepare_kitty_overlay_image_bytes(image_data: &[u8]) -> Option<Vec<u8>> {
     if kitty_format_from_bytes(image_data).is_some() {
         return Some(image_data.to_vec());
@@ -352,11 +322,7 @@ pub fn prepare_overlay_image_bytes(image_data: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-/// The image is transmitted inline as base64-encoded data and scaled by the terminal to fit `cols` columns × `rows` rows.
-/// The terminal handles HiDPI/Retina scaling correctly since it knows the actual cell pixel dimensions.
-///
-/// Uses `a=T` (transmit and display), `f=<format>` (PNG format), `t=d` (direct data transmission), and `q=2` (suppress responses).
-/// Sets `C=1` (preserve cursor position) and `z=1` (draw above text cells), and chunks the payload into 4096-byte pieces.
+/// Terminal scales to the cell rect (it knows HiDPI). `C=1` preserves the cursor, `z=1` draws above text, `q=2` suppresses replies.
 pub fn render_kitty_image(
     image_data: &[u8],
     format: KittyImageFormat,
@@ -458,12 +424,7 @@ pub fn clear_kitty_image(image_id: u32) -> String {
 // iTerm2 inline images protocol
 // -------------------------------------------------------------------------
 
-/// Build an iTerm2 inline image escape sequence filling exactly `cols × rows` cells.
-///
-/// `preserveAspectRatio=0`: callers size the cell rect with [`fit_image_to_cells`], which already encodes the aspect ratio.
-/// The *actual* cell pixel geometry rarely matches the assumed 1:2 cell.
-/// Letting iTerm2 re-preserve the ratio against it letterboxes the image inside the rect, leaving blank bands in the preview box.
-/// Filling the rect exactly matches the Kitty path's behavior.
+/// `preserveAspectRatio=0`: callers already sized the rect. Re-preserving against real cell geometry letterboxes blank bands.
 pub fn render_iterm2_image(image_data: &[u8], cols: u16, rows: u16) -> String {
     use base64::Engine as _;
     let b64 = base64::engine::general_purpose::STANDARD.encode(image_data);
@@ -476,12 +437,7 @@ pub fn render_iterm2_image(image_data: &[u8], cols: u16, rows: u16) -> String {
 // Shared overlay helpers
 // -------------------------------------------------------------------------
 
-/// Kitty always deletes id 1 (`d=i`) then transmits and displays (`a=T`).
-/// Warp ignores placement-id replace, so a later `a=p` would stack a duplicate image.
-/// Callers that see an unchanged committed placement must not call this.
-/// They return an empty string (keeping the existing placement) instead of re-placing every frame.
-///
-/// Returns `None` when no graphics protocol is available.
+/// Delete-then-transmit: Warp ignores placement replace, so `a=p` would stack duplicates. Unchanged placements must not call this.
 pub(super) fn build_overlay_image_escapes_for_protocol(
     protocol: GraphicsProtocol,
     image_data: &[u8],
@@ -599,13 +555,8 @@ pub fn place_inline_image(
 /// Fallback cell width/height ratio (typical monospace cell ~8×16 px), used when the terminal does not report its pixel size.
 const DEFAULT_CELL_ASPECT: f64 = 0.5;
 
-/// Cell aspect ratio (width / height) measured from the terminal's pixel report (TIOCGWINSZ).
-/// Protocols scale the image to fill the requested cell rect, so a rect computed from the assumed 1:2 cell stretches images on any other font.
-/// Falls back to [`DEFAULT_CELL_ASPECT`] on zero or implausible reports (tmux, Windows, non-tty).
-///
-/// Measured once per process: the ratio is scale-invariant (font zoom changes both cell dimensions proportionally).
-/// Only a font-family switch mid-session could change it.
-/// Pinned to the fallback in test builds for determinism.
+/// Protocols fill the cell rect, so an assumed 1:2 cell stretches other fonts. Implausible reports (tmux, Windows, non-tty) use the default.
+/// Once per process: zoom scales both axes. Tests pin the fallback.
 fn cell_aspect() -> f64 {
     #[cfg(any(test, feature = "test-support"))]
     {
@@ -639,10 +590,7 @@ fn cell_aspect_from(ws: &crossterm::terminal::WindowSize) -> f64 {
     }
 }
 
-/// Compute the cell dimensions (`cols`, `rows`) to display an image at its correct aspect ratio within a bounding box of `max_cols × max_rows`.
-///
-/// Terminal cells are not square; they're roughly twice as tall as wide.
-/// This accounts for the measured cell shape (see [`cell_aspect`]) so a 1:1 image appears visually square and a 16:9 screenshot looks 16:9.
+/// Uses measured [`cell_aspect`] so a 1:1 image stays visually square; cells are not square.
 pub fn fit_image_to_cells(img_w: u32, img_h: u32, max_cols: u16, max_rows: u16) -> (u16, u16) {
     if img_w == 0 || img_h == 0 || max_cols == 0 || max_rows == 0 {
         return (max_cols.max(1), max_rows.max(1));

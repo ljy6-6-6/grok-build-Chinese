@@ -1,6 +1,6 @@
 //! Minimal serializable hunk shapes.
 //!
-//! TODO(workspace): align with `xai_hunk_tracker::Hunk` and
+//! TODO: align with `xai_hunk_tracker::Hunk` and
 //! `xai_hunk_tracker::HunkAction` when the hunk tracker's wire surface
 //! is extracted into this crate. The fields below are a strict subset
 //! sufficient for the API surface to compile.
@@ -11,7 +11,7 @@ use crate::identity::HunkId;
 
 /// A single tracked hunk in a file.
 ///
-/// TODO(workspace): align with `xai_hunk_tracker::types::Hunk`.
+/// TODO: align with `xai_hunk_tracker::types::Hunk`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hunk {
     /// Stable identifier for this hunk.
@@ -34,11 +34,7 @@ pub struct Hunk {
 }
 
 /// Action applied to a hunk by `WorkspaceOpsRequest::ActOnHunk`.
-///
-/// TODO(workspace): align with `xai_hunk_tracker::types::HunkAction`.
-///
-/// Tagged with `tag = "type", content = "data"` (adjacent tagging) to match every other wire enum in the crate.
-/// See `crate::lib` doc-comment "# Wire format" for the rationale.
+/// TODO: align with `xai_hunk_tracker::types::HunkAction`. Adjacent tagging matches every other wire enum.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum HunkAction {

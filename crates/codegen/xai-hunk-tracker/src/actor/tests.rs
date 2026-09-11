@@ -183,12 +183,9 @@ impl TestHarness {
         events
     }
 
-    /// Wait for the actor to finish processing all queued commands.
-    ///
-    /// Instead of an arbitrary sleep, we send a query to the actor and await
-    /// the response.  Since the actor processes commands sequentially, receiving
-    /// a reply guarantees that every prior command (and its side-effects, such
-    /// as event emissions) has been fully processed.
+    /// Wait for the actor to finish processing all queued commands. Instead of an arbitrary sleep, we send a query to the
+    /// actor and await the response. Since the actor processes commands sequentially, receiving a reply guarantees that every
+    /// prior command (and its side-effects
     async fn settle(&mut self) {
         let _ = self.handle.get_all_hunks().await;
     }
@@ -932,21 +929,12 @@ async fn test_text_file_with_valid_utf8_tracked() {
     assert_eq!(hunks[0].new_text, "Hello, 世界!\n");
 }
 
-// =========================================================================
-// Accept/Reject Per-Hunk Tests (Bug Demonstration)
-// =========================================================================
-// These tests explicitly demonstrate the bug where accept/reject affects
-// ALL hunks in a file instead of just the targeted hunk.
-//
-// Each test shows:
-// 1. The CURRENT broken behavior (what happens now)
-// 2. What the CORRECT behavior should be (commented with TODO)
+// Accept/Reject Per-Hunk Tests (Bug Demonstration). These tests explicitly demonstrate the bug where accept/reject
+// affects ALL hunks in a file instead of just the targeted hunk. Each test shows: The CURRENT broken behavior (what
+// happens now); What the CORRECT behavior should be (commented with TODO).
 
-/// BUG DEMONSTRATION: Accept sets baseline = current_content (whole file)
-///
-/// This test shows that after accepting a hunk, the baseline becomes
-/// the entire current file, which means on the next recompute, there
-/// will be no diff (no hunks).
+/// BUG DEMONSTRATION: Accept sets baseline = current_content (whole file). This test shows that after accepting a hunk,
+/// the baseline becomes the entire current file, which means on the next recompute, there will be no diff (no hunks).
 #[tokio::test]
 async fn test_bug_accept_makes_baseline_equal_current() {
     let mut harness = TestHarness::new();
@@ -1015,10 +1003,8 @@ NEW CHANGE
 // Tests that will PASS after the fix is implemented
 // =========================================================================
 
-/// EXPECTED BEHAVIOR: Accept one hunk, other hunks remain
-///
-/// This test will FAIL now but should PASS after the fix.
-/// It triggers a recompute after accept to expose the bug.
+/// EXPECTED BEHAVIOR: Accept one hunk, other hunks remain. This test will FAIL now but should PASS after the fix. It
+/// triggers a recompute after accept to expose the bug.
 #[tokio::test]
 async fn test_accept_one_hunk_preserves_other_hunks() {
     let mut harness = TestHarness::new();
@@ -1194,10 +1180,8 @@ line 10
     );
 }
 
-/// EXPECTED BEHAVIOR: Sequential accepts work correctly
-///
-/// Accept hunks one by one, each time the remaining hunks should stay.
-/// This test triggers recomputes to expose the bug.
+/// EXPECTED BEHAVIOR: Sequential accepts work correctly. Accept hunks one by one, each time the remaining hunks should
+/// stay. This test triggers recomputes to expose the bug.
 #[tokio::test]
 async fn test_sequential_accepts_preserve_remaining_hunks() {
     let mut harness = TestHarness::new();
@@ -1391,11 +1375,7 @@ line 12
     );
 }
 
-// =========================================================================
-// Per-Turn Attribution Tests (Bug Demonstration)
-// =========================================================================
-// These tests demonstrate the bug where agent-to-agent overlapping edits
-// lose the latest prompt_index attribution.
+// These tests demonstrate the bug where agent-to-agent overlapping edits lose the latest prompt_index attribution.
 
 /// EXPECTED BEHAVIOR: Agent-to-agent merge updates prompt_index
 ///
@@ -1455,21 +1435,13 @@ line 5
     }
 }
 
-// =========================================================================
-// Integration Bug Test: record_agent_write vs handle_file_change
-// =========================================================================
-// This test demonstrates the bug in the CLI shell where tool execution
-// only triggers fs_notify (handle_file_change) but never calls record_agent_write.
-// This means ALL hunks from agent tools are classified as External, not AgentEdit.
+// Integration Bug Test: record_agent_write vs handle_file_change. This test demonstrates the bug in the CLI shell where
+// tool execution only triggers fs_notify (handle_file_change) but never calls record_agent_write. This means ALL hunks
+// from agent tools are classified as External, not AgentEdit.
 
-/// BUG DEMONSTRATION: fs_notify path creates External hunks, not AgentEdit
-///
-/// This test shows that when a file change comes through handle_file_change
-/// (as happens via fs_notify in the CLI shell), the hunk is created as
-/// External, not as AgentEdit with a prompt_index.
-///
-/// The fix requires calling record_agent_write from tool execution paths
-/// (search_replace, write_file, etc.) BEFORE the fs_notify event fires.
+/// This test shows that when a file change comes through handle_file_change (as happens via fs_notify in the CLI shell),
+/// the hunk is created as External, not as AgentEdit with a prompt_index. The fix requires calling record_agent_write
+/// from tool execution paths (search_replace, write_file, etc.) BEFORE the fs_notify event fires.
 #[tokio::test]
 async fn test_bug_fs_notify_path_creates_external_hunks_not_agent_hunks() {
     // Use AllDirty mode to track all file changes (including external)
@@ -1489,10 +1461,8 @@ async fn test_bug_fs_notify_path_creates_external_hunks_not_agent_hunks() {
     // BUG: The hunk is External, not AgentEdit
     match &hunks[0].source {
         crate::types::HunkSource::External => {
-            // This is the CURRENT BROKEN BEHAVIOR
-            // Since forward_to_hunk_tracker only calls handle_file_change,
-            // and the file wasn't previously tracked as an agent file,
-            // the hunk is created as External.
+            // This is the CURRENT BROKEN BEHAVIOR Since forward_to_hunk_tracker only calls handle_file_change, and the file wasn't
+            // previously tracked as an agent file, the hunk is created as External.
         }
         crate::types::HunkSource::AgentEdit { prompt_index } => {
             panic!(
@@ -1508,10 +1478,8 @@ async fn test_bug_fs_notify_path_creates_external_hunks_not_agent_hunks() {
     }
 }
 
-/// Test that record_agent_write creates AgentEdit hunks with prompt_index
-///
-/// This shows the CORRECT behavior when record_agent_write is called.
-/// Tool execution should follow this path, not the fs_notify/handle_file_change path.
+/// Test that record_agent_write creates AgentEdit hunks with prompt_index. This shows the CORRECT behavior when
+/// record_agent_write is called. Tool execution should follow this path, not the fs_notify/handle_file_change path.
 #[tokio::test]
 async fn test_record_agent_write_creates_agent_edit_hunks() {
     let mut harness = TestHarness::new();
@@ -1544,15 +1512,9 @@ async fn test_record_agent_write_creates_agent_edit_hunks() {
     }
 }
 
-/// Integration test: record_agent_write should be called BEFORE fs_notify fires
-///
-/// This tests the race condition scenario where:
-/// 1. Tool writes file to disk
-/// 2. fs_notify detects the change and calls handle_file_change
-/// 3. If record_agent_write wasn't called first, the hunk becomes External
-///
-/// The fix should ensure record_agent_write is called BEFORE or INSTEAD OF
-/// relying on fs_notify for agent-initiated writes.
+/// Integration test: record_agent_write should be called BEFORE fs_notify fires. This tests the race condition scenario
+/// where: The fix should ensure record_agent_write is called BEFORE or INSTEAD OF relying on fs_notify for
+/// agent-initiated writes.
 #[tokio::test]
 async fn test_agent_write_before_external_preserves_attribution() {
     let mut harness = TestHarness::new();
@@ -1635,15 +1597,8 @@ async fn test_repro_bulk_accept_insertion_baseline_shifts() {
         );
     }
 
-    // With the OLD buggy code:
-    // 1. apply_hunk_action(hunk_A) at old_start=2
-    //    - patches baseline: "1\nINSERT_A\n2\n3\n4\n5\n6\n7\n8\n9\n10\n"
-    //    - recompute diffs new baseline vs current
-    //    - hunk_B was at old_start=4, but in new baseline it's at old_start=5 (shifted!)
-    //    - overlap matching uses old_start, so it checks if old_start=4 overlaps with new old_start=5
-    //    - For insertions, overlap check is: a_start == b_start (line 401-403 in diff.rs)
-    //    - 4 != 5 → NO MATCH → new ID assigned
-    // 2. apply_hunk_action(hunk_B_old_id) → HunkNotFound ❌
+    // apply_hunk_action(hunk_A) at old_start=2; patches baseline: "1\nINSERT_A\n2\n3\n4\n5\n6\n7\n8\n9\n10\n"; recompute
+    // diffs new baseline vs current.
 
     let result = harness.handle.all_action(HunkAction::Accept).await;
 
@@ -1803,12 +1758,9 @@ async fn test_repro_bulk_reject_multiple_files() {
     assert_eq!(remaining.len(), 0, "All hunks should be rejected");
 }
 
-/// Bulk accept on a file where only SOME hunks belong to the target turn.
-/// Non-target hunks must survive the batch operation.
-///
-/// Note: When the agent writes a full file, recompute_hunks assigns all new hunks
-/// the source of that write. To get hunks on different turns in the same file,
-/// we use two separate files.
+/// Bulk accept on a file where only SOME hunks belong to the target turn. Non-target hunks must survive the batch
+/// operation. Note: When the agent writes a full file, recompute_hunks assigns all new hunks the source of that write. To
+/// get hunks on different turns in the same file, we use two separate files.
 #[tokio::test]
 async fn test_repro_turn_action_preserves_other_turns() {
     let mut harness = TestHarness::new();
@@ -1850,21 +1802,13 @@ async fn test_repro_turn_action_preserves_other_turns() {
     );
 }
 
-// =========================================================================
-// Worktree Diff Bug: previous_content as fallback baseline
-// =========================================================================
-// When a session runs in a worktree created from dirty state, files that
-// exist on disk but are not committed to git should use previous_content
-// as the baseline, not None. Otherwise the diff shows the entire file
-// as new (+N lines) instead of just the incremental change.
+// Worktree Diff Bug: previous_content as fallback baseline. When a session runs in a worktree created from dirty state,
+// files that exist on disk but are not committed to git should use previous_content as the baseline, not None. Otherwise
+// the diff shows the entire file as new (+N lines) instead of just the incremental change.
 
-/// Test that previous_content is used as baseline when file is not in git HEAD.
-///
-/// This reproduces the worktree diff bug for forked sessions:
-/// 1. Source repo has an uncommitted file (created by agent in prior turn)
-/// 2. Worktree is created with dirty copy (file is copied but not in git HEAD)
-/// 3. Forked session's agent edits the file
-/// 4. Diff should show only the new change (+1), not the entire file (+2)
+/// Test that previous_content is used as baseline when file is not in git HEAD. This reproduces the worktree diff bug for
+/// forked sessions: Source repo has an uncommitted file (created by agent in prior turn); Worktree is created with dirty
+/// copy (file is copied but not in git HEAD); Diff should show only the new change (+1), not the entire file (+2).
 #[tokio::test]
 async fn test_worktree_previous_content_used_as_baseline_when_not_in_git() {
     let mut harness = TestHarness::new();
@@ -1902,10 +1846,8 @@ async fn test_worktree_previous_content_used_as_baseline_when_not_in_git() {
     );
 }
 
-/// Test that previous_content=None still works for truly new files.
-///
-/// When the agent creates a brand new file (no previous_content),
-/// the baseline should be None and the entire file shows as additions.
+/// Test that previous_content=None still works for truly new files. When the agent creates a brand new file (no
+/// previous_content), the baseline should be None and the entire file shows as additions.
 #[tokio::test]
 async fn test_new_file_without_previous_content_shows_all_lines() {
     let mut harness = TestHarness::new();
@@ -1933,10 +1875,8 @@ async fn test_new_file_without_previous_content_shows_all_lines() {
     );
 }
 
-/// Test that git HEAD baseline takes precedence over previous_content.
-///
-/// When a file IS in git HEAD, the baseline should come from git HEAD,
-/// not from previous_content. previous_content is only a fallback.
+/// Test that git HEAD baseline takes precedence over previous_content. When a file IS in git HEAD, the baseline should
+/// come from git HEAD, not from previous_content. previous_content is only a fallback.
 #[tokio::test]
 async fn test_git_baseline_takes_precedence_over_previous_content() {
     let mut harness = TestHarness::new();
@@ -1978,12 +1918,9 @@ async fn test_git_baseline_takes_precedence_over_previous_content() {
 // Baseline refresh after accept + git restore
 // =========================================================================
 
-/// Reproduces the bug where accepting all hunks then running `git restore .`
-/// leaves the hunk tracker with a stale baseline, producing a giant backwards
-/// diff (the entire file shown as deleted).
-///
-/// Expected: after git restore, the file should appear clean (no hunks)
-/// because current content matches git HEAD.
+/// Reproduces the bug where accepting all hunks then running `git restore.` leaves the hunk tracker with a stale
+/// baseline, producing a giant backwards diff (the entire file shown as deleted). Expected: after git restore, the file
+/// should appear clean (no hunks) because current content matches git HEAD.
 #[tokio::test]
 async fn test_accept_all_then_git_restore_shows_clean() {
     let mut harness = TestHarness::new();
@@ -2016,13 +1953,9 @@ async fn test_accept_all_then_git_restore_shows_clean() {
     harness.external_write("restore_test.rs", baseline);
     harness.settle().await;
 
-    // BUG: without the fix, the hunk tracker shows a giant backwards diff
-    // because the baseline was patched by accept (= modified content),
-    // but the file was restored to HEAD (= baseline content).
-    // The diff becomes: modified → baseline = "everything deleted".
-    //
-    // EXPECTED: file should be clean — current matches git HEAD,
-    // baseline should be refreshed to git HEAD, no hunks.
+    // BUG: without the fix, the hunk tracker shows a giant backwards diff because the baseline was patched by accept (=
+    // modified content), but the file was restored to HEAD (= baseline content). EXPECTED: file should be clean — current
+    // matches git HEAD, baseline should be refreshed to git HEAD, no hunks.
     let hunks = harness.get_all_hunks().await;
     assert!(
         hunks.is_empty(),
@@ -2235,28 +2168,9 @@ async fn test_content_changed_external_edit_on_agent_hunk() {
     }
 }
 
-/// Test the overlap fallback path in emit_hunk_diff_events: when a new hunk's
-/// ID doesn't match any old hunk ID, the prev lookup falls back to finding
-/// an overlapping old hunk.
-///
-/// Scenario: Agent creates a file with two disjoint edits (2 hunks at
-/// different locations). Then agent writes a new version that merges
-/// both regions into one contiguous change. The diff engine produces
-/// one merged hunk. `find_matching_old_hunk` matches one old hunk and
-/// claims its ID. The other old hunk is now "orphaned" — but the merged
-/// new hunk still overlaps with it.
-///
-/// For HunkContentChanged, the prev lookup should find the matched old
-/// hunk by ID (primary path). We separately verify that non-ID-matched
-/// hunks that overlap still get a HunkRemoved event (the overlap fallback
-/// for prev is only used when a NEW hunk gets a fresh ID but has overlap).
-///
-/// To test the actual fallback: we need a case where `find_matching_old_hunk`
-/// can't find a match for a new hunk (no content match, but old hunk was
-/// claimed), yet the new hunk overlaps with an old hunk. We construct this
-/// by having the agent make two adjacent edits that the diff engine initially
-/// produces as separate hunks, then editing again so they merge — but the
-/// merge creates a new hunk whose best_match was already claimed.
+/// The diff engine produces one merged hunk. For HunkContentChanged, the prev lookup should find the matched old hunk by
+/// ID (primary path). To test the actual fallback: we need a case where `find_matching_old_hunk` can't find a match for a
+/// new hunk (no content match, but old hunk was claimed), yet the new hunk overlaps with an old hunk.
 #[tokio::test]
 async fn test_content_changed_prev_lookup_uses_overlap_fallback() {
     let mut harness = TestHarness::new();
@@ -2331,18 +2245,15 @@ async fn test_content_changed_prev_lookup_uses_overlap_fallback() {
         );
     }
 
-    // Verify that at least one HunkContentChanged has a NEW hunk ID
-    // (not matching any old hunk ID) — this proves the overlap fallback
-    // path was used (the hunk got a fresh ID because the old ID was
-    // already claimed by another new hunk).
+    // Verify that at least one HunkContentChanged has a NEW hunk ID (not matching any old hunk ID) — this proves the overlap
+    // fallback path was used (the hunk got a fresh ID because the old ID was already claimed by another new hunk).
     let has_new_id = content_changed
         .iter()
         .any(|(id, _, _)| !old_hunk_ids.contains(id));
 
-    // Note: this assertion may not always hold depending on diff engine
-    // behavior (both hunks might get matched by ID). If it fails, the
-    // test still validates that prev_lines_added > 0 for all events,
-    // which is the core correctness property. Log rather than fail.
+    // Note: this assertion may not always hold depending on diff engine behavior (both hunks might get matched by ID). If it
+    // fails, the test still validates that prev_lines_added > 0 for all events, which is the core correctness property. Log
+    // rather than fail.
     if !has_new_id {
         eprintln!(
             "INFO: All HunkContentChanged events matched old hunk IDs. \
@@ -2564,12 +2475,8 @@ async fn test_too_large_survives_baseline_refresh() {
     );
 }
 
-// =========================================================================
-// get_file_hunk_data() Query API Tests
-// =========================================================================
-// These tests verify the explicit FileContentStatus contract exposed by
-// get_file_hunk_data(), ensuring Missing, Binary, TooLarge, and Full states
-// are correctly propagated through the query/API surface.
+// These tests verify the explicit FileContentStatus contract exposed by get_file_hunk_data(), ensuring Missing, Binary,
+// TooLarge, and Full states are correctly propagated through the query/API surface.
 
 /// get_file_hunk_data returns Full status for normal text file
 /// Verifies: status=Full, byte_len set, content populated, legacy fields populated
@@ -2869,11 +2776,8 @@ async fn test_get_file_hunk_data_mixed_states() {
     assert!(data.hunks.is_empty());
 }
 
-// =========================================================================
-// Action-Path Hardening Tests
-// =========================================================================
-// These tests verify that accept/reject actions are safe under the explicit
-// content-state model, and that transitions correctly clear/create hunks.
+// These tests verify that accept/reject actions are safe under the explicit content-state model, and that transitions
+// correctly clear/create hunks.
 
 /// Hunks are cleared when file becomes TooLarge
 /// When a file with pending hunks grows beyond MAX_TRACKED_TEXT_BYTES,
@@ -3174,11 +3078,8 @@ async fn test_file_creation_hunk_action() {
     assert!(!exists, "File should be deleted after rejecting creation");
 }
 
-// =========================================================================
-// Validation + UI Messaging Smoke Tests
-// =========================================================================
-// These tests verify that the API correctly exposes file content status
-// for clients to display appropriate UI messages (e.g., "file too large").
+// These tests verify that the API correctly exposes file content status for clients to display appropriate UI messages
+// (e.g., "file too large").
 
 /// API returns Missing status for deleted files
 /// Clients can show "File was deleted" message.
@@ -3220,13 +3121,9 @@ async fn test_ui_messaging_deleted_file() {
     );
 }
 
-/// Smoke test for memory-bounded behavior with multiple large files
-/// Verifies that tracking many large files doesn't retain their content.
-///
-/// This test provides validation evidence for the memory fix:
-/// - Creates files exceeding MAX_TRACKED_TEXT_BYTES
-/// - Verifies content is NOT retained (content: None)
-/// - Verifies metadata IS retained (byte_len, status)
+/// Smoke test for memory-bounded behavior with multiple large files. Verifies that tracking many large files doesn't
+/// retain their content. Creates files exceeding MAX_TRACKED_TEXT_BYTES; Verifies content is NOT retained (content:
+/// None); Verifies metadata IS retained (byte_len, status).
 #[tokio::test]
 async fn test_memory_bounded_multiple_large_files() {
     use crate::actor::state::MAX_TRACKED_TEXT_BYTES;
@@ -4845,11 +4742,9 @@ async fn test_snapshot_turn_delta_is_per_turn() {
 // Baseline refresh during git rebases (scan counting + hunk preservation)
 // =========================================================================
 
-/// Count of `BaselineUpdated` events in a drained batch. The real
-/// `refresh_all_baselines` scan path emits one per still-tracked file, while
-/// the unchanged-git-state skip path returns before emitting anything — so
-/// this distinguishes "real scan" from "skip" through the public event
-/// channel, independent of tracing configuration or runner environment.
+/// Count of `BaselineUpdated` events in a drained batch. The real `refresh_all_baselines` scan path emits one per
+/// still-tracked file, while the unchanged-git-state skip path returns before emitting anything — so this distinguishes
+/// "real scan" from "skip" through the public event channel, independent of tracing configuration or runner environment.
 fn baseline_updates(events: &[HunkEvent]) -> usize {
     events
         .iter()
@@ -5003,10 +4898,9 @@ fn scoped_scan_fixture() -> tempfile::TempDir {
     temp
 }
 
-/// For every scoped path the caches must agree with a full scan (modified
-/// tracked, untracked — the gix-pathspec dirwalk risk — and staged files all
-/// detected), while dirty files outside the scope stay out of the caches;
-/// that absence is what makes the AgentOnly scan O(tracked).
+/// For every scoped path the caches must agree with a full scan (modified tracked, untracked — the gix-pathspec dirwalk
+/// risk — and staged files all detected), while dirty files outside the scope stay out of the caches; that absence is
+/// what makes the AgentOnly scan O(tracked).
 #[tokio::test]
 async fn scoped_dirty_cache_matches_full_scan_and_prunes_outside_paths() {
     let temp = scoped_scan_fixture();
@@ -5061,11 +4955,9 @@ async fn scoped_dirty_cache_matches_full_scan_and_prunes_outside_paths() {
     }
 }
 
-/// The AgentOnly refresh pipeline derives the scan scope from the tracked
-/// set: after `refresh_all_baselines`, tracked files (including an untracked
-/// agent creation) are in the dirty cache with their hunks intact, while
-/// out-of-scope dirty noise never enters it. AllDirty keeps the full scan —
-/// that is how it discovers newly-dirty files.
+/// The AgentOnly refresh pipeline derives the scan scope from the tracked set: after `refresh_all_baselines`, tracked
+/// files (including an untracked agent creation) are in the dirty cache with their hunks intact, while out-of-scope dirty
+/// noise never enters it. AllDirty keeps the full scan — that is how it discovers newly-dirty files.
 #[tokio::test]
 async fn agent_only_refresh_scopes_scan_to_tracked_paths() {
     let temp = scoped_scan_fixture();
@@ -5115,11 +5007,9 @@ async fn agent_only_refresh_scopes_scan_to_tracked_paths() {
     );
 }
 
-/// Every tracked path outside working_dir (record_agent_write accepts
-/// arbitrary absolute paths): the AgentOnly scope collapses to empty, which
-/// must SKIP the dirty scan — gix treats an empty pathspec list as a FULL
-/// worktree scan, the inversion of the scoped intent. Pinned by the caches
-/// staying empty even though the repo is dirty.
+/// Every tracked path outside working_dir (record_agent_write accepts arbitrary absolute paths): the AgentOnly scope
+/// collapses to empty, which must SKIP the dirty scan — gix treats an empty pathspec list as a FULL worktree scan, the
+/// inversion of the scoped intent. Pinned by the caches staying empty even though the repo is dirty.
 #[tokio::test]
 async fn agent_only_scope_outside_working_dir_skips_scan_not_full_scan() {
     let temp = scoped_scan_fixture();
@@ -5145,11 +5035,9 @@ async fn agent_only_scope_outside_working_dir_skips_scan_not_full_scan() {
     );
 }
 
-/// The empty-scope skip must not serve stale caches: entries populated by an
-/// earlier scan (here the public RefreshGitDirtyCache full-scan contract)
-/// predate the HEAD/index move that triggers the refresh, and the committed
-/// repo_sync_state makes every later refresh short-circuit — so the skip has
-/// to clear the caches (consistent-empty: they describe nothing in scope).
+/// The empty-scope skip must not serve stale caches: entries populated by an earlier scan (here the public
+/// RefreshGitDirtyCache full-scan contract) predate the HEAD/index move that triggers the refresh, and the committed
+/// repo_sync_state makes every later refresh short-circuit — so the skip has to clear the caches (consistent-empty: they
 #[tokio::test]
 async fn agent_only_empty_scope_refresh_clears_stale_caches() {
     let temp = scoped_scan_fixture();
@@ -5191,10 +5079,9 @@ async fn agent_only_empty_scope_refresh_clears_stale_caches() {
     );
 }
 
-/// Tracked-file and agent-created (untracked, uncommitted) hunks must survive
-/// a real rebase followed by `refresh_all_baselines` — the invariant a scoped
-/// (pathspec-limited) scan must keep intact, especially for the untracked
-/// file, which only stays dirty if the scan still reports it.
+/// Tracked-file and agent-created (untracked, uncommitted) hunks must survive a real rebase followed by
+/// `refresh_all_baselines` — the invariant a scoped (pathspec-limited) scan must keep intact, especially for the
+/// untracked file, which only stays dirty if the scan still reports it.
 #[tokio::test]
 async fn hunks_survive_rebase_and_refresh_all_baselines() {
     let mut harness = TestHarness::new();

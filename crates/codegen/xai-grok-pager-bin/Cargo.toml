@@ -1,6 +1,6 @@
 [package]
 name = "xai-grok-pager-bin"
-version = "1.0.16"
+version = "1.0.24"
 edition.workspace = true
 license = "Apache-2.0"
 authors = ["xAI"]
@@ -23,6 +23,7 @@ xai-grok-pager-minimal = { path = "../xai-grok-pager-minimal" }
 xai-grok-product = { path = "../xai-grok-product" }
 
 # Agent runtime + leader/stdio/headless entry points.
+xai-grok-login = { workspace = true }
 xai-grok-shell = { workspace = true }
 xai-grok-update = { path = "../xai-grok-update", features = ["community-build"] }
 xai-grok-version = { workspace = true }
@@ -81,7 +82,6 @@ serial_test = { workspace = true }
 # `PagerArgs::try_parse_from` in the CLI-parsing unit tests (needs the
 # `clap::Parser` trait in scope).
 clap = { workspace = true, features = ["derive"] }
-tempfile = { workspace = true }
 
 [features]
 default = [

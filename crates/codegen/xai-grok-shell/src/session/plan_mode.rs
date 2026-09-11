@@ -13,25 +13,15 @@ pub enum PlanModeState {
     Inactive,
     /// Client toggled plan mode ON, but no prompt has been sent yet.
     /// The model does not know about plan mode yet.
-    /// No tool call has been made, no system-reminder injected.
-    ///
-    /// Transitions:
-    ///   -> Active  (first user prompt triggers injection)
-    ///   -> Inactive (client toggles off before any prompt)
+    /// Transitions: -> Active (first user prompt triggers injection) -> Inactive (client toggles off before any prompt).
     Pending,
-    /// Plan mode is active.
     /// The model has received plan mode instructions (either via system-reminder injection or via EnterPlanMode tool result).
     /// Write tools are blocked except for the plan file.
-    ///
-    /// Transitions:
-    ///   -> Inactive    (ExitPlanMode approved, or user toggles off when idle)
-    ///   -> ExitPending (user toggles off while a turn is in-flight)
+    /// Transitions: -> Inactive (ExitPlanMode approved, or user toggles off when idle) -> ExitPending (user toggles off while a turn is in-flight).
     Active,
     /// Client toggled plan mode OFF while Active and a model turn is in-flight.
     /// We need to wait for the current turn to finish (or cancel it), then cleanly exit.
-    ///
-    /// Transitions:
-    ///   -> Inactive (after turn completes, exit attachment injected)
+    /// Transitions: -> Inactive (after turn completes, exit attachment injected).
     ExitPending,
 }
 pub struct PlanModeTracker {
@@ -47,10 +37,8 @@ pub struct PlanModeTracker {
     /// Persisted so resume can restore approval chrome.
     awaiting_plan_approval: bool,
     /// Rendered activation reminder buffered by a mid-turn toggle ([`Self::activate_mid_turn`]).
-    /// It awaits delivery at the running turn's next safe drain point.
     /// While set, the model has NOT seen plan mode yet.
     /// A toggle-off withdraws it and rolls the activation back instead of deferring an exit the model never knew about.
-    /// Not persisted: a restart loses the buffer, and the next turn's Active-state injection covers it.
     pending_activation: Option<PendingActivation>,
     /// Lives inside the session directory:
     /// `~/.grok/sessions/<cwd>/<session_id>/plan.md`
@@ -137,8 +125,6 @@ impl PlanModeTracker {
     pub fn is_active(&self) -> bool {
         self.state == PlanModeState::Active
     }
-    /// The prompt mode the session is in according to this tracker.
-    ///
     /// The prompt-mode mirrors follow the tracker, never the other way round.
     /// A restored tracker is the only thing that knows a resumed session is still planning.
     /// Seeding a mirror `Agent` under a restored `Active` makes the first prompt resolve `Agent` and reconcile the plan mode away.
@@ -167,10 +153,8 @@ impl PlanModeTracker {
         self.was_previously_active && self.state == PlanModeState::Pending
     }
     /// Client toggled plan mode ON.
-    ///
     /// Returns true if state actually changed.
-    /// Handles re-entry from `ExitPending` by cancelling the deferred exit and returning directly to `Active`
-    /// (the model already has plan mode context).
+    /// Handles re-entry from `ExitPending` by cancelling the deferred exit and returning directly to `Active` (the model already has plan mode context).
     pub(crate) fn enter_pending(&mut self) -> bool {
         match self.state {
             PlanModeState::Inactive => {
@@ -198,12 +182,8 @@ impl PlanModeTracker {
         true
     }
     /// Mid-turn toggle: activate immediately and buffer the pre-rendered activation reminder.
-    /// The buffered reminder is delivered at the running turn's next safe drain point.
     /// Only valid from `Pending` (a re-entry from `ExitPending` needs no reminder).
-    /// Returns true if activated.
-    ///
     /// The reminder is recorded (alternation counter) at delivery ([`Self::take_pending_activation`]), not here.
-    /// That way a withdrawn or restart-lost buffer doesn't advance the full/sparse cycle.
     pub(crate) fn activate_mid_turn(&mut self, rendered_reminder: String) -> bool {
         if self.state != PlanModeState::Pending {
             return false;
@@ -238,9 +218,6 @@ impl PlanModeTracker {
         self.pending_exit_reminder = false;
         true
     }
-    /// ExitPlanMode approved (agent-initiated exit).
-    /// Returns true if state actually changed.
-    ///
     /// Does NOT set `pending_exit_reminder`: callers must ensure the model gets an in-context exit signal.
     /// Either push a tool result that states the exit, or explicitly call [`Self::queue_exit_reminder`] when the result text carries no such signal.
     /// A reminder queued here would only drain at the next turn start, arriving a turn late and stale.
@@ -289,7 +266,6 @@ impl PlanModeTracker {
         self.pending_exit_reminder = true;
     }
     /// Queue the one-shot exit reminder for the next turn.
-    ///
     /// For exit paths whose tool result carries no exit signal (the compat harness).
     /// Policy and rationale live on the bridge's `queue_exit_reminder_on_approved_exit` flag.
     pub(crate) fn queue_exit_reminder(&mut self) {
@@ -311,17 +287,9 @@ impl PlanModeTracker {
         }
     }
 }
-/// Full plan mode reminder template (plan-file write rules and turn-ending tools).
-///
 /// Returns a MiniJinja template string with `${{ tools.by_kind.X }}` and `${{ plan_path }}` / `${{ plan_has_content }}` placeholders.
-/// The caller must render it via `TemplateRenderer::render_with_extra()` passing:
-///
-/// ```json
-/// { "plan_path": "/path/to/plan.md", "plan_has_content": true }
-/// ```
-///
-/// Tool name placeholders (`${{ tools.by_kind.edit }}`, etc.) are resolved automatically.
-/// The names come from the registry's map of `ToolKind` to client-facing name.
+/// The caller must render it via `TemplateRenderer::render_with_extra()` passing.
+/// ```json { "plan_path": "/path/to/plan.md", "plan_has_content": true } ```.
 pub(crate) fn plan_mode_reminder_full_template() -> &'static str {
     "\
 Plan mode is active. Do not make any edits or writes to the system.
@@ -367,7 +335,6 @@ Your turn should only end with either ${{ tools.by_kind.ask_user }} to clarify r
 }
 /// Rejection message for an edit outside the plan file while plan mode is active.
 /// Returned as the tool result so the model knows the only editable path.
-///
 /// Render via `TemplateRenderer::render_with_extra()` with `{ "plan_path": "..." }`.
 pub(crate) fn plan_mode_edit_rejected_template() -> &'static str {
     "Rejected: file edits are not allowed in plan mode - the only editable file is the plan file (${{ plan_path }})."
@@ -384,10 +351,8 @@ pub(crate) fn is_plan_file_write(target_path: &Path, plan_file: &Path) -> bool {
     target_path == plan_file
 }
 /// Whether the path's final component ends with a markdown suffix (case-insensitive).
-///
 /// Suffixes align with client / workspace `MARKDOWN_SUFFIXES`: `.md`, `.markdown`, `.mdown`, `.mkd`, `.mkdn`, `.mdx`.
-///
-/// In plan mode the shell rejects `Write` and `StrReplace` when this is false (see `prepare_tool_call` in `acp_session.rs`).
+/// In plan mode the shell rejects `Write` and `StrReplace` when this is false.
 pub(crate) fn is_markdown_file_path(path: &Path) -> bool {
     const MARKDOWN_SUFFIXES: &[&str] = &[".md", ".markdown", ".mdown", ".mkd", ".mkdn", ".mdx"];
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
@@ -400,9 +365,7 @@ pub(crate) fn is_markdown_file_path(path: &Path) -> bool {
             && bytes[bytes.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
     })
 }
-/// True if a plan file exists at `path` with non-zero size.
 /// An empty pre-seeded plan file (created by enter_plan_mode) reports false so the reminder still tells the model to write its plan.
-///
 /// Divergence: uses `metadata().len() > 0` (cheap per-turn stat), so a whitespace-only file counts as content here.
 /// `exit_plan_mode` trims and treats such a file as empty; harmless because the seed is always `b""`.
 pub(crate) async fn plan_file_has_content(path: &std::path::Path) -> bool {
@@ -412,7 +375,6 @@ pub(crate) async fn plan_file_has_content(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 /// The prompt mode sent by the client in `_meta.mode`.
-///
 /// Determines whether the prompt expects tool use / file edits (`Agent`) or is read-only (`Ask` / `Plan`).
 /// Used to decide whether a forked session needs worktrees or can run in read-only mode.
 #[derive(

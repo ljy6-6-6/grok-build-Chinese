@@ -71,15 +71,11 @@ impl WorkspaceRpc for ResolveFileReferencesReq {
 }
 
 /// `workspace.update_tool_config` replaces a session's tool config.
-///
-/// Rejected while the target session has an active turn and the new config differs; retry at the turn boundary.
-/// The rejection carries the retryable [`TURN_ACTIVE`](super::envelope::TURN_ACTIVE) wire code.
+/// Rejected while a turn is active and the config differs; retry at the turn boundary. Carries retryable [`TURN_ACTIVE`](super::envelope::TURN_ACTIVE).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UpdateToolConfigReq {
-    /// Deprecated: self-attested and no longer trusted.
-    /// The server derives the caller from the hub-bound envelope session; only old call paths with no envelope session fall back to this field.
-    /// Empty means absent: skipped on serialize so typed clients that leave the default do not send a self-attested `""`.
-    /// The server also filters empty to absent for old serializers.
+    /// Deprecated: self-attested and no longer trusted. The server derives the caller from the hub-bound envelope session; only old paths fall back here.
+    /// Empty means absent on serialize, and the server filters empty to absent for old serializers.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub caller_session_id: String,
     pub session_id: String,
@@ -95,10 +91,8 @@ impl WorkspaceRpc for UpdateToolConfigReq {
 /// `workspace.drop_session` drops a workspace session.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DropSessionReq {
-    /// Deprecated: self-attested and no longer trusted.
-    /// The server derives the caller from the hub-bound envelope session; only old call paths with no envelope session fall back to this field.
-    /// Empty means absent: skipped on serialize so typed clients that leave the default do not send a self-attested `""`.
-    /// The server also filters empty to absent for old serializers.
+    /// Deprecated: self-attested and no longer trusted. The server derives the caller from the hub-bound envelope session; only old paths fall back here.
+    /// Empty means absent on serialize, and the server filters empty to absent for old serializers.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub caller_session_id: String,
     pub session_id: String,

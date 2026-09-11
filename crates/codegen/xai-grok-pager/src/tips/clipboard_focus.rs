@@ -72,12 +72,9 @@ pub struct CheckOutcome {
     pub has_image: bool,
 }
 
-/// The `classify` step: the heavier native probe in one pasteboard pass, the changeCount plus the advertised type list (no bytes, no subprocess).
-/// It stays sub-millisecond and safe to call inline on the ~30fps loop.
-///
-/// The throttled poll reaches here ONLY on a changeCount delta (see [`ClipboardFocusTipState::poll`]); the cheap changeCount-only read gates it.
-/// The expensive one-time AppKit `dlopen` is pre-warmed off the UI thread at the first focus-gain (see `clipboard::prewarm_image_probe`).
-/// If the warm-up hasn't finished yet the memoised `dlopen` happens here once as a fallback.
+/// The `classify` step: the heavier native probe in one pasteboard pass, the changeCount plus the advertised type
+/// list (no bytes, no subprocess). The throttled poll reaches here ONLY on a changeCount delta. the cheap
+/// changeCount-only read gates it.
 pub fn run_clipboard_check() -> CheckOutcome {
     let (change_count, has_image) = crate::clipboard::clipboard_image_snapshot();
     CheckOutcome {
@@ -86,12 +83,8 @@ pub fn run_clipboard_check() -> CheckOutcome {
     }
 }
 
-/// Pure state machine for the focus-scoped, opportunistically-polled clipboard-image tip.
-///
-/// Owns the poll throttle, the changeCount delta-detection, the fire cooldown, and the changeCount dedup.
-/// It never schedules itself: the caller drives [`Self::poll`] from event-loop iterations already running for some other reason.
-/// An idle or hibernating app therefore polls zero times.
-/// All inputs (clock, both probe steps) are injected, so every transition is unit-testable with a fake clock and call-counting probes.
+/// Pure state machine for the focus-scoped, opportunistically-polled clipboard-image tip. It never schedules
+/// itself: the caller drives [`Self::poll`] from event-loop iterations already running for some other reason.
 #[derive(Debug, Default)]
 pub struct ClipboardFocusTipState {
     /// When the last poll actually read the pasteboard (throttle anchor).
@@ -119,18 +112,9 @@ impl ClipboardFocusTipState {
         change_count.is_some() && change_count != self.last_seen_change_count
     }
 
-    /// Run one throttled poll on an already-running loop iteration.
-    ///
-    /// `cheap` reads ONLY the pasteboard changeCount (one Obj-C message); `classify` runs the heavier type scan.
-    /// The contract that keeps the idle cost at ~zero: `classify` is invoked ONLY when `cheap` reports a changeCount that differs from the last seen.
-    /// Returns the classified [`CheckOutcome`] for the caller to evaluate via [`Self::should_fire`].
-    /// Returns `None` when the poll was throttled or the changeCount was unchanged (the hot path: no classify, no redraw).
-    ///
-    /// Dedup-commit policy: the classify-dedup (`last_seen_change_count`) is advanced here ONLY for content this poll fully handles.
-    /// That is non-image content, which has nothing to show.
-    /// A fireable image is deferred to [`Self::note_fired`] (called only on a landed show).
-    /// Committing it here would let a *refused* show skip re-classification forever, breaking the "refused show burns nothing" contract.
-    /// So an image found but not shown re-classifies on the next poll; a shown image is deduped post-cooldown.
+    /// `cheap` reads ONLY the pasteboard changeCount (one Obj-C message). A fireable image is deferred to
+    /// [`Self::note_fired`] (called only on a landed show). So an image found but not shown re-classifies on the next
+    /// poll.
     pub fn poll(
         &mut self,
         now: Instant,
@@ -163,10 +147,9 @@ impl ClipboardFocusTipState {
                 || outcome.change_count != self.last_fired_change_count)
     }
 
-    /// Commit a successful (landed) show: anchors the cooldown, records the fired changeCount, and commits the classify-dedup too.
-    /// (`poll` defers the dedup for fireable images; the show is now fully handled.)
-    /// So the same image isn't re-scanned once the cooldown elapses.
-    /// A refused show (which never calls this) leaves `last_seen` stale and stays retryable.
+    /// Commit a successful (landed) show: anchors the cooldown, records the fired changeCount, and commits the
+    /// classify-dedup too. So the same image isn't re-scanned once the cooldown elapses. A refused show (which never
+    /// calls this) leaves `last_seen` stale and stays retryable.
     pub fn note_fired(&mut self, outcome: &CheckOutcome, now: Instant) {
         self.last_fired_at = Some(now);
         if outcome.change_count.is_some() {

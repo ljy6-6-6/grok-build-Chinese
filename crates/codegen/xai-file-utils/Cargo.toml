@@ -38,9 +38,8 @@ xai-grok-auth = { path = "../xai-grok-auth", features = ["middleware"] }
 prod-mc-cli-chat-proxy-types = { path = "../../../prod/mc/cli-chat-proxy-types" }
 async-compression = { workspace = true, features = ["tokio"] }
 gcloud-storage = { workspace = true }
-opentelemetry = { workspace = true }
 reflink-copy = { workspace = true }
-tracing-opentelemetry = { workspace = true }
+xai-grok-otel = { workspace = true }
 url = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true, features = ["io"] }
@@ -54,10 +53,11 @@ default-bazel = []
 [dev-dependencies]
 tempfile = { workspace = true }
 axum = { workspace = true, features = ["multipart"] }
+axum-server = { workspace = true, features = ["tls-rustls"] }
+rcgen = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "net", "time"] }
 xai-test-utils = { workspace = true }
 filetime = { workspace = true }
-opentelemetry_sdk = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [lints]

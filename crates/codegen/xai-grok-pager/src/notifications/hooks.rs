@@ -98,7 +98,7 @@ fn abandon_child(child: Child, group: Option<Arc<xai_tty_utils::ProcessGroup>>, 
 
 pub fn run_hook(hook: &NotificationHook, event: &NotificationEvent) {
     let command = hook.command.clone();
-    let event_str: &'static str = event.kind.as_str();
+    let event_str: &'static str = event.kind.into();
     let message = event.body.clone();
     let session_id = event.session_id.clone();
     let timeout = Duration::from_secs(hook.timeout_secs.max(1));

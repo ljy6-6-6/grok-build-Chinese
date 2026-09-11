@@ -19,28 +19,17 @@ pub enum SamplingChannel {
 
 /// Why the in-flight request was stripped.
 /// What to do about it (e.g. persist the strip to stored history) is the consumer's decision, not the sampler's.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::AsRefStr, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum StripReason {
-    /// A 400 stamped with the invalid-image code: the server's deterministic verdict on this exact payload.
+    /// A coded `invalid_image` rejection: HTTP 400, Responses mid-stream, or StreamError.
     ServerRejected,
     /// A size/transport heuristic (413, connection reset on upload) or a non-deterministic rejection.
-    /// Non-deterministic covers a proxy-wrapped 500, a legacy phrase match, or a mid-stream error.
+    /// Non-deterministic covers a proxy-wrapped 500, a legacy phrase match, or an uncoded mid-stream error.
     /// The failure may be transient and blames no particular image.
     PayloadHeuristic,
 }
-
-impl StripReason {
-    /// snake_case label for telemetry.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            StripReason::ServerRejected => "server_rejected",
-            StripReason::PayloadHeuristic => "payload_heuristic",
-        }
-    }
-}
-
 /// Events emitted by the sampler for a single in-flight request.
-///
 /// Events are sent on the shared event channel that callers subscribe to.
 /// The session translates these into ACP notifications.
 #[derive(Debug, Clone)]
@@ -63,7 +52,6 @@ pub enum SamplingEvent {
     },
 
     /// Streaming delta carrying a fragment of a tool call.
-    ///
     /// Emitted by the L2 transforms (Chat Completions, Responses, Messages) per-chunk as the model streams tool-call arguments.
     /// Any single `arguments_delta` is NOT necessarily valid JSON in isolation.
     ToolCallDelta {
@@ -75,13 +63,8 @@ pub enum SamplingEvent {
     },
 
     /// The provider opened a response (Messages `message_start`).
-    /// Carries the real message id, model, and input-side token counts exactly as they arrive on the wire, before any content.
     /// Emitted in order so partial-mode consumers can emit the real `message_start` id/usage instead of a synthesized placeholder.
     /// Emitted by the Messages L2 transform only; the Responses/Chat transforms lack these fields at stream open and emit nothing here.
-    ///
-    /// `input_tokens` is the uncached prompt portion.
-    /// The Anthropic Messages API reports cache hits and writes in the separate `cache_read_input_tokens` and `cache_creation_input_tokens` buckets.
-    /// Both are known at `message_start`.
     ResponseStarted {
         request_id: RequestId,
         message_id: String,
@@ -191,7 +174,6 @@ impl SamplingEvent {
 }
 
 /// Serializable mirror of [`SamplingError`].
-///
 /// The rich `SamplingError` carries non-serializable inner values (`reqwest::Error`, `serde_json::Error`) so it cannot cross a network boundary.
 /// `SamplingErrorInfo` extracts the bits that downstream consumers (UIs, gRPC adapters) actually need.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -230,13 +212,12 @@ pub struct SamplingErrorInfo {
 }
 
 /// Coarse-grained classification of a sampling failure.
-///
 /// Intentionally narrow: context-window-exceeded has NO variant because the sampler lacks the tracked token counts to detect it reliably.
-/// Context-window errors arrive as `Api { status: 400, .. }` with model metadata; the session inspects the metadata and decides whether to compact.
-///
-/// The derived serde form (PascalCase, in `SamplingErrorInfo`) is frozen wire format and differs from [`Self::as_str`]'s snake_case tags.
 /// Do not "clean up" with `rename_all`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, strum::AsRefStr, strum::IntoStaticStr,
+)]
+#[strum(serialize_all = "snake_case")]
 pub enum SamplingErrorKind {
     Auth,
     Http,
@@ -248,25 +229,6 @@ pub enum SamplingErrorKind {
     MaxTokensTruncation,
     DoomLoopDetected,
 }
-
-impl SamplingErrorKind {
-    /// Stable, lowercase string form suitable for telemetry tags (e.g., analytics `error_type` columns and signals histograms).
-    /// Mirrors the strings used in the shell's `stream_conversation_with_retries` error classifier so both emit the same tags.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            SamplingErrorKind::Auth => "auth",
-            SamplingErrorKind::Http => "http",
-            SamplingErrorKind::Api => "api",
-            SamplingErrorKind::Serialization => "serialization",
-            SamplingErrorKind::IdleTimeout => "idle_timeout",
-            SamplingErrorKind::RateLimited => "rate_limited",
-            SamplingErrorKind::EmptyResponse => "empty_response",
-            SamplingErrorKind::MaxTokensTruncation => "max_tokens_truncation",
-            SamplingErrorKind::DoomLoopDetected => "doom_loop_detected",
-        }
-    }
-}
-
 /// [`SamplingErrorKind::from_str`] error: the wire string matched no known kind (a newer peer's kind); callers degrade to untyped via `.ok()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnknownSamplingErrorKind;
@@ -298,7 +260,9 @@ impl From<&SamplingError> for SamplingErrorInfo {
 
         let (kind, status_code, retry_after_secs, model_metadata) = match err {
             SamplingError::Auth { .. } => (SamplingErrorKind::Auth, None, None, None),
-            SamplingError::InvalidConfiguration(_) => (SamplingErrorKind::Api, None, None, None),
+            SamplingError::InvalidConfiguration(_) | SamplingError::MtlsConfiguration(_) => {
+                (SamplingErrorKind::Api, None, None, None)
+            }
             SamplingError::Http(_) => (SamplingErrorKind::Http, None, None, None),
             SamplingError::Serialization(_) => (SamplingErrorKind::Serialization, None, None, None),
             SamplingError::Api {
@@ -578,7 +542,7 @@ mod tests {
                 Auth | Http | Api | Serialization | IdleTimeout | RateLimited | EmptyResponse
                 | MaxTokensTruncation | DoomLoopDetected => {}
             }
-            assert_eq!(kind.as_str().parse(), Ok(kind));
+            assert_eq!(kind.as_ref().parse(), Ok(kind));
         }
         assert_eq!(
             "nope".parse::<SamplingErrorKind>(),

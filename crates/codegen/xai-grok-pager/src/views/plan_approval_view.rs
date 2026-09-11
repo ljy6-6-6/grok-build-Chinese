@@ -8,9 +8,8 @@ pub use xai_grok_tools::implementations::grok_build::exit_plan_mode::{
 use crate::views::prompt_widget::StashedPrompt;
 
 /// Placeholder body for the plan-approval preview when `exit_plan_mode` parks with no plan content.
-/// No content means a missing/empty `plan.md`, or a whitespace-only body.
-///
-/// Must be non-empty after trim so `LineViewerState::open_markdown_content` accepts it; empty bodies are rejected there.
+/// No content means a missing/empty `plan.md`, or a whitespace-only body. Must be non-empty after
+/// trim so `LineViewerState::open_markdown_content` accepts it; empty bodies are rejected there.
 pub const EMPTY_PLAN_PLACEHOLDER: &str = "\
 # No plan written yet
 
@@ -71,6 +70,13 @@ pub enum PlanApprovalFocus {
 pub enum PlanReviewSource {
     Inline,
     FileBacked,
+}
+
+/// A revision request is not an outcome: the review reopens and plan mode stays on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanReviewOutcome {
+    Approved,
+    Abandoned,
 }
 
 #[derive(Debug, Clone)]

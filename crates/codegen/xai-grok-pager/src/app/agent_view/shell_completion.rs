@@ -611,7 +611,6 @@ mod shell_suggestion_key_tests {
     /// A Fill whose range clips a paste chip used to no-op the write and STILL kick a refetch.
     /// Every Tab spun the fill and refetch again with no draft change.
     /// The declined fill now degrades to opening the dropdown: candidates visible, nothing fetched, chip intact.
-    /// The second Tab rides the normal open-dropdown handling.
     #[test]
     fn tab_fill_clipping_paste_chip_opens_dropdown_without_refetch() {
         // Two candidates whose shared range (chip bytes 0..2, "li") fills to "lima_", a valid Fill decision over an unwritable span
@@ -657,7 +656,6 @@ mod shell_suggestion_key_tests {
     }
 
     /// The sibling hole: the OPEN-dropdown accept (Tab/Enter/mouse all share the helper) used to consume the candidates.
-    /// It closed before the write path declined the chip-clipping splice, leaving nothing.
     /// The probe now makes it an honest no-op: nothing consumed, dropdown up, chip/draft/generation untouched, no kick.
     /// Enter must not fall through to send either.
     #[test]

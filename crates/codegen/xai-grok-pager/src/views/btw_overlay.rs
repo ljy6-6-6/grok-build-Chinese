@@ -115,10 +115,9 @@ impl BtwOverlayState {
     }
 }
 
-/// Push one `/btw` row in the same column space scrollback uses for copy.
-///
-/// `col_within_range` is an offset into the selectable region (`QuoteBarStrip` drops blockquote bars).
-/// Indexing the full painted line would shift quoted copy by the prefix width.
+/// Push one `/btw` row in the same column space scrollback uses for copy. `col_within_range` is an
+/// offset into the selectable region (`QuoteBarStrip` drops blockquote bars). Indexing the full
+/// painted line would shift quoted copy by the prefix width.
 fn push_btw_selectable_line(
     model: &mut ResolvedSelectionModel,
     line: &crate::scrollback::types::BlockLine,
@@ -180,11 +179,6 @@ fn wrapped_error_lines(error: &str, content_width: usize, max_lines: usize) -> V
 }
 
 /// Returns 0 when there is nothing to show (state is `None`).
-/// A Loading panel is 3 rows (top border, 1 body row, bottom border).
-/// Done and Error are 2 border rows plus min(wrapped lines, DONE_MAX_BODY_LINES) body rows.
-///
-/// `panel_width` is the full panel width (`render_btw_panel`'s `area.width`).
-/// Body text gets `panel_width - 4` (border and padding), matching the render.
 pub fn btw_panel_height(state: Option<&BtwOverlayState>, panel_width: u16) -> u16 {
     let cw = panel_width.saturating_sub(4) as usize; // border and pad
     match state {
@@ -205,11 +199,8 @@ pub fn btw_panel_height(state: Option<&BtwOverlayState>, panel_width: u16) -> u1
     }
 }
 
-/// The panel renders as a compact bordered box with the question in the top border and the status in the body.
-/// It sits in the normal layout flow (above queue / turn status / prompt).
-///
-/// When `link_overlay` is `Some`, markdown hyperlinks in the Done body are mapped into screen-space overlay links (same path as scrollback).
-/// OSC 8 and click-to-open then work inside the panel.
+/// The panel renders as a compact bordered box with the question in the top border and the status
+/// in the body.
 #[allow(clippy::too_many_arguments)]
 pub fn render_btw_panel(
     buf: &mut Buffer,
@@ -288,10 +279,9 @@ pub fn render_btw_panel_with_locale(
         .style(Style::default().bg(bg))
         .render(area, buf);
 
-    // ── Hint in top border (right side): scroll position and [Esc] ──
-    // Built BEFORE the title so the title can reserve room for it and truncate the question, rather than the question pushing [Esc] off-screen
-    // [Esc] always stays visible: its columns are reserved here first
-    // On panels too narrow for the full Done-state hint, the scroll indicator is dropped and a bare "[Esc]" kept (fallback below)
+    // Hint in top border (right side): scroll position and [Esc]. Built BEFORE the title so the title
+    // can reserve room for it and truncate the question, rather than the question pushing [Esc]
+    // off-screen. [Esc] always stays visible: its columns are reserved here first.
     let hint = match state {
         BtwOverlayState::Loading { .. } | BtwOverlayState::Error { .. } => "[Esc]".to_string(),
         BtwOverlayState::Done {

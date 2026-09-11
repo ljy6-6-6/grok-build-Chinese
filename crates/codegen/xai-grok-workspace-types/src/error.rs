@@ -22,10 +22,8 @@ use thiserror::Error;
 use crate::chunks::ChunkKind;
 use crate::identity::SessionId;
 
-/// All errors surfaced by a workspace transport.
-///
-/// Every variant is fully serializable so it can travel over the gRPC transport.
-/// Conversion from non-serializable runtime errors (`std::io::Error`, `xai_grok_tools::ToolError`) happens at the workspace-crate boundary.
+/// All errors surfaced by a workspace transport. Every variant is serializable for gRPC.
+/// Conversion from non-serializable runtime errors happens at the workspace-crate boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum WorkspaceError {
@@ -113,9 +111,7 @@ impl WorkspaceError {
     }
 
     /// Whether the operation is safe to retry.
-    ///
-    /// Retryable: [`Self::Timeout`], [`Self::Remote`], and [`Self::Io`] with a transient [`IoKind`] (see [`IoKind::is_transient`]).
-    /// Everything else, including all domain errors, returns `false`.
+    /// Only [`Self::Timeout`], [`Self::Remote`], and transient [`Self::Io`]; domain errors are not.
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Timeout { .. } | Self::Remote(_) => true,
@@ -129,10 +125,8 @@ impl WorkspaceError {
     }
 }
 
-/// Serializable mirror of [`std::io::ErrorKind`].
-///
-/// Tracks every currently-stable variant of [`std::io::ErrorKind`] as of Rust 1.83+.
-/// Conversion from `std::io::ErrorKind` is lossless for every enumerated variant; future-stabilized variants collapse to [`IoKind::Other`].
+/// Serializable mirror of [`std::io::ErrorKind`] (stable variants as of Rust 1.83+).
+/// Enumerated variants convert losslessly; future-stabilized ones collapse to [`IoKind::Other`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IoKind {

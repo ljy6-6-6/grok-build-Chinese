@@ -68,11 +68,9 @@ pub(crate) fn upgrade_cta_reserve(label: &str, caption: Option<&str>) -> u16 {
     (UnicodeWidthStr::width(format!("[{label}]").as_str()) + cap_w) as u16
 }
 
-/// Paint the promo upgrade `[label]` button at (`x`, `y`), then the dim `caption` one space after it when it fits.
-/// The button is semantic warning yellow; hovered, warning fg on `bg_hover`.
-/// The label truncates to `max_width` and the caption is dropped whole when it no longer fits, so the button never overpaints past `max_width`.
-/// Returns the clickable button rect (caption excluded), or `None` when not even a clipped button fits.
-/// The ONE painter every surface (banner, hero, header, dashboard) shares so the button/caption style, truncation, and clamping can't drift.
+/// The label truncates to `max_width` and the caption is dropped whole when it no longer fits, so
+/// the button never overpaints past `max_width`. The ONE painter every surface (banner, hero,
+/// header, dashboard) shares so the button/caption style, truncation, and clamping can't drift.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_cta_button(
     buf: &mut Buffer,
@@ -97,7 +95,9 @@ pub(crate) fn render_cta_button(
         return None;
     }
     let cta_style = if hovered {
-        Style::default().fg(theme.warning).bg(theme.bg_hover)
+        // hover_overlay: bg_hover band on RGB, reverse video on the
+        // terminal theme (bg_hover is Reset there).
+        theme.hover_overlay().fg(theme.warning)
     } else {
         Style::default().fg(theme.warning).bg(theme.bg_base)
     };
@@ -174,12 +174,9 @@ fn is_hidden(
     is_dismissible(a) && hidden_ids.contains(&xai_grok_announcements::announcement_hide_key(a))
 }
 
-/// The promo's CTA when it is renderable: both label and url trimmed non-empty, and the url scheme allowed by the click path's filter.
-/// (The server validates the pair; the tolerant client re-checks so a partial object never paints a dead button.)
-/// This is the ONE gate; paint, hit-rect, OSC 8 emission, and dispatch all inherit it.
-/// The scheme re-check fails closed here: OSC 8 activation is terminal-native.
-/// It would otherwise hand a raw remote URL (`file://`, custom schemes) past `open_url_if_safe`.
-/// A non-https CTA renders as a plain message row instead of a dead or unsafe button.
+/// (The server validates the pair; the tolerant client re-checks so a partial object never paints a
+/// dead button.). It would otherwise hand a raw remote URL (`file://`, custom schemes) past
+/// `open_url_if_safe`.
 fn usable_cta(a: &xai_grok_announcements::RemoteAnnouncement) -> Option<(&str, &str)> {
     let cta = a.cta.as_ref()?;
     let label = cta
@@ -218,13 +215,9 @@ fn first_critical_session_announcement<'a>(
     first_critical_session_announcement_at(announcements, hidden_ids, chrono::Utc::now())
 }
 
-/// The critical the session banner shows: the first live critical whose hide key is NOT in `hidden_ids`.
-/// Hiding the first critical reveals the next unhidden one.
-/// Info/warning stay welcome-only and do not open the in-session slot.
-/// Private: prod consumers go through [`first_session_announcement`]'s `.or_else` leg so slot precedence is structurally enforced.
-/// Skips expired items at selection (draw) time so an `expires_at` crossed mid-session stops rendering before the next server push.
-/// The per-call timestamp parse and hide-key build allocate little.
-/// The gate runs at most a few times per frame over a tiny list, so no caching is needed.
+/// The critical the session banner shows: the first live critical whose hide key is NOT in
+/// `hidden_ids`. Info/warning stay welcome-only and do not open the in-session slot. The gate runs
+/// at most a few times per frame over a tiny list, so no caching is needed.
 fn first_critical_session_announcement_at<'a>(
     announcements: &'a [xai_grok_announcements::RemoteAnnouncement],
     hidden_ids: &BTreeSet<String>,
@@ -286,11 +279,8 @@ pub fn first_session_announcement_at<'a>(
 }
 
 /// The upgrade CTA to show: `(owner, label, url)` resolved through the banner-slot gate.
-/// The single resolution shared by every surface that paints the `[label]` button (welcome hero, in-session header, dashboard, banner).
-/// The click/keyboard/OSC 8 open paths share it too, so show-logic, https-safety, critical-preemption, and expiry are inherited once.
-/// `is_dismissible(owner)` tells a surface whether the `Ctrl+O` override applies (pinned promos only).
-/// Resolving through [`first_session_announcement`] keeps dispatch slot-consistent: a critical owning the slot yields no target.
-/// A click through a stale prior-frame rect (critical preempted the promo between draws) then no-ops.
+/// `is_dismissible(owner)` tells a surface whether the `Ctrl+O` override applies (pinned promos
+/// only).
 pub(crate) fn promo_cta<'a>(
     announcements: &'a [xai_grok_announcements::RemoteAnnouncement],
     hidden_ids: &BTreeSet<String>,
@@ -408,13 +398,8 @@ fn paint_hide_button(
     Some(Rect::new(hide_x, row, button_w as u16, 1))
 }
 
-/// Session top banner: paints the [`first_session_announcement`] selection (slot precedence lives there alone) with the severity-matched painter.
-///
-/// `caption_allowed` gates the promo row's dim `cta.caption`: the caller passes `false` while a permission prompt owns `Ctrl+O`.
-/// (It toggles YOLO there, so advertising the CTA open would be a mislabeled control.)
-/// The `[label]` button + its mouse/OSC 8 open are unaffected.
-///
-/// Returns the painted clickable rects so the caller can hit-test mouse clicks against them.
+/// Session top banner: paints the [`first_session_announcement`] selection (slot precedence lives
+/// there alone) with the severity-matched painter.
 pub fn render_banner(
     area: Rect,
     buf: &mut Buffer,
@@ -469,12 +454,8 @@ pub fn render_banner_with_locale(
     }
 }
 
-/// The selected critical announcement, two lines.
-///
-/// Row 0: `! Title` (error red, title bold) with a right-aligned dim `[hide]` button.
-/// Row 1: the message (default fg) indented to the title column, then the dim `hide: /announcements hide` CTA.
-/// The CTA width is reserved up front so a long message truncates with `…` instead of pushing the CTA off-screen.
-/// A non-dismissible announcement paints neither hide affordance and the title/message reclaim the reserved widths.
+/// The selected critical announcement, two lines. The CTA width is reserved up front so a long
+/// message truncates with `…` instead of pushing the CTA off-screen.
 fn render_critical_rows(
     area: Rect,
     buf: &mut Buffer,
@@ -598,13 +579,9 @@ fn render_critical_rows(
     }
 }
 
-/// The selected promo announcement, one line (see the module doc for the pinned/dismissible row sketches).
-///
-/// The `[Label]` CTA button (semantic warning yellow) leads the row and is omitted when the promo has no usable CTA.
-/// The promo `message` is NOT painted here (it renders on the roomy welcome hero instead).
-/// A pinned (non-dismissible) promo shows its dim `cta.caption` after the button when one is configured and `caption_allowed`.
-/// (A dismissible twin keeps `Ctrl+O` on YOLO, so no caption; no caption configured means a bare button.)
-/// The right-hand hide affordances are reserved first (dismissible promos only) so the button + caption never overpaint them.
+/// The selected promo announcement, one line (see the module doc for the pinned/dismissible row
+/// sketches). The right-hand hide affordances are reserved first (dismissible promos only) so the
+/// button + caption never overpaint them.
 fn render_promo_row(
     area: Rect,
     buf: &mut Buffer,

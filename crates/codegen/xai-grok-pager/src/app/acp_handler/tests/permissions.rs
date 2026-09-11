@@ -370,7 +370,7 @@
             should_drop_late_auto_recap(true, false, &agent),
             "running subagent is not idle"
         );
-        agent.subagent_sessions.get_mut("child").unwrap().finished = true;
+        agent.subagent_sessions.get_mut("child").unwrap().set_finished_for_test(true);
         assert!(
             !should_drop_late_auto_recap(true, false, &agent),
             "finished subagent is idle again"
@@ -612,4 +612,3 @@
         assert_eq!(agent.active_pane, AgentPane::Scrollback);
         assert!(agent.permission_stashed_pane.is_none());
     }
-

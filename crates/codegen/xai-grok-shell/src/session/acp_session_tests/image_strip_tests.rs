@@ -1,6 +1,6 @@
 //! Image-strip persistence policy (`acp_session_impl/image_strip.rs`).
-//! Covers which `ImagesStripped` events may rewrite stored history and the deferred persist that waits for the stripped retry's `Completed`.
-//! Also covers the user notifications for both the request-local and the durable case.
+//! Covers which `ImagesStripped` events may rewrite stored history, the deferred persist that
+//! waits for the stripped retry to terminal (`Completed` or `Failed`), and the user notifications.
 
 use std::sync::Arc;
 
@@ -87,10 +87,10 @@ async fn wait_for_conversation(
 
 fn own_request(actor: &SessionActor, request_id: &RequestId) {
     let (tx, _rx) = tokio::sync::oneshot::channel();
-    actor
-        .turn_stream_drained
-        .lock()
-        .insert(request_id.clone(), Some(tx));
+    actor.turn_stream_drained.lock().insert(
+        request_id.clone(),
+        crate::session::acp_session::StreamOwnership::with_waiter(Some(tx)),
+    );
 }
 
 fn completed_event(request_id: &RequestId) -> SamplingEvent {
@@ -220,15 +220,11 @@ async fn server_rejected_strip_persists_only_after_completed() {
             );
 
             actor.handle_sampling_event(completed_event(&rid)).await;
-            let conv = wait_for_conversation(&actor, |conv| {
-                !conversation_has_image(conv, PERSIST_GATE_IMAGE_URI)
-            })
-            .await;
+            let conv = actor.chat_state_handle.get_conversation().await;
             assert!(
                 !conversation_has_image(&conv, PERSIST_GATE_IMAGE_URI),
-                "Completed must apply the buffered strip: {conv:?}"
+                "Completed must persist the strip before the handler returns: {conv:?}"
             );
-            settle().await; // the note follows the disk ack
             let sent = drain_gateway_debug(&mut gateway_rx);
             assert!(
                 sent.contains("removed from the conversation"),
@@ -266,6 +262,7 @@ async fn timed_out_strip_survives_new_turn_until_late_completed() {
                 .lock()
                 .get_mut(&timed_out)
                 .expect("timed-out request remains owned")
+                .waiter
                 .take();
 
             // The next turn keeps only timeout-owned durable work, then clears ordinary stream ownership before registering its own request
@@ -344,6 +341,7 @@ async fn rewind_cancels_detached_image_strip_before_it_runs() {
                 .lock()
                 .get_mut(&timed_out)
                 .expect("timed-out request remains owned")
+                .waiter
                 .take();
             actor.retain_timed_out_image_strips_for_new_turn();
             actor.turn_stream_drained.lock().clear();
@@ -804,13 +802,12 @@ async fn non_applied_strip_outcome_still_notifies_the_user() {
         .await;
 }
 
-/// A strip that did not rescue the turn proves nothing: `Failed` drops the buffer and stored history keeps its images.
 #[tokio::test(flavor = "current_thread")]
-async fn server_rejected_strip_dropped_when_retry_fails() {
+async fn server_rejected_strip_persists_when_retry_fails() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let (gateway_tx, _) =
+            let (gateway_tx, mut gateway_rx) =
                 tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
             let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let actor =
@@ -826,21 +823,29 @@ async fn server_rejected_strip_dropped_when_retry_fails() {
                     StripReason::ServerRejected,
                 ))
                 .await;
-            // The drop must be wired through the event handler itself; deleting the Failed arm's call must fail this test
             actor
                 .handle_sampling_event(SamplingEvent::Failed {
                     request_id: rid.clone(),
                     error: failed_info(),
                 })
                 .await;
-            // A later Completed for the same id must be a no-op.
-            actor.handle_sampling_event(completed_event(&rid)).await;
-            settle().await;
-
             let conv = actor.chat_state_handle.get_conversation().await;
             assert!(
-                conversation_has_image(&conv, PERSIST_GATE_IMAGE_URI),
-                "a dropped strip must never persist: {conv:?}"
+                !conversation_has_image(&conv, PERSIST_GATE_IMAGE_URI),
+                "Failed after ServerRejected must persist the strip before the handler returns: {conv:?}"
+            );
+            let sent = drain_gateway_debug(&mut gateway_rx);
+            assert!(
+                sent.contains("removed from the conversation"),
+                "persisted Failed strip must tell the user it is permanent, sent: {sent}"
+            );
+
+            actor.handle_sampling_event(completed_event(&rid)).await;
+            settle().await;
+            let conv = actor.chat_state_handle.get_conversation().await;
+            assert!(
+                !conversation_has_image(&conv, PERSIST_GATE_IMAGE_URI),
+                "a later Completed must not restore the stripped image: {conv:?}"
             );
         })
         .await;

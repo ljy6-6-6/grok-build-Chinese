@@ -7,13 +7,8 @@ use crate::terminal::{TerminalName, terminal_context};
 
 use super::{ActionDef, ActionId, Category, When};
 
-/// True when `Ctrl+.` is not a reliable primary key for the shortcuts cheatsheet.
-///
-/// Callers pick an alternate primary that can arrive (`Ctrl+X` on the agent screen, `?` on the dashboard).
-/// Both keys stay registered either way; this only chooses which the UI advertises.
-///
-/// Driven by [`crate::terminal::TerminalContext::ctrl_dot_unreliable`] (any KKP skip: brand, tmux `extended-keys off`, screen, unknown host).
-/// Host-OS signals add to it: native Windows on a non-branded console, or a Linux binary inside Win32's console pipeline (WSL).
+/// True when `Ctrl+.` is not a reliable primary key for the shortcuts cheatsheet. Both keys stay registered either
+/// way; this only chooses which the UI advertises.
 pub fn ctrl_dot_unreliable() -> bool {
     terminal_context().ctrl_dot_unreliable() || cfg!(target_os = "windows") || crate::host::is_wsl()
 }
@@ -133,8 +128,8 @@ pub(super) fn default_actions(
         },
         ActionDef {
             id: ActionId::NextResponse,
-            label: "response",
-            description: "Next response",
+            label: "turn",
+            description: "Jump to next turn at viewport top",
             default_key: key!('J'),
             alt_keys: vec![],
             category: Category::ConversationNav,
@@ -146,8 +141,8 @@ pub(super) fn default_actions(
         },
         ActionDef {
             id: ActionId::PrevResponse,
-            label: "response",
-            description: "Previous response",
+            label: "turn",
+            description: "Jump to previous turn at viewport top",
             default_key: key!('K'),
             alt_keys: vec![],
             category: Category::ConversationNav,
@@ -510,7 +505,7 @@ pub(super) fn default_actions(
             hint_key_display: None,
             requires_confirmation: false,
             long_help: Some(
-                "Interrupts the agent's current turn and stops generation, keeping the session open.\nEsc cancels immediately while a turn is running in minimal mode or when vim scrollback mode is off (prompt or scrollback focused, even with a draft).\nCtrl+C cancels when the prompt is empty; with a non-empty draft it clears the prompt first and leaves the turn running.\nIt stops the turn, not the app; use the quit shortcut to exit.",
+                "Interrupts the agent's current turn and stops generation, keeping the session open.\nCtrl+C cancels when the prompt is empty; with a non-empty draft it clears the prompt first and leaves the turn running.\nEsc never cancels a turn; pressed mid-turn it shows a reminder to use Ctrl+C.\nIt stops the turn, not the app; use the quit shortcut to exit.",
             ),
         },
         ActionDef {
@@ -578,9 +573,9 @@ pub(super) fn default_actions(
             id: ActionId::OpenSessions,
             label: "sessions",
             description: "Open sessions",
-            default_key: key!(F(3)),
+            default_key: key!('r', CONTROL),
             alt_keys: vec![],
-            category: Category::Panels,
+            category: Category::Session,
             context: When::AgentScreen,
             hint_priority: None,
             hint_key_display: None,
@@ -669,11 +664,8 @@ pub(super) fn default_actions(
             long_help: None,
         },
         ActionDef {
-            // Voice capture chord (the same capture as `/voice`; Esc/Enter stop)
-            // Bound to both Ctrl+Space and F8
-            // Ctrl+Space decodes on every terminal (without the Kitty protocol it collapses to NUL, reported as `Char(' ')`+CONTROL)
-            // F8 is a fallback for OSes/terminals that intercept Ctrl+Space (e.g. macOS input-source switching; use Fn+F8 on a laptop).
-            // The event loop maps a press to hold-to-talk or tap-toggle per `[ui].voice_capture_mode` before normal routing
+            // Voice capture chord (the same capture as `/voice`; Esc/Enter stop). Ctrl+Space decodes on every terminal
+            // (without the Kitty protocol it collapses to NUL, reported as `Char(' ')`+CONTROL).
             id: ActionId::VoiceToggle,
             label: "mic",
             description: "Voice dictation (Ctrl+Space / F8)",
@@ -689,7 +681,7 @@ pub(super) fn default_actions(
                 "Microphone capture for dictation, bound to Ctrl+Space (or F8: handy where Ctrl+Space is taken, e.g. macOS input-source switching; use Fn+F8 on a laptop).\nBehavior follows the Voice capture setting: toggle (press to start, press again to stop) or hold-to-talk (hold to record, release to stop), where hold needs a Kitty-protocol terminal and falls back to toggle elsewhere. `/voice` toggles everywhere.\nSpeech is transcribed straight into the prompt.",
             ),
         },
-        // Prompt history has no key chord (Ctrl+R is deliberately unbound):
+        // Prompt history has no key chord of its own:
         // `/history` opens the search panel; Up on an empty prompt browses.
         ActionDef {
             id: ActionId::ToggleMultiline,
@@ -859,12 +851,8 @@ pub(super) fn default_actions(
         },
     ];
 
-    // Toggle terminal mouse reporting (mouse capture). Opt-in via `[ui] mouse_reporting_toggle = true` in config.toml.
-    // Disabling capture hands mouse selection back to the terminal for native click-drag copy/paste; re-enabling restores in-app mouse support
-    //
-    // Single binding: Ctrl+R on scrollback only (not prompt, where Ctrl+R remains prompt history search)
-    // Plain Ctrl+letter passes through Apple Terminal; this avoids Ctrl+Shift+… chords that Terminal.app often swallows
-    // Under Panels (not Essentials): advanced/opt-in only
+    // Toggle terminal mouse reporting (mouse capture). Single binding: Ctrl+R on scrollback only, which takes that
+    // chord from OpenSessions while scrollback is focused. Under Panels (not Essentials): advanced/opt-in only.
     if mouse_reporting_toggle_enabled {
         actions.push(ActionDef {
             id: ActionId::ToggleMouseCapture,
@@ -881,14 +869,9 @@ pub(super) fn default_actions(
         });
     }
 
-    // Agent Dashboard ----------------------------------------------------
-    //
-    // The `Ctrl+\` entry point and every in-dashboard shortcut are registered here
-    // They all share the dedicated `Category::Dashboard` section so the cheatsheet groups them under a single "Dashboard" header
-    // That keeps them out of Panels / Session / Navigation
-    //
-    // `Ctrl+\` (OpenDashboard) is registered against `Always` (global) so it works from any view, including the dashboard itself (which Esc closes)
-    // Configurable through the standard config.toml mechanism
+    // They all share the dedicated `Category::Dashboard` section so the cheatsheet groups them under a single
+    // "Dashboard" header. `Ctrl+\` (OpenDashboard) is registered against `Always` (global) so it works from any view,
+    // including the dashboard itself (which Esc closes).
     actions.extend([
         ActionDef {
             id: ActionId::OpenDashboard,
@@ -1067,13 +1050,9 @@ pub(super) fn default_actions(
             requires_confirmation: false,
             long_help: None,
         },
-        // `DashboardExit` is registered as a discoverable action with its default key set to Esc
-        // The in-dashboard Esc behaviour is a multi-tier cascade (peek, then input/filter, then exit) that no single action can express
-        // The Esc cascade in `state::handle_key` runs before this registry lookup, so Esc always cascades
-        // A user who rebinds Esc to something else gains a discoverable exit shortcut for the rebound key
-        // The original Esc cascade still works because the cascade is keyed on `KeyCode::Esc` directly
-        // The contract is therefore: "Esc always cascades; any other key bound to `DashboardExit` exits directly."
-        // The hint key shows the effective binding via `Esc` as a fallback
+        // `DashboardExit` is registered as a discoverable action with its default key set to Esc. The Esc cascade in
+        // `state::handle_key` runs before this registry lookup, so Esc always cascades. The original Esc cascade still
+        // works because the cascade is keyed on `KeyCode::Esc` directly. The contract is therefore: "Esc always cascades.
         ActionDef {
             id: ActionId::DashboardExit,
             label: "exit",
@@ -1123,10 +1102,8 @@ pub(super) fn default_actions(
                 "Opens a picker to set the working directory that newly dispatched dashboard agents run in.\nLaunch agents against a different repo or folder without leaving the dashboard.\nAffects new dispatches only, not agents already running.",
             ),
         },
-        // Toggle worktree-dispatch mode
-        // Ctrl+W ("worktree") makes the next dashboard-dispatched session spawn in a fresh git worktree
-        // The dispatcher gates it on the cwd being a git repo
-        // Free under `DashboardFocused` (Ctrl+W only binds the overlay-exit fallback under `DashboardOverlay`, a different context)
+        // Toggle worktree-dispatch mode. Free under `DashboardFocused` (Ctrl+W only binds the overlay-exit fallback under
+        // `DashboardOverlay`, a different context).
         ActionDef {
             id: ActionId::DashboardToggleWorktree,
             label: "worktree",
@@ -1149,15 +1126,9 @@ pub(super) fn default_actions(
             id: ActionId::DashboardOverlayExit,
             label: "close overlay",
             description: "Back to dashboard",
-            // The primary back-out shortcuts are reached through different routes:
-            //   - Ctrl+\\ resolves to OpenDashboard (registered separately above); the overlay-input intercept treats it as overlay-exit
-            //   - `q` when scrollback is focused, handled by the overlay intercept directly
-            //   - Esc when the agent is in a "neutral" state
-            //     Neutral means no modals or viewers, no text selection, no link highlight, and no question/goal/rewind/permission overlays
-            //     Per-pane Esc consumers still take precedence; see the `overlay_esc_*` tests in `app_view`
-            //   - A `[✗]` click, routed via this action by the mouse handler
-            // The `default_key` mirrors the primary route, Ctrl+\ (OpenDashboard, treated as overlay-exit), so the cheatsheet hint is accurate
-            // (Ctrl+W is not used here; it's the dashboard's worktree toggle.)
+            // The primary back-out shortcuts are reached through different routes. A `[✗]` click, routed via this action by
+            // the mouse handler The `default_key` mirrors the primary route, Ctrl+\ (OpenDashboard, treated as overlay-exit),
+            // so the cheatsheet hint is accurate (Ctrl+W is not used here.
             default_key: key!('\\', CONTROL),
             alt_keys: vec![],
             category: Category::Dashboard,

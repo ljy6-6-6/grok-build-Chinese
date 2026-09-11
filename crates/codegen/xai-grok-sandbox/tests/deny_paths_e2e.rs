@@ -845,10 +845,9 @@ fn fixture_homes(
         TempDirGuard(workspace),
     )
 }
-/// Drive one deny case end-to-end; shared by the exact-path and glob cases.
-/// A custom profile gets `deny_entries` (exact paths and/or globs) as its `deny` list.
-/// Each `target` is created with the MARKER, each `control` with readable content.
-/// An isolated subprocess then asserts every target is read/write/rename-denied and every control stays readable.
+/// A custom profile gets `deny_entries` (exact paths and/or globs) as its `deny` list. Each `target` is created with the
+/// MARKER, each `control` with readable content. An isolated subprocess then asserts every target is
+/// read/write/rename-denied and every control stays readable.
 fn run_deny_case(
     tag: &str,
     profile: &str,

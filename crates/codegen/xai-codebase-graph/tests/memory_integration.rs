@@ -148,9 +148,7 @@ fn test_builder_skips_binary_and_oversized_in_bulk() {
 }
 
 /// Verify that bounded merge-batching produces the same index as unbounded.
-///
-/// Uses a very small build_batch_size to exercise the multi-batch code path
-/// even on this small corpus, then compares stats against an unbatched build.
+/// A tiny `build_batch_size` exercises the multi-batch path even on this small corpus.
 #[test]
 fn test_build_batch_size_produces_correct_index() {
     let dir = tempdir().unwrap();
@@ -188,10 +186,7 @@ fn test_build_batch_size_produces_correct_index() {
 // =============================================================================
 
 /// Verify that an index survives a save/load round-trip after compact().
-///
-/// Guards against regressions in the binary format introduced by the u32
-/// line-number change.  compact() is already called by IndexBuilder::build,
-/// so no explicit call is needed here.
+/// Guards the binary format against the u32 line-number change. `IndexBuilder` already compacts.
 #[test]
 fn test_compact_then_save_load_roundtrip() {
     let dir = tempdir().unwrap();

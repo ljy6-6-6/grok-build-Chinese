@@ -16,10 +16,6 @@ pub use prod_mc_cli_chat_proxy_types::{
 
 /// Compiled-in trusted keys `(key_id, raw 32 bytes)`. Prod `v1`. Empty means dark (no verification).
 /// The private signing key never lives in this crate or in client env flags.
-///
-/// - base64: `BxP2cxaRIzlhxUvqmlz9e/dIBeWX58P4whEW0sFrdzI=`
-/// - SHA-256: `fb4dcc77c757465b953265146d495166527fcc1c2b365352f8d20c3d8f6de620`
-///
 /// Ship only after the server is emitting valid envelopes for this key id.
 pub const EMBEDDED_DEPLOYMENT_CONFIG_PUBKEYS: &[(&str, &[u8])] = &[(
     "v1",
@@ -196,11 +192,7 @@ pub fn verification_active() -> bool {
 }
 
 /// Apply remote `managed_config_signature_verification`.
-///
-/// - `Some(false)` disarms only when `settings_origin_trusted` is true **or** no keys are embedded (dark: disarm is a no-op for enforcement).
-///   An untrusted origin (env-overridden proxy) cannot disarm a keyed client; that would make the kill-switch an env toggle.
-/// - `None` / `Some(true)` re-arm always (stronger / default).
-///
+/// `Some(false)` disarms only when `settings_origin_trusted` is true **or** no keys are embedded (dark: disarm is a no-op for enforcement). An untrusted origin (env-overridden proxy) cannot disarm a keyed client; that would make the kill-switch an env toggle; `None` / `Some(true)` re-arm always (stronger / default).
 /// Call only when settings were successfully fetched. Logs on state change.
 pub fn apply_remote_managed_config_signature_verification(
     setting: Option<bool>,
@@ -232,9 +224,7 @@ pub fn embedded_key_id_trusted(key_id: &str) -> bool {
 
 /// Verify `signature_b64` over `signed_payload` against `trusted_keys`, returning the parsed payload.
 /// The verifying key is selected by the SIGNED payload's `key_id`; reading it pre-verification is safe because selection stays in the trusted set.
-/// A forged id either misses or picks a key the signature won't match.
 /// Requires the [`MANAGED_POLICY_TYP`] tag (a claim must never verify as a policy).
-/// Pure: callers supply the keys so tests can use throwaway keypairs.
 pub fn verify_signed_payload(
     signed_payload: &str,
     signature_b64: &str,
@@ -286,7 +276,6 @@ fn verify_signature_with_keys(
 /// Fetch-time identity binding for a VERIFIED payload, expiry enforced.
 /// A deployment-signed payload is trusted on signature alone; a team-signed payload must match the active team.
 /// Lenient on a missing active team: an `auth.json` read blip must not brick a session (a cross-team attacker has a team of their own).
-/// The at-rest checks use [`signed_principal_matches`] instead.
 pub fn check_fetch_identity(
     payload: &SignedPayload,
     active_team_id: Option<&str>,
@@ -364,9 +353,7 @@ fn verify_fetched_with_keys(
 }
 
 /// True when something occupies `path` that is not a regular file (directory, symlink, fifo, …).
-/// The check is NO-FOLLOW, so even a symlink to a byte-identical file counts.
 /// A squatter blocks or redirects reads/rewrites, which is tamper, never a blip.
-/// The clearing side stays no-follow too (a symlink squat is removed as the link).
 fn non_regular_file_at(path: &std::path::Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|m| !m.is_file())
 }
@@ -374,7 +361,6 @@ fn non_regular_file_at(path: &std::path::Path) -> bool {
 /// Confirm the on-disk artifacts match the signed payload byte-for-byte: an in-place edit is caught, not just a deletion.
 /// A signed-ABSENT slot must be empty on disk: a locally planted `requirements.toml` (the highest-precedence layer) is tamper, not noise.
 /// An unreadable file is [`SigError::Unreadable`] (a read blip: refetch, don't refuse).
-/// Anything non-regular squatting the slot ([`non_regular_file_at`]) reads as tamper.
 pub fn check_on_disk_matches(
     home: &std::path::Path,
     payload: &SignedPayload,
@@ -471,7 +457,6 @@ fn write_envelope_at(path: &std::path::Path, sidecar: &SignatureEnvelope) -> std
 /// Persisted envelope nonce for [`MANAGED_CONFIG_NONCE_ECHO_HEADER`] (unverified; telemetry only, never a trust input).
 /// Both guards fail open by skipping the echo.
 /// Only a nonce with the server's mint shape is echoed (header-safe: a corrupt sidecar can't brick the fetch).
-/// Only a payload issued to `fetch_principal` counts: a leftover sidecar from a prior identity must not read as a cross-tenant replay upstream.
 pub fn stored_envelope_nonce(
     home: &std::path::Path,
     fetch_principal: Option<&str>,
@@ -491,7 +476,6 @@ pub fn stored_envelope_nonce(
 }
 
 /// Whether an authentic claim IMPOSES fail-closed enforcement.
-/// It imposes only when verified, bound to the KNOWN `expected_principal`, in-date vs the caller-clamped `now_unix`, and `fail_closed`.
 /// Anything else imposes nothing: permissive (must not override a now-fail_closed marker), foreign, expired, forged, or absent.
 /// An unknown principal also imposes nothing: a planted claim must not brick a signed-out victim.
 pub fn managed_identity_claim_imposes(
@@ -644,9 +628,6 @@ pub enum SignedVerdict {
     /// No sidecar, or one whose signature doesn't verify: not an authentic verdict.
     /// Under a fail-closed marker that recorded served policy, absence is itself tamper.
     /// Stripping the sidecar must not downgrade enforcement to the forgeable marker path.
-    /// A first keyed launch over a pre-signing cache also refuses until one online refetch writes the sidecar; that is deliberate.
-    /// Residual risk: wiping the marker with the sidecar, inherent to user-writable state, covered by the root-owned /etc/grok and MDM layers.
-    /// Otherwise the marker decides.
     NoAuthenticSidecar,
     /// The sidecar exists but a transient IO error (EACCES-style, never plain absence or a squatting non-file) blocked the read.
     /// Not tamper evidence: the gate falls back to the marker decision, and the refetch trigger fires to rewrite it.
@@ -661,8 +642,6 @@ pub enum SignedVerdict {
 
 /// The signed verdict for the on-disk cache; see [`SignedVerdict`].
 /// The fail-closed opt-in is read from the SIGNED bytes, not the forgeable marker.
-/// `expected_principal` is the machine's managed principal (active team id, or the recorded deployment id).
-/// A payload bound elsewhere is a cross-tenant replay and reads compromised.
 pub fn signed_cache_compromised(
     home: &std::path::Path,
     expected_principal: Option<&str>,

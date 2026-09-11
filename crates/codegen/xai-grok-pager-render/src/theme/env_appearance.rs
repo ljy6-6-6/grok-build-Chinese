@@ -11,10 +11,7 @@ use std::collections::HashMap;
 
 use super::system_appearance::SystemAppearance;
 
-/// Read appearance from the process environment (explicit hints and `COLORFGBG`).
-///
-/// This is the runtime watcher path.
-/// Startup uses [`detect_explicit_from_env_map`] then OSC 11 then [`detect_colorfgbg_from_env_map`].
+/// Runtime watcher path. Startup orders explicit hints, then OSC 11, then `COLORFGBG`.
 #[must_use]
 pub fn detect() -> Option<SystemAppearance> {
     detect_from_env_map(&crate::host::collect_unicode_env())

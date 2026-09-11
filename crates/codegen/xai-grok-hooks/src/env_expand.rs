@@ -34,9 +34,6 @@ const SENTINEL_SUFFIX: &str = "__\u{f8ff}";
 
 /// Build the per-call sentinel that hides modifier-form `${...}` substrings from `shellexpand::env_with_context_no_errors`.
 /// The sentinel is restored to `${` after shellexpand runs, so the modifier form survives expansion verbatim.
-///
-/// 128 bits of `fastrand` entropy sit as hex between the fixed [`SENTINEL_PREFIX`] and [`SENTINEL_SUFFIX`] markers.
-/// A fixed sentinel could collide with a hand-crafted `extra_env` value or modifier body and be rewritten to `${`.
 /// With per-call randomization the chance of a natural collision is ~2^-128.
 fn make_sentinel() -> String {
     let hi: u64 = fastrand::u64(..);
@@ -45,15 +42,8 @@ fn make_sentinel() -> String {
 }
 
 /// Expand `${VAR}` / `$VAR` references in `input`.
-///
-/// Lookup order for each reference:
-/// 1. `extra` (the per-hook `extra_env` map)
-/// 2. The current process environment
-///
 /// Unresolved references are preserved verbatim, so the function is idempotent on already-expanded strings.
-/// References resolved only at runtime (e.g. the dispatcher's always-set `GROK_HOOK_*` vars) survive the load-time pass.
-///
-/// Parameter-expansion-modifier forms (`${VAR:-x}`, `${VAR%pat}`, etc.) are ALSO preserved verbatim; see the module docs for why.
+/// References resolved only at runtime survive the load-time pass.
 pub(crate) fn expand_env_vars_with_extra(input: &str, extra: &HashMap<String, String>) -> String {
     expand_env_vars_with_process_skip(input, extra, &[])
 }
@@ -100,9 +90,7 @@ pub(crate) fn expand_env_vars_with_process_skip(
 
 /// Replace the leading `${` of every modifier-form `${...}` substring (valid identifier plus a parameter-expansion modifier) with `sentinel`.
 /// Plain `${VAR}` and bare `$VAR` references are NOT touched; they pass through to shellexpand for normal resolution.
-///
 /// "Modifier" means anything inside the braces after the identifier: `:-`, `-`, `:=`, `=`, `:?`, `?`, `:+`, `+`, `%`, `#`, `/`, `:N`, `:N:M`, etc.
-/// Detection is shared with [`crate::runner::command::find_unresolved_env_vars`] via [`iter_env_var_references`].
 fn mask_modifier_forms(input: &str, sentinel: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut cursor: usize = 0;
@@ -148,14 +136,7 @@ pub(crate) struct EnvVarRef<'a> {
 
 /// Walk `input` and yield every `$VAR` / `${...}` reference.
 /// Skips shell positional / special params (`$1`, `$$`, `$?`, `$#`, `$(...)`, `$@`, etc.) since none of those are env-var references.
-///
-/// Behaviour notes:
-///
-/// * Unterminated braced forms (`${VAR:-no-close`) are skipped: the `$` is consumed and scanning continues at the next byte.
-///   This matches `shellexpand`, which treats unterminated forms as literal text.
-/// * Nested braces inside a modifier body (`${A:-${B}}`) match the FIRST `}`, so the inner `${B}` becomes part of the outer modifier body.
-///   The runtime `sh -c` branch handles real nesting natively when the form reaches the shell.
-/// * Empty / invalid identifier (`${}`, `${:-foo}`) is yielded with an empty `name`, so callers can decide whether to mask it.
+/// Unterminated braced forms (`${VAR:-no-close`) are skipped: the `$` is consumed and scanning continues at the next byte. This matches `shellexpand`, which treats unterminated forms as literal text; Nested braces inside a modifier body (`${A:-${B}}`) match the FIRST `}`, so the inner `${B}` becomes part of the outer modifier body. The runtime `sh -c` branch handles real nesting natively when the form reaches the shell; Empty / invalid identifier (`${}`, `${:-foo}`) is yielded with an empty `name`, so callers can decide whether to mask it.
 pub(crate) fn iter_env_var_references(input: &str) -> EnvVarRefIter<'_> {
     EnvVarRefIter { input, pos: 0 }
 }

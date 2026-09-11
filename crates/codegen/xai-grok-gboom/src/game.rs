@@ -35,9 +35,7 @@ const PLAYER_RADIUS: f32 = 0.20;
 const IMP_RADIUS: f32 = 0.30;
 
 /// Movement tuning: a continuous "held" model.
-///
 /// With no key-release events, each press/repeat refreshes a per-control hold timer ([`HOLD_WINDOW`]).
-/// While it's positive, velocity eases toward a steady target.
 /// A constant target while held means speed doesn't sawtooth with the OS key-repeat cadence, yet releasing glides to a stop.
 const MOVE_SPEED: f32 = 3.3; // tiles/s while a move key is held
 const TURN_SPEED: f32 = 2.2; // rad/s (~125°/s) while a turn key is held

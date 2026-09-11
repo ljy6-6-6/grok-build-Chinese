@@ -100,12 +100,7 @@ fn topmost_marker_in(screen: &str) -> Option<usize> {
 pub const STREAMING_TAIL_WORDS: usize = 240;
 pub const STREAMING_CHUNK_DELAY: Duration = Duration::from_millis(30);
 
-/// Spawn `binary` for `kind` over a `marker_count`-marker transcript, with `extra_env` appended to the mock's pager env.
-/// `binary` is the pager under test: the matrix runner passes its `--binary` override here, tests pass `env::pager_binary()`.
-/// `extra_env` carries terminal-class markers, `GROK_SCROLL_*`, and `GROK_SCROLL_LOG`.
-/// The PTY spawn strips host-terminal identity first, so the injected markers always win.
-///
-/// `blocked_turn` is present only for a streaming session.
+/// Host-terminal identity is stripped first, so injected markers always win. `blocked_turn` is only for a streaming session.
 pub async fn spawn_marker_session(
     binary: &Path,
     kind: SessionKind,
@@ -180,10 +175,7 @@ fn assert_scrollable_baseline(harness: &PtyHarness, context: &str) -> usize {
     })
 }
 
-/// [`SessionKind::Settled`]/[`SessionKind::BottomPinned`] preamble: stream the whole marker transcript and land bottom-pinned in follow mode.
-/// Tab focuses the scrollback; Esc would silently start the rewind picker, whose ~800ms expiry redraw pollutes frame captures.
-/// Wheel reports are position-routed regardless of focus.
-/// After settling, the frame-timing watermark is reset so counted frames come only from the caller's gesture.
+/// Tab focuses scrollback; Esc starts the rewind picker and its expiry redraw pollutes captures. Reset the frame watermark after settling.
 pub async fn spawn_settled_marker_session(
     binary: &Path,
     marker_count: usize,
@@ -212,11 +204,7 @@ pub async fn spawn_settled_marker_session(
     (harness, content, baseline)
 }
 
-/// [`SessionKind::Streaming`] preamble: the whole fenced marker block rides the first delta.
-/// The mock splits deltas on single spaces and the block contains none.
-/// The space-separated tail streams word-by-word at `chunk_delay`.
-/// The matched expectation prevents terminal completion until the caller releases it.
-/// Setup guards: the transcript overflows the viewport and [`STREAM_END_SENTINEL`] is not on screen.
+/// Marker block has no spaces so it rides the first delta; the mock splits on spaces. Expectation holds completion until released.
 pub async fn spawn_streaming_marker_session(
     binary: &Path,
     marker_count: usize,

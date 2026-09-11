@@ -12,10 +12,9 @@ use xai_grok_tools::implementations::skills::discovery::extract_first_paragraph;
 
 use serde::Deserialize;
 
-/// A declarative subagent role definition from config.
-///
-/// Roles provide named presets that callers can reference via the `subagent_type` field in the task tool.
-/// Each role can specify a default capability mode, model override, and custom prompt.
+/// A declarative subagent role definition from config. Roles provide named presets that callers can reference via the
+/// `subagent_type` field in the task tool. Each role can specify a default capability mode, model override, and custom
+/// prompt.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct SubagentRole {
@@ -47,10 +46,8 @@ pub struct SubagentRole {
     pub source_dir: Option<PathBuf>,
 }
 
-/// A named persona/SOUL definition controlling tone, style, and behavior.
-///
-/// Personas are referenced by name via the `persona` field in the task tool.
-/// Their instructions are prepended to the child's prompt as a `<persona>` XML block.
+/// A named persona/SOUL definition controlling tone, style, and behavior. Personas are referenced by name via the
+/// `persona` field in the task tool. Their instructions are prepended to the child's prompt as a `<persona>` XML block.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct SubagentPersona {

@@ -111,7 +111,6 @@ async fn salvage_test_actor_on_backend(
         sampling_cfg,
         xai_grok_sampler::RetryPolicy {
             max_retries: 0,
-            rate_limit_retry_threshold: 0,
             ..Default::default()
         },
         sampler_event_tx,
@@ -301,7 +300,13 @@ fn rate_limit_mid_continuation_stays_terminal() {
             let error =
                 error_with_tiny_window(xai_grok_sampler::SamplingErrorKind::RateLimited, 429);
             let Err(err) = actor
-                .handle_sampling_failure(error, 0, transient_state(0, true), true)
+                .handle_sampling_failure(
+                    error,
+                    0,
+                    transient_state(0, true),
+                    true,
+                    TurnParkState::Fresh,
+                )
                 .await
             else {
                 panic!("a mid-salvage rate limit is still terminal");
@@ -333,7 +338,13 @@ fn suppressed_overflow_mid_continuation_still_completes_truncated() {
             );
             let error = error_with_tiny_window(xai_grok_sampler::SamplingErrorKind::Api, 500);
             let Err(err) = actor
-                .handle_sampling_failure(error, 0, transient_state(0, true), true)
+                .handle_sampling_failure(
+                    error,
+                    0,
+                    transient_state(0, true),
+                    true,
+                    TurnParkState::Fresh,
+                )
                 .await
             else {
                 panic!("the quiet arm returns the typed error");

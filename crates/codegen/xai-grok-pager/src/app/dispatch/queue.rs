@@ -2,11 +2,13 @@
 //! It also holds the local drip-feed drain ([`maybe_drain_queue`]), the turn-start shim, and the queue-interject action arm.
 
 use super::ctx::{NO_SESSION_NOTICE, active_agent_session_id, with_active_agent};
+use super::inline_feedback::{self, InlineDraftSaveError};
 use crate::acp::meta::user_prompt_meta;
 use crate::app::actions::Effect;
 use crate::app::agent::{AgentCommand, AgentId};
 use crate::app::agent_view::{AgentView, PromptMode};
 use crate::app::app_view::{ActiveView, AppView};
+use crate::app::command_catalog::CommandCatalogSource;
 use crate::scrollback::EntryId;
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::SessionEvent;
@@ -25,44 +27,16 @@ pub(super) fn push_and_page_flip(scrollback: &mut ScrollbackState, block: Render
         return;
     }
     let idx = scrollback.len() - 1;
-    scrollback.scroll_to_entry_top(idx);
-    scrollback.enable_follow_with_preserve();
+    scrollback.page_flip_to_entry(idx);
 }
 
 fn combine_queued_prompts_enabled() -> bool {
     crate::appearance::cache::load_combine_queued_prompts()
 }
 
-/// Whether a prompt/command submitted right now should take the server-authoritative immediate-send path.
-/// Conditions: the **server is busy** (running a turn or still holding queued prompts), the session exists, and the local drip-feed queue is empty.
 /// We must also not be mid-edit, mid-model-switch, or mid-replay.
-/// Kind-specific extras (e.g. the plain-prompt "no images" rule) are checked by the caller.
-///
-/// **Server-busy (`is_turn_running() || !shared_queue.is_empty()`):**
-/// the immediate-send path is for prompts that must queue server-side rather than start a turn locally.
-/// Checking `is_turn_running()` alone is not enough.
-/// In leader mode there is a turn-end window where this client has processed the turn-end (locally `Idle`, `current_prompt_id` cleared).
-/// It has not yet adopted the leader's broadcast that the next prompt was promoted.
-/// In that window `is_turn_running()` is false, yet the agent is busy and its queue is non-empty.
-/// This client sees that as a non-empty `shared_queue` mirror.
-/// Without the queue check, a prompt sent then takes the local drip-feed path and is optimistically promoted to a running turn on this client.
-/// The leader instead appends it behind the existing queue, so it shows as running here but queued on every other client.
-/// (Confirmed via qtrace: `send_route_plain immediate=false is_turn_running=false shared_queue_len=5` followed by `local_drain`.)
-/// Treating a non-empty `shared_queue` as server-busy routes it to the server queue, where the broadcast then drives adoption for all clients.
-///
+/// **Server-busy (`is_turn_running() || !shared_queue.is_empty()`):** the immediate-send path is for prompts that must queue server-side rather than start a turn locally.
 /// **FIFO guard (`pending_prompts.is_empty()`):** a prompt may only jump onto the server queue when the local drip-feed queue is empty.
-/// The two queues are merged for display/drain as *server rows first, then local rows* ([`QueuePane::sync_from_merged`]).
-/// That merge is only correct while every server-queued prompt is older than every local one.
-/// The invariant breaks during the startup race: prompts typed while the session is still "Starting…" go local (no session/turn yet).
-/// Once the first one drains and the turn starts, a newly-typed prompt would immediate-send onto the server queue.
-/// It would render *ahead* of the still-pending older local prompt (e.g. `[2, 3]` shown/run as `[3, 2]`).
-/// Requiring an empty local queue keeps later prompts behind the older ones (they join the local queue and drain in order), preserving FIFO.
-///
-/// **Leader / follow-up Steer gate:** the shared queue exists to hold every attached client to one order.
-/// `[ui].follow_up_behavior = "steer"` also takes this path.
-/// The shell can then promote the row to a mid-turn interjection at the next tool batch or model step.
-/// A non-adopted auto-wake is also server-busy: the pane is Idle, but the shell is in a turn.
-/// Route that send onto the server queue instead of locally starting a fake turn.
 pub(super) fn immediate_server_send_eligible(agent: &AgentView, leader_mode: bool) -> bool {
     let wake_running = agent.running_wake_turn.is_some();
     let server_busy =
@@ -99,16 +73,9 @@ pub(super) fn push_server_queue_echo(
     }
 }
 
-/// Retire the optimistic placeholder for a prompt that has definitively left the server-authoritative queue.
 /// That covers a prompt restored on cancel, removed, drained, or otherwise resolved without becoming the running turn.
-///
-/// The agent's `pending_inputs` is the single source of truth for queue contents and order.
 /// The only client-side queue state is the optimistic echo that bridges the round-trip before the confirming `x.ai/queue/changed` broadcast.
 /// Once a prompt's RPC resolves (or we pull it back on cancel) it will never reappear in a future broadcast, so its echo must be dropped.
-/// Otherwise the reconcile in [`AppView::apply_queue_changed`] keeps re-pinning the stale row onto the end of every subsequent broadcast.
-/// That both resurrects the removed prompt and scrambles the queue order.
-///
-/// Takes the two backing maps by `&mut` (rather than `&mut AppView`) so callers can invoke it while holding a disjoint borrow of `app.agents`.
 pub(super) fn retire_optimistic_echo(
     optimistic: &mut std::collections::HashMap<
         String,
@@ -133,7 +100,6 @@ pub(super) fn retire_optimistic_echo(
 }
 
 /// Drain prompt-side images and snapshot all chip elements (paste blocks, @-file refs, image chips) into the most recently enqueued `QueuedPrompt`.
-///
 /// Must be called after `enqueue_prompt` / `push_back` and before `prompt.set_text("")` (which clears element and image state).
 /// If the last queued entry already has `wire_blocks` (skill injection), images are dropped with a toast instead of merged.
 pub(super) fn drain_prompt_state_to_last_queued(agent: &mut AgentView) {
@@ -144,7 +110,12 @@ pub(super) fn drain_prompt_state_to_last_queued(agent: &mut AgentView) {
         return;
     };
 
-    entry.chip_elements = chip_elements;
+    // Injected skill text can be shorter than the composer that supplied the chips.
+    let text = entry.text.as_str();
+    entry.chip_elements = chip_elements
+        .into_iter()
+        .filter(|chip| text.get(chip.range.clone()).is_some())
+        .collect();
 
     if images.is_empty() {
         return;
@@ -163,24 +134,9 @@ pub(super) fn drain_prompt_state_to_last_queued(agent: &mut AgentView) {
     entry.images = images;
 }
 
-/// Prepend `<system-reminder>` framing to a cron prompt for the model.
-///
-/// Delegates to the shared implementation in `xai_grok_tools::reminders`.
-/// The UI shows the raw `prompt` text via `RenderBlock::cron_prompt`; this wrapped version is only sent to the model via `Effect::SendPrompt`.
-/// The framing tells the model the message is a scheduled task execution, not a human.
-fn format_cron_prompt(prompt: &str, task_id: &str, human_schedule: &str) -> String {
-    xai_grok_tools::reminders::format_scheduled_task_prompt(prompt, task_id, human_schedule)
-}
-
-/// Try to send the next queued entry (prompt, command, bash, or cron) if the agent is idle.
-///
+/// Try to send the next queued entry (prompt, command, or bash) if the agent is idle.
 /// Called after enqueue operations and task completions to advance the queue.
-///
-/// Branches on `QueueEntryKind`:
-/// - **Prompt**: pushes user prompt block to scrollback, starts turn, returns `Effect::SendPrompt`
-/// - **Command**: starts command, returns the appropriate `Effect` (e.g., `Effect::Compact`)
-/// - **BashCommand**: starts turn (no user block), returns `Effect::SendBashCommand`
-/// - **Cron**: pushes cron prompt block to scrollback, starts turn, returns `Effect::SendPrompt`
+/// **Prompt**: pushes user prompt block to scrollback, starts turn, returns `Effect::SendPrompt`
 pub(super) struct QueueDrain {
     pub(super) effects: Vec<Effect>,
     pub(super) page_flip_entry: Option<EntryId>,
@@ -195,27 +151,18 @@ impl QueueDrain {
     }
 }
 
-/// Release a locally-queued prompt into a running turn that is parked on a sendable wait (subagent / task output).
-///
 /// The local drip-feed queue otherwise holds every queued prompt until the turn ends, so a message sent while waiting never reaches the shell.
-/// `/btw` is an ext-method and does not produce an ACP session batch.
 /// This therefore has to run on the send path itself (and when the /btw answer lands), not only after the next session update.
-///
 /// Only a parked wait counts.
-/// Live watchers (`/loop`, background commands) survive idle thinking turns, and a foreground tool is not a wait.
-/// Treating either as busy would interject a follow-up the user meant to queue.
-/// Goes out as `x.ai/interject`, never send-now (cancel semantics).
-///
-/// Releases the **last** queued plain prompt (the one this send just pushed), not the front.
-/// An earlier follow-up queued while thinking must stay queued.
-/// Only a row whose wire payload is its display text is released.
-///
-/// `agent_id` targets that session. `None` uses the focused agent.
 pub(crate) fn maybe_release_queued_prompt_into_turn(
     app: &mut AppView,
     agent_id: Option<AgentId>,
 ) -> Vec<Effect> {
     use crate::app::agent::QueueEntryKind;
+
+    if !crate::appearance::cache::load_follow_up_steer() {
+        return Vec::new();
+    }
 
     let id = match agent_id {
         Some(id) => id,
@@ -308,7 +255,6 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
         return QueueDrain::blocked();
     }
     // Server-owned next turn: a non-running server row (including this client's own in-flight send-now echo) drains shell-side
-    // The `queue/changed(running_prompt_id)` adoption starts it
     // Draining a local row now would optimistically promote it as the running turn while the shell runs the server row
     // The server row's deltas then fail the prompt-id gate and render nothing (the FIFO invariant documented on `immediate_server_send_eligible`)
     let running = agent.session.current_prompt_id.as_deref();
@@ -345,13 +291,81 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
         PromptMode::EditingQueued { id, .. } => Some(*id),
         _ => None,
     };
-    let queued = match if combine_queued_prompts_enabled() {
+    let mut queued = match if combine_queued_prompts_enabled() {
         agent.session.dequeue_combined_prompt(editing_id)
     } else {
         agent.session.dequeue_prompt()
     } {
         Some(q) => q,
         None => return QueueDrain::blocked(),
+    };
+
+    // Saved at send time, not on Enter: no file I/O in the composer path, and the model only sees a draft id that exists on disk.
+    let mut inline_feedback_images: Vec<Option<(Vec<u8>, String)>> = Vec::new();
+    let predraft_save = if let Some(blocks) = queued.wire_blocks.as_mut()
+        && let Some(user_text) =
+            crate::slash::commands::feedback::inline_feedback_user_text(&queued.text)
+    {
+        use base64::Engine as _;
+        // An undecodable image is dropped like any other unusable one; it never refuses the report.
+        inline_feedback_images = blocks
+            .iter()
+            .filter_map(|block| match block {
+                acp::ContentBlock::Image(image) => Some(image),
+                _ => None,
+            })
+            .map(|image| {
+                base64::engine::general_purpose::STANDARD
+                    .decode(&image.data)
+                    .ok()
+                    .map(|bytes| (bytes, image.mime_type.clone()))
+            })
+            .collect();
+        let session_dir = agent.session.local_session_dir();
+        inline_feedback::save_inline_feedback_draft(
+            session_dir.as_deref(),
+            user_text,
+            &inline_feedback_images,
+        )
+        .map(|saved| {
+            if let Some(acp::ContentBlock::Text(text)) = blocks.first_mut() {
+                text.text = crate::slash::commands::feedback::feedback_skill_instruction(
+                    user_text,
+                    saved.draft_id.as_str(),
+                );
+            }
+            saved.notice
+        })
+    } else {
+        Ok(None)
+    };
+    // Pushed after the skill bubble below so it stays inside the page a flip-on-send pins to the bubble.
+    let inline_feedback_notice = match predraft_save {
+        Ok(notice) => notice,
+        Err(InlineDraftSaveError::Busy) => {
+            agent.session.pending_prompts.push_front(queued);
+            let notice = inline_feedback::FEEDBACK_STORE_BUSY_NOTICE;
+            // A second blocked drain of the same front row must not stack a duplicate.
+            let already_shown = agent.scrollback.last().is_some_and(
+                |entry| matches!(&entry.block, RenderBlock::System(block) if block.text == notice),
+            );
+            if !already_shown {
+                push_and_page_flip(&mut agent.scrollback, RenderBlock::system(notice));
+            }
+            log_blocked("feedback_store_busy", Some(&session_id.0));
+            return QueueDrain::blocked();
+        }
+        Err(InlineDraftSaveError::Failed(message)) => {
+            let notice = inline_feedback::restore_inline_feedback_report(
+                agent,
+                &queued.text,
+                inline_feedback_images.into_iter().flatten().collect(),
+                message,
+            );
+            push_and_page_flip(&mut agent.scrollback, RenderBlock::system(notice));
+            // The row is gone and no turn started, so the next row can drain now.
+            return maybe_drain_queue(agent);
+        }
     };
 
     // A new turn is starting: follow-up chips belong to the previous response and must not linger into it
@@ -373,6 +387,16 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
     );
     // qtrace: a local drip-feed drain promotes this prompt to the running turn client-side (renders a scrollback block and sets current_prompt_id)
     // In leader mode this is the suspected divergence point: the server may queue the prompt behind others instead of running it
+    let logged_text = if queued.kind == QueueEntryKind::Command {
+        queued
+            .text
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_string()
+    } else {
+        queued.text.chars().take(48).collect()
+    };
     tracing::debug!(
         target: "qtrace",
         pid = std::process::id(),
@@ -381,7 +405,7 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
         remaining = agent.session.pending_prompts.len(),
         shared_queue_len = agent.shared_queue.len(),
         session = session_id.0.as_ref(),
-        text = %queued.text.chars().take(48).collect::<String>(),
+        text = %logged_text,
         "draining prompt LOCALLY as a new running turn",
     );
 
@@ -389,11 +413,6 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
 
     // Track whether this turn is a bash-mode command for post-turn focus.
     agent.bash_turn = queued.kind == QueueEntryKind::BashCommand;
-    agent.cron_task_id = if queued.kind == QueueEntryKind::Cron {
-        queued.task_id.clone()
-    } else {
-        None
-    };
     // Generate a fresh prompt_id for every outgoing prompt/command
     // It is threaded through PromptRequest._meta to the agent and echoed on every SessionNotification and the PromptResponse
     // That lets us correlate notifications back to the originating prompt for cancel/rewind
@@ -401,15 +420,14 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
 
     // Record it as self-originated so the ACP gate treats this turn's deltas as ours rather than adopting them as another client's turn
     // Ours means drive it, and drop a stale post-rewind chunk on a mismatch
-    // The `Cron` arm overrides `prompt_id` with a `scheduler-fired-` prefix and records that id itself
-    if queued.kind != QueueEntryKind::Cron {
-        agent.note_self_originated_prompt(&prompt_id);
-    }
+    agent.note_self_originated_prompt(&prompt_id);
 
     match queued.kind {
         QueueEntryKind::Prompt => {
             agent.start_turn_boundary(Some(&prompt_id));
             agent.session.current_prompt_id = Some(prompt_id.clone());
+            // After `current_prompt_id`: `start_turn_boundary` clears any earlier watch
+            agent.arm_prompt_ack(&prompt_id, Instant::now());
             // Scrollback shows display text (never raw skill XML)
             // Combined drains paint one bubble per original follow-up
             let is_skill = queued.display_as_skill;
@@ -432,6 +450,9 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
                 let id = agent.scrollback.push_block(block);
                 (agent.scrollback.len().saturating_sub(1), id, vec![id])
             };
+            if let Some(notice) = inline_feedback_notice {
+                agent.scrollback.push_block(RenderBlock::system(notice));
+            }
             // Stash for cancel-with-restore
             // Only plain (non-skill) prompts can be reversed back into the input box
             if queued.wire_blocks.is_none() {
@@ -456,7 +477,6 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
             let effects = if let Some(mut blocks) = queued.wire_blocks {
                 // Skill injection: send structured blocks.
                 // Annotate the first text block's meta with the display text
-                // The pager can then reconstruct the clean prompt on session restore (replay)
                 // Without the annotation, replay shows the raw skill instructions instead of the user-facing display text
                 if let Some(acp::ContentBlock::Text(tb)) = blocks.first_mut() {
                     let map = tb.meta.get_or_insert_with(acp::Meta::new);
@@ -485,7 +505,6 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
             } else if !queued.images.is_empty() {
                 // Image-bearing prompt: build text and image content blocks
                 // Pass the session cwd so orphan `[Image #N: <path>]` placeholders can be recovered from disk via the shared helper
-                // Orphans come from a paste in a previous session and the like
                 // Token ranges are not stamped here: the builder rewrites the text (placeholder stripping), which would shift byte offsets
                 let mut blocks = crate::prompt_images::build_content_blocks_with_workspace(
                     queued.text,
@@ -542,10 +561,20 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
                 .scrollback
                 .push_block(RenderBlock::session_event(SessionEvent::CompactStarted));
 
+            let user_context = crate::slash::parse_invocation(&queued.text).and_then(|inv| {
+                let args = inv.args.trim();
+                if inv.token == "compact" && !args.is_empty() {
+                    Some(args.to_string())
+                } else {
+                    None
+                }
+            });
+
             QueueDrain {
                 effects: vec![Effect::Compact {
                     agent_id,
                     session_id,
+                    user_context,
                 }],
                 page_flip_entry: None,
             }
@@ -555,6 +584,7 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
             // The execute block from the shell is the visual entry
             agent.start_turn_boundary(Some(&prompt_id));
             agent.session.current_prompt_id = Some(prompt_id.clone());
+            agent.arm_prompt_ack(&prompt_id, Instant::now());
             agent.turn_started_at = Some(Instant::now());
 
             agent.scrollback.follow_new_turn(None, page_flip_on_send());
@@ -569,56 +599,12 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
                 page_flip_entry: None,
             }
         }
-        QueueEntryKind::Cron => {
-            let prompt_id = format!("scheduler-fired-{prompt_id}");
-            agent.note_self_originated_prompt(&prompt_id);
-            agent.start_turn_boundary(Some(&prompt_id));
-            agent.session.current_prompt_id = Some(prompt_id.clone());
-            let prompt_entry_id = agent
-                .scrollback
-                .push_block(RenderBlock::cron_prompt(&queued.text));
-            agent.turn_started_at = Some(Instant::now());
-
-            let prompt_idx = agent.scrollback.len().saturating_sub(1);
-            let flip = page_flip_on_send();
-            agent.scrollback.follow_new_turn(Some(prompt_idx), flip);
-
-            let framed_text = format_cron_prompt(
-                &queued.text,
-                queued.task_id.as_deref().unwrap_or("unknown"),
-                queued.human_schedule.as_deref().unwrap_or("unknown"),
-            );
-
-            let mut meta_map = serde_json::Map::new();
-            meta_map.insert(
-                user_prompt_meta::DISPLAY_TEXT.into(),
-                serde_json::Value::String(queued.text),
-            );
-            meta_map.insert(
-                user_prompt_meta::DISPLAY_AS_CRON.into(),
-                serde_json::Value::Bool(true),
-            );
-            let blocks = vec![acp::ContentBlock::Text(
-                acp::TextContent::new(framed_text).meta(Some(meta_map)),
-            )];
-
-            QueueDrain {
-                effects: vec![Effect::SendPromptBlocks {
-                    agent_id,
-                    session_id,
-                    blocks,
-                    prompt_id,
-                }],
-                page_flip_entry: flip.then_some(prompt_entry_id),
-            }
-        }
     }
 }
 
 /// Whether [`apply_turn_start_shim`] renders its own user block (i.e. `display_block` is `Some`).
 /// When true the pager owns the block and must swallow the leader's user-echo.
 /// When false (bash, or a viewer with no local text) the echo is the only source and must render.
-/// Kept in sync with the shim's match via a `debug_assert!` there.
 pub(crate) fn shim_renders_own_user_block(kind: &str, text: Option<&str>) -> bool {
     match kind {
         "bash" => false,
@@ -689,7 +675,6 @@ fn trailing_user_prompts(
 
 /// Paint one user bubble per combined segment, or reuse matching trailing bubbles.
 /// Drops a single joined-body bubble if the echo raced ahead.
-///
 /// Returns `(first_idx, first_id, last_id, all_segment_ids)`, with segment ids oldest to newest.
 fn paint_or_reuse_combined_user_bubbles(
     agent: &mut AgentView,
@@ -740,10 +725,8 @@ fn paint_or_reuse_combined_user_bubbles(
 }
 
 /// Paint the user block for a send-now'd prompt at dispatch.
-/// Arming hides the queue row, and the shell echo is swallowed at adoption (`expect_user_echo`) or swept as a duplicate.
 /// Without this paint the message has no visible representation until the turn-start adoption (which reuses the block via `send_now_painted_blocks`).
 /// Call wherever the expectation is armed, only for rows whose adoption paints its own block; `kind` must build the same block the shim would.
-/// `edited` marks an edit-interject override (fresher than the mirror text the adoption sees).
 pub(super) fn push_send_now_user_block(
     agent: &mut AgentView,
     prompt_id: &str,
@@ -782,11 +765,9 @@ pub(super) fn push_send_now_user_block(
         .insert(prompt_id.to_string(), (entry_id, edited));
 }
 
-/// Whether a Send Now row should paint an optimistic block.
 /// Returns `false` unless the client expects a Send Now cancel, or the row belongs to an active goal on a committed, running turn.
 /// Arms the cancel expectation only on the expects-cancel path.
 /// An active goal paints without arming so its interjection notification can claim the block.
-/// Bash rows and idle sessions do neither.
 fn paint_send_now_and_maybe_arm(agent: &mut AgentView, id: &str) -> bool {
     let expects_cancel = agent.expects_send_now_cancel();
     let goal_active = agent
@@ -834,17 +815,8 @@ pub(crate) fn arm_send_now_and_paint(agent: &mut AgentView, id: &str, new_text: 
     }
 }
 
-/// Turn-start shim for a server-authoritative prompt the leader just drained into the running slot.
-///
-/// Mirrors the matching arm of [`maybe_drain_queue`], with two exceptions.
 /// It does not mint a `prompt_id`; it adopts the one the leader reported.
 /// It does not emit a send `Effect`; the prompt was already sent at enqueue time.
-/// The scrollback block and focus flag are branched on the adopted entry's `kind`:
-///
-/// - `"bash"`: no user block (the shell's execute block is the entry); set `agent.bash_turn = true` for post-turn focus and TurnComplete suppression.
-/// - `"cron"`: render the cron text via `cron_prompt`.
-/// - otherwise (plain `"prompt"`): render the user-prompt block and stash an `in_flight_prompt` for Ctrl+C rewind.
-///
 /// `start_turn` calls `expect_user_echo`, so the optimistic block here and the server's user-echo `session/update` are de-duplicated.
 pub(crate) fn apply_turn_start_shim(
     agent: &mut AgentView,
@@ -854,10 +826,8 @@ pub(crate) fn apply_turn_start_shim(
     combined_texts: Option<Vec<String>>,
 ) -> Option<EntryId> {
     // Re-derive the per-turn viewer flag (see the ACP gate)
-    // This shim adopts a turn the leader drained into the running slot
     // If this client originated it (its own queued/immediate prompt), it drives it; otherwise it is viewing a turn another client drives
     // `attached_as_viewer` must then flip back to true even if this pane has sent prompts before (the flag is not a one-way latch)
-    // That drives `handle_prompt_complete` and the viewer chrome correctly
     let adopted_from_other_client = !agent.is_self_originated_prompt(&prompt_id);
     // Sticky pin and still-armed send-now expect (not cleared on adopt; the cancel rail may still need it)
     // Either covers adopt-before-cancel
@@ -889,8 +859,6 @@ pub(crate) fn apply_turn_start_shim(
     agent.attached_as_viewer = adopted_from_other_client;
     // A new (adopted) turn is starting: drop the prior turn's chips but keep the seen ring
     // A buffer-replayed `x.ai/follow_ups` for an older response then stays rejected (no stale revival)
-    // This is correct for both passive-viewer and self-driven adoption
-    // The adopted turn's own follow_ups still re-render via the stamped `promptId` match in `apply_follow_ups` (the current_prompt_id set above)
     // No seen-ring un-recording is therefore needed
     agent.clear_follow_ups();
     // The adopted turn's follow_ups may have arrived on the ext channel before this turn-start adoption (separate channels) and been buffered
@@ -1019,10 +987,8 @@ pub(crate) fn apply_turn_start_shim(
             flip.then_some(prompt_entry_id)
         }
     } else {
-        // No local block to render: this is a synthetic/cron/bash adoption with no shared-queue text
         // `start_turn` above called `expect_user_echo`, which would swallow the agent's live user-message broadcast
         // For these turns that broadcast is the only source of the user block
-        // One example: the cron `↻ echo hello` header, rendered from `_meta.displayAsCron` / `displayText`
         // Clear the skip so `handle_user_message` renders it instead of dropping it (the cause of viewers missing the cron header)
         agent.session.tracker.clear_user_echo_skip();
         agent.scrollback.follow_new_turn(None, page_flip_on_send());
@@ -1037,8 +1003,9 @@ pub(crate) fn apply_turn_start_shim(
         agent.session.in_flight_prompt = None;
     }
     if let Some(commands) = agent.session.tracker.take_pending_acp_commands() {
-        agent.session.available_commands = commands;
-        agent.session.available_commands_generation += 1;
+        agent
+            .session
+            .replace_available_commands(commands, CommandCatalogSource::QueueDrain);
     }
     if let Some(tools) = agent.session.tracker.take_pending_acp_tools() {
         agent.session.available_tools = Some(tools.into_iter().collect());
@@ -1124,20 +1091,33 @@ enum EditedCommandGate {
     NeedsSession,
 }
 
+fn preserve_queued_image_paths(
+    app: &AppView,
+    submission: &mut crate::views::prompt_widget::StashedPrompt,
+) {
+    let retained = app
+        .agents
+        .values()
+        .flat_map(|agent| agent.session.pending_prompts.iter())
+        .flat_map(|prompt| prompt.images.iter())
+        .map(|image| image.preview.identity())
+        .collect::<std::collections::HashSet<_>>();
+    submission.disarm_image_cleanup(&retained);
+}
+
 /// `Action::RunEditedQueuedCommand` arm: the row's edited text resolved to a pager builtin.
 /// Drop the row and run the text through slash dispatch, the owner of resolution and command telemetry.
-///
-/// Every gate that can refuse the command (active view, the send path's screen-mode refusal, a bound session) runs before the removal.
 /// A refusal thus leaves the row queued with its pre-edit text instead of trading it for a hint.
 pub(super) fn dispatch_run_edited_queued_command(
     app: &mut AppView,
     local_id: u64,
     server: Option<crate::app::actions::SharedQueueTarget>,
-    text: String,
+    mut submission: crate::views::prompt_widget::StashedPrompt,
 ) -> Vec<Effect> {
     if app.reconnect_pending {
         // Nothing runs and nothing drains while reconnecting (see `dispatch_drain_queue`), so the row just stays put
         app.show_toast(super::prompt::RECONNECTING_NOTICE);
+        preserve_queued_image_paths(app, &mut submission);
         return vec![];
     }
     // The send half is bound to the active view, so resolve the removal target the same way
@@ -1145,28 +1125,37 @@ pub(super) fn dispatch_run_edited_queued_command(
     // The edit exit has already taken the composer text, so a silent bail would drop the command without a trace
     let ActiveView::Agent(agent_id) = app.active_view else {
         app.show_toast("Open the session to run this command");
+        preserve_queued_image_paths(app, &mut submission);
         return vec![];
     };
-    // The screen-mode refusal is resolved the executor's way (`get_for_dispatch`, then `mode_support`)
-    // It thus cannot disagree with `dispatch_send_prompt_inner`
-    // That path's restricted-command upsell can't fire here because the classifier already required the same lookup
+    // Resolve every command refusal before removing the row. The send path will surface the same
+    // refusal after this gate keeps the original queued prompt and its attachments intact.
     let screen_mode = app.screen_mode;
     let gate = {
         let Some(agent) = app.agents.get(&agent_id) else {
+            preserve_queued_image_paths(app, &mut submission);
             return vec![];
         };
         let registry = agent.prompt.slash_controller.registry();
-        let mode_refused = crate::slash::parse_invocation(text.trim()).is_some_and(|invocation| {
-            registry
-                .get_for_dispatch(invocation.token)
-                .is_some_and(|command| {
-                    command
-                        .mode_support()
-                        .refusal(invocation.token, screen_mode)
-                        .is_some()
-                })
-        });
-        if mode_refused {
+        let command_refused =
+            crate::slash::parse_invocation(submission.text.trim()).is_some_and(|invocation| {
+                registry
+                    .get_for_dispatch(invocation.token)
+                    .is_some_and(|command| {
+                        command
+                            .mode_support()
+                            .refusal(invocation.token, screen_mode)
+                            .is_some()
+                            || command
+                                .submission_refusal(
+                                    invocation.args,
+                                    screen_mode.is_minimal(),
+                                    /* voice_owns_prompt */ false,
+                                )
+                                .is_some()
+                    })
+            });
+        if command_refused {
             EditedCommandGate::RefusedBySendPath
         } else {
             // Fail closed on the session itself rather than on what a command declares
@@ -1193,28 +1182,45 @@ pub(super) fn dispatch_run_edited_queued_command(
                 }),
                 None => {
                     if let Some(removed) = agent.remove_local_queue_row(local_id) {
-                        // Defensive: the edit exit already cleaned the temp paths the composer shared with this row
-                        // Covers images the composer never held
+                        let retained: std::collections::HashSet<u64> = submission
+                            .images
+                            .iter()
+                            .map(|image| image.preview.identity())
+                            .collect();
                         for image in &removed.images {
-                            crate::prompt_images::cleanup_temp_file(image);
+                            if !retained.contains(&image.preview.identity()) {
+                                crate::prompt_images::cleanup_image(
+                                    crate::prompt_images::SessionPathPolicy::Preserve,
+                                    image,
+                                );
+                            }
                         }
                     }
                 }
             }
             true
         }
-        EditedCommandGate::RefusedBySendPath => true,
+        EditedCommandGate::RefusedBySendPath => {
+            preserve_queued_image_paths(app, &mut submission);
+            true
+        }
         // Row kept and nothing runs: a command that ignores the missing session (`/compact` enqueues regardless) would leave a second row
         EditedCommandGate::NeedsSession => {
             if let Some(agent) = app.agents.get_mut(&agent_id) {
                 agent.show_toast(NO_SESSION_NOTICE);
             }
+            preserve_queued_image_paths(app, &mut submission);
             false
         }
     };
     if sends {
-        effects.extend(super::prompt::dispatch_send_prompt_inner(
-            app, text, /* consume_input */ false, /* literal */ false,
+        let text = submission.text.clone();
+        effects.extend(super::prompt::dispatch_send_prompt_submission(
+            app,
+            text,
+            Some(submission),
+            /* consume_input */ false,
+            /* literal */ false,
             /* is_follow_up */ false,
         ));
     }
@@ -1326,22 +1332,6 @@ mod tests {
     }
 
     #[test]
-    fn format_cron_prompt_includes_framing() {
-        let out = super::format_cron_prompt("do stuff", "task-1", "every 5m");
-        assert!(out.starts_with("<system-reminder>"));
-        assert!(out.contains("task task-1"));
-        assert!(out.contains("every 5m"));
-        assert!(out.contains("do stuff"));
-        assert!(
-            !out.contains("<user_query>"),
-            "must not add <user_query> — shell does that"
-        );
-        assert!(out.ends_with("do stuff"));
-    }
-
-    // ── Drain-blocking tests ───────────────────────────────────────────
-
-    #[test]
     fn drain_blocked_when_editing_front_prompt() {
         let mut app = test_app_with_agent();
         let id = AgentId(0);
@@ -1407,19 +1397,37 @@ mod tests {
 
     // Edited row that resolved to a pager builtin
 
+    fn run_edited_queued_submission(
+        app: &mut AppView,
+        local_id: u64,
+        server: Option<SharedQueueTarget>,
+        submission: crate::views::prompt_widget::StashedPrompt,
+    ) -> Vec<Effect> {
+        dispatch(
+            Action::RunEditedQueuedCommand {
+                local_id,
+                server,
+                submission,
+            },
+            app,
+        )
+    }
+
     fn run_edited_queued_command(
         app: &mut AppView,
         local_id: u64,
         server: Option<SharedQueueTarget>,
         text: &str,
     ) -> Vec<Effect> {
-        dispatch(
-            Action::RunEditedQueuedCommand {
-                local_id,
-                server,
-                text: text.into(),
-            },
+        run_edited_queued_submission(
             app,
+            local_id,
+            server,
+            crate::views::prompt_widget::StashedPrompt::from_submission(
+                text.into(),
+                Vec::new(),
+                Vec::new(),
+            ),
         )
     }
 
@@ -1461,6 +1469,93 @@ mod tests {
             "expected the command to run"
         );
         assert_eq!(app.agents[&id].session.queue_len(), 0);
+    }
+
+    #[test]
+    fn refused_edited_feedback_keeps_the_original_queue_row() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        app.screen_mode = crate::app::ScreenMode::Minimal;
+        app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+        enqueue_local(&mut app, id, "original queued prompt");
+        let local_id = app.agents[&id].session.pending_prompts[0].id;
+
+        let effects = run_edited_queued_command(&mut app, local_id, None, "/feedback");
+
+        assert!(
+            effects.is_empty(),
+            "refusal must not emit queue removal or send"
+        );
+        assert_eq!(app.agents[&id].session.queue_len(), 1);
+        assert_eq!(
+            app.agents[&id].session.pending_prompts[0].text,
+            "original queued prompt"
+        );
+        assert!(last_system_text(&app, id).contains("minimal mode"));
+    }
+
+    #[test]
+    fn run_edited_feedback_uses_row_text_and_attachments_not_the_restored_draft() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+        app.agents
+            .get_mut(&id)
+            .unwrap()
+            .prompt
+            .set_text("/feedback live draft");
+        enqueue_local(&mut app, id, "queued feedback");
+        let local_id = app.agents[&id].session.pending_prompts[0].id;
+
+        let image = crate::prompt_images::from_clipboard_data(&crate::clipboard::ImageData {
+            data: vec![
+                0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+            mime_type: "image/png".to_owned(),
+        });
+        let placeholder = crate::prompt_images::display_text(1);
+        let submission = crate::views::prompt_widget::StashedPrompt::from_submission(
+            format!("/feedback row report {placeholder}"),
+            vec![image],
+            vec![crate::app::agent::ChipElement {
+                range: 21..21 + placeholder.len(),
+                kind: crate::views::prompt_widget::KIND_IMAGE,
+                display: None,
+            }],
+        );
+        let effects = run_edited_queued_submission(&mut app, local_id, None, submission);
+
+        // Inline `/feedback <text>` injects a skill turn; a running turn parks it on the local queue instead of POSTing SendFeedback or draining the restored composer.
+        // local queue instead of POSTing SendFeedback or draining the restored composer.
+        assert!(
+            effects
+                .iter()
+                .all(|effect| !matches!(effect, Effect::SendFeedback { .. })),
+            "edited inline /feedback must not POST: {effects:?}"
+        );
+        assert_eq!(app.agents[&id].prompt.text(), "/feedback live draft");
+        let queued = &app.agents[&id].session.pending_prompts;
+        assert_eq!(queued.len(), 1, "the edited row is replaced by the skill");
+        let skill = &queued[0];
+        assert!(skill.display_as_skill);
+        assert_eq!(skill.text, "/feedback row report");
+        let blocks = skill.wire_blocks.as_deref().expect("skill wire blocks");
+        assert!(
+            blocks.iter().any(|block| {
+                matches!(
+                    block,
+                    acp::ContentBlock::Text(text)
+                        if text.text.contains("row report") && !text.text.contains("live draft")
+                )
+            }),
+            "skill prompt must use the row report, not the restored draft: {blocks:?}"
+        );
+        assert!(
+            blocks
+                .iter()
+                .any(|block| matches!(block, acp::ContentBlock::Image(_))),
+            "the row attachment must ride the skill turn: {blocks:?}"
+        );
     }
 
     /// Server row: a versioned remove, then the command.
@@ -1595,6 +1690,54 @@ mod tests {
             "the row survives with its pre-edit text"
         );
         assert!(last_system_text(&app, id).contains("already in fullscreen"));
+    }
+
+    /// A refused edit disarms only row-owned temps; a newly pasted file is still deleted on drop.
+    #[test]
+    fn refused_edit_deletes_new_pasted_temps_not_row_owned() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+        enqueue_local(&mut app, id, "what is the default");
+        let local_id = app.agents[&id].session.pending_prompts[0].id;
+
+        let dir = tempfile::tempdir().unwrap();
+        let owned_path = dir.path().join("owned.png");
+        let pasted_path = dir.path().join("pasted.png");
+        std::fs::write(&owned_path, b"owned").unwrap();
+        std::fs::write(&pasted_path, b"pasted").unwrap();
+
+        let png = crate::clipboard::ImageData {
+            data: vec![
+                0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+            mime_type: "image/png".to_owned(),
+        };
+        let mut owned = crate::prompt_images::from_clipboard_data(&png);
+        owned.staged_temp_path = Some(owned_path.clone());
+        let mut pasted = crate::prompt_images::from_clipboard_data(&png);
+        pasted.staged_temp_path = Some(pasted_path.clone());
+        app.agents.get_mut(&id).unwrap().session.pending_prompts[0].images = vec![owned.clone()];
+
+        let submission = crate::views::prompt_widget::StashedPrompt::from_submission(
+            "/fullscreen".into(),
+            vec![owned, pasted],
+            Vec::new(),
+        );
+        let _ = run_edited_queued_submission(&mut app, local_id, None, submission);
+
+        assert!(
+            owned_path.exists(),
+            "row-owned temp must not be double-deleted"
+        );
+        assert!(
+            !pasted_path.exists(),
+            "edit-only pasted temp must be deleted"
+        );
+        assert_eq!(
+            app.agents[&id].session.pending_prompts[0].text, "what is the default",
+            "refusal must keep the row"
+        );
     }
 
     /// A refusal releases the edit lock too, so the queue must not park behind the row that was not removed.
@@ -1887,6 +2030,54 @@ mod tests {
                 .map(String::as_str),
             Some("edited body")
         );
+    }
+
+    #[test]
+    fn arm_send_now_during_idle_looking_wake_paints_and_arms_cancel() {
+        let mut app = test_app_with_agent();
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.state = AgentState::Idle;
+        agent.running_wake_turn = Some(crate::app::agent_view::RunningWakeTurn {
+            prompt_id: "task-completed-bg1".into(),
+            cancel_sent: false,
+        });
+        agent.front_message_committed = true;
+        agent.shared_queue = vec![crate::app::prompt_queue::QueueEntryWire {
+            id: "p-next".into(),
+            version: 1,
+            owner: None,
+            last_editor: None,
+            kind: "prompt".into(),
+            text: "flush me".into(),
+            position: 0,
+            combined_texts: None,
+        }];
+
+        arm_send_now_and_paint(agent, "p-next", None);
+
+        assert_eq!(agent.expect_send_now_cancel.as_deref(), Some("p-next"));
+        assert!(agent.send_now_painted_blocks.contains_key("p-next"));
+    }
+
+    #[test]
+    fn send_now_during_cancellation_does_not_arm_cancel_expectation() {
+        for state in [AgentState::Idle, AgentState::TurnCancelling] {
+            let mut app = test_app_with_agent();
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.session.state = state;
+            if agent.session.state.is_idle() {
+                agent.running_wake_turn = Some(crate::app::agent_view::RunningWakeTurn {
+                    prompt_id: "task-completed-bg1".into(),
+                    cancel_sent: true,
+                });
+            }
+            agent.front_message_committed = true;
+
+            arm_send_now_and_paint_dispatched(agent, "p-next", "flush me");
+
+            assert!(agent.expect_send_now_cancel.is_none());
+            assert!(!agent.send_now_painted_blocks.contains_key("p-next"));
+        }
     }
 
     #[test]
@@ -2749,13 +2940,8 @@ mod tests {
         let id = AgentId(0);
 
         // Simulate session-resume state: Idle but still replaying.
-        let agent = app.agents.get_mut(&id).unwrap();
-        agent.session.loading_replay = true;
-        agent.session.enqueue_cron_prompt(
-            "check status".into(),
-            "task-1".into(),
-            "every 5m".into(),
-        );
+        app.agents.get_mut(&id).unwrap().session.loading_replay = true;
+        enqueue_local(&mut app, id, "check status");
 
         // A drain while loading_replay is true must be blocked
         let effects = maybe_drain_queue(app.agents.get_mut(&id).unwrap()).effects;
@@ -2766,7 +2952,7 @@ mod tests {
         assert_eq!(
             app.agents[&id].session.queue_len(),
             1,
-            "cron prompt must stay queued"
+            "the prompt must stay queued"
         );
 
         // Clear loading_replay (simulates SessionLoaded completing).
@@ -2775,20 +2961,10 @@ mod tests {
         // Drain again: it succeeds now
         let effects = maybe_drain_queue(app.agents.get_mut(&id).unwrap()).effects;
         assert_eq!(effects.len(), 1);
-        assert!(
-            matches!(&effects[0], Effect::SendPromptBlocks { .. }),
-            "expected SendPromptBlocks effect, got: {:?}",
-            effects[0]
-        );
         assert_eq!(
             app.agents[&id].session.queue_len(),
             0,
             "queue must be empty after drain"
-        );
-        assert_eq!(
-            app.agents[&id].cron_task_id.as_deref(),
-            Some("task-1"),
-            "cron_task_id must track the running cron task"
         );
     }
 
@@ -2873,8 +3049,6 @@ mod tests {
 
     /// Regression (leader mode): a prompt queued during a turn must drain once the leader connection reconnects.
     /// Every normal drain trigger (PromptResponse / DrainQueue / send-prompt / session-created) early-returns while `reconnect_pending` is set.
-    /// The drain is deferred to the event loop's reconnect-complete arm.
-    /// That arm clears `reconnect_pending`, force-idles the agent, then dispatches `Action::DrainQueue`.
     /// This test exercises that final drain step and guards against the queue silently stalling after a reconnect.
     #[test]
     fn drain_queue_after_reconnect_sends_queued_prompt() {

@@ -33,7 +33,7 @@ enum ClaimError {
     TrackerFull,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, strum::IntoStaticStr)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, strum::AsRefStr, strum::IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 #[non_exhaustive]
 pub enum PrewarmOutcome {
@@ -259,7 +259,7 @@ mod first_use {
 
     /// Warm freshness at first use, not observed pool reuse — reqwest
     /// exposes no pool-hit signal.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, strum::IntoStaticStr)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, strum::AsRefStr, strum::IntoStaticStr)]
     pub(super) enum Freshness {
         #[strum(serialize = "warm_fresh")]
         Fresh,

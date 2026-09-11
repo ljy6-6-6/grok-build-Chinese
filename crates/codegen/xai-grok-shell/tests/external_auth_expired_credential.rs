@@ -49,7 +49,6 @@ impl Capture {
     }
 
     /// `(error_type, message)` of the turn's terminal failure.
-    ///
     /// Awaited, not read: the failed prompt's JSON-RPC response and this notification reach the client down independent paths.
     /// The response routinely arrives first.
     async fn await_terminal_failure(&self, within: Duration) -> (String, String) {
@@ -162,7 +161,8 @@ async fn connect(
     let auth_manager = Arc::new(agent_config.create_auth_manager());
     let (gw_tx, gw_rx) = tokio::sync::mpsc::unbounded_channel();
     let gateway = GatewaySender::new(gw_tx);
-    let agent = MvpAgent::new(gateway, &agent_config, auth_manager, None).expect("valid config");
+    let agent =
+        MvpAgent::new(gateway, &agent_config, auth_manager, None, None).expect("valid config");
 
     let (c2a_a, c2a_b) = tokio::io::duplex(DUPLEX_BUFFER_BYTES);
     let (a2c_a, a2c_b) = tokio::io::duplex(DUPLEX_BUFFER_BYTES);
@@ -174,7 +174,7 @@ async fn connect(
         });
     tokio::task::spawn_local(
         GatewayReceiver::new(gw_rx, agent_conn)
-            .with_on_meta(xai_file_utils::trace_context::span_from_meta_traceparent)
+            .with_on_meta(xai_grok_otel::span_from_meta_traceparent)
             .run(),
     );
     tokio::task::spawn_local(agent_io);
@@ -324,11 +324,12 @@ fn expired_external_credential_routes_to_the_provider_login_flow() {
             !methods.iter().any(|(id, _)| id == "cached_token"),
             "the dead bearer must not be offered at all; got {methods:?}"
         );
+        // Startup makes several `auth()` calls in quick succession (the silent refresh, the login-method advertisement). Only the first runs the binary: a non-timeout failure is transient and the refresher's strike ladder puts every call inside the following cooldown on a no-run transient, so the budget is spent on the clock, not on the call rate.
+        let startup_runs = provider_runs(grok_home.path());
         assert_eq!(
-            provider_runs(grok_home.path()),
-            1,
-            "startup owes the provider exactly one headless attempt — the escalation \
-             above must come after it, and the attempt must not be re-run per launch"
+            startup_runs, 1,
+            "startup owes the provider exactly one headless attempt; the calls that \
+             follow inside the cooldown must not re-run it"
         );
 
         // Phase 2: parity with a launch that has no credential at all
@@ -341,7 +342,7 @@ fn expired_external_credential_routes_to_the_provider_login_flow() {
         );
         assert_eq!(
             provider_runs(grok_home.path()),
-            1,
+            startup_runs,
             "with nothing to refresh there is no headless attempt to make; the \
              binary runs when the client starts the login flow"
         );

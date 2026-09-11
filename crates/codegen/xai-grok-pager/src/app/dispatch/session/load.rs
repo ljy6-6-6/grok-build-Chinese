@@ -4,8 +4,8 @@ use super::foreign::{
 };
 use super::fork::build_child_fork_marker_with_locale;
 use super::lifecycle::{
-    clear_startup_actions, dispatch_new_session_inner, dispatch_new_worktree_session,
-    refuse_chat_mode_build_agent,
+    abandon_unused_empty_for_load, clear_startup_actions, dispatch_new_session_inner,
+    dispatch_new_worktree_session, refuse_chat_mode_build_agent,
 };
 use super::picker_routing::{PickerRequest, PickerSeqKind, accept_picker_result};
 use crate::acp::tracker::AcpUpdateTracker;
@@ -45,7 +45,6 @@ fn localized_template(
 }
 
 /// Create a placeholder agent and load an existing session by ID.
-///
 /// `session_cwd` overrides the CWD in the `LoadSessionRequest`.
 /// This is needed when resuming a session that was created in a different CWD (e.g., a worktree).
 pub(in crate::app::dispatch) fn dispatch_load_session(
@@ -77,6 +76,16 @@ pub(in crate::app::dispatch) fn clear_stale_session_id(
     session_id: &str,
 ) -> acp::SessionId {
     let sid = acp::SessionId::new(session_id);
+    let replaced_agents = app
+        .agents
+        .iter()
+        .filter_map(|(agent_id, agent)| {
+            (agent.session.session_id.as_ref() == Some(&sid)).then_some(*agent_id)
+        })
+        .collect::<std::collections::HashSet<_>>();
+    if let Some(dashboard) = app.dashboard.as_mut() {
+        dashboard.prepare_agent_unbind(&replaced_agents, &mut app.agents);
+    }
     for agent in app.agents.values_mut() {
         if agent.session.session_id.as_ref() == Some(&sid) {
             agent.unbind_session_id();
@@ -84,13 +93,6 @@ pub(in crate::app::dispatch) fn clear_stale_session_id(
     }
     sid
 }
-/// If a local agent already owns this id **and** matches kind, focus it.
-///
-/// - Kind: compare against the stamped form `chat_kind || app.chat_mode` (agents store that; the LoadSession arg is conversation-entry only).
-///   Conversation vs Build still differs when sticky `--chat` is off.
-/// - An eager `session_id` with a leftover load placeholder after `SessionLoadFailed` is not "open": reissue the load instead of focusing.
-/// - Overlay: retarget when on the dashboard list, already in the overlay (attached matches visible), or attached already points at this agent.
-///   Retargeting lets the switch activate the overlay with the correct `focus_row`.
 pub(in crate::app::dispatch) fn focus_if_session_already_open(
     app: &mut AppView,
     session_id: &str,
@@ -98,14 +100,14 @@ pub(in crate::app::dispatch) fn focus_if_session_already_open(
 ) -> Option<AgentId> {
     use crate::app::app_view::ActiveView;
     use crate::views::dashboard::DashboardRowId;
-    let expected_kind = chat_kind || app.chat_mode;
+    let expected_conversation_entry = session_opens_as_chat(app, chat_kind);
     let existing_id = app.agents.iter().find_map(|(id, a)| {
         let sid_ok = a
             .session
             .session_id
             .as_ref()
             .is_some_and(|sid| &*sid.0 == session_id);
-        if !sid_ok || a.chat_kind != expected_kind {
+        if !sid_ok || a.conversation_entry != expected_conversation_entry {
             return None;
         }
         if a.loading_placeholder_id.is_some() && !a.session.loading_replay {
@@ -133,7 +135,6 @@ pub(in crate::app::dispatch) fn focus_if_session_already_open(
 /// Matches the effects layer's `is_chat_path` after history-bypass clearing of `SessionFlags.chat_mode`.
 /// True for a conversation-entry row, or under sticky `--chat` without the local-disk history bypass.
 /// Gateway resumes (no bypass) are Chat; history-bypass local-disk rows stay Build.
-/// Used by load and fork so `rename_kind()` matches the lane `LoadSession` is stamped onto.
 pub(in crate::app::dispatch) fn session_opens_as_chat(app: &AppView, chat_kind: bool) -> bool {
     if chat_kind {
         return true;
@@ -178,6 +179,8 @@ fn dispatch_load_session_ungated(
         }
         return vec![];
     }
+    let mut effects = abandon_unused_empty_for_load(app, &session_id);
+    let identity_rebind = super::super::dashboard::WorkspaceIdentityRebind::capture(app);
     let acp_session_id = clear_stale_session_id(app, &session_id);
     let agent_id = AgentId(app.next_agent_id);
     app.next_agent_id += 1;
@@ -244,6 +247,7 @@ fn dispatch_load_session_ungated(
         scrollback,
     );
     app.agents.insert(agent_id, agent);
+    identity_rebind.apply(app);
     let conversation_entry = session_opens_as_chat(app, chat_kind);
     let agent_mut = app.agents.get_mut(&agent_id).unwrap();
     agent_mut.attached_as_viewer = true;
@@ -305,13 +309,13 @@ fn dispatch_load_session_ungated(
     agent_mut.apply_credit_balance(app.credit_balance.clone(), app.auto_topup.clone());
     agent_mut.set_plugins_visible_recursive(!app.appearance.disable_plugins);
     switch_to_agent(app, agent_id, SwitchCause::Load);
-    vec![Effect::LoadSession {
+    effects.push(Effect::LoadSession {
         agent_id,
         session_id,
         session_cwd,
-        // Conversation-entry bit; the effects layer ORs in SessionFlags.chat_mode for the meta
         chat_kind,
-    }]
+    });
+    effects
 }
 /// Load the session selected in the session picker.
 pub(in crate::app::dispatch) fn dispatch_pick_session(
@@ -810,6 +814,7 @@ pub(in crate::app::dispatch) fn dispatch_cycle_session_source_filter(
     let seq = next_picker_list_generation(app);
     let mut effects = vec![Effect::FetchSessionList {
         host: request_identity.0,
+        cwd_override: None,
         generation: request_identity.1,
         query: None,
         seq,
@@ -937,6 +942,7 @@ fn dispatch_chat_search_refetch(app: &mut AppView, force: bool) -> Vec<Effect> {
         set_chat_search_loading(app, host, false);
         return vec![Effect::FetchSessionList {
             host,
+            cwd_override: None,
             generation,
             query: None,
             seq,
@@ -948,6 +954,7 @@ fn dispatch_chat_search_refetch(app: &mut AppView, force: bool) -> Vec<Effect> {
     if force {
         vec![Effect::FetchSessionList {
             host,
+            cwd_override: None,
             generation,
             query: Some(query),
             seq,
@@ -1248,7 +1255,6 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
     restore_summary: Option<String>,
     restore_degree: Option<xai_grok_workspace::session::git::RestoreDegree>,
     running_prompt_id: Option<String>,
-    scheduler_background_loops: Option<bool>,
 ) -> Vec<Effect> {
     tracing::info!(
         "Session loaded for agent {:?} session {:?}",
@@ -1256,13 +1262,18 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
         session_id,
     );
     let locale = app.locale.clone();
+    if app
+        .agents
+        .get_mut(&agent_id)
+        .is_some_and(|agent| defer_to_open_reload_window(agent, agent_id, "SessionLoaded"))
+    {
+        return vec![];
+    }
+    let identity_rebind = super::super::dashboard::WorkspaceIdentityRebind::capture(app);
+    crate::app::workspace_sync::allow_loaded_session(app, session_id.0.as_ref());
     if let Some(agent) = app.agents.get_mut(&agent_id) {
-        if defer_to_open_reload_window(agent, agent_id, "SessionLoaded") {
-            return vec![];
-        }
         let hydrate_sid = session_id.clone();
         agent.bind_session_id(session_id);
-        agent.scheduler_background_loops = scheduler_background_loops;
         agent.scrollback.end_batch();
         agent.session.loading_replay = false;
         agent.arm_late_replay_grace();
@@ -1394,6 +1405,7 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
         notify_session_ready(&app.notification_service, agent);
         crate::memory_release::release_retained_memory("session-load-replay");
         note_peek_page_flip(app, agent_id, page_flip_entry);
+        identity_rebind.apply(app);
         return effects;
     }
     vec![]
@@ -1460,6 +1472,7 @@ pub(in crate::app::dispatch) fn handle_session_search_debounce_expired(
     if chat_mode {
         vec![Effect::FetchSessionList {
             host: request.host,
+            cwd_override: None,
             generation: request.generation,
             query: (!query.is_empty()).then_some(query),
             seq: request.seq,
@@ -1531,6 +1544,7 @@ pub(in crate::app::dispatch) fn handle_session_restored(
         "Session restored. Loading {session_id}...",
         &[("{session_id}", &local_session_id)],
     );
+    let identity_rebind = super::super::dashboard::WorkspaceIdentityRebind::capture(app);
     let sid = clear_stale_session_id(app, &local_session_id);
     let conversation_entry = session_opens_as_chat(app, false);
     if let Some(agent) = app.agents.get_mut(&agent_id) {
@@ -1564,6 +1578,7 @@ pub(in crate::app::dispatch) fn handle_session_restored(
             .scrollback
             .push_block(RenderBlock::system(loading_message));
     }
+    identity_rebind.apply(app);
     let cwd = app.cwd.clone();
     vec![Effect::LoadSession {
         agent_id,
@@ -1632,24 +1647,8 @@ pub(in crate::app::dispatch) fn handle_deep_search_results(
     vec![]
 }
 pub(in crate::app::dispatch) fn dispatch_show_session_picker(app: &mut AppView) -> Vec<Effect> {
-    use crate::views::modal::ActiveModal;
     with_active_agent(app, |agent| {
-        agent.active_modal = Some(ActiveModal::SessionPicker {
-            state: crate::views::picker::PickerState::default(),
-            entries: None,
-            loading: true,
-            lanes: Default::default(),
-            previous_palette: None,
-            window: crate::views::modal_window::ModalWindowState::new(),
-            content_results: None,
-            content_loading: false,
-            deep_search_seq: 0,
-            generation: 0,
-            detail_seq: 0,
-            entries_query: None,
-            source_filter: crate::views::session_picker::SourceFilter::default(),
-            pending_delete: None,
-        });
+        agent.active_modal = Some(crate::views::modal::session_picker_modal(None));
     });
     dispatch_fetch_session_list(app)
 }

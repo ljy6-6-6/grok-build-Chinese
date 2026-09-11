@@ -75,7 +75,6 @@ pub struct PtySession {
 }
 
 /// A shell and the group that can signal it.
-///
 /// Reaping releases the pid, and a released pid can be recycled, so a signal after the reap may reach a stranger.
 /// `Reaped` carries no group, which makes that mistake unrepresentable rather than a rule to remember.
 enum Shell {

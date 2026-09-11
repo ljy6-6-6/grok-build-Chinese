@@ -32,7 +32,6 @@ pub(crate) const SUBSCRIPTION_CHECK_DEBOUNCE: std::time::Duration =
 /// How long a deferred gate is held before being shown anyway.
 /// This is a safety net for a hung ACP round-trip only; a completed check (even a failed one) resolves the deferral immediately.
 /// Generous on purpose: the check can chain a `/user` fetch, a JWT refresh, and a settings re-fetch.
-/// 5s was observed timing out in CI under full-suite contention.
 pub(crate) const GATE_VERIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl AppView {
@@ -99,7 +98,6 @@ impl AppView {
 
     /// The watch tick and the terminal-refocus trigger both fire their check through this one guard.
     /// Returns no effects when the watch is unwanted or the check is debounced.
-    /// The paywall check loop that reruns every 5s deliberately bypasses this.
     /// `trigger` tags the unified-log entry (`"watch"` / `"focus"`) so the check cadence is reconstructable from logs.
     #[must_use]
     pub fn fire_subscription_check(&mut self, trigger: &'static str) -> Vec<Effect> {
@@ -126,9 +124,8 @@ impl AppView {
     /// Chokepoint for showing a gate.
     /// An already-gated view just updates the copy.
     /// A consumer session with access defers for live verification (the gate source may be stale).
-    /// Anything else shows directly.
     #[must_use]
-    pub fn impose_gate(&mut self, gate: xai_grok_shell::auth::GateInfo) -> Vec<Effect> {
+    pub fn impose_gate(&mut self, gate: xai_grok_login::GateInfo) -> Vec<Effect> {
         if self.gate.is_some() {
             self.gate = Some(gate);
             return vec![];
@@ -176,7 +173,7 @@ impl AppView {
     /// Resolution: authoritative meta via `apply_auth_meta` drops the deferral.
     /// A same-generation check failure or timeout promotes it via [`Self::promote_deferred_gate`].
     #[must_use]
-    fn defer_gate_for_verification(&mut self, gate: xai_grok_shell::auth::GateInfo) -> Vec<Effect> {
+    fn defer_gate_for_verification(&mut self, gate: xai_grok_login::GateInfo) -> Vec<Effect> {
         self.pending_gate_verification = Some(gate);
         self.gate_verify_gen = self.gate_verify_gen.wrapping_add(1);
         self.note_subscription_check();
@@ -226,8 +223,8 @@ mod tests {
     use super::*;
     use crate::app::app_view::tests::test_app;
 
-    fn watch_gate() -> xai_grok_shell::auth::GateInfo {
-        xai_grok_shell::auth::GateInfo {
+    fn watch_gate() -> xai_grok_login::GateInfo {
+        xai_grok_login::GateInfo {
             message: "Subscribe".into(),
             url: None,
             label: None,
@@ -391,7 +388,7 @@ mod tests {
         // Already gated: update the copy only.
         let mut gated = test_app();
         gated.gate = Some(watch_gate());
-        let new_copy = xai_grok_shell::auth::GateInfo {
+        let new_copy = xai_grok_login::GateInfo {
             message: "New copy".into(),
             url: None,
             label: None,
@@ -469,7 +466,7 @@ mod tests {
         let mut app = test_app();
         let _effs = app.impose_gate(watch_gate());
 
-        app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta::default());
+        app.apply_auth_meta(&xai_grok_login::AuthMeta::default());
 
         assert!(app.pending_gate_verification.is_none());
         assert!(app.has_access());

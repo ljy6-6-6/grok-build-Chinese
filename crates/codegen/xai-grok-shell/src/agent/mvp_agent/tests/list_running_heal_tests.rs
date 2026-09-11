@@ -13,6 +13,7 @@ use xai_grok_tools::implementations::grok_build::task::types::{
 fn running_meta(id: &str, parent: &str) -> SubagentMeta {
     SubagentMeta {
         subagent_id: id.into(),
+        attempt_id: None,
         parent_session_id: parent.into(),
         child_session_id: format!("child-{id}"),
         subagent_type: "explore".into(),

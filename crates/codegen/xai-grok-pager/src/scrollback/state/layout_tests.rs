@@ -114,6 +114,56 @@ fn test_push_user_prompt_appends_prompt_descriptor() {
     assert_eq!(pd.y_virtual, cache.virtual_y[prompt_idx]);
 }
 
+/// A collapsed turn marker keeps its blank row against collapsed tool and subagent rows on both sides.
+/// The incremental extend path and the full recompute must agree.
+#[test]
+fn collapsed_turn_marker_keeps_gap_from_collapsed_neighbors() {
+    use crate::scrollback::blocks::{SessionEvent, SubagentBlock};
+    use std::time::Duration;
+
+    let gaps = |state: &ScrollbackState| -> Vec<u16> {
+        state
+            .layout_cache
+            .as_ref()
+            .expect("layout cache")
+            .entries
+            .iter()
+            .map(|e| e.gap_after)
+            .collect()
+    };
+
+    let mut state = ScrollbackState::new();
+    state.push_block(tool_block("wait one"));
+    state.push_block(tool_block("wait two"));
+    let marker = state.push_block(RenderBlock::session_event(SessionEvent::TurnCompleted {
+        elapsed: Some(Duration::from_secs(3)),
+    }));
+    state
+        .get_by_id_mut(marker)
+        .unwrap()
+        .set_display_mode(DisplayMode::Collapsed);
+    state.prepare_layout(80, 40);
+    assert_eq!(
+        state.get_by_id(marker).unwrap().display_mode,
+        DisplayMode::Collapsed
+    );
+    // Two collapsed tool rows stack; the collapsed marker after them does not
+    assert_eq!(gaps(&state), vec![0, 1, 1]);
+
+    // Extend path: the child's completion row appended under the marker keeps the blank row
+    state.push_block(RenderBlock::Subagent(SubagentBlock::completed(
+        "spacing probe",
+        "child-1",
+        Duration::from_secs(1),
+    )));
+    assert_eq!(gaps(&state), vec![0, 1, 1, 1]);
+
+    // Full recompute agrees with the extend path
+    state.layout_cache = None;
+    state.prepare_layout(80, 40);
+    assert_eq!(gaps(&state), vec![0, 1, 1, 1]);
+}
+
 /// Build a LayoutCache with the given entry heights.
 /// virtual_y is computed with 1-row gaps between entries (matching current gap_after=1).
 fn make_cache(heights: &[u16]) -> LayoutCache {
@@ -230,17 +280,9 @@ fn test_entry_at_content_y_height_one_entries() {
 
 // ── Hit-testing with sticky headers ──────────────────────────────
 
-/// Set up a scrollback state with a prompt + N response blocks,
-/// prepare layout, and return it.
-///
-/// Uses no-vpad appearance so heights are predictable:
-///   user_block("prompt") → height 1
-///   stub_block("resp")   → height 1
-///
-/// With ENTRY_GAP=1, a 2-entry layout is:
-///   row 0: prompt (entry 0)
-///   row 1: gap
-///   row 2: response (entry 1)
+/// Set up a scrollback state with a prompt + N response blocks, prepare layout, and return it. Uses no-vpad
+/// appearance so heights are predictable: user_block("prompt") → height 1 stub_block("resp") → height 1. With
+/// ENTRY_GAP=1, a 2-entry layout is: row 0: prompt (entry 0) row 1: gap row 2: response (entry 1).
 fn make_scrollback_for_hittest(
     response_count: usize,
     viewport_width: u16,
@@ -454,10 +496,8 @@ fn test_entry_screen_area_behind_header_returns_none() {
     assert!(entry_area.height > 0, "Pinned header should have height");
 }
 
-/// Regression: a lazily-resumed session must not pad a pinned sticky-header prompt with empty rows.
-/// Old prompts above the viewport are never in the measurement window, so `entry_truncated_heights` keeps the `MAX_TRUNCATED_HEADER_HEIGHT` seed.
-/// The sticky layout must still collapse a short pinned prompt to its real (full) height rather than the 6-row seed.
-/// See `sticky::calculate_render_height`'s full-height clamp.
+/// Regression: a lazily-resumed session must not pad a pinned sticky-header prompt with empty rows. The sticky
+/// layout must still collapse a short pinned prompt to its real (full) height rather than the 6-row seed.
 #[test]
 fn lazy_resumed_pinned_prompt_collapses_to_real_height() {
     use crate::appearance::AppearanceConfig;
@@ -1741,14 +1781,9 @@ fn lazy_empty_scrollback_and_oversized_viewport() {
     );
 }
 
-/// A long session can render past 65 535 rows, and the bottom must stay reachable.
-///
-/// Before the fix, `ScrollbackState::scroll_offset`/`total_height` were `u16` and `compute_total_height_from_cache` capped the total at `u16::MAX`.
-/// Once content exceeded 65 535 rows, `goto_bottom` could not scroll past that ceiling and the final entries were stranded.
-/// With the cumulative scroll state widened to `usize`, the full height is preserved and the last entry is on screen at the bottom.
-///
-/// This test FAILS pre-fix: `total_height` saturates at 65 535, so the `total_height > 65_535` assertion fails.
-/// The last entry would also sit below the reachable `scroll_offset`.
+/// A long session can render past 65 535 rows, and the bottom must stay reachable. This test FAILS pre-fix:
+/// `total_height` saturates at 65 535, so the `total_height > 65_535` assertion fails. The last entry would also
+/// sit below the reachable `scroll_offset`.
 #[test]
 fn goto_bottom_reaches_end_past_u16_max_rows_gb3236() {
     let _theme = pin_theme();
@@ -1833,10 +1868,8 @@ fn lazy_dirty_case2_settle_measures_revealed_region() {
 fn lazy_fold_anchor_settles_visible_region_on_estimated_session() {
     crate::appearance::cache::set_show_thinking_blocks(true);
     let _theme = pin_theme();
-    // fold_selected_impl nulls the cache and rebuilds to ESTIMATES
-    // It then settles the visible region exactly BEFORE its scroll-anchor math reads virtual_y
-    // This asserts that settle ran: the on-screen entries are `measured` immediately after the fold (before any later prepare_layout)
-    // Without the in-fold settle they'd all be estimates. (Load-bearing: verified to fail when the settle at fold_selected_impl is removed.)
+    // fold_selected_impl nulls the cache and rebuilds to ESTIMATES. Without the in-fold settle they'd all be
+    // estimates. (Load-bearing: verified to fail when the settle at fold_selected_impl is removed.).
     let mut state = ScrollbackState::new();
     let appearance = crate::appearance::AppearanceConfig {
         show_timestamps: false,
@@ -1989,11 +2022,9 @@ fn lazy_page_down_measures_revealed_entries() {
 #[test]
 fn lazy_ensure_selected_visible_measure_is_bounded() {
     let _theme = pin_theme();
-    // An earlier fix measured [first_visible, selected], which is UNBOUNDED
-    // With the viewport jumped to the top and the selection far below, one select step must measure EXACTLY the bounded window [sel-vp, sel+vp]
-    // It must never measure the whole prefix; that is the O(history) freeze being removed
-    // Asserting the exact measured INDEX SPAN (not a loose global count) is deterministic and attributable
-    // A regression to the unbounded span fails here with a span mismatch, not an ambiguous count
+    // With the viewport jumped to the top and the selection far below, one select step must measure EXACTLY the
+    // bounded window [sel-vp, sel+vp]. It must never measure the whole prefix; that is the O(history) freeze being
+    // removed. A regression to the unbounded span fails here with a span mismatch, not an ambiguous count.
     let vp = 12u16;
     let mut state = bulk_load_wrapping(200);
     state.prepare_layout(20, vp);

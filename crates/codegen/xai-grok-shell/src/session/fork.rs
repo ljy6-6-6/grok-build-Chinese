@@ -55,7 +55,7 @@ fn generate_fork_session_id(_source_id: &str) -> String {
 pub async fn fork_session(
     request: ForkSessionRequest,
     agent_id: &str,
-    auth_manager: Option<std::sync::Arc<crate::auth::AuthManager>>,
+    auth_manager: Option<std::sync::Arc<xai_grok_login::AuthManager>>,
 ) -> io::Result<ForkSessionResponse> {
     let t0 = std::time::Instant::now();
 
@@ -82,11 +82,17 @@ pub async fn fork_session(
     // Runs on the blocking thread pool so concurrent fork copies can execute truly in parallel
     // On a LocalSet, async copy_session_data serializes because the sync disk I/O blocks the single-threaded runtime
     let options = CopySessionOptions {
+        mint_session_identity: true,
         parent_session_id: Some(request.source_session_id.clone()),
         new_model_id: request.new_model_id.clone(),
         target_prompt_index: request.target_prompt_index,
         session_kind: request.session_kind.clone(),
         source_workspace_dir: request.source_workspace_dir.clone(),
+        prompt_display_cwd: request
+            .source_workspace_dir
+            .clone()
+            .filter(|display| display != &request.new_cwd),
+        skip_cwd_transform: request.session_kind.as_deref() == Some("worktree"),
         // Carry the parent's compaction segment archive into the fork so the child retains pre-compaction history
         // The live summary is already copied via chat_history.jsonl
         copy_compaction_segments: true,
@@ -110,9 +116,18 @@ pub async fn fork_session(
         let parent = request.source_session_id.clone();
         let model = request.new_model_id.clone();
         let aid = agent_id.to_string();
+        let session_agent_id = result.agent_id.clone();
         tokio::spawn(async move {
-            if let Err(e) =
-                sync_forked_session_to_backend(&sid, &cwd, parent, model, &aid, am).await
+            if let Err(e) = sync_forked_session_to_backend(
+                &sid,
+                &cwd,
+                parent,
+                model,
+                &aid,
+                session_agent_id.as_deref(),
+                am,
+            )
+            .await
             {
                 tracing::warn!(
                     session_id = %sid,
@@ -153,7 +168,8 @@ async fn sync_forked_session_to_backend(
     parent_session_id: String,
     model_id: Option<String>,
     agent_id: &str,
-    auth_manager: std::sync::Arc<crate::auth::AuthManager>,
+    session_agent_id: Option<&str>,
+    auth_manager: std::sync::Arc<xai_grok_login::AuthManager>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let client = BackendClient::new().with_auth_manager(auth_manager);
     let metadata = ExportedMetadata {
@@ -164,6 +180,7 @@ async fn sync_forked_session_to_backend(
         updated_at: Some(chrono::Utc::now().to_rfc3339()),
         total_messages: Some(0),
         parent_session_id: Some(parent_session_id),
+        agent_id: session_agent_id.map(str::to_owned),
         session_kind: None,
         subagent_type: None,
         subagent_persona: None,

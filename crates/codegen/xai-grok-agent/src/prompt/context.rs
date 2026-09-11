@@ -72,9 +72,7 @@ pub enum PromptAudience {
 use xai_grok_tools::bridge::ToolBridge;
 use xai_grok_tools::types::template_renderer::TemplateRenderer;
 /// Agent-specific inputs for system prompt rendering.
-///
-/// Serializable (JSON/YAML) so users can dump it and inspect fields.
-/// Rendering goes through `ToolBridge::render_prompt()`.
+/// Serializable so users can dump and inspect fields. Rendering goes through `ToolBridge::render_prompt()`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptContext {
     /// Schema version for forward-compatible persistence.
@@ -108,6 +106,9 @@ pub struct PromptContext {
     /// When true, the system prompt includes a `<memory>` section telling the model it can use `memory_search` and `memory_get`.
     #[serde(default)]
     pub memory_enabled: bool,
+    /// Whether isolated filesystem-based Memory is enabled.
+    #[serde(default)]
+    pub memory_v2_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_global_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -169,6 +170,7 @@ impl Default for PromptContext {
             persona_summaries: vec![],
             build_timestamp_utc: chrono::Utc::now().to_rfc3339(),
             memory_enabled: false,
+            memory_v2_enabled: false,
             memory_global_path: None,
             memory_workspace_path: None,
             role_instructions: None,
@@ -199,10 +201,7 @@ impl PromptContext {
         self.format_agents_md_section()
     }
     /// Personas content for injection as a prepended user message.
-    ///
-    /// Returns a `<system-reminder>` block wrapping the `<personas>` section.
-    ///
-    /// - Subagents never get personas (`task` itself is a parent-only tool).
+    /// Returns a `<system-reminder>` wrapping the `<personas>` section. Subagents never get personas.
     pub fn personas_user_reminder(&self) -> Option<String> {
         if self.audience == PromptAudience::Subagent {
             return None;
@@ -220,6 +219,7 @@ impl PromptContext {
     pub fn placeholders(&self) -> serde_json::Value {
         serde_json::json!({
             "memory_enabled": self.memory_enabled,
+            "memory_v2_enabled": self.memory_v2_enabled,
             "memory_global_path": self.memory_global_path.as_deref().unwrap_or(""),
             "memory_workspace_path": self.memory_workspace_path.as_deref().unwrap_or(""),
             "role_instructions": self.role_instructions.as_deref().unwrap_or(""),
@@ -233,13 +233,8 @@ impl PromptContext {
             "include_browser_verification": self.include_browser_verification,
         })
     }
-    /// Render the full system prompt via `ToolBridge`.
-    ///
-    /// Tool names (`${{ tools.by_kind.* }}`) are resolved by the `TemplateRenderer` inside the bridge.
-    /// Agent-specific fields (`memory_enabled`, `role_instructions`, etc.) are passed as placeholders.
-    ///
-    /// Both the base template AND the `prompt_body` are rendered through MiniJinja.
-    /// This lets `${{ tools.by_kind.* }}` variables resolve correctly regardless of prompt mode.
+    /// Render the full system prompt via `ToolBridge`. Tool names are resolved inside the bridge.
+    /// Both the base template and `prompt_body` go through MiniJinja so `${{ tools.by_kind.* }}` resolves regardless of prompt mode.
     pub async fn render(&self, tool_bridge: &ToolBridge) -> Option<String> {
         let renderer = tool_bridge.template_renderer_snapshot().await?;
         self.render_with_renderer(&renderer)
@@ -297,6 +292,7 @@ mod tests {
             persona_summaries: vec![],
             build_timestamp_utc: TEST_TIMESTAMP.to_string(),
             memory_enabled: false,
+            memory_v2_enabled: false,
             memory_global_path: None,
             memory_workspace_path: None,
             role_instructions: None,
@@ -450,6 +446,7 @@ mod tests {
         let ctx = test_context();
         let p = ctx.placeholders();
         assert_eq!(p["memory_enabled"], false);
+        assert_eq!(p["memory_v2_enabled"], false);
         assert!(p.get("role_instructions").is_some());
         assert!(p.get("persona_instructions").is_some());
         assert_eq!(p["system_prompt_label"], DEFAULT_SYSTEM_PROMPT_LABEL);
@@ -475,6 +472,7 @@ mod tests {
         ctx.working_directory = Some("/workspace".into());
         ctx.current_date = Some("2026-03-26".into());
         ctx.memory_enabled = true;
+        ctx.memory_v2_enabled = true;
         ctx.role_instructions = Some("test role".into());
         ctx.persona_instructions = Some("test persona".into());
         let p = ctx.placeholders();
@@ -483,6 +481,7 @@ mod tests {
         assert_eq!(p["working_directory"], "/workspace");
         assert_eq!(p["current_date"], "2026-03-26");
         assert_eq!(p["memory_enabled"], true);
+        assert_eq!(p["memory_v2_enabled"], true);
         assert_eq!(p["role_instructions"], "test role");
         assert_eq!(p["persona_instructions"], "test persona");
     }
@@ -618,6 +617,7 @@ mod tests {
             ],
             build_timestamp_utc: TEST_TIMESTAMP.to_string(),
             memory_enabled: true,
+            memory_v2_enabled: false,
             memory_global_path: None,
             memory_workspace_path: None,
             role_instructions: None,

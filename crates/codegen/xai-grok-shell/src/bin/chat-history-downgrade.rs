@@ -33,13 +33,8 @@ struct Args {
     output: PathBuf,
 }
 
-/// Convert one v1 JSONL line to a v0 `ChatRequestMessage`.
-/// `pending_reasoning` threads across calls so sibling `Reasoning` items fold into the following assistant.
-///
-/// Returns:
-/// - `Ok(Some(msg))`: emit this v0 message.
-/// - `Ok(None)`: a sibling `Reasoning` line; its text is buffered in `pending_reasoning` for the next assistant and nothing is emitted.
-/// - `Err(_)`: the line parsed as neither v1 nor v0.
+/// Convert one v1 JSONL line to a v0 `ChatRequestMessage`. `pending_reasoning` threads across calls so sibling `Reasoning` items fold into the following assistant.
+/// `Ok(None)`: a sibling `Reasoning` line; its text is buffered in `pending_reasoning` for the next assistant and nothing is emitted. `Err(_)`: the line parsed as neither v1 nor v0.
 fn convert_line(
     trimmed: &str,
     pending_reasoning: &mut Vec<String>,
@@ -59,10 +54,8 @@ fn convert_line(
         return Ok(None);
     }
 
-    // (a) Legacy reasoning field on the assistant item.
-    // Tries `reasoning.text` first (chat-completions style), then `reasoning.encrypted` (responses-API style)
-    // The encrypted form is opaque bytes, so it becomes a placeholder rather than being dropped silently
-    // Real text wins if both are present
+    // (a) Legacy reasoning field on the assistant item. Tries `reasoning.text` first (chat-completions style), then `reasoning.encrypted` (responses-API style)
+    // The encrypted form is opaque bytes, so it becomes a placeholder rather than being dropped silently Real text wins if both are present
     let legacy_reasoning: Option<String> = if item_type == Some("assistant") {
         raw.get("reasoning").and_then(|r| {
             r.get("text")

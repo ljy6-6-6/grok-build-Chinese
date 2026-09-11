@@ -31,10 +31,9 @@ pub enum MatchMode {
     Search,
 }
 
-/// Unified filter / search state for a list pane.
-///
-/// Wraps a [`TextMatcher`] with the list-specific bits: [`MatchMode`] (hide or highlight) and the eagerly-built physical match indices.
-/// It also holds the `current_match` cursor used by n/N navigation.
+/// Unified filter / search state for a list pane. Wraps a [`TextMatcher`] with the list-specific
+/// bits: [`MatchMode`] (hide or highlight) and the eagerly-built physical match indices. It also
+/// holds the `current_match` cursor used by n/N navigation.
 #[derive(Debug, Clone)]
 pub struct ListMatcher {
     text: TextMatcher,
@@ -48,10 +47,7 @@ pub struct ListMatcher {
 }
 
 impl ListMatcher {
-    /// Build a new matcher.
-    ///
-    /// `query`: the raw user input.
-    /// `kind`: substring or regex interpretation.
+    /// Build a new matcher. `query`: the raw user input. `kind`: substring or regex interpretation.
     /// `mode`: filter (hide) or search (highlight).
     pub fn new(query: impl Into<String>, kind: QueryKind, mode: MatchMode) -> Self {
         Self {
@@ -124,10 +120,9 @@ impl ListMatcher {
 // Backward-compatible aliases
 // ---------------------------------------------------------------------------
 
-/// Backward-compatible alias for [`ListMatcher`].
-///
-/// Existing code that constructs `FilterMatcher::substring(...)` or `FilterMatcher::regex(...)` continues to work via these helper methods.
-/// New code should use [`ListMatcher::new`] directly.
+/// Backward-compatible alias for [`ListMatcher`]. Existing code that constructs
+/// `FilterMatcher::substring(...)` or `FilterMatcher::regex(...)` continues to work via these
+/// helper methods. New code should use [`ListMatcher::new`] directly.
 pub type FilterMatcher = ListMatcher;
 
 impl ListMatcher {
@@ -147,10 +142,9 @@ impl ListMatcher {
     }
 }
 
-/// Active filter state.  Wraps a [`ListMatcher`] with a match count.
-///
-/// Kept for backward compatibility with code that reads `filter().match_count`.
-/// The match count is now derived from `matcher.match_indices.len()`.
+/// Active filter state. Wraps a [`ListMatcher`] with a match count. Kept for backward compatibility
+/// with code that reads `filter().match_count`. The match count is now derived from
+/// `matcher.match_indices.len()`.
 #[derive(Debug, Clone)]
 pub struct ListFilter {
     /// The unified matcher.
@@ -290,14 +284,8 @@ pub struct ListPaneState {
     /// Consumed by `prepare_layout` and reset to `None`.
     scroll_anchor: Option<usize>,
 
-    /// Pinned screen-y for viewport scrolling.
-    ///
-    /// When scrolling the viewport (Ctrl-d/u, mouse wheel, etc.), we want the selection to stay at a fixed screen row.
-    /// If the target item is non-selectable (separator), we pick a neighbor, but that shifts the *actual* screen-y by 1.
-    /// Without this pin, the drift accumulates across every separator crossing.
-    ///
-    /// Set on the first viewport scroll after a selection change.
-    /// Cleared by any intentional selection movement (j/k, click, g/G, etc.).
+    /// Pinned screen-y for viewport scrolling. Without this pin, the drift accumulates across every
+    /// separator crossing.
     scroll_screen_y: Option<usize>,
 
     // -- Modes ----------------------------------------------------------------
@@ -318,10 +306,8 @@ pub struct ListPaneState {
     /// Active matcher (filter or search).  `None` means show all, no highlights.
     matcher: Option<ListMatcher>,
 
-    /// Visible-index to physical-index mapping.
-    /// `None` means identity (no filter active, vis[i] == i).
-    /// `Some(vec)` means a filtered mapping.
-    /// Built in `prepare_layout`, consumed by the renderer.
+    /// Visible-index to physical-index mapping. `None` means identity (no filter active, vis[i] == i).
+    /// `Some(vec)` means a filtered mapping. Built in `prepare_layout`, consumed by the renderer.
     vis_map: Option<Vec<usize>>,
 
     /// Scroll margin: minimum lines of context above/below selection.
@@ -331,24 +317,12 @@ pub struct ListPaneState {
     /// `None` when scrollbar is not shown (content fits viewport).
     last_scrollbar_area: Option<Rect>,
 
-    // -- Highlight visibility -------------------------------------------------
-    /// Whether the highlight post-pass should render match inversions.
-    ///
-    /// Callers set this to `false` after accepting a filter (Enter) to avoid visual noise when every visible line matches.
-    /// Set back to `true` when re-entering the input bar or switching to search mode.
-    ///
-    /// Defaults to `true` (highlights always shown).
+    // Callers set this to `false` after accepting a filter (Enter) to avoid visual noise when every
+    // visible line matches. Defaults to `true` (highlights always shown).
     pub show_highlights: bool,
 
-    // -- Height cache (Wrap mode) ---------------------------------------------
-    /// Per-physical-item height cache for Wrap mode.
-    ///
-    /// Indexed by physical item index.
-    /// Computed once when the width changes (or on first layout), reused across filter changes.
-    /// This avoids calling `desired_height` (which runs word-wrapping) on every filter keystroke for 100K+ items.
-    ///
-    /// Invalidated when width changes.
-    /// Extended incrementally on appends.
+    // Height cache (Wrap mode) --------------------------------------------Per-physical-item height
+    // cache for Wrap mode.
     height_cache: Vec<u16>,
 
     /// Width at which `height_cache` was computed.
@@ -375,10 +349,9 @@ pub struct ListPaneState {
     /// Whether a scrollbar drag is in progress.
     scrollbar_dragging: bool,
 
-    // -- Clipboard ------------------------------------------------------------
-    /// Clipboard provider for `y` (copy).
-    /// Default is `InternalClipboard` (in-memory).
-    /// Host app can inject system clipboard via [`set_clipboard_provider`].
+    // Clipboard -----------------------------------------------------------Clipboard provider for `y`
+    // (copy). Default is `InternalClipboard` (in-memory). Host app can inject system clipboard via
+    // [`set_clipboard_provider`].
     clipboard: Box<dyn ClipboardProvider>,
 
     /// When the last successful copy happened (for toast notification).
@@ -400,24 +373,14 @@ const MOUSE_OVERSCROLL_THRESHOLD: u8 = 1;
 // ListPaneConfig — feature flags
 // ---------------------------------------------------------------------------
 
-/// Configuration flags for a `ListPaneState`.
-///
-/// Controls which features are available.  Use-case examples:
-///
-/// | Use case       | follow | wrap_toggle |
-/// |----------------|--------|-------------|
-/// | Tracing pane   | ✓      | ✓           |
-/// | Todo list      | ✗      | ✗           |
-/// | Background tasks | ✗    | ✗           |
+/// Configuration flags for a `ListPaneState`. Controls which features are available. Use-case
+/// examples. | Use case | follow | wrap_toggle |. | Tracing pane | ✓ | ✓ |. | Todo list | ✗ | ✗ |.
+/// | Background tasks | ✗ | ✗ |.
 #[derive(Debug, Clone, Copy)]
 pub struct ListPaneConfig {
-    /// Whether follow mode is available.
-    ///
-    /// When `false`:
-    /// - `follow_mode` is always `false` regardless of constructor arg.
-    /// - `G`/`End` selects the last item (no follow engage).
-    /// - One-past / overscroll logic is disabled.
-    /// - `toggle_follow()` is a no-op.
+    /// Whether follow mode is available. When `false`. `follow_mode` is always `false` regardless of
+    /// constructor arg. `G`/`End` selects the last item (no follow engage). One-past / overscroll logic
+    /// is disabled. `toggle_follow()` is a no-op.
     pub follow_enabled: bool,
 
     /// Whether `w` toggles wrap mode.
@@ -435,11 +398,9 @@ pub struct ListPaneConfig {
     /// When `false`, `y` is not consumed by `handle_key_event`.
     pub copy_enabled: bool,
 
-    /// Whether to show the selection highlight when the pane is unfocused.
-    ///
-    /// When `true` (default), the selection bg is always painted.
-    /// When `false`, the selection bg is only painted when `ListPane::focused(true)`.
-    /// Use `false` in multi-pane layouts where unfocused panes should dim.
+    /// Whether to show the selection highlight when the pane is unfocused. When `true` (default), the
+    /// selection bg is always painted. When `false`, the selection bg is only painted when
+    /// `ListPane::focused(true)`. Use `false` in multi-pane layouts where unfocused panes should dim.
     pub show_selection_when_unfocused: bool,
 
     /// Whether `v` / `Shift-j` / `Shift-k` visual selection is available.
@@ -447,10 +408,8 @@ pub struct ListPaneConfig {
     /// When `false`, these keys are not consumed by `handle_key_event`.
     pub visual_select_enabled: bool,
 
-    /// Whether `f` (filter) is available.
-    ///
-    /// When `false`, `f` is not consumed.
-    /// `/` (search) is still controlled by `search_enabled`; this allows search-only without filter.
+    /// Whether `f` (filter) is available. When `false`, `f` is not consumed. `/` (search) is still
+    /// controlled by `search_enabled`; this allows search-only without filter.
     pub filter_enabled: bool,
 
     /// Whether `:` (go to line) is available.
@@ -460,10 +419,9 @@ pub struct ListPaneConfig {
 }
 
 impl Default for ListPaneConfig {
-    /// Default config: follow and search disabled, wrap toggle enabled.
-    ///
-    /// This is the safe default for static lists (todo items, background tasks) where follow mode and search don't make sense.
-    /// For streaming/append-only lists (tracing pane), use `ListPaneConfig::streaming()`.
+    /// Default config: follow and search disabled, wrap toggle enabled. This is the safe default for
+    /// static lists (todo items, background tasks) where follow mode and search don't make sense. For
+    /// streaming/append-only lists (tracing pane), use `ListPaneConfig::streaming()`.
     fn default() -> Self {
         Self {
             follow_enabled: false,
@@ -512,14 +470,8 @@ enum GotoTarget {
     Invalid,
 }
 
-/// Parse goto-line input text into a target.
-///
-/// Supports:
-/// - `N`: single line number (clamped to 1..=max)
-/// - `N-M`: range (clamped, with the end raised to at least `N`)
-///
-/// Partial inputs like `12-` (separator typed, no end yet) are treated as a single line jump to the start number.
-/// The end updates live as the user types more digits.
+/// Parse goto-line input text into a target. `N-M`: range (clamped, with the end raised to at least
+/// `N`).
 fn parse_goto_input(text: &str, max_lines: usize) -> GotoTarget {
     let text = text.trim();
     if text.is_empty() {

@@ -442,10 +442,7 @@ impl ProtectedEditPermission {
 }
 
 /// Whether an already-resolved direct edit target needs confirmation, and why.
-///
-/// The caller uses the edit tools' shared model-path resolver first.
-/// This helper preserves its uncollapsed components for physical symlink and `..` resolution.
-/// It also checks a separate lexical normalization for traversal aliases.
+/// Preserves the resolver's uncollapsed components for physical symlink and `..` checks, plus a separate lexical normalization for traversal aliases.
 pub(crate) fn edit_target_protection(path: &Path) -> Option<ProtectedEditReason> {
     if !path.is_absolute() {
         return Some(ProtectedEditReason::Sensitive);

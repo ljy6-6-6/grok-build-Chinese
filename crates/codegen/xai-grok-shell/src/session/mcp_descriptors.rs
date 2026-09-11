@@ -26,10 +26,8 @@ pub(crate) fn server_descriptor_dir(mcps_root: &Path, server_name: &str) -> Path
 }
 
 /// Upsert the on-disk tool descriptors for the given connected clients.
-///
 /// Safe to run concurrently (the first-turn build and the background handshake task can both call it).
 /// `materialize_descriptors` writes each file atomically, so overlapping writers converge without a lock.
-/// Errors are logged, not propagated.
 pub(crate) async fn materialize_descriptors_for_clients(
     mcps_root: &Path,
     clients: Vec<(String, Arc<McpClient>)>,

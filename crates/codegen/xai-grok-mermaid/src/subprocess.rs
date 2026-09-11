@@ -31,17 +31,8 @@ pub enum SubprocessError {
 }
 
 /// Spawn `cmd`, optionally write `stdin_payload` to its stdin, wait up to `timeout`, and reap the process group on a breach.
-///
 /// The caller must have configured `cmd` (stdio, env, detach).
 /// To pass `stdin_payload`, the caller must set `cmd.stdin(Stdio::piped())`.
-/// The payload is written from a scoped thread so a full pipe buffer can never deadlock the wait.
-/// When `stdin_payload` is `None` (or stdin is not piped), no writer runs.
-///
-/// Returns `Ok(())` only on a zero-exit run; otherwise the matching [`SubprocessError`].
-/// On timeout or a failed wait the child is killed and reaped.
-/// On Unix the whole process group is SIGKILLed, so grandchildren (e.g. an [`crate::MmdcEngine`]'s headless Chromium) are reaped too.
-/// On Windows only the direct child is killed, which is enough for the pager's render child (no grandchildren).
-/// A Windows `MmdcEngine` could leak Chromium grandchildren; a Job Object is the follow-up there.
 pub fn run_with_timeout(
     mut cmd: Command,
     stdin_payload: Option<&[u8]>,
@@ -79,11 +70,7 @@ pub fn run_with_timeout(
 }
 
 /// Spawn `cmd`, retrying briefly on `ETXTBSY` ("Text file busy").
-///
-/// On Linux, exec'ing a binary that another thread or process still holds open for writing fails with `ExecutableFileBusy`.
-/// A concurrent `Command::spawn` on another thread forks and inherits any write fd open at that instant.
 /// The fd is close-on-exec but only closes at that child's own `execve`, so our `execve` of a freshly-written binary can race that window.
-/// The failure is transient and clears within milliseconds, so retry a few times with a short backoff.
 #[allow(clippy::disallowed_methods)] // the caller owns the reap
 fn spawn_with_etxtbsy_retry(cmd: &mut Command) -> std::io::Result<Child> {
     const MAX_ATTEMPTS: u32 = 5;
@@ -108,8 +95,6 @@ fn spawn_with_etxtbsy_retry(cmd: &mut Command) -> std::io::Result<Child> {
 fn wait_and_reap(child: &mut Child, timeout: Duration) -> Result<(), SubprocessError> {
     match child.wait_timeout(timeout) {
         // `wait_timeout` already reaped the direct child on these two branches, but it was its own detached group leader
-        // SIGKILL the group's pgid so any grandchildren (e.g. an opt-in MmdcEngine's headless Chromium) are torn down regardless of exit code.
-        // The pgid stays valid while a grandchild is alive, the case that matters
         // For the render child, which has no grandchildren, the leader is already gone and killpg is a harmless no-op (ESRCH)
         // The full `reap()` is unneeded: the direct child is already reaped, so `child.kill()`/`wait()` would be redundant
         Ok(Some(status)) if status.success() => {
@@ -140,9 +125,6 @@ fn reap(child: &mut Child) {
 }
 
 /// SIGKILL the child's process group so grandchildren are reaped, not just the direct child.
-///
-/// `xai_tty_utils::detach_std_command` runs `setsid` (EPERM fallback `setpgid(0,0)`).
-/// The child is therefore its own group leader and its pgid equals its pid.
 /// We send the signal directly because `xai_tty_utils::ProcessGroup` only wraps tokio children.
 #[cfg(unix)]
 fn reap_process_group(child: &Child) {

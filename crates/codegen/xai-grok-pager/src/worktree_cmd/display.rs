@@ -111,7 +111,7 @@ pub fn print_table_with_locale(
         .clamp(5, 24);
     let type_width = records
         .iter()
-        .map(|r| UnicodeWidthStr::width(kind_label(r.kind.as_str(), locale).as_str()))
+        .map(|r| UnicodeWidthStr::width(kind_label(r.kind.as_str(), locale).as_ref()))
         .fold(UnicodeWidthStr::width(type_header.as_ref()), usize::max);
     writeln!(
         out,
@@ -151,7 +151,7 @@ pub fn print_table_with_locale(
         records
             .iter()
             .fold(std::collections::BTreeMap::new(), |mut m, r| {
-                *m.entry(r.kind.as_str()).or_default() += 1;
+                *m.entry(r.kind.as_ref()).or_default() += 1;
                 m
             });
     let breakdown: Vec<String> = by_kind
@@ -216,7 +216,7 @@ pub fn print_show_with_locale(
         locale,
         "worktree.show.type",
         "Type",
-        kind_label(rec.kind.as_str(), locale),
+        kind_label(rec.kind.as_ref(), locale),
     )?;
     write_show_field(
         out,
@@ -270,7 +270,7 @@ pub fn print_show_with_locale(
         locale,
         "worktree.show.status",
         "Status",
-        status_label(rec.status.as_str(), locale),
+        status_label(rec.status.as_ref(), locale),
     )?;
     if let Some(label) = rec.label() {
         write_show_field(out, locale, "worktree.show.label", "Label", label)?;

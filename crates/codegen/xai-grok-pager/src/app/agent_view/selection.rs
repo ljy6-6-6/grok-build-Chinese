@@ -142,9 +142,7 @@ impl AgentView {
 
     /// Run `f` with a text source over the anchor entry's full block output (so off-screen fragments are included).
     /// Lines outside the hit's selection range yield `None`, which detection treats as a boundary.
-    ///
     /// `width_override` is the drag-start width snapshot, for callers whose entry may have scrolled fully out of `visible_blocks` by now.
-    /// Other callers pass `None` and use the current frame's geometry.
     fn with_entry_output_text_source<R>(
         &self,
         entry_idx: usize,
@@ -278,13 +276,8 @@ impl AgentView {
     }
 
     /// Advance drag autoscroll by one tick.
-    ///
     /// Scrolls the active scrollback (main or subagent) by `speed` rows in the autoscroll direction.
     /// After scrolling, recomputes the drag head from the stored mouse position using the current (soon-stale) selection model.
-    /// [`Self::reclamp_drag_head_post_render`] re-snaps the head once the next render rebuilds the model.
-    ///
-    /// For block drag, implements long-block snap.
-    /// If the current head block is no longer visible after scrolling, the head advances to the next visible block in the scroll direction.
     pub fn tick_drag_autoscroll(&mut self) -> bool {
         let Some(autoscroll) = self.drag_autoscroll else {
             return false;
@@ -365,12 +358,8 @@ impl AgentView {
     }
 
     /// Snap an active drag head to the freshly rebuilt selection model.
-    ///
     /// Input handlers and autoscroll ticks hit-test against the previous frame's model, which scrolling/streaming/resizing make stale.
-    /// `draw` calls this right after each model rebuild and before the corresponding overlay paints.
     /// The head thus re-resolves from the held pointer position with at most one frame of lag.
-    /// `btw_rebuilt` names which model was just rebuilt: a drag anchored on the other one is left alone (its model is still last frame's).
-    /// Keeps the previous head when the anchor's range has no lines in the fresh model.
     pub(in crate::app) fn reclamp_drag_head_post_render(&mut self, btw_rebuilt: bool) {
         let Some((col, row)) = self.last_drag_mouse else {
             return;
@@ -441,33 +430,20 @@ impl AgentView {
         self.last_drag_mouse = None;
     }
 
-    /// On xterm.js embeds a lost release can also mean the terminal's own button tracker is wedged and will eat every release from now on.
-    /// (VS Code does this after a context-menu gesture.)
     /// Toggling reporting off and on resets the tracker so the next gesture gets clean reports.
     /// Callers must know the button is UP (bare `Moved`, an unpaired release).
-    /// The toggle clears xterm.js's tracking of a press in flight, so firing it mid-press would break that gesture.
     /// Gated to xterm.js embeds: other terminals don't have the wedge, and some (VTE) emit spurious events on mouse-mode churn.
-    pub(super) fn reset_wedged_mouse_reporting(&self) {
+    pub(super) fn reset_wedged_mouse_reporting(&mut self) {
         if crate::terminal::terminal_context().brand.is_xtermjs_embed()
             && crate::app::MOUSE_CAPTURE_ENABLED.load(std::sync::atomic::Ordering::Acquire)
         {
-            xai_grok_shell::util::with_locked_stderr(|stderr| {
-                let _ = crossterm::execute!(
-                    stderr,
-                    crossterm::event::DisableMouseCapture,
-                    crossterm::event::EnableMouseCapture
-                );
-            });
+            self.pending_effects
+                .push(crate::app::actions::Effect::ResetMouseReporting);
         }
     }
 
     /// Update [`Self::plan_prompt_mouse_drag`] for a left-button mouse event during plan feedback.
     /// Reports whether the event should be forwarded to the feedback prompt (for cursor placement / text selection).
-    ///
-    /// `in_prompt` is whether the pointer currently sits in the prompt rect.
-    /// A left press arms the drag when it lands in the prompt; the release disarms it.
-    /// Subsequent `Drag`/`Up` events keep being routed to the prompt even after the pointer leaves the rect.
-    /// (TextArea tracks drag state internally and handles drag-beyond-edge.)
     /// Shared by both plan-feedback mouse paths (line-viewer-open and empty-plan) so the two route drags the same way.
     pub(super) fn route_plan_prompt_mouse_drag(
         &mut self,
@@ -618,8 +594,6 @@ impl AgentView {
 
     /// One-way deferred-anchor conversion.
     /// A scrollback press with no selectable text under it arms [`AgentView::deferred_text_press`] alongside the normal block-drag latch.
-    /// The FIRST drag position that hits selectable text (the same hit test the press ran) becomes both anchor and head of an [`ActiveTextDrag`].
-    /// Any block-drag state in flight is cancelled: once text, the gesture stays text.
     /// A gesture that never enters text leaves the block drag to run unchanged.
     fn convert_deferred_text_press(&mut self, mouse: &MouseEvent) -> bool {
         let Some((press_col, press_row)) = self.deferred_text_press else {
@@ -873,7 +847,7 @@ impl AgentView {
         );
     }
 
-    /// Note on the AgentView whose scrollback was copied: the fullscreen child when
+    /// Note on the AgentView whose scrollback was copied: the fullscreen child when active_subagent is set (same view reconstruct_drag_copy / with_entry_* use).
     /// active_subagent is set (same view reconstruct_drag_copy / with_entry_* use).
     fn note_scrollback_drag_copy(&mut self, entry_idx: usize, toast_ticks: u16) {
         if let Some(child_id) = self.active_subagent.clone()
@@ -1106,14 +1080,6 @@ impl AgentView {
     }
 
     /// Handle a click on a scrollback entry with multi-click detection.
-    ///
-    /// - Single click: select entry
-    /// - Double-click non-prompt: toggle fold in place
-    /// - Double-click prompt: toggle fold + scroll to top
-    /// - Triple-click non-prompt: toggle fold + scroll to top
-    ///
-    /// Returns `(last_click_state, show_word_select_tip)`.
-    /// The tip flag is set on a REPEATED double-click on assistant text: a second gesture within [`WORD_SELECT_REPEAT_WINDOW`].
     /// It only fires while Text selection is still fold/nav (not `word_select`), so dispatch can teach `/settings → Text selection`.
     /// A lone double-click, or one on fold-affordance rows (headers, prompts, tool rows), never tips.
     pub(in crate::app) fn handle_scrollback_click(
@@ -1207,17 +1173,15 @@ impl AgentView {
                     && let crate::scrollback::block::RenderBlock::BgTask(ref bt) = entry.block
                     && let Some(task) = self.session.bg_tasks.get(&bt.task_id)
                 {
-                    let eid = task
-                        .scrollback_entry_id
-                        .unwrap_or_else(|| crate::scrollback::entry::EntryId::new(0));
                     let is_running = task.status == crate::app::agent::BgTaskStatus::Running;
-                    self.block_viewer =
-                        Some(crate::views::block_viewer::BlockViewerPane::for_bg_task(
-                            eid,
+                    self.install_block_viewer(
+                        crate::views::block_viewer::BlockViewerPane::for_bg_task(
+                            entry.id,
                             &bt.task_id,
                             &task.stdout,
                             is_running,
-                        ));
+                        ),
+                    );
                 }
             }
             2 if is_subagent => {
@@ -1241,10 +1205,8 @@ impl AgentView {
             }
             2 if is_prompt => {
                 // Edit in place; bash/cron keep the old fold behavior.
-                //
                 // Gated OFF for now (unsolved scroll jump on enter; see inline_edit::INLINE_EDIT_ENABLED)
                 // When disabled this is a no-op, so the block below runs
-                // That restores the EXACT pre-feature double-click behavior for a prompt: fold (if foldable) and scroll the entry to the top
                 if !(crate::app::inline_edit::INLINE_EDIT_ENABLED && self.enter_inline_edit(idx)) {
                     if foldable {
                         self.scrollback.toggle_fold_selected();
@@ -1382,12 +1344,8 @@ impl AgentView {
     }
 
     /// Select the logical line (paragraph or list item) at `hit`.
-    ///
     /// The run is bounded to a single pre-wrap logical line.
     /// Prose paragraphs collapse soft breaks into one logical line, so this takes the whole wrapped paragraph.
-    /// Each list item (and each hard-broken source line) is its own logical line, so triple-click on a bullet takes that item, not the whole list.
-    /// Soft-wrap continuation rows carry a `joiner_to_previous`; a `None` joiner marks a new logical line and bounds the run.
-    /// A single-line run delegates to [`Self::select_line_at`].
     pub(in crate::app) fn select_paragraph_at(&mut self, hit: &RangeHit) {
         // Resolve the run's first/last rendered lines under an immutable borrow, then release it before mutating selection state
         let resolved = {
@@ -1404,7 +1362,6 @@ impl AgentView {
             };
 
             // `b` is a soft-wrap continuation of `a` (same logical line): the two are adjacent and `b` carries a joiner
-            // A `None` joiner starts a new logical line (new paragraph, list item, or source line) and bounds the run
             // Reads go through `.get()`, so an out-of-range neighbor just ends the walk instead of panicking
             // `click_pos` is valid and start/end only move inward-to-outward from it
             let continues = |a: usize, b: usize| match (range.lines.get(a), range.lines.get(b)) {
@@ -2572,7 +2529,6 @@ mod tests {
 
     /// The TABLE-shaped copy also survives full scroll-out via the width snapshot.
     /// The side-car geometry frozen while the block was visible re-detects against the snapshot-width output.
-    /// The cell text is then copied with no `visible_blocks` entry at mouse-up.
     /// Without the snapshot the whole copy fails.
     #[test]
     fn table_copy_uses_width_snapshot_when_anchor_block_scrolled_out() {
@@ -2925,7 +2881,6 @@ mod tests {
     /// Two message entries with chrome rows and a dead gap between them.
     /// Entry 0 area: rows 4-6 (row 4 chrome, text on rows 5-6, width 46).
     /// Rows 7-8: dead gap.
-    /// Entry 1 area: rows 9-10 (row 9 chrome, text on row 10, width 52).
     fn agent_with_chrome_and_gap() -> AgentView {
         let mut agent = make_agent();
         agent.pane_areas.scrollback = Rect::new(0, 0, 80, 24);
@@ -3468,7 +3423,6 @@ mod tests {
     }
 
     /// A held pointer (no motion events) in the bottom edge zone, and equally on a strip row below the pane, must scroll monotonically down.
-    /// It stops dead at the clamp.
     /// The direction is only ever written by motion handlers, so ticks alone can never flip it or oscillate at the boundary.
     /// The per-tick reclamp must stay a pure head snap (it never scrolls).
     #[test]
@@ -3586,7 +3540,6 @@ mod tests {
 
     /// The strip conversion landing on the bottommost text row (inside the edge zone).
     /// With content already at-bottom the clamped offset must not move and the reclamped head must not wobble.
-    /// With room to scroll, ticks and per-frame reclamps advance offset and head monotonically.
     /// The reclamp never amplifies scrolling into oscillation.
     #[test]
     fn conversion_at_bottom_edge_ticks_without_oscillation() {

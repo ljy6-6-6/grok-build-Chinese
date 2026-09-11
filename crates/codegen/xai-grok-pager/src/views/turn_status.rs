@@ -69,20 +69,11 @@ pub(crate) const SPINNER_DIVISOR: u64 = 4;
 /// Its `○ ◎ ◉ ◎` cycle therefore runs at roughly half the speed (~1.07s per loop).
 pub(crate) const MONITOR_PULSE_DIVISOR: u64 = 8;
 
-/// Pulse speed for every "waiting on you" diamond.
-/// The drain-blocked, pending-user-input, and plan-approval statuses all share this cadence.
-/// `pulse_brightness` returns `sin²(tick*speed)`, which has period π, so at ~30fps this is ~1.3s per cycle (`π / (0.08 * 30) ≈ 1.31`).
-///
-/// Always route diamond rendering through [`pending_diamond_color`] so the three call sites can never silently drift apart.
+/// Pulse speed for every "waiting on you" diamond. Always route diamond rendering through
+/// [`pending_diamond_color`] so the three call sites can never silently drift apart.
 pub(crate) const USER_WAITING_PULSE_SPEED: f32 = 0.08;
 
 /// Compute the pulsing diamond color for any "waiting on you" cue.
-///
-/// Blends `accent` toward `theme.bg_base` using a `sin²` pulse driven by [`USER_WAITING_PULSE_SPEED`].
-/// Brightness ranges from 0.3 (dim) to 1.0 (full accent) so the diamond stays visible at the trough.
-///
-/// Pass `theme.accent_user` for user-input waits (permission prompts, `ask_user_question`, the drain-blocked idle status).
-/// Pass `theme.accent_plan` for plan-approval waits.
 pub(crate) fn pending_diamond_color(theme: &Theme, accent: Color, tick: u64) -> Color {
     let brightness = crate::theme::pulse_brightness(tick, USER_WAITING_PULSE_SPEED);
     crate::render::color::blend_color(theme.bg_base, accent, 0.3 + brightness * 0.7)
@@ -117,10 +108,8 @@ pub struct MouseButtons {
     pub watching_hovered: bool,
 }
 
-/// Counts of "watcher" work: background jobs that can wake the agent for a new turn while it sits idle.
-/// Commands and monitors wake it on completion or events, `/loop` tasks on a timer, and background subagents on finish.
-/// They share one persistent still-running cue above the prompt.
-/// This is broader than the tasks-pane `Watchers` group (monitors and loops only).
+/// Counts of "watcher" work: background jobs that can wake the agent for a new turn while it sits
+/// idle. This is broader than the tasks-pane `Watchers` group (monitors and loops only).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Watchers {
     /// Running background commands (non-monitor `background: true` tasks).
@@ -219,14 +208,7 @@ fn still_running_label(
 }
 
 /// Whether the turn is blocked in a wait the shell aborts as soon as the user sends a message.
-/// Matches `get_task_output` with `timeout_ms`, `wait_tasks`, `Await*`, and a foreground subagent await, mirroring the shell's blocking waits.
-/// The shell's send-now routing cancels the blocked turn and runs the new message next, so typing is actionable during these.
-/// That is what the parked-wait rendering (`AgentView::is_parked_on_sendable_wait` / `renders_parked`) builds on.
-///
-/// `Subagent` is included: the shell treats a blocked foreground subagent await like the other blocking waits.
 /// Enter therefore sends promptly and pre-wait rows read as held.
-/// `Model` waits stay excluded: the model is actively producing the turn, so a message typed there queues behind real work.
-/// A pure predicate over the resolved activity; it has no side effects on the turn.
 pub fn is_sendable_wait(activity: &Option<TurnActivity>) -> bool {
     matches!(
         activity,
@@ -342,10 +324,9 @@ pub fn render_turn_status(
         return TurnStatusOutput::default();
     }
 
-    // Idle or parked: a persistent cue (not scrollback, it must never scroll away)
-    // Lower priority than the starting-session and drain-blocked cues above
-    // Parked never falls through to the running-turn chrome (spinner/timers/[stop])
-    // The wait aborts the moment the user types, so that chrome would lie
+    // Idle or parked: a persistent cue (not scrollback, it must never scroll away). Parked never falls
+    // through to the running-turn chrome (spinner/timers/[stop]). The wait aborts the moment the user
+    // types, so that chrome would lie.
     if state.is_idle() || parked {
         // Parked with held queued rows: the queued hint says what Enter does (act on the queue now), so it replaces the generic interrupt copy
         let parked_suffix = if held_queue > 0 && held_queue_top_sendable {
@@ -509,14 +490,8 @@ pub fn render_turn_status(
     };
     let phase_timer_width = phase_timer_str.width();
 
-    // Timer style (gray for both phase and turn timers).
-    //
-    // Right-side elements (turn timer, bg button, cancel button) must set fg, bg, AND remove_modifier explicitly
-    // fill_background() paints bg_base on every cell before widgets render
-    // set_line() for the left content may then overwrite fg/modifiers on cells in the right zone
-    // A Style with bg:None (the default) cannot restore bg after a reset, and a Style without remove_modifier cannot clear leaked modifiers
-    // Right-side cells normally paint `bg_base`
-    // A flat-background host (minimal mode) uses the terminal's own background so the row stays transparent like the rest of the live region
+    // Timer style (gray for both phase and turn timers). A Style with bg:None (the default) cannot
+    // restore bg after a reset, and a Style without remove_modifier cannot clear leaked modifiers.
     let timer_bg = if flat_background {
         Color::Reset
     } else {
@@ -616,11 +591,7 @@ pub fn render_turn_status(
             }
         }
     } else {
-        // Sendable wait holding queued messages: a persistent inline hint saying why the queue is paused and how to send anyway
-        // It sits on the status row (not an ephemeral tip) so it stays visible for the whole wait
-        // It drops before the label truncates on a narrow terminal
-        // "Enter to send now" is advertised only when Enter would actually send the top row
-        // Bash and client-expanded local rows refuse with a toast, see `AgentView::held_queue_top_sendable`
+        // "Enter to send now" is advertised only when Enter would actually send the top row.
         let suffix = if held_queue > 0 && is_sendable_wait(activity) {
             if held_queue_top_sendable {
                 turn_format(
@@ -874,21 +845,15 @@ fn compute_activity(
     }
 }
 
-/// Whether the idle "Starting session…" indicator wants the turn-status row.
-///
-/// True only for a fresh `total == 0` startup seed (gated by [`McpInitProgress::is_visible`] so an orphaned seed expires).
-/// Real MCP progress (`total > 0`) renders as the top-bar chip instead, so it does not drive this row.
+/// Whether the idle "Starting session…" indicator wants the turn-status row. True only for a fresh
+/// `total == 0` startup seed (gated by [`McpInitProgress::is_visible`] so an orphaned seed
+/// expires).
 fn starting_session_visible(progress: Option<&McpInitProgress>) -> bool {
     progress.is_some_and(|p| p.total == 0 && p.is_visible())
 }
 
-/// Render the idle "Starting session…" indicator above the prompt.
-///
-/// Format: `⠋ Starting session… 0:01` (braille spinner, label, elapsed timer).
-/// Rendered in `theme.gray_dim` (the dimmest gray) so it reads as quiet and ambient, matching the top-bar MCP chip and the directory path.
-/// This is non-blocking startup, not foreground activity.
-/// Shown only while the MCP init progress is a startup seed (`total == 0`), before the shell reports real server counts.
-/// Real progress (`total > 0`) renders as the top-bar chip.
+/// Shown only while the MCP init progress is a startup seed (`total == 0`), before the shell
+/// reports real server counts.
 fn render_starting_session(
     buf: &mut Buffer,
     area: Rect,
@@ -912,17 +877,8 @@ fn render_starting_session(
     buf.set_line(area.x, area.y, &Line::from(spans), area.width);
 }
 
-/// Whether the turn status line should be visible.
-///
-/// Returns true when a turn is active (Running or Cancelling) or the drain is blocked (agent idle, waiting on a user edit).
-/// Also true while the MCP startup seed shows "Starting session…" (a fresh `total == 0` seed).
-/// Also true when the agent is idle but background watchers are still running (`watchers.total() > 0`).
-/// Commands and monitors wake the agent on completion or events, `/loop` tasks fire prompts, and background subagents inject a completion turn.
-/// Any of those can start a new turn.
-///
-/// A parked turn always shows the row, watchers or not.
-///
-/// Real MCP progress (`total > 0`) renders as a compact chip in the top status bar instead, so it does not affect this row.
+/// Whether the turn status line should be visible. A parked turn always shows the row, watchers or
+/// not.
 pub fn should_show(
     state: &AgentState,
     drain_blocked: bool,
@@ -944,12 +900,9 @@ pub fn should_show(
 /// Re-exports [`crate::util::format_duration`] under the old name for backwards compatibility within this module.
 pub use crate::util::format_duration as format_turn_timer;
 
-/// Format a token count for compact display.
-///
-/// - Under 1000: `1`, `10`, `100` (raw number)
-/// - 1k-100k: `1.23k`, `10.1k` (with decimal)
-/// - 100k-1m: `100k`, `500k` (whole thousands)
-/// - 1m+: `1.23m`, `10.1m` (with decimal)
+/// Format a token count for compact display. Under 1000: `1`, `10`, `100` (raw number). 1k-100k:
+/// `1.23k`, `10.1k` (with decimal). 100k-1m: `100k`, `500k` (whole thousands). 1m+: `1.23m`,
+/// `10.1m` (with decimal).
 fn format_tokens_short(tokens: u64) -> String {
     if tokens < 1000 {
         format!("{tokens}")
@@ -1103,6 +1056,10 @@ mod tests {
             ),
             (WaitingReason::TasksComplete, "Waiting on tasks…"),
             (WaitingReason::Sleep, "Sleeping…"),
+            (
+                WaitingReason::PromptAck,
+                "Waiting for the agent to accept the prompt…",
+            ),
         ];
         for (reason, expected) in cases {
             let (_, label, is_tool) = compute_activity(

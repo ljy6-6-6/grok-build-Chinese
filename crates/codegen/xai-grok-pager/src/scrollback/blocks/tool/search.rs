@@ -76,6 +76,8 @@ pub struct SearchToolCallBlock {
     pub started_at: Option<std::time::Instant>,
     /// Elapsed time in ms after completion.
     pub elapsed_ms: Option<i64>,
+    /// Whether this ordinary search targets a memory v2 scope.
+    pub is_memory_activity: bool,
 }
 
 impl SearchToolCallBlock {
@@ -91,7 +93,13 @@ impl SearchToolCallBlock {
             meta: SearchInputMeta::default(),
             started_at: None,
             elapsed_ms: None,
+            is_memory_activity: false,
         }
+    }
+
+    pub fn with_memory_activity(mut self) -> Self {
+        self.is_memory_activity = true;
+        self
     }
 
     pub fn with_matches(mut self, match_count: usize, file_matches: Vec<SearchFileMatch>) -> Self {
@@ -224,12 +232,8 @@ impl SearchToolCallBlock {
         self.pattern.is_empty() || self.pattern == "."
     }
 
-    /// Three cases:
-    /// 1. Trivial pattern + glob → `Search glob in path (summary)`
-    ///    glob is string-styled without quotes (it IS the search term).
-    /// 2. Real pattern + glob → `Search "pattern" in glob in path (summary)`
-    ///    glob shown as path scope after first "in".
-    /// 3. No glob → `Search "pattern" in path (summary)`
+    /// Trivial pattern + glob → `Search glob in path (summary)` glob is string-styled without quotes (it IS the search
+    /// term). No glob → `Search "pattern" in path (summary)`.
     fn header_line(
         &self,
         theme: &Theme,
@@ -340,7 +344,6 @@ impl SearchToolCallBlock {
     }
 
     /// Header line with only the search term span selectable (exclude "Search " prefix).
-    ///
     /// Span 0 is always the label; span 1 is the pattern/glob.
     /// Later "in path" and summary spans stay non-selectable so copy yields the search term.
     fn header_block_line(&self, line: Line<'static>) -> BlockLine {

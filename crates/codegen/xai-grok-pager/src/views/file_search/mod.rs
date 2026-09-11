@@ -30,7 +30,7 @@ pub fn styled_file_ref<'a>(
     theme: &Theme,
     at_prefix: bool,
 ) -> Line<'a> {
-    let dim = Style::default().fg(theme.gray);
+    let dim = theme.muted();
     let path_style = Style::default().fg(theme.path);
     let num_style = Style::default().fg(theme.gray_bright);
 

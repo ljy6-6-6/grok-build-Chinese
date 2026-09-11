@@ -1,10 +1,8 @@
 use super::*;
 
 /// Cached `mcp.push_server_status` flag resolution.
-///
 /// Resolution mirrors the `mcp.liveness_watchers` flag pattern but only stacks the env and default layers.
 /// The pager process does not load `config.toml` / `requirements.toml`.
-/// Default `true`; set `GROK_MCP_PUSH_SERVER_STATUS=0` to disable.
 pub(super) fn push_server_status_enabled() -> bool {
     use std::sync::OnceLock;
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -43,26 +41,9 @@ pub(super) fn handle_mcp_init_progress(notif: &acp::ExtNotification, app: &mut A
     is_active
 }
 
-/// Handle `x.ai/mcp/tools_changed` and `x.ai/mcp_initialized`.
-///
-/// Routing rules, verified against the four shell emit sites in `xai-grok-shell/src/session/acp_session.rs`
-/// (toggle-tool ~L6661, `emit_mcp_tools_changed_notifications` ~L8997, post-handshake ~L10156, and `mcp_initialized` ~L10157):
-///
-/// 1. Try `notif.params.sessionId`.
-///    All `tools_changed` emit sites carry `sessionId` via the typed [`xai_grok_shell::extensions::mcp::McpToolsChanged`] struct.
-///    `mcp_initialized` already carried it.
-///    So the sessionId branch is the primary path for current builds.
-///
-/// 2. Older shells / forward-compat (**`tools_changed` only**): a payload with no `sessionId` falls back to `app.active_view`.
-///    Older shells emit `tools_changed` as `{serverName, tools}` with no `sessionId`; the fallback keeps those in-flight payloads working.
-///    The `mcp_initialized` variant does NOT need this fallback: its emitter already carries `sessionId`.
-///    The sessionId branch (step 1) is thus the only matched-build path for `mcp_initialized`.
-///
-/// 3. When the owning agent has an open extensions modal, schedules a debounced [`Effect::FetchMcpsList`].
-///    The fetch is coalesced **per-agent** (see [`agent_has_pending_mcps_fetch`]).
-///    A pending fetch on agent A does NOT drop a notification for agent B.
-///
-/// Always clears `mcp_init_progress` on the `mcp_initialized` variant.
+/// So the sessionId branch is the primary path for current builds.
+/// Older shells / forward-compat (**`tools_changed` only**): a payload with no `sessionId` falls back to `app.active_view`.
+/// The sessionId branch (step 1) is thus the only matched-build path for `mcp_initialized`.
 pub(super) fn handle_mcp_tools_changed(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     let method = notif.method.as_ref();
 
@@ -135,7 +116,6 @@ pub(super) fn handle_mcp_tools_changed(notif: &acp::ExtNotification, app: &mut A
 /// Per-agent coalescing test for [`Effect::FetchMcpsList`].
 /// An earlier approach used `matches!(e, FetchMcpsList { .. })`, which collapsed across agents.
 /// A pending fetch on agent A would drop the push for agent B.
-/// Keying on `agent_id` keeps each agent's refetch independently debounced.
 pub(super) fn agent_has_pending_mcps_fetch(app: &AppView, agent_id: AgentId) -> bool {
     app.pending_effects.iter().any(|e| {
         matches!(
@@ -145,27 +125,8 @@ pub(super) fn agent_has_pending_mcps_fetch(app: &AppView, agent_id: AgentId) -> 
     })
 }
 
-/// Handle `x.ai/mcp/server_status`.
-///
-/// Routes by the notification's `sessionId` via [`find_session_match`].
-/// The matched agent's extensions modal is patched in-place via [`crate::views::mcps_modal::patch_server_row`] using the per-row delta.
-/// This avoids the full `mcp/list` round trip the legacy `tools_changed` debounced refetch path requires.
-///
-/// No-ops when:
-/// - the `sessionId` does not match any known agent (drop),
-/// - the matched agent has no extensions modal open (cheap path; the next `/mcps` open will pull fresh data anyway),
-/// - the modal's `mcps_data` is not yet `Loaded` (a Loading / Error patch would be incoherent; the in-flight fetch will land a consistent snapshot),
-/// - the named server is not present in the cached `servers` vec ([`patch_server_row`] silently returns).
-///
 /// Re-uses the shell's canonical wire types instead of re-declaring a parallel pager enum.
-/// The types: [`xai_grok_shell::extensions::mcp::McpServerStatusPayload`] and [`xai_grok_shell::extensions::mcp::McpServerStatus`].
 /// Later variants (e.g. `RestartSucceeded` / `RestartFailed`) ride through automatically without a pager code change.
-///
-/// `status` is **not** `serde(default)`; a malformed payload falls into the `tracing::warn!` arm rather than silently re-painting the row red.
-///
-/// `tools` is decoded loosely as `Option<serde_json::Value>` so a future non-array shape doesn't drop the entire push.
-/// `status` still applies, and `tools` is silently skipped (warn-logged) on shape mismatch.
-///
 /// Returns `true` (request redraw) only when the row mutation happened AND the matched agent is the currently active view.
 pub(super) fn handle_mcp_server_status(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     use crate::views::extensions_modal::TabDataState;
@@ -254,21 +215,11 @@ pub(super) fn handle_mcp_elicit_complete(notif: &acp::ExtNotification, app: &mut
 }
 
 /// Handle `x.ai/mcp/servers_updated`.
-///
-/// Emitted by the shell from `MvpAgent` on managed-config resolve and on config reload.
-/// (See `notify_servers_updated` in `crates/codegen/xai-grok-shell/src/agent/mvp_agent.rs`.)
-/// The shell's `McpServersUpdated` wire shape (`{ mcpServers: [...] }`) is session-agnostic by design.
 /// An attempt to route by `sessionId` therefore always fell back to `app.active_view` and re-created the multi-agent bug.
-///
-/// Routing broadcasts: every agent with an open extensions modal gets a per-agent debounced [`Effect::FetchMcpsList`].
-/// Per-agent coalescing keeps a second push from displacing an in-flight fetch on the same agent.
 /// Agents without an open modal drop the push (cheap path).
 pub(super) fn handle_mcp_servers_updated(_notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     // `_notif` is intentionally unread
-    // The shell's `McpServersUpdated` payload is `{ mcpServers: [...] }` with no `sessionId` (the protocol forbids extending it)
-    // There is nothing in the notification body the broadcast model needs
     // Do NOT "fix" this back to per-session routing without re-reading the rustdoc above
-    //
     // Snapshot (agent_id, session_id, modal_open) up front so the mutable `pending_effects` borrow can proceed without aliasing `app.agents`
     let targets: Vec<(AgentId, acp::SessionId)> = app
         .agents

@@ -20,11 +20,14 @@ pub mod instrumentation;
 pub mod memory_log;
 pub mod memory_telemetry;
 pub mod otel_layer;
-pub(crate) mod otlp_http;
+// OTLP HTTP client now lives in the low-level foundation crate; re-export keeps `crate::otlp` paths working.
+pub(crate) use xai_grok_otel::otlp;
 pub mod process_info;
 pub mod process_metrics;
 pub mod prompt_timing;
-pub(crate) mod redact_common;
+// Shared redaction utils now live in the foundation crate; re-export keeps `crate::redact_common` paths working.
+pub(crate) use xai_grok_otel::redact_common;
+pub use xai_grok_otel::redact_common::redact_error_detail;
 pub mod region;
 pub mod sampling_log;
 pub mod sentry;
@@ -34,6 +37,7 @@ pub mod session_metrics;
 pub mod span_profile;
 pub mod startup;
 pub mod subagent_spawn;
+pub mod turn_phases;
 pub mod unified_log;
 
 pub use client::{

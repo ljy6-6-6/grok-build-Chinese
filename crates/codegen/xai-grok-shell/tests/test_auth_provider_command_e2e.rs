@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use chrono::Utc;
-use xai_grok_shell::auth::{AuthMode, GrokAuth, GrokComConfig, try_ensure_fresh_auth};
+use xai_grok_login::{AuthMode, GrokAuth, GrokComConfig, try_ensure_fresh_auth};
 
 const SEED_TOKEN: &str = "stale-token-that-must-be-replaced";
 
@@ -50,7 +50,12 @@ async fn mint_with_provider(home: &Path, command: &str) -> String {
     };
     seed_expired_credential(home, &config.auth_scope());
 
-    let auth = try_ensure_fresh_auth(&config).await.unwrap_or_else(|| {
+    let auth = try_ensure_fresh_auth(
+        &config,
+        xai_grok_shell::agent::config::CLI_CHAT_PROXY_BASE_URL_DEFAULT.to_string(),
+    )
+    .await
+    .unwrap_or_else(|| {
         panic!("auth_provider_command `{command}` was configured but no credential was minted")
     });
     assert_eq!(

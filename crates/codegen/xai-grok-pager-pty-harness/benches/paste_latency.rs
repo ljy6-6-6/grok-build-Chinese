@@ -95,23 +95,17 @@ enum Mode {
     All,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum, strum::AsRefStr, strum::IntoStaticStr,
+)]
 enum Surface {
+    #[strum(serialize = "agent")]
     Agent,
+    #[strum(serialize = "dashboard-dispatch")]
     DashboardDispatch,
+    #[strum(serialize = "all")]
     All,
 }
-
-impl Surface {
-    fn as_str(self) -> &'static str {
-        match self {
-            Surface::Agent => "agent",
-            Surface::DashboardDispatch => "dashboard-dispatch",
-            Surface::All => "all",
-        }
-    }
-}
-
 /// Aggregated latency stats for one (surface, mode) cell.
 /// For `image` the primary p50/p95/max track the chip (end-to-end attach) latency.
 /// The burst responsiveness and chip p50s are also broken out explicitly.

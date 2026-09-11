@@ -25,11 +25,7 @@ pub const META_CLIENT_ID: &str = "x-workspace-client-id";
 pub const META_PROMPT_INDEX: &str = "x-workspace-prompt-index";
 
 /// Standard metadata key for the gRPC call deadline.
-///
-/// The `grpc-timeout` header carries a unit-suffixed string per the [gRPC HTTP/2 spec][grpc-spec], not a bare millisecond count.
-/// Examples: `"100m"` (100 ms), `"30S"` (30 s), `"2H"` (2 h).
-///
-/// [grpc-spec]: https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md#requests
+/// The `grpc-timeout` header is a unit-suffixed string per the gRPC HTTP/2 spec, not a bare millisecond count.
 pub const META_GRPC_TIMEOUT: &str = "grpc-timeout";
 
 /// All standard metadata keys defined by this crate, in declaration order.

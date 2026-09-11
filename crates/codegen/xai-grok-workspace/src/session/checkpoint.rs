@@ -13,10 +13,7 @@ use std::collections::{HashMap, HashSet};
 use xai_hunk_tracker::{HunkId, HunkTrackerSnapshot, HunkTurnDelta};
 use xai_tool_protocol::turn_hook::TurnHookOutcome;
 /// A turn/prompt boundary routed through [`WorkspaceHandle::on_turn_boundary`].
-///
-/// `prompt_index` selects the origin and keeps the two effect sets disjoint:
-/// - `None`: a turn hook (`on_before_turn`/`on_after_turn`).
-/// - `Some(idx)`: a rewind RPC arm (`begin_prompt`/`end_prompt`).
+/// `prompt_index` `None` is a turn hook; `Some` is a rewind RPC arm. The two effect sets stay disjoint.
 pub(crate) enum TurnBoundary {
     Start {
         prompt_index: Option<usize>,
@@ -52,10 +49,8 @@ impl TurnBoundary {
             written,
         }
     }
-    /// Rewind begin (from the `begin_prompt` RPC arm): FS-rewind only.
-    ///
-    /// The RPC carries no turn metadata; a turn is roughly a prompt, so `turn_number` mirrors `prompt_index`.
-    /// The dispatcher ignores it on this path.
+    /// Rewind begin from `begin_prompt`: FS-rewind only.
+    /// The RPC has no turn metadata, so `turn_number` mirrors `prompt_index`; the dispatcher ignores it here.
     pub(crate) fn rewind_begin(prompt_index: usize) -> Self {
         Self::Start {
             prompt_index: Some(prompt_index),
@@ -75,12 +70,8 @@ impl TurnBoundary {
         }
     }
 }
-/// A per-prompt rewind checkpoint: the FS rewind point bundled with the incremental hunk-tracker delta for the same `prompt_index`.
-/// [`WorkspaceSession::get_checkpoint`] assembles it on demand.
-/// The [`CheckpointStore`](crate::session::checkpoint_store::CheckpointStore) writes it to disk.
-///
-/// Optional domain fields use `#[serde(default)]` so the schema stays additive.
-/// A blob written before a later field existed still deserializes; the missing field reads as `None`.
+/// Per-prompt rewind checkpoint: FS rewind point plus the hunk delta for the same `prompt_index`.
+/// Optional domain fields use `#[serde(default)]` so an older blob still deserializes; a missing field is `None`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RewindCheckpoint {
     /// The prompt this checkpoint belongs to.
@@ -102,10 +93,8 @@ pub(crate) fn rewind_durable_enabled() -> bool {
     xai_grok_config::env_bool("GROK_WORKSPACE_REWIND_DURABLE").unwrap_or(false)
 }
 impl WorkspaceSession {
-    /// Capture the hunk delta for `prompt_index` into the in-memory store.
-    /// Last-write-wins, so repeated finalizes (e.g. `ForceContinue`) are idempotent.
-    /// Empty deltas are skipped to avoid a stale `turn_index` entry.
-    /// Returns `true` when a delta was stored, so callers count a hunk capture.
+    /// Capture the hunk delta for `prompt_index`. Last-write-wins, so repeated finalizes are idempotent.
+    /// Empty deltas are skipped to avoid a stale `turn_index`. Returns whether a delta was stored.
     pub(crate) async fn capture_hunk_delta(&self, prompt_index: usize) -> bool {
         let Some(delta) = self.hunk_tracker.snapshot_turn_delta(prompt_index).await else {
             return false;
@@ -133,13 +122,8 @@ impl WorkspaceSession {
             crate::handle::record_rewind_capture(crate::handle::RewindDomain::Git, outcome);
         }
     }
-    /// Re-seed the hunk tracker to the **start** of `target_prompt_index`, mirroring the FS rewind.
-    /// Stored deltas for prompts `< target` are composed in ascending order (last write per path wins); deltas `>= target` are dropped.
-    ///
-    /// No-op when the store is empty, or when it holds only deltas `>= target` with `target > 0`.
-    /// In that case the flag was enabled mid-session: the state at the target's start can't be rebuilt, so uncaptured live hunks aren't wiped.
-    /// `target == 0` re-seeds to empty.
-    /// Composed `turn_index` ids are pruned to those surviving in the snapshots.
+    /// Re-seed the hunk tracker to the start of `target_prompt_index`. Deltas `< target` compose (last write per path wins); `>= target` are dropped.
+    /// No-op if the store cannot rebuild that start (flag enabled mid-session), so live hunks are not wiped. `target == 0` re-seeds to empty.
     pub(crate) async fn restore_hunk_checkpoints(&self, target_prompt_index: usize) {
         let mut store = self.hunk_checkpoints.lock().await;
         if store.is_empty() {
@@ -217,13 +201,8 @@ impl WorkspaceSession {
     }
 }
 impl WorkspaceHandle {
-    /// Single fan-out for turn/prompt boundaries.
-    ///
-    /// Keyed on `prompt_index`: turn hooks (`None`) drive activity.
-    /// Rewind RPC arms (`Some`) drive rewind capture (FS, plus git/hunks when their flags are on).
-    /// `workspace_rewind_all_outcomes` also finalizes the open FS checkpoint on non-`Completed` turn-ends.
-    ///
-    /// Turn-hook ends return the after-turn enqueue handle for the ack path.
+    /// Fan-out for turn/prompt boundaries. `None` drives activity; `Some` drives rewind capture.
+    /// `workspace_rewind_all_outcomes` also finalizes the open FS checkpoint on non-`Completed` turn-ends. Turn-hook ends return the ack handle.
     pub(crate) async fn on_turn_boundary(
         &self,
         session_id: &str,
@@ -364,12 +343,8 @@ impl WorkspaceHandle {
             }
         }
     }
-    /// User-initiated restore (`workspace.rewind_to` RPC): restore every enabled domain to before `target_prompt_index`.
-    /// Git's soft restore (stash, `reset --soft`, unstage; behind `workspace_rewind_git`) runs first so its stash-or-abort guard sees live state.
-    /// Then the FS is reverted.
-    /// Only on FS success are git paths re-staged against the reverted tree and git/hunk checkpoints `>= target` dropped.
-    /// A failed `rewind_files` keeps all domains for retry.
-    /// A missing session yields a failed response, not a panic.
+    /// User restore to before `target_prompt_index`. Git soft-restore runs first so its stash-or-abort guard sees live state, then FS reverts.
+    /// Checkpoints `>= target` drop only after FS success; a failed rewind keeps all domains for retry. Missing session is a failed response, not a panic.
     pub(crate) async fn rewind_to(
         &self,
         session_id: &str,
@@ -446,14 +421,8 @@ impl WorkspaceHandle {
         }
         response
     }
-    /// Soft-restore the git domain at `target_prompt_index` (phase 1 only: stash, `reset --soft`, unstage; turn-local commits preserved).
-    /// Returns the [`GitRestoreOutcome`](git::GitRestoreOutcome) and the captured [`GitStateRef`](git::GitStateRef).
-    /// The caller re-stages paths and drops checkpoints `>= target` only after the FS revert succeeds, so a failed revert retains them for retry.
-    ///
-    /// When nothing was captured at the target itself, the nearest earlier checkpoint (greatest index `<= target`) is used.
-    /// That happens when git rewind was enabled mid-session or capture was skipped for that prompt.
-    /// This lands HEAD on the closest known-good git state instead of leaving it post-turn.
-    /// `None` when disabled, no session, or no git state captured at or before the target.
+    /// Soft-restore git at `target_prompt_index` (stash, `reset --soft`, unstage). Caller drops checkpoints only after FS success.
+    /// If the target itself was not captured, the nearest earlier checkpoint is used so HEAD is not left post-turn. `None` if nothing at or before the target.
     pub(crate) async fn restore_git_checkpoint(
         &self,
         session_id: &str,

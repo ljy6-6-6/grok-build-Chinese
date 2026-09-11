@@ -8,7 +8,6 @@ use agent_client_protocol as acp;
 use std::hash::{Hash, Hasher};
 
 /// Hash of the config parts a user edits to fix a broken server (transport, url/command/args, header and env names, never header or env values).
-/// An in-place edit therefore starts a new failure episode.
 /// Only ever compared for equality; hashing keeps fields that can carry credentials (URLs, arg values) out of the value itself.
 /// Never persisted, so restored episodes adopt the current identity instead.
 fn config_identity(cfg: &acp::McpServer) -> u64 {
@@ -33,19 +32,12 @@ fn config_identity(cfg: &acp::McpServer) -> u64 {
     }
 }
 
-/// Classify every configured but unconnected server for the "failed to connect" reminder.
 /// Returns the failures to feed [`crate::session::announcement_state::McpAnnounced::note_failures`], sorted by name.
-/// Also returns the full set of unconnected configured names, which keeps existing episodes alive.
-///
-/// Skipped from the failure list (but kept in the unconnected set):
-/// - servers whose retry handshake is still running, and
-/// - servers with no recorded failure while init is still settling.
-///
+/// Skipped from the failure list (but kept in the unconnected set).
 /// The skip while settling exists because the episode's one announcement should carry the real cause, not the "connection failed" placeholder.
-/// Once init is complete, the placeholder is a legitimate fallback for an unrecorded crash.
 pub(super) fn classify_failed_servers(
     mcp_state: &crate::session::mcp_servers::McpState,
-    connected_names: &std::collections::HashSet<&str>,
+    connected_names: &std::collections::HashSet<String>,
 ) -> (Vec<FailedServer>, std::collections::HashSet<String>) {
     let mut failed: Vec<FailedServer> = Vec::new();
     let mut unconnected: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -85,7 +77,6 @@ pub(super) fn classify_failed_servers(
 }
 
 /// Render the "failed to connect" reminder section from the episodes being announced now.
-/// This is the single sanitization boundary: remote-influenced detail and names are flattened here.
 /// Flattening stops them forging extra reminder lines or smuggling invisible/bidi characters.
 /// A detail with nothing legible left falls back to the generic reason.
 pub(super) fn render_failed_section(to_announce: &[FailedServer]) -> String {

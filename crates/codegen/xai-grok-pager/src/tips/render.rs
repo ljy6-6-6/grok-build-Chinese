@@ -134,11 +134,8 @@ pub fn render_tip_with_locale(
         .render(text, buf);
 }
 
-/// Blank every cell of `area` (chars, colors, and modifiers) in `color`.
-///
-/// Modifiers MUST be reset here: ratatui's `Cell::set_style` only *merges* modifiers (`insert(add)` / `remove(sub)`).
-/// A later paint whose style carries no `sub_modifier` inherits whatever BOLD/ITALIC/… an earlier same-frame paint left behind.
-/// One example: the welcome tip's bold `Tip: ` prefix bled into the ephemeral tip as "**Queue**d · Enter to send now".
+/// Blank every cell of `area` (chars, colors, and modifiers) in `color`. Modifiers MUST be reset here: ratatui's
+/// `Cell::set_style` only *merges* modifiers (`insert(add)` / `remove(sub)`).
 fn clear_rect(buf: &mut Buffer, area: Rect, color: Color) {
     for row in 0..area.height {
         for col in 0..area.width {
@@ -536,7 +533,6 @@ mod tests {
     fn clears_leaked_modifiers_from_underpaint() {
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
-        // Simulate a stale session-tip underpaint: 5 bold cells ("Tip: ")
         buf.set_string(
             0,
             0,
@@ -544,17 +540,18 @@ mod tests {
             Style::default().add_modifier(Modifier::BOLD),
         );
 
-        // The send-now tip shape: dim text with a single bold key chord.
+        let prefix = "Status · ";
+        let chord = "Enter";
         let dim = Style::default();
         let bold = Style::default().add_modifier(Modifier::BOLD);
         let line = Line::from(vec![
-            Span::styled("Queued · ", dim),
-            Span::styled("Enter", bold),
-            Span::styled(" to send now", dim),
+            Span::styled(prefix, dim),
+            Span::styled(chord, bold),
+            Span::styled(" to continue", dim),
         ]);
         render_ephemeral_tip(area, &mut buf, &line);
 
-        assert_eq!(row_text(&buf, area, 0).trim(), "Queued · Enter to send now");
+        assert_eq!(row_text(&buf, area, 0).trim(), "Status · Enter to continue");
         let bold_cols: Vec<u16> = (0..area.width)
             .filter(|&x| {
                 buf.cell((x, 0))
@@ -563,10 +560,10 @@ mod tests {
                     .contains(Modifier::BOLD)
             })
             .collect();
-        // Inset by one: "Queued · " occupies cols 1..10, "Enter" cols 10..15.
+        let chord_start = 1 + prefix.chars().count() as u16;
         assert_eq!(
             bold_cols,
-            (10..15).collect::<Vec<u16>>(),
+            (chord_start..chord_start + chord.chars().count() as u16).collect::<Vec<u16>>(),
             "only the Enter chord may be bold — no leak from the underpaint"
         );
     }

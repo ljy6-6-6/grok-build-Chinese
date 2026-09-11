@@ -17,7 +17,6 @@ use std::path::Path;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 /// Write `contents` to `path` with secure permissions (owner read/write only).
-///
 /// On Unix, this sets mode 0o600.
 /// On Windows, this restricts the file's ACL to grant access only to the current user.
 pub fn write_secure_file(path: &Path, contents: &[u8]) -> io::Result<()> {
@@ -37,7 +36,6 @@ pub fn write_secure_file(path: &Path, contents: &[u8]) -> io::Result<()> {
 }
 
 /// Opens a file for writing with secure permissions set during creation (Unix) or prepares it for permission setting after creation (Windows).
-///
 /// Callers that write secret material should also call [`ensure_owner_only_permissions`] after the write (or use [`write_secure_file`]).
 /// `mode(0o600)` only applies when the file is newly created, not when truncating an existing path.
 pub fn open_secure_file(path: &Path) -> io::Result<File> {
@@ -52,11 +50,7 @@ pub fn open_secure_file(path: &Path) -> io::Result<File> {
     options.open(path)
 }
 
-/// Ensure `path` is owner-read/write only (Unix `0o600` / Windows user ACL).
-///
-/// Best-effort on missing files (`NotFound` is ignored).
-/// Other errors propagate so callers can fail closed when tightening a secret store.
-///
+/// Ensure `path` is owner-read/write only (Unix `0o600` / Windows user ACL). Best-effort on missing files (`NotFound` is ignored). Other errors propagate so callers can fail closed when tightening a secret store.
 /// Use on **load** of credential files so a hand-copied or restored world-readable `auth.json` is tightened before the process continues.
 pub fn ensure_owner_only_permissions(path: &Path) -> io::Result<()> {
     match ensure_owner_only_permissions_inner(path) {
@@ -90,11 +84,7 @@ fn ensure_owner_only_permissions_inner(path: &Path) -> io::Result<()> {
 }
 
 /// Sets Windows-specific secure permissions on a file.
-///
-/// This function modifies the file's ACL to:
-/// 1. Remove inherited permissions
-/// 2. Grant full control only to the current user
-///
+/// Grant full control only to the current user
 /// This is equivalent to Unix mode 0o600.
 #[cfg(windows)]
 pub fn set_windows_secure_permissions(path: &Path) -> io::Result<()> {

@@ -32,9 +32,8 @@ impl WorktreeHintMode {
     }
 
     /// Returns `(new_session_worktree_mode, fork_worktree_mode)`.
-    ///
-    /// - `/new`: `new_session_worktree_mode`, else legacy `worktree_mode`, else `Never`.
-    /// - `/fork`: `fork_worktree_mode`, else legacy `worktree_mode`, else `Ask`.
+    /// `/new`: `new_session_worktree_mode`, else legacy `worktree_mode`, else `Never`.
+    /// `/fork`: `fork_worktree_mode`, else legacy `worktree_mode`, else `Ask`.
     pub fn resolve_pair(hints: Option<&TomlValue>) -> (Self, Self) {
         let get_str = |key: &str| -> Option<Self> {
             hints
@@ -212,14 +211,13 @@ mod tests {
         undo: Option<bool>,
         plan_mode: Option<bool>,
         image_input: Option<bool>,
-        send_now: Option<bool>,
         word_select: Option<bool>,
     ) -> ContextualHintsRemote {
         ContextualHintsRemote {
             undo,
             plan_mode,
             image_input,
-            send_now,
+            send_now: None,
             small_screen: None,
             word_select,
             export_copy: None,
@@ -266,7 +264,7 @@ mod tests {
         let r = ContextualHintsRemote {
             ssh_wrap: Some(false),
             export_copy: Some(false),
-            ..remote(None, Some(false), None, None, None)
+            ..remote(None, Some(false), None, None)
         };
         let resolved = resolve_contextual_hints(&ContextualHints::default(), Some(&r));
         assert!(resolved.undo, "absent remote tip → default ON");
@@ -288,7 +286,7 @@ mod tests {
             image_input: Some(true),
             ..ContextualHints::default()
         };
-        let r = remote(None, None, Some(false), None, None);
+        let r = remote(None, None, Some(false), None);
         let resolved = resolve_contextual_hints(&ui, Some(&r));
         assert!(
             resolved.image_input,
@@ -310,13 +308,7 @@ mod tests {
             export_copy: Some(false),
             ssh_wrap: Some(false),
         };
-        let r = remote(
-            Some(false),
-            Some(false),
-            Some(false),
-            Some(false),
-            Some(false),
-        );
+        let r = remote(Some(false), Some(false), Some(false), Some(false));
         let resolved = resolve_contextual_hints(&ui, Some(&r));
         assert!(
             resolved.undo
@@ -345,7 +337,7 @@ mod tests {
             export_copy: Some(true),
             ssh_wrap: Some(true),
         };
-        let r = remote(Some(true), Some(true), Some(true), Some(true), Some(true));
+        let r = remote(Some(true), Some(true), Some(true), Some(true));
         let resolved = resolve_contextual_hints(&ui, Some(&r));
         assert!(
             !resolved.undo

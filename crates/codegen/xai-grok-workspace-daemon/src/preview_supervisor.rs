@@ -51,44 +51,29 @@ static PREVIEW_PROXY_RESTART_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
 });
 
 /// Reason label for the restart metric.
+#[derive(Clone, Copy, strum::AsRefStr, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 enum RestartReason {
     Exit,
     SpawnError,
 }
-
-impl RestartReason {
-    fn as_str(&self) -> &'static str {
-        match self {
-            RestartReason::Exit => "exit",
-            RestartReason::SpawnError => "spawn_error",
-        }
-    }
-}
-
 fn record_restart(reason: RestartReason) {
     PREVIEW_PROXY_RESTART_TOTAL
-        .with_label_values(&[reason.as_str()])
+        .with_label_values(&[reason.as_ref()])
         .inc();
 }
 
 /// Access policy forwarded to the proxy's `--visibility`.
 /// It mirrors the proxy's own enum values (`owner` | `public`) without depending on its crate.
 /// It also constrains the workspace-server CLI so a bad value fails fast at startup rather than crash-looping the proxy.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum, strum::AsRefStr, strum::IntoStaticStr,
+)]
+#[strum(serialize_all = "snake_case")]
 pub enum PreviewVisibility {
     Owner,
     Public,
 }
-
-impl PreviewVisibility {
-    fn as_str(self) -> &'static str {
-        match self {
-            PreviewVisibility::Owner => "owner",
-            PreviewVisibility::Public => "public",
-        }
-    }
-}
-
 /// The supervisor forwards this config to the proxy child.
 /// `Option` fields are omitted from argv when absent; the proxy applies its own defaults.
 /// Per-session secrets stay in the inherited env, never argv.
@@ -135,7 +120,7 @@ impl PreviewArgs {
         }
         if let Some(visibility) = self.visibility {
             argv.push("--visibility".to_owned());
-            argv.push(visibility.as_str().to_owned());
+            argv.push(visibility.as_ref().to_owned());
         }
         if let Some(suffix) = &self.instance_suffix {
             argv.push("--instance-suffix".to_owned());
@@ -255,29 +240,18 @@ fn build_preview_command(cfg: &PreviewArgs) -> io::Result<tokio::process::Comman
     {
         use std::os::unix::process::CommandExt;
 
-        // Raw pre_exec, NOT xai_tty_utils::detach_command
-        // The proxy must stay in the workspace-server's session/pgid to share its escape from the launcher's process-group reap
-        // The setsid that detach_command performs would be actively wrong here
-        // The daemonized server also owns no controlling TTY, so the detach rationale does not apply
-        // This raw path is also deliberately exempt from the shared child OOM reset: the proxy sets -500 (or resets to 0) below
-        //
-        // PDEATHSIG keys off the spawning thread, so capture our PID to also close the race between fork and exec in the child
+        // Raw pre_exec, not detach_command: the proxy must stay in the server's session/pgid, and setsid would break that. No controlling TTY either.
+        // Exempt from the shared child OOM reset; the proxy sets its own score below. Capture our PID because PDEATHSIG keys off the spawning thread.
         let parent_pid = std::process::id();
         // Read env pre-fork: env access is not async-signal-safe inside pre_exec.
         // It is set when the always-on protect succeeds and/or `--oom-protect` forces it
         let oom_protect = std::env::var_os(xai_tty_utils::RESET_CHILD_OOM_ENV).is_some();
-        // SAFETY: the closure runs in the forked child between fork and exec, so
-        // it calls only async-signal-safe libc functions (`prctl`, `getppid`,
-        // `open`/`write`/`close`, `_exit`) and touches no allocation/locks/Rust
-        // runtime state. Its error path returns `io::Error::last_os_error()`,
-        // which only wraps the raw errno (no allocation). Never use
-        // `io::Error::new`/`other` here, as they allocate.
+        // SAFETY: runs in the forked child between fork and exec, so only async-signal-safe libc (`prctl`, `getppid`, `open`/`write`/`close`, `_exit`); no allocation, locks, or Rust runtime.
+        // Error path is `io::Error::last_os_error()` (raw errno). Never `io::Error::new`/`other` — they allocate.
         unsafe {
             cmd.pre_exec(move || {
-                // Bind the proxy's lifetime to the workspace-server
-                // A WS crash makes the kernel SIGKILL the proxy so it can't orphan and hold the preview/control ports
-                // This binding survives the proxy's own execve only because that binary is non-setuid and carries no file capabilities
-                // The kernel clears PDEATHSIG across a privileged exec
+                // Bind the proxy's lifetime to the workspace-server so a crash SIGKILLs it and it cannot hold the preview ports
+                // Survives the proxy execve only because that binary is non-setuid and has no file capabilities; a privileged exec clears PDEATHSIG
                 if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong) == -1 {
                     return Err(io::Error::last_os_error());
                 }
@@ -406,11 +380,8 @@ const PREVIEW_ACTIVITY_PATH: &str = "/__control/activity";
 /// Effective proxy `--control-port` when the supervisor didn't set one (mirrors the default in `xai-grok-preview-proxy/src/cli.rs`).
 pub const DEFAULT_PREVIEW_CONTROL_PORT: u16 = 6015;
 
-/// Where the scraper reports what it read off the proxy.
-///
-/// The workspace-server implements this over its `ActivityTracker`, whose idle-withhold accounting is the only consumer today.
-/// It is a trait rather than the concrete tracker so this crate stays free of `xai-grok-workspace`.
-/// The daemon code is used by the server binary alone, and a dependency on the library would put it back into every downstream build.
+/// Where the scraper reports what it read off the proxy. The server implements this over `ActivityTracker`.
+/// A trait, not the concrete tracker, so this crate stays free of `xai-grok-workspace` and does not re-enter every downstream build.
 pub trait PreviewActivitySink: Send + Sync + 'static {
     /// A request was routed through the proxy since the previous scrape.
     fn note_preview_routed_activity(&self);
@@ -516,10 +487,8 @@ fn clear_attached_if_stale(
     }
 }
 
-/// Poll the proxy's loopback activity endpoint until `shutdown` flips, feeding the sink on each advance.
-/// Spawn this after the sink's tracker exists (after hub connect), and only when preview is enabled.
-/// `control_port` is the proxy's loopback control port; `None` falls back to [`DEFAULT_PREVIEW_CONTROL_PORT`].
-/// `scrape_interval` comes from `StatusConfig` (kept strictly below the withhold window by `StatusConfig::validate`).
+/// Poll the proxy's loopback activity endpoint until `shutdown`, feeding the sink on each advance. Spawn after the tracker exists, and only when preview is enabled.
+/// `control_port` `None` falls back to [`DEFAULT_PREVIEW_CONTROL_PORT`]; `scrape_interval` is kept strictly below the withhold window.
 pub async fn supervise_preview_activity(
     control_port: Option<u16>,
     tracker: Arc<dyn PreviewActivitySink>,
@@ -565,11 +534,8 @@ async fn scrape_activity_loop(
     // Baselining rather than starting at 0 avoids a spurious withhold
     // A workspace-server restart can meet a proxy whose stamp is already non-zero but stale
     let mut last_seen: Option<ActivitySample> = None;
-    // When we last had trustworthy attached-client data
-    // The counters are the ONLY hold a WS-only client has (a tunnel writes no stamps), so one bad scrape must not clear them
-    // Unlike the stamps they do not decay, so a sustained loss must clear them, or a proxy that dies mid-tunnel holds the sandbox to the TTL
-    // `Absent` and `BadResponse` both count as loss: one cannot reach the proxy, the other cannot understand it
-    // The threshold is the stamp window, so both hold mechanisms expire on the same clock
+    // Last trustworthy attached-client data. Counters are the only hold a tunnel client has, so one bad scrape must not clear them
+    // They do not decay, so sustained `Absent`/`BadResponse` must clear them or a dead proxy holds the sandbox to the TTL; threshold matches the stamp window
     let attached_grace = Duration::from_millis(tracker.preview_activity_window_ms());
     let mut attached_stale_since: Option<Instant> = None;
     loop {
@@ -698,10 +664,8 @@ mod tests {
 
     use super::*;
 
-    /// Stand-in for the workspace-server's `ActivityTracker`.
-    /// It records exactly what the scraper reported, so these tests assert the scraper's contract without linking the workspace library.
-    /// The tracker's own idle-withhold accounting is covered by `xai_grok_workspace::activity`.
-    /// The wiring between the two is covered by the `xai-workspace-server` binary's own tests.
+    /// Stand-in for `ActivityTracker`: records exactly what the scraper reported, without linking the workspace library.
+    /// Tracker accounting and the wiring live in `xai_grok_workspace::activity` and the server binary tests.
     struct TestSink {
         window_ms: u64,
         routed_notes: AtomicU64,
@@ -976,8 +940,8 @@ mod tests {
     #[test]
     fn record_restart_increments_the_labeled_counter() {
         // The mapping from reason to label must be exact (no cross-wiring)
-        assert_eq!(RestartReason::Exit.as_str(), "exit");
-        assert_eq!(RestartReason::SpawnError.as_str(), "spawn_error");
+        assert_eq!(RestartReason::Exit.as_ref(), "exit");
+        assert_eq!(RestartReason::SpawnError.as_ref(), "spawn_error");
 
         // Concurrency-safe: assert a strict increase (other tests may also bump these labels), matching the crate's metric-test convention
         let exit_before = PREVIEW_PROXY_RESTART_TOTAL
@@ -1291,10 +1255,8 @@ mod tests {
             .expect("build client")
     }
 
-    /// Bind an ephemeral loopback port without `listen`.
-    /// Connects are refused and no sibling test can steal the port.
-    /// Dropping a listener and racing `scrape_activity` previously let `serve_incrementing_stamp` take the port.
-    /// The scrape then yielded `Stamp { last_activity_ms: 1 }` instead of `Absent`.
+    /// Bind an ephemeral loopback port without `listen`, so connects are refused and no sibling test can steal it.
+    /// A dropped listener previously let another test take the port and turn an `Absent` scrape into a stamp.
     struct ReservedRefusedPort {
         port: u16,
         _socket: TcpSocket,
@@ -1707,16 +1669,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     const PDEATHSIG_HELPER_OK: i32 = 42;
 
-    /// End-to-end PDEATHSIG guard.
-    /// A grandchild set up exactly like the proxy child (`PR_SET_PDEATHSIG(SIGKILL)` plus the `getppid` re-check) must not outlive its parent.
-    /// This validates the actual kernel mechanism, not just the wiring.
-    /// The reverse direction, the child living while the parent lives, is covered by `supervisor_shutdown_kills_running_child_without_restart`.
-    /// There a child runs until the still-alive parent flips shutdown.
-    ///
-    /// The fork(P)/fork(G) scenario runs in a freshly **re-exec'd** helper process, not the test process.
-    /// The test binary's descriptors are `O_CLOEXEC`, so the helper's exec closes them all (including other concurrent tests' `flock`'d pidfiles).
-    /// Forking only that isolated process therefore can't pin a lock another test holds.
-    /// That pinning is the hazard of forking the multi-threaded test runner directly.
+    /// End-to-end PDEATHSIG: a grandchild set up like the proxy child must not outlive its parent. The reverse is covered by the shutdown test.
+    /// Runs in a re-exec'd helper so `O_CLOEXEC` drops other tests' flock'd fds; forking the multi-threaded runner directly could pin their locks.
     #[cfg(target_os = "linux")]
     #[test]
     fn pdeathsig_does_not_let_a_child_outlive_its_parent() {
@@ -1732,12 +1686,8 @@ mod tests {
             .arg("pdeathsig_does_not_let_a_child_outlive_its_parent") // unique substring filter
             .arg("--nocapture")
             .env(PDEATHSIG_HELPER_ENV, "1")
-            // The helper is a fresh libtest run of exactly the one filtered test.
-            // Strip Bazel's per-shard test env
-            // When this target is built with `shard_count > 1`, the re-exec'd helper must not re-apply sharding to its single filtered test
-            // Otherwise sharding could partition the test into a shard other than the inherited TEST_SHARD_INDEX
-            // The helper would then run zero tests and exit 0 instead of PDEATHSIG_HELPER_OK, failing the driver's verdict assertion
-            // Also drop the inherited test filter so only our positional filter selects the test
+            // Fresh libtest of the one filtered test. Strip Bazel shard env so a `shard_count > 1` re-exec does not partition the test away and exit 0
+            // Also drop the inherited filter so only the positional filter selects the test
             .env_remove("TEST_SHARD_INDEX")
             .env_remove("TEST_TOTAL_SHARDS")
             .env_remove("TEST_SHARD_STATUS_FILE")

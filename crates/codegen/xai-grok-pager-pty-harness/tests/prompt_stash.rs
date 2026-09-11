@@ -50,6 +50,13 @@ async fn run() -> Result<()> {
         .wait_for_text("Quit", Duration::from_secs(20))
         .context("welcome screen")?;
 
+    pager
+        .inject_keys(xai_grok_pager_pty_harness::keys::CTRL_N)
+        .context("leave home")?;
+    pager
+        .wait_for_text("Shift+Tab", Duration::from_secs(20))
+        .context("agent view")?;
+
     // Draft in the composer, never submitted.
     pager.inject_keys(CANARY.as_bytes()).context("type draft")?;
     pager

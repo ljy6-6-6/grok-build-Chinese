@@ -143,7 +143,6 @@ impl DiagHandle {
     }
 
     /// Called when the initial hello completes, or when a reconnect's serve replay settles.
-    /// No-op after [`Self::set_shutting_down`] or [`Self::set_failed`], and while a terminal close code is latched.
     /// A stale reconnect settle must not clear `last_close_code` or republish connected.
     /// Terminal closes do not reconnect on this handle.
     pub fn set_connected(&self) {
@@ -195,9 +194,7 @@ impl DiagHandle {
     }
 
     /// Clear the latch and publish connected in one step, for a deliberate revival (the epoch-guarded reconnect settle).
-    /// One lock, so a racing [`Self::set_terminal_close`] serializes wholly before or after.
     /// Only codes in `revivable` are cleared: a newer non-revivable latch survives a stale settle.
-    /// No-op after failed or shutting-down.
     pub fn revive_connected(&self, revivable: &[u16]) {
         let mut inner = self.lock();
         if inner.is_failed() || inner.shutting_down {
@@ -238,13 +235,22 @@ impl DiagHandle {
     }
 
     /// Publish the owner's advisory image capability snapshot on `/statusz`.
-    /// `declared = false` is UNKNOWN, not "declares nothing".
     /// Publish before the socket binds so `/statusz` never serves the unpublished default.
-    /// Taking the snapshot before any guest can write the declaration directory is the caller's responsibility.
     pub fn set_image_capabilities(&self, tokens: impl Into<Arc<[String]>>, declared: bool) {
         let mut inner = self.lock();
         inner.image_capabilities = tokens.into();
         inner.image_capabilities_declared = declared;
+    }
+
+    /// The state `/ready` reports right now, for owners that supervise their own hub connections
+    /// (a multi-folder daemon has no external poller to notice a connection that died for good).
+    pub fn state(&self) -> DiagState {
+        self.lock().state
+    }
+
+    /// The latched terminal close code, when the hub closed this connection for good.
+    pub fn last_close_code(&self) -> Option<u16> {
+        self.lock().last_close_code
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {

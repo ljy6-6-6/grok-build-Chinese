@@ -82,18 +82,9 @@ fn compose_repo_status_in_system_prompt(
         .value
 }
 
-/// Whether model-catalog (`/v1/models`) and remote-settings (`/v1/settings`) fetches from xAI backends are allowed.
-/// That includes the deployment-config sync bundled into the startup prefetch.
-/// The background managed-config sync has its own `[features] managed_config` gate.
-///
-/// Precedence: requirements (MDM > system > user) > managed (`managed_config.toml` > system managed) > user `config.toml` > default (true).
-/// Overlay-free: the `GROK_CONFIG` / `GROK_CONFIG_PATH` overlay is deliberately excluded, matching `ConfigLayers::env_overlay`'s contract.
-/// This is an egress gate, so an overlay cannot re-enable a user's or a deployment's "never fetch" decision.
-/// Callable before an `AgentConfig` exists (startup prefetch runs pre-agent).
-///
-/// Deliberately no env var and no remote tier.
-/// Remote settings are exactly what is unreachable when this knob is needed (firewalled / air-gapped deployments).
-/// An env var would be one more way to re-enable the fetches.
+/// Whether model-catalog (`/v1/models`) and remote-settings (`/v1/settings`) fetches from xAI backends are allowed. That includes the deployment-config sync bundled into the startup prefetch.
+/// The background managed-config sync has its own `[features] managed_config` gate. Precedence: requirements (MDM > system > user) > managed (`managed_config.toml` > system managed) > user `config.toml` > default (true).
+/// This is an egress gate, so an overlay cannot re-enable a user's or a deployment's "never fetch" decision. Callable before an `AgentConfig` exists (startup prefetch runs pre-agent).
 pub fn resolve_remote_fetch_enabled() -> bool {
     match crate::config::ConfigLayers::load() {
         Ok(layers) => remote_fetch_enabled_from_layers(&layers),
@@ -119,9 +110,7 @@ fn remote_fetch_value(v: &TomlValue) -> Option<bool> {
 /// This walks the layers first-match instead of using the plain effective-config merge, which puts the user layer over managed.
 /// For this knob the management layer must win, so a user's stray `remote_fetch = true` cannot re-enable a deployment's "never fetch" decision.
 fn remote_fetch_enabled_from_layers(layers: &crate::config::ConfigLayers) -> bool {
-    // Exhaustive destructure (no `..`): a future layer must be slotted into the walk deliberately instead of silently keeping stale precedence
-    // `env_overlay` is deliberately NOT in the walk: the `GROK_CONFIG` overlay is soft, user-tier input, and this is an egress gate
-    // `campaigns` is excluded for the same reason: campaign patches are soft, dismissable overlays applied after the layer merge
+    // Exhaustive destructure (no `..`): a future layer must be slotted into the walk deliberately instead of silently keeping stale precedence `env_overlay` is deliberately NOT in the walk: the `GROK_CONFIG` overlay is soft, user-tier input, and this is an egress gate `campaigns` is excluded for the same reason: campaign patches are soft, dismissable overlays applied after the layer merge
     // Requirements are re-merged over campaigns for the same reason
     let crate::config::ConfigLayers {
         system_managed,
@@ -148,8 +137,7 @@ fn remote_fetch_enabled_from_layers(layers: &crate::config::ConfigLayers) -> boo
 }
 
 /// Err-arm fallback for [`resolve_remote_fetch_enabled`]: walks the independently loadable policy tiers in Ok-arm walk order.
-/// Merged requirements come first (`load_merged_requirements` merges user, system, MDM with last-wins, matching the walk), then the managed tiers.
-/// A root-owned or synced managed-only pin thus survives a corrupt user layer.
+/// Merged requirements come first (`load_merged_requirements` merges user, system, MDM with last-wins, matching the walk), then the managed tiers. A root-owned or synced managed-only pin thus survives a corrupt user layer.
 /// The user `config.toml` tier stays fail-open: it is a preference, not deployment policy.
 fn remote_fetch_enabled_from_policy_layers(
     merged_requirements: Option<&TomlValue>,

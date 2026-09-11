@@ -1,12 +1,12 @@
 //! Minimal serializable git/VCS shapes referenced from `WorkspaceOpsRequest` and `OpsChunk`.
 //!
-//! TODO(workspace): align with the canonical git types in
+//! TODO: align with the canonical git types in
 //! `xai_grok_shell::session::git` and `xai_grok_shell::extensions::git`
 //! when the VCS subsystem moves into the workspace crate.
 
 use serde::{Deserialize, Serialize};
 
-/// TODO(workspace): align with `xai_grok_shell::session::git::VcsKind`.
+/// TODO: align with `xai_grok_shell::session::git::VcsKind`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VcsKind {
@@ -29,9 +29,7 @@ pub struct GitStatusOpts {
 }
 
 /// Status snapshot returned by `OpsChunk::GitStatus`.
-///
-/// TODO(workspace): align with `GitStatusData` in
-/// `xai_grok_shell::session::git`.
+/// TODO: align with `GitStatusData` in `xai_grok_shell::session::git`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitStatus {
     /// Current branch (if HEAD is on one).
@@ -75,9 +73,7 @@ pub struct GitDiffArgs {
 }
 
 /// Diff returned by `OpsChunk::GitDiff`.
-///
-/// TODO(workspace): align with `GitDiffsData` in
-/// `xai_grok_shell::session::git`.
+/// TODO: align with `GitDiffsData` in `xai_grok_shell::session::git`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitDiff {
     /// Unified-diff text.

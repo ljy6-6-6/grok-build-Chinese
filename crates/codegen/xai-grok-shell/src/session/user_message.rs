@@ -23,7 +23,6 @@ pub(crate) struct UserInfoOverride {
 }
 
 /// Minimal user message prefix for fast-start / headless contexts.
-///
 /// Intentionally excludes workspace snapshot and git status.
 /// When `override_info` is provided, uses remote workspace info instead of local machine introspection.
 pub(crate) fn construct_user_message_minimal(
@@ -58,8 +57,7 @@ Note: Prefer using relative paths over absolute paths as tool call args when pos
 pub(crate) const USER_INFO_DATE_MARKER: &str = "Today's date:";
 
 /// Resolve a display string for the user's shell.
-///
-/// Unix: full path from `$SHELL` (e.g. `/bin/zsh`).
+/// Unix: full path from `$SHELL`.
 /// Windows: `detect_windows_shell` tries pwsh, then powershell.exe, then Git Bash, then cmd.exe.
 fn resolve_shell_display() -> String {
     #[cfg(unix)]

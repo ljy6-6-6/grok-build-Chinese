@@ -136,10 +136,7 @@ impl KeyShortcut {
         }
     }
 
-    /// Pretty display for the all-shortcuts cheatsheet modal.
-    ///
-    /// Uses `Ctrl+Q` style instead of the compact `ctrl-q` / `C-q` bar style.
-    /// Shift is always shown explicitly (e.g. `Shift+G`, `Ctrl+Shift+P`, `Shift+Tab`).
+    /// Cheatsheet form (`Ctrl+Q`), not the compact bar style. Shift is always shown.
     pub fn display_pretty(&self) -> String {
         let mut parts: Vec<String> = Vec::new();
         // SUPER first, spelled per-platform like Opt/Alt (Cmd on macOS).
@@ -196,10 +193,7 @@ impl KeyShortcut {
         parts.join("+")
     }
 
-    /// Platform-stable chord label for product telemetry.
-    ///
-    /// Unlike [`Self::display_pretty`], this never localizes modifiers (`Cmd`/`Opt` vs `Super`/`Alt`).
-    /// It uses uppercase letters so analytics filters can match exact strings (e.g. `Ctrl+L`).
+    /// Telemetry label: never localizes modifiers, uppercase letters so filters match exact strings.
     pub fn display_telemetry(&self) -> String {
         let mut parts: Vec<String> = Vec::new();
         if self.modifiers.contains(KeyModifiers::SUPER) {
@@ -258,11 +252,8 @@ pub fn is_paste_key(key: &KeyEvent) -> bool {
     if key!('v', CONTROL).matches(key) || key!('v', SUPER).matches(key) {
         return true;
     }
-    // Windows-only escape hatch: Windows Terminal's default Ctrl+V is a text-only `paste` action
-    // It silently drops image clipboards (Win+Shift+S, browser "Copy Image")
-    // Alt+V is unbound in default WT profiles and reaches us as a normal keypress
-    // macOS is excluded (`Opt+V` types `√`); Linux is excluded (no interceptor to escape)
-    // No AltGr collision: AltGr arrives as `Ctrl+Alt`, not bare `Alt`, and `KeyShortcut::matches` compares modifiers exactly
+    // WT's default Ctrl+V is text-only and drops image clipboards; Alt+V is unbound and reaches us.
+    // macOS Opt+V types `√`; Linux has no interceptor. AltGr is Ctrl+Alt, so exact modifier match is safe.
     #[cfg(target_os = "windows")]
     if key!('v', ALT).matches(key) {
         return true;
@@ -375,15 +366,7 @@ impl fmt::Display for KeyShortcut {
     }
 }
 
-/// Ergonomic macro for constructing [`KeyShortcut`] values.
-///
-/// ```ignore
-/// key!(Enter)              // KeyCode::Enter, no modifiers
-/// key!('q')                // KeyCode::Char('q')
-/// key!('c', CONTROL)       // Ctrl-C
-/// key!('z', CONTROL | SHIFT) // Ctrl+⇧Z
-/// key!(F(5))               // F5
-/// ```
+/// Build a [`KeyShortcut`]: `key!(Enter)`, `key!('c', CONTROL)`, `key!(F(5))`.
 #[macro_export]
 macro_rules! key {
     // Char literal: key!('c') or key!('c', CONTROL)

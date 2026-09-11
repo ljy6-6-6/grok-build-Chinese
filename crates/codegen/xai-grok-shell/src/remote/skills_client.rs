@@ -22,7 +22,7 @@ use serde::Deserialize;
 use xai_grok_tools::implementations::skills::skill::extract_skill_body;
 use xai_grok_tools::implementations::skills::types::{SkillInfo, SkillScope};
 
-use crate::auth::AuthManager;
+use xai_grok_login::AuthManager;
 
 const GROK_WEB_URL: &str = "https://grok.com";
 
@@ -296,21 +296,20 @@ struct SkillsAuthCandidate {
     untagged_recovery: bool,
 }
 
-fn primary_is_tenant_tagged(auth: &crate::auth::GrokAuth) -> bool {
+fn primary_is_tenant_tagged(auth: &xai_grok_login::GrokAuth) -> bool {
     auth.team_id.is_some() || auth.organization_id.is_some()
 }
 
-fn entry_is_untagged(auth: &crate::auth::GrokAuth) -> bool {
+fn entry_is_untagged(auth: &xai_grok_login::GrokAuth) -> bool {
     auth.team_id.is_none() && auth.organization_id.is_none()
 }
 
 /// Exact tenant equality for tagged credentials.
-///
 /// When either side carries a team and/or org, both `team_id` and `organization_id` must match (including both `None`).
 /// Prevents accepting an alt that is a strict superset of primary tags (e.g. a team-only primary matching a team and org alt).
 fn entry_matches_primary_tenant(
-    primary: &crate::auth::GrokAuth,
-    entry: &crate::auth::GrokAuth,
+    primary: &xai_grok_login::GrokAuth,
+    entry: &xai_grok_login::GrokAuth,
 ) -> bool {
     if !primary_is_tenant_tagged(primary) && !primary_is_tenant_tagged(entry) {
         return false;
@@ -318,14 +317,11 @@ fn entry_matches_primary_tenant(
     primary.team_id == entry.team_id && primary.organization_id == entry.organization_id
 }
 
-/// Build ordered alt credentials for product Skills REST (after primary).
-///
-/// - Prefer same-tagged alts when primary is tagged (exact team and org equality).
-/// - Allow untagged same-user alts as OIDC/team 403 recovery when primary is tagged (catalog still cached under primary identity).
-/// - Untagged primary never accepts more-tagged (team/org) alts.
+/// Build ordered alt credentials for product Skills REST (after primary). Prefer same-tagged alts when primary is tagged (exact team and org equality).
+/// Allow untagged same-user alts as OIDC/team 403 recovery when primary is tagged (catalog still cached under primary identity). Untagged primary never accepts more-tagged (team/org) alts.
 fn skills_auth_alt_candidates<'a>(
-    primary: &crate::auth::GrokAuth,
-    entries: impl IntoIterator<Item = &'a crate::auth::GrokAuth>,
+    primary: &xai_grok_login::GrokAuth,
+    entries: impl IntoIterator<Item = &'a xai_grok_login::GrokAuth>,
 ) -> Vec<SkillsAuthCandidate> {
     let mut tagged_match = Vec::new();
     let mut untagged = Vec::new();
@@ -415,11 +411,11 @@ impl SkillsClient {
         if let Some(email) = email {
             builder = builder.header("x-email", email);
         }
-        xai_file_utils::trace_context::inject_trace_context_into_request(builder)
+        xai_grok_otel::inject_trace_context_into_request(builder)
     }
 
     /// Grok.com product Skills require first-party session auth (the same gate as managed MCP and sibling grok.com clients), not plain BYOK API keys.
-    async fn require_skills_auth(&self) -> Result<crate::auth::GrokAuth, SkillsError> {
+    async fn require_skills_auth(&self) -> Result<xai_grok_login::GrokAuth, SkillsError> {
         let auth = self.auth.auth().await.map_err(|_| SkillsError::NoAuth)?;
         if !auth.is_managed_mcp_eligible() {
             return Err(SkillsError::NoAuth);
@@ -427,18 +423,14 @@ impl SkillsClient {
         Ok(auth)
     }
 
-    /// Credentials to try for grok.com product Skills REST.
-    ///
-    /// Primary first.
-    /// When primary is OIDC on the default grok.com host, also try non-OIDC keys for the same user from this AuthManager's `auth.json`.
+    /// Credentials to try for grok.com product Skills REST. Primary first. When primary is OIDC on the default grok.com host, also try non-OIDC keys for the same user from this AuthManager's `auth.json`.
     /// Team OIDC is often rejected with `oauth2-auth-forbidden`.
-    ///
-    /// Order / isolation (see [`skills_auth_alt_candidates`]):
-    /// 1. same-tenant-tagged alts first when primary is tagged
-    /// 2. untagged same-user alts as 403 recovery when primary is tagged
-    /// 3. untagged primary never accepts team-tagged alts
-    fn skills_auth_candidates(&self, primary: &crate::auth::GrokAuth) -> Vec<SkillsAuthCandidate> {
-        use crate::auth::AuthMode;
+    /// Order / isolation (see [`skills_auth_alt_candidates`]): same-tenant-tagged alts first when primary is tagged untagged same-user alts as 403 recovery when primary is tagged untagged primary never accepts team-tagged alts
+    fn skills_auth_candidates(
+        &self,
+        primary: &xai_grok_login::GrokAuth,
+    ) -> Vec<SkillsAuthCandidate> {
+        use xai_grok_login::AuthMode;
         let mut out = vec![SkillsAuthCandidate {
             key: primary.key.clone(),
             user_id: primary.user_id.clone(),
@@ -451,7 +443,7 @@ impl SkillsClient {
         if self.base_url != GROK_WEB_URL {
             return out;
         }
-        let Ok(store) = crate::auth::read_auth_json(self.auth.auth_json_path()) else {
+        let Ok(store) = xai_grok_login::read_auth_json(self.auth.auth_json_path()) else {
             return out;
         };
         out.extend(skills_auth_alt_candidates(
@@ -633,17 +625,9 @@ impl SkillsClient {
         Err(last_err.unwrap_or(SkillsError::NoAuth))
     }
 
-    /// Full product catalog (bundled and user).
-    ///
-    /// Empty REST 200 is authoritative (no embedded substitute).
-    /// Transient transport / 5xx failures retry a few times.
-    /// Bundled REST failure after retries is `Err` (callers must not invent a catalog).
-    /// User REST failure yields empty user skills with `user_list_failed: true` while keeping bundled.
-    /// Callers must not treat that as an authoritative empty user list (e.g. must not poison a last-success cache).
-    ///
-    /// The bool is `used_untagged_recovery`: the catalog loaded via an untagged alt while primary is tenant-tagged.
-    /// Callers still cache success under the **primary** identity (team/org of primary) so the same session hits the TTL.
-    /// Personal primaries cannot match that entry.
+    /// Full product catalog (bundled and user). Empty REST 200 is authoritative (no embedded substitute). Transient transport / 5xx failures retry a few times.
+    /// Bundled REST failure after retries is `Err` (callers must not invent a catalog). User REST failure yields empty user skills with `user_list_failed: true` while keeping bundled.
+    /// Callers must not treat that as an authoritative empty user list (e.g. must not poison a last-success cache). Callers still cache success under the **primary** identity (team/org of primary) so the same session hits the TTL. Personal primaries cannot match that entry.
     pub(crate) async fn try_list_catalog(
         &self,
         locale: &str,
@@ -802,7 +786,7 @@ mod tests {
     }
 
     fn test_auth_manager() -> Arc<AuthManager> {
-        use crate::auth::{AuthMode, GrokAuth, GrokComConfig, XAI_OAUTH2_ISSUER};
+        use xai_grok_login::{AuthMode, GrokAuth, GrokComConfig, XAI_OAUTH2_ISSUER};
         let dir = tempfile::tempdir().unwrap();
         let mgr = AuthManager::new(dir.path(), GrokComConfig::default());
         mgr.hot_swap(GrokAuth {
@@ -939,7 +923,7 @@ mod tests {
 
     #[test]
     fn skills_auth_alts_prefer_tagged_then_untagged_recovery() {
-        use crate::auth::{AuthMode, GrokAuth};
+        use xai_grok_login::{AuthMode, GrokAuth};
         let primary = GrokAuth {
             key: "oidc".into(),
             user_id: "u1".into(),
@@ -997,7 +981,7 @@ mod tests {
 
     #[test]
     fn skills_auth_alts_untagged_primary_rejects_team_keys() {
-        use crate::auth::{AuthMode, GrokAuth};
+        use xai_grok_login::{AuthMode, GrokAuth};
         let primary = GrokAuth {
             key: "oidc".into(),
             user_id: "u1".into(),
@@ -1031,7 +1015,7 @@ mod tests {
 
     #[test]
     fn entry_matches_primary_tenant_requires_symmetric_tags() {
-        use crate::auth::{AuthMode, GrokAuth};
+        use xai_grok_login::{AuthMode, GrokAuth};
         let primary = GrokAuth {
             key: "oidc".into(),
             user_id: "u1".into(),

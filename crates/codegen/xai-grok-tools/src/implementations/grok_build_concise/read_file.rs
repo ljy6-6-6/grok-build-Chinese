@@ -13,10 +13,8 @@ use crate::types::output::ReadFileOutput;
 use crate::types::requirements::{Expr, ToolRequirement};
 use crate::types::tool::{ToolKind, ToolNamespace};
 
-/// Concise variant of `ReadFileTool`.
-///
-/// Delegates to `run_read_file()`, then swaps `content_concise` into `content`
-/// (no line-number padding).
+/// Concise variant of `ReadFileTool`. Delegates to `run_read_file()`, then swaps `content_concise`
+/// into `content` (no line-number padding).
 #[derive(Debug, Default)]
 pub struct ReadFileConciseTool;
 

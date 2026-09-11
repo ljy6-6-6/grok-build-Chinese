@@ -3,6 +3,7 @@ use crate::discovery::HookRegistry;
 use crate::event::{HookEventEnvelope, HookEventName};
 use crate::result::{HookDecision, HookRunResult, PromptDecision};
 use crate::runner::{self, GateKind, HookRunnerResult, RunContext};
+use crate::trust::DisabledHooks;
 
 fn dispatch_span(event: HookEventName, hook_count: usize) -> tracing::Span {
     tracing::info_span!(
@@ -17,28 +18,41 @@ fn dispatch_span(event: HookEventName, hook_count: usize) -> tracing::Span {
     )
 }
 
+/// The one per-spec disable rule: a user-disabled spec is skipped unless it is managed policy, which cannot be disabled.
+pub(crate) fn is_disabled(spec: &HookSpec, disabled: &DisabledHooks) -> bool {
+    (!spec.enabled || disabled.contains(&spec.name)) && !spec.is_managed_policy()
+}
+
 fn eligible_or_record_skip(
     spec: &HookSpec,
     match_value: Option<&str>,
     results: &mut Vec<HookRunResult>,
-    disabled: &crate::trust::DisabledHooks,
+    disabled: &DisabledHooks,
 ) -> bool {
-    if !spec.enabled || disabled.contains(&spec.name) {
-        if spec.is_managed_policy() {
-            tracing::info!(
-                hook_name = %spec.name,
-                layer = spec.layer.as_str(),
-                "managed-policy hook cannot be disabled; running anyway"
-            );
-        } else {
-            tracing::info!(hook_name = %spec.name, "hook skipped (disabled)");
-            results.push(HookRunResult::Skipped {
-                hook_name: spec.name.clone(),
-            });
-            return false;
-        }
+    if is_disabled(spec, disabled) {
+        tracing::info!(hook_name = %spec.name, "hook skipped (disabled)");
+        results.push(HookRunResult::Skipped {
+            hook_name: spec.name.clone(),
+        });
+        return false;
     }
     crate::matcher::matcher_allows(spec.matcher.as_ref(), match_value)
+}
+
+/// How many hooks dispatching `envelope` would run, so the caller can announce the batch before awaiting it.
+/// Filters exactly like the dispatch loops (payload match value, disabled snapshot), so the count never over-announces.
+pub fn runnable_count(
+    registry: &HookRegistry,
+    envelope: &HookEventEnvelope,
+    ctx: &RunContext<'_>,
+) -> usize {
+    let match_value = envelope.payload.match_value();
+    registry
+        .hooks_for_canonical(envelope.hook_event_name)
+        .into_iter()
+        .filter(|spec| !is_disabled(spec, ctx.disabled()))
+        .filter(|spec| crate::matcher::matcher_allows(spec.matcher.as_ref(), match_value))
+        .count()
 }
 
 pub struct InputRewrite {
@@ -104,10 +118,14 @@ async fn dispatch_sequential_gate(
     let mut additional_context: Vec<AdditionalContext> = Vec::new();
     let mut pending_ask: Option<PendingAsk> = None;
     let mut deferring_hook: Option<String> = None;
-    let disabled = crate::trust::DisabledHooks::load();
 
     for spec in hooks {
-        if !eligible_or_record_skip(spec, match_value.as_deref(), &mut run_results, &disabled) {
+        if !eligible_or_record_skip(
+            spec,
+            match_value.as_deref(),
+            &mut run_results,
+            ctx.disabled(),
+        ) {
             continue;
         }
 
@@ -454,10 +472,14 @@ pub async fn dispatch_stop(
 
     let mut out = StopDispatchResult::default();
     let match_value = envelope.payload.match_value().map(str::to_string);
-    let disabled = crate::trust::DisabledHooks::load();
 
     for spec in hooks {
-        if !eligible_or_record_skip(spec, match_value.as_deref(), &mut out.results, &disabled) {
+        if !eligible_or_record_skip(
+            spec,
+            match_value.as_deref(),
+            &mut out.results,
+            ctx.disabled(),
+        ) {
             continue;
         }
 
@@ -657,10 +679,14 @@ pub async fn dispatch_post_tool_use(
 
     let mut out = PostToolUseResult::default();
     let match_value = envelope.payload.match_value().map(str::to_string);
-    let disabled = crate::trust::DisabledHooks::load();
 
     for spec in hooks {
-        if !eligible_or_record_skip(spec, match_value.as_deref(), &mut out.results, &disabled) {
+        if !eligible_or_record_skip(
+            spec,
+            match_value.as_deref(),
+            &mut out.results,
+            ctx.disabled(),
+        ) {
             continue;
         }
 
@@ -763,10 +789,14 @@ pub async fn dispatch_post_tool_use_failure(
 
     let mut out = PostToolUseFailureResult::default();
     let match_value = envelope.payload.match_value().map(str::to_string);
-    let disabled = crate::trust::DisabledHooks::load();
 
     for spec in hooks {
-        if !eligible_or_record_skip(spec, match_value.as_deref(), &mut out.results, &disabled) {
+        if !eligible_or_record_skip(
+            spec,
+            match_value.as_deref(),
+            &mut out.results,
+            ctx.disabled(),
+        ) {
             continue;
         }
 
@@ -860,10 +890,9 @@ pub async fn dispatch_non_blocking(
 
     let match_value = envelope.payload.match_value().map(str::to_string);
     let mut results = Vec::with_capacity(hooks.len());
-    let disabled = crate::trust::DisabledHooks::load();
 
     for spec in hooks {
-        if !eligible_or_record_skip(spec, match_value.as_deref(), &mut results, &disabled) {
+        if !eligible_or_record_skip(spec, match_value.as_deref(), &mut results, ctx.disabled()) {
             continue;
         }
 
@@ -1028,6 +1057,7 @@ mod tests {
             session_id: "test-session",
             workspace_root: "/tmp",
             process_scope: None,
+            disabled: Default::default(),
         }
     }
 
@@ -2201,6 +2231,67 @@ mod tests {
         match result.decision {
             HookDecision::Deny { ref reason, .. } => assert_eq!(reason, "managed policy"),
             ref other => panic!("managed hook must have run and denied, got {other:?}"),
+        }
+    }
+
+    fn ran(results: &[HookRunResult]) -> usize {
+        results
+            .iter()
+            .filter(|r| !matches!(r, HookRunResult::Skipped { .. }))
+            .count()
+    }
+
+    /// The announced count matches the dispatch on every eligibility axis: matcher, enabled, disabled snapshot, managed exemption.
+    #[tokio::test]
+    async fn runnable_count_matches_pre_tool_use_dispatch() {
+        let mut managed = make_command_spec(
+            "requirements/system:pre_tool_use[0].hooks[0]",
+            None,
+            false,
+            "true",
+        );
+        managed.layer = crate::config::HookProvenance::Requirements;
+        let registry = registry_from_specs(vec![
+            make_command_spec("a", Some("read_file"), true, "true"),
+            make_command_spec("b", None, true, "true"),
+            make_command_spec("c", Some("write"), true, "true"),
+            make_command_spec("d", Some("read_file"), false, "true"),
+            make_command_spec("e", None, true, "true"),
+            managed,
+        ]);
+        let ctx = RunContext {
+            disabled: std::sync::Arc::new(DisabledHooks::from_names(["e".to_string()])),
+            ..run_ctx()
+        };
+        // read_file: a, b, managed (flagged disabled but exempt); d is disabled, e is in the snapshot, c misses the matcher
+        for (tool, expected) in [("read_file", 3), ("grep", 2)] {
+            let envelope = pre_tool_use_envelope(tool);
+            let count = runnable_count(&registry, &envelope, &ctx);
+            assert_eq!(count, expected, "{tool}");
+            let result = dispatch_pre_tool_use(&registry, &envelope, &ctx).await;
+            assert_eq!(count, ran(&result.results), "{tool}");
+        }
+        assert_eq!(runnable_count(&registry, &stop_envelope(), &ctx), 0);
+    }
+
+    /// Non-tool events match on their own payload field, so a count that ignored the payload would over-announce.
+    #[tokio::test]
+    async fn runnable_count_matches_dispatch_for_a_non_tool_matcher() {
+        let mut spec = make_command_spec("manual-only", Some("manual"), true, "true");
+        spec.event = HookEventName::PreCompact;
+        let registry = registry_from_specs(vec![spec]);
+        for (source, expected) in [("auto", 0), ("manual", 1)] {
+            let mut envelope = session_start_envelope();
+            envelope.hook_event_name = HookEventName::PreCompact;
+            envelope.payload = HookPayload::PreCompact {
+                source: source.into(),
+            };
+            let count = runnable_count(&registry, &envelope, &run_ctx());
+            assert_eq!(count, expected, "{source}");
+            let results =
+                dispatch_non_blocking(&registry, HookEventName::PreCompact, &envelope, &run_ctx())
+                    .await;
+            assert_eq!(count, ran(&results), "{source}");
         }
     }
 }

@@ -559,6 +559,7 @@ async fn test_subagent_notifications_round_trip() {
     let spawned = XaiSessionNotification {
         session_id: acp::SessionId::new("parent-session"),
         update: XaiSessionUpdateType::SubagentSpawned {
+            attempt_id: None,
             subagent_id: "child-001".to_string(),
             parent_session_id: "parent-session".to_string(),
             parent_prompt_id: Some("turn-123".to_string()),
@@ -573,6 +574,7 @@ async fn test_subagent_notifications_round_trip() {
             model: None,
             resumed_from: None,
             workflow_run_id: None,
+            agent_address: None,
         },
         meta: None,
     };
@@ -580,6 +582,7 @@ async fn test_subagent_notifications_round_trip() {
     let finished = XaiSessionNotification {
         session_id: acp::SessionId::new("parent-session"),
         update: XaiSessionUpdateType::SubagentFinished {
+            attempt_id: None,
             subagent_id: "child-001".to_string(),
             child_session_id: "child-001".to_string(),
             status: "completed".to_string(),
@@ -677,6 +680,7 @@ async fn test_subagent_spawned_resumed_roundtrip() {
     let spawned = XaiSessionNotification {
         session_id: acp::SessionId::new("resume-parent"),
         update: XaiSessionUpdateType::SubagentSpawned {
+            attempt_id: None,
             subagent_id: "child-resumed".to_string(),
             parent_session_id: "resume-parent".to_string(),
             parent_prompt_id: Some("turn-5".to_string()),
@@ -691,6 +695,7 @@ async fn test_subagent_spawned_resumed_roundtrip() {
             model: None,
             resumed_from: Some("source-agent-id".to_string()),
             workflow_run_id: None,
+            agent_address: None,
         },
         meta: None,
     };
@@ -1183,6 +1188,8 @@ fn write_test_summary(
             id: acp::SessionId::new(session_id),
             cwd: urlencoding::decode(cwd_encoded).unwrap().into_owned(),
         },
+        agent_id: None,
+        attempt_id: None,
         cwd_generation: 0,
         previous_cwd: None,
         pending_cwd_switch_reminder: None,
@@ -1277,6 +1284,20 @@ fn scan_session_dirs_skips_non_directory_entries() {
     assert_eq!(dirs.len(), 1);
     assert!(dirs[0].ends_with("real-session"));
 }
+#[test]
+fn scan_session_dirs_continues_when_a_cwd_bucket_is_gone() {
+    let tmp = TempDir::new().unwrap();
+    let now = chrono::Utc::now();
+    let keep = crate::util::grok_home::encode_cwd_dirname("/keep");
+    write_test_summary(tmp.path(), &keep, "s1", now, None, None, None);
+    let gone = tmp.path().join("sessions").join("gone-bucket");
+    std::fs::create_dir_all(&gone).unwrap();
+    std::fs::remove_dir_all(&gone).unwrap();
+    let adapter = JsonlStorageAdapter::with_root(tmp.path().to_path_buf());
+    let dirs = adapter.scan_session_dirs(None).unwrap();
+    assert_eq!(dirs.len(), 1);
+    assert!(dirs[0].ends_with("s1"));
+}
 #[tokio::test]
 async fn list_sessions_recent_returns_most_recent_by_mtime() {
     let tmp = TempDir::new().unwrap();
@@ -1316,6 +1337,25 @@ async fn list_sessions_recent_excludes_hidden_sessions() {
     let recent = adapter.list_sessions_recent(100).await.unwrap();
     assert_eq!(recent.len(), 1);
     assert_eq!(recent[0].info.id, acp::SessionId::new("visible"));
+}
+#[tokio::test]
+async fn list_sessions_recent_excludes_unused_optimistic_husks() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = crate::util::grok_home::encode_cwd_dirname("/workspace");
+    let now = chrono::Utc::now();
+    write_test_summary(tmp.path(), &cwd, "real", now, None, None, None);
+    let husk_dir = write_test_summary(tmp.path(), &cwd, "husk", now, None, None, None);
+    let husk_path = husk_dir.join("summary.json");
+    let mut husk: Summary = serde_json::from_slice(&std::fs::read(&husk_path).unwrap())
+        .unwrap();
+    husk.num_messages = 0;
+    husk.num_chat_messages = 0;
+    husk.session_summary.clear();
+    std::fs::write(&husk_path, serde_json::to_vec_pretty(&husk).unwrap()).unwrap();
+    let adapter = JsonlStorageAdapter::with_root(tmp.path().to_path_buf());
+    let recent = adapter.list_sessions_recent(100).await.unwrap();
+    assert_eq!(recent.len(), 1);
+    assert_eq!(recent[0].info.id, acp::SessionId::new("real"));
 }
 #[tokio::test]
 async fn list_sessions_recent_skips_headless_without_shorting_the_page() {
@@ -1815,16 +1855,9 @@ fn read_chat_history_upgrades_raw_output_parallel_tco_reasoning() {
         .collect();
     assert_eq!(reasoning_ids, vec!["tco_1", "tco_2", "rs_main"]);
 }
-/// Hybrid file: legacy-shape turns at the front of the file, new-shape turns appended at the back.
-/// That is the realistic shape when a user loads an old session with a new binary and takes another turn.
-/// Verifies:
-///
-/// 1. The legacy turn's `reasoning` field is reconstructed as a sibling *before* the legacy assistant.
-/// 2. The post-PR sibling Reasoning row passes through unchanged and lands before the post-PR assistant (no double-emission).
-/// 3. `sibling_btc_ids_seen` tracks ids across the boundary.
-///    A (hypothetical) later legacy assistant's raw_output may list an id that already appeared as a post-PR sibling row.
-///    That BackendToolCall does not get re-emitted.
-/// 4. Final item order is a uniform sibling-shape `Vec<ConversationItem>` that downstream code can replay without knowing about the seam.
+/// The legacy turn's `reasoning` field is reconstructed as a sibling *before* the legacy assistant.
+/// The post-PR sibling Reasoning row passes through unchanged and lands before the post-PR assistant (no double-emission).
+/// Final item order is a uniform sibling-shape `Vec<ConversationItem>` that downstream code can replay without knowing about the seam.
 #[test]
 fn read_chat_history_handles_hybrid_legacy_and_post_pr_lines() {
     let items = load_lines(
@@ -2299,12 +2332,16 @@ async fn retry_after_lost_ack_converges_memory_and_disk_to_authoritative_item() 
         vec![],
         xai_grok_sampling_types::SamplingConfig {
             base_url: String::new(),
+            mtls_cert_dir: None,
             model: String::new(),
             max_completion_tokens: None,
             temperature: None,
             top_p: None,
+            max_retries: None,
+            rate_limit_retry_threshold: None,
             api_backend: Default::default(),
             extra_headers: Default::default(),
+            conversation_group_id: None,
             query_params: Default::default(),
             env_http_headers: Default::default(),
             context_window: std::num::NonZeroU64::new(128_000).unwrap(),
@@ -2413,9 +2450,8 @@ async fn append_update_terminates_torn_trailing_line() {
     assert_eq!(updates.len(), 2, "torn line skipped, real updates kept");
 }
 /// End-to-end resume-path regression for the incident: a live session with a merged record in `chat_history.jsonl` must still load.
-/// (Merged record: crash mid-append, then log-and-continue appended the next record onto the partial line.)
-/// Previously `load_session_without_updates` returned InvalidData ("expected `,` or `}` at line 1 column N").
-/// That surfaced to the user as "Couldn't load session: … FS_OTHER" and permanently bricked the session.
+/// (Merged record: crash mid-append, then log-and-continue appended the next record onto the partial line.).
+/// Previously `load_session_without_updates` returned.
 #[tokio::test]
 async fn load_session_without_updates_survives_merged_chat_line() {
     let temp_dir = TempDir::new().unwrap();

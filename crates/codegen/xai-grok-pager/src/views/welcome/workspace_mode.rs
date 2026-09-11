@@ -231,11 +231,8 @@ pub struct WorkspaceModeHitRects {
 /// Rows reserved above the welcome menu for the picker (content and gap).
 pub const WORKSPACE_MODE_MENU_ROWS: u16 = 2;
 
-/// Paint the segmented workspace control into `area`.
-///
-/// Layout:
-/// `Workspace  [ Sandbox ]  [ Local workspace ]  ctrl+e`
-/// or when locked: `Workspace  [ Local workspace ]  locked by CLI`
+/// Paint the segmented workspace control into `area`. Layout: `Workspace [ Sandbox ] [ Local
+/// workspace ] ctrl+e` or when locked: `Workspace [ Local workspace ] locked by CLI`.
 pub fn render_workspace_mode_picker(
     area: Rect,
     buf: &mut Buffer,
@@ -545,9 +542,8 @@ pub fn mode_from_active_stamp(
     }
 }
 
-/// Whether keyboard/mouse should mutate the welcome selection.
-///
-/// Same gate as the ACK and render paths: chat mode, access, auth Done, not ZDR, not CLI-startup-locked, and history picker closed.
+/// Whether keyboard/mouse should mutate the welcome selection. Same gate as the ACK and render
+/// paths: chat mode, access, auth Done, not ZDR, not CLI-startup-locked, and history picker closed.
 /// With the history picker open, Ctrl+E/click would mutate the selection with no on-screen control.
 pub fn picker_interactive(
     chat_mode: bool,

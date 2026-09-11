@@ -15,7 +15,6 @@ use xai_grok_shell::session::ExtMethodResult;
 use xai_grok_shell::session::helpers::session_compact::{
     COMPACT_CANCELLED_MSG, CompactErrorKind, compact_error_kind,
 };
-use xai_grok_shell::session::unified_list::ListScope;
 /// Floor for the session create/load RPCs.
 const SESSION_RPC_FLOOR: std::time::Duration = std::time::Duration::from_secs(180);
 /// Headroom over the agent-side `.envrc` budget for the rest of session setup.
@@ -26,7 +25,7 @@ pub(super) fn session_rpc_timeout() -> std::time::Duration {
     SESSION_RPC_FLOOR.max(xai_grok_workspace::envrc::loader_budget() + SESSION_RPC_SLACK)
 }
 /// `acp_send` bounded by [`session_rpc_timeout`]; on expiry, an error naming `action` instead of an eternal spinner.
-pub(super) async fn acp_send_bounded<R, T>(
+pub(crate) async fn acp_send_bounded<R, T>(
     request: T,
     tx: &tokio::sync::mpsc::UnboundedSender<R>,
     action: &str,
@@ -170,7 +169,6 @@ pub(super) async fn fetch_plugin_cta_mcps(
 /// Convert an ACP error to a user-friendly string for display.
 /// Rate-limit errors render the free-usage paywall, else the server detail, else the auth-aware fallback (see [`format_rate_limited_user_message`]).
 /// The server detail is rewritten for API-key auth when the body pushes personal SuperGrok.
-/// All other errors render as the formatted request-failure banner text (status headline and sanitized detail).
 pub(super) fn format_acp_error(err: &acp::Error, is_api_key_auth: bool) -> String {
     format_acp_error_with_locale(
         err,
@@ -234,10 +232,8 @@ pub(crate) fn format_rate_limited_user_message_with_locale(
 fn error_data_detail(err: &acp::Error) -> Option<String> {
     err.data.as_ref().and_then(error_detail_from_data)
 }
-/// Error text for the manual `/compact` result.
 /// A typed `data.kind` means the shell already normalized the payload at its wire boundary (`compact_error_data`), so it passes through untouched.
 /// Re-sanitizing would re-truncate (our 200-char cap against the shell's 300 bytes).
-/// Old-shell bare strings get the full scrub.
 /// Cancel text survives verbatim for the dispatch match; empty data yields an empty message (terse render); Display is used only when data is absent.
 pub(crate) fn compact_error_message(err: &acp::Error) -> String {
     if compact_error_kind(err).is_some() {
@@ -277,7 +273,7 @@ pub(super) fn format_restore_elapsed(d: std::time::Duration) -> String {
 }
 /// CANONICAL wire parser for the worktree resume response.
 /// Any other code consuming the `codeRestored` / `restoreSummary` / `restoreDegree` shape MUST go through this function; do not re-implement.
-pub(super) fn parse_worktree_restore_payload(
+pub(crate) fn parse_worktree_restore_payload(
     result_obj: &serde_json::Value,
 ) -> (bool, Option<String>, Option<xai_grok_workspace::session::git::RestoreDegree>) {
     let code_restored = result_obj
@@ -293,6 +289,13 @@ pub(super) fn parse_worktree_restore_payload(
         .cloned()
         .and_then(|v| serde_json::from_value(v).ok());
     (code_restored, restore_summary, restore_degree)
+}
+pub(crate) fn parse_worktree_strategy_summary(
+    result_obj: &serde_json::Value,
+) -> Option<String> {
+    use serde::Deserialize;
+    let strategy = result_obj.get("strategy")?;
+    xai_grok_workspace::worktree::StrategyReport::deserialize(strategy).ok()?.notice()
 }
 /// CANONICAL wire parser for `LoadSessionResponse._meta.codeRestore`.
 /// Any other code consuming this shape MUST go through this function; do not re-implement.
@@ -315,10 +318,8 @@ pub(super) fn parse_session_load_restore_meta(
     (code_restored, restore_summary, restore_degree)
 }
 /// CANONICAL wire parser for `LoadSessionResponse._meta["x.ai/runningPromptId"]`.
-///
 /// Returns the session's in-flight running prompt id when the session was loaded MID-turn (some other client is driving), otherwise `None`.
 /// The loader adopts this id so subsequent live `session/update` deltas pass the `current_prompt_id` gate (see `app/acp_handler.rs`).
-/// `pub(super)` for the reconnect re-init in `event_loop.rs`, which reads the same response meta.
 pub(crate) fn parse_session_load_running_prompt_id(
     resp_meta: Option<&acp::Meta>,
 ) -> Option<String> {
@@ -327,20 +328,17 @@ pub(crate) fn parse_session_load_running_prompt_id(
         .and_then(|v| v.as_str())
         .map(String::from)
 }
-/// CANONICAL wire parser for the `session/new` / `session/load` response `_meta[SCHEDULER_BACKGROUND_LOOPS_META_KEY]`.
+/// Parse the persistent-memory implementation pinned by the session actor.
 ///
-/// Carries whether THIS session's scheduled fires run as detached background subagents, as the shell resolved it when the session's actor spawned.
-/// The pager stores it per session and must not re-resolve the setting.
-/// A mid-session flip would make `/loop`'s wording describe a runtime the already-spawned session will never use.
-/// `None` when the shell predates the key (or for gateway chat sessions, which have no local fires), leaving the reader on the startup seed.
-pub(crate) fn parse_session_scheduler_background_loops(
+/// `None` supports older shells that predate the metadata key. Those shells
+/// only support the legacy layout, so save call sites can safely default it.
+pub(crate) fn parse_session_memory_mode(
     resp_meta: Option<&acp::Meta>,
-) -> Option<bool> {
+) -> Option<xai_grok_shell::config::MemoryMode> {
     resp_meta
-        .and_then(|m| {
-            m.get(xai_grok_shell::session::SCHEDULER_BACKGROUND_LOOPS_META_KEY)
-        })
-        .and_then(|v| v.as_bool())
+        .and_then(|meta| meta.get(xai_grok_shell::session::MEMORY_MODE_META_KEY))
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
 }
 /// Whether `raw` is (or wraps) a disk-full / ENOSPC failure.
 pub(crate) fn is_disk_full_error(raw: &str) -> bool {
@@ -376,25 +374,7 @@ pub(crate) fn sanitize_user_error(raw: &str) -> String {
     result
 }
 /// Additive session creation flags passed from the CLI through AppView into effects.
-///
-/// The flags map to built-in `BuiltinAgentName` profiles (`agentProfile`).
-/// Independently, they gate the `ask_user_question` tool at the builder (`askUserQuestion`).
 /// `--no-ask-user` always strips the tool, regardless of which profile was selected.
-///
-/// The `askUserQuestion` column is the value the pager stamps into `_meta`; `omitted` means the shell resolves the gate itself (default ON).
-///
-/// | plan  | subagents | ask-user | agentProfile                   | askUserQuestion    |
-/// |-------|-----------|----------|--------------------------------|--------------------|
-/// | false | false     | false    | `grok-build` (default)         | `false`            |
-/// | false | true      | false    | `grok-build` (default)         | `false`            |
-/// | false | false     | true     | `grok-build-ask-user`          | omitted (shell gate) |
-/// | false | true      | true     | `grok-build-ask-user`          | omitted (shell gate) |
-/// | true  | false     | false    | `grok-build-plan-no-subagents` | `false`            |
-/// | true  | true      | false    | `grok-build-plan`              | `false`            |
-/// | true  | false     | true     | `grok-build-plan-no-subagents` | omitted (shell gate) |
-/// | true  | true      | true     | `grok-build-plan`              | omitted (shell gate) |
-///
-/// When [`Self::chat_mode`] is set (gateway light-frontend / `--chat`), Build `agentProfile` injection is omitted.
 /// `_meta["x.ai/session"].kind` is stamped `"chat"` so the shell takes the `require_gateway` / thin profile.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SessionFlags {
@@ -433,7 +413,6 @@ pub(crate) struct SessionFlags {
 }
 impl SessionFlags {
     /// Resolve the agent profile name from the flags.
-    ///
     /// Returns `None` for the default `grok-build` profile (no `_meta` needed; it already includes TaskTool).
     /// Chat mode never injects a Build profile (remote owns agent behavior).
     pub(super) fn agent_profile(&self) -> Option<&'static str> {
@@ -447,13 +426,9 @@ impl SessionFlags {
             (false, _, false) => None,
         }
     }
-    /// Build the `_meta` JSON value for ACP `NewSessionRequest` / `LoadSessionRequest`.
-    ///
     /// In practice always `Some`: the permission seeds (`yoloMode` / `autoMode`) are emitted unconditionally.
     /// An absent key is not the same as off; see the emit-site comment below.
     /// `--no-ask-user` always forces `askUserQuestion: false` into the meta, even when paired with `GROK_AGENT`.
-    /// The env var chooses the *agent*, but the tool-strip is independent.
-    /// Chat mode additionally stamps `x.ai/session.kind`.
     pub(crate) fn to_meta(&self) -> Option<acp::Meta> {
         let mut meta = serde_json::Map::new();
         if self.chat_mode {
@@ -518,8 +493,6 @@ pub(super) fn apply_chat_kind_meta(meta: &mut Option<acp::Meta>) {
 }
 /// Stamp the chat and local-workspace intent.
 /// Attach also stamps `x.ai/cloud_existing_workspace`.
-/// Own leaves `server_id` unset; the shell supervisor mints one before the handshake.
-///
 /// Never stamps `envId` or `x.ai/cloud_server_id`.
 #[cfg(feature = "local-workspace")]
 pub(super) fn stamp_local_workspace_meta(
@@ -592,8 +565,6 @@ pub(super) fn finalize_chat_session_meta(
     scrub_chat_workspace_bind_meta(meta);
 }
 /// Remove client workspace-bind keys from chat create/load meta (defense in depth).
-///
-/// Narrow scrub exception: keep `x.ai/cloud_existing_workspace` when local intent is **attach**.
 /// Own stamps intent only (shell mints `server_id`).
 /// Never keep `envId` or Direct hub `x.ai/cloud_server_id`.
 pub(super) fn scrub_chat_workspace_bind_meta(meta: &mut Option<acp::Meta>) {
@@ -731,273 +702,6 @@ pub(super) fn count_chat_history_stats(history_path: &Path) -> (usize, usize) {
         }
     }
     (turn_count, tool_call_count)
-}
-/// Degraded conversations lane on `x.ai/session/list`, parsed from the response's `_meta["x.ai/partial"]` envelope.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConversationsPartial {
-    NoOauth,
-    Timeout,
-    Error,
-}
-impl ConversationsPartial {
-    /// Picker notice for a degraded conversations lane.
-    pub(crate) fn picker_notice(self) -> &'static str {
-        self.picker_notice_with_locale(None)
-    }
-
-    pub(crate) fn picker_notice_with_locale(
-        self,
-        locale: Option<&crate::locale::LocaleContext>,
-    ) -> &'static str {
-        match self {
-            Self::NoOauth => locale
-                .map(|locale| {
-                    locale.named_static_text(
-                        "session_picker.partial.no_oauth",
-                        "Couldn't load your chats: log in with /login",
-                    )
-                })
-                .unwrap_or("Couldn't load your chats: log in with /login"),
-            Self::Timeout | Self::Error => locale
-                .map(|locale| {
-                    locale.named_static_text(
-                        "session_picker.partial.retry",
-                        "Couldn't load conversations: retry",
-                    )
-                })
-                .unwrap_or("Couldn't load conversations: retry"),
-        }
-    }
-}
-/// Read `_meta["x.ai/partial"]` from a session-list payload.
-/// `None` when the conversations lane completed (or was skipped); unknown reasons degrade to [`ConversationsPartial::Error`].
-pub(super) fn parse_session_list_partial(
-    payload: &serde_json::Value,
-) -> Option<ConversationsPartial> {
-    let partial = payload.get("_meta")?.get("x.ai/partial")?;
-    if partial.get("conversations").and_then(|v| v.as_bool()) != Some(true) {
-        return None;
-    }
-    Some(
-        match partial.get("reason").and_then(|v| v.as_str()) {
-            Some("no_oauth") => ConversationsPartial::NoOauth,
-            Some("timeout") => ConversationsPartial::Timeout,
-            _ => ConversationsPartial::Error,
-        },
-    )
-}
-/// Reads `_meta["x.ai/listScope"]` from a session-list payload.
-pub(super) fn parse_session_list_scope(payload: &serde_json::Value) -> ListScope {
-    match payload
-        .get("_meta")
-        .and_then(|m| m.get("x.ai/listScope"))
-        .and_then(|v| v.as_str())
-    {
-        Some("repo") => ListScope::Repo,
-        Some("all") => ListScope::All,
-        _ => ListScope::Cwd,
-    }
-}
-/// Parse the `x.ai/session/list` response payload (the unwrapped `{ "sessions": [...] }` object) into [`SessionPickerEntry`] rows.
-///
-/// Shared by the resume picker ([`Effect::FetchSessionList`]) and the dashboard's non-leader idle-session fallback ([`Effect::FetchDashboardSessions`]).
-/// Sharing one parser keeps both label sets identical.
-/// Sessions older than 30 days, and sessions with no usable user prompt (empty `summary` after fallbacks), are dropped.
-pub(super) fn parse_session_picker_entries(
-    payload: &serde_json::Value,
-) -> Vec<crate::app::app_view::SessionPickerEntry> {
-    use crate::app::app_view::SessionPickerEntry;
-    let entries: Vec<serde_json::Value> = payload
-        .get("sessions")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-    let now = chrono::Utc::now();
-    let cutoff = now - chrono::Duration::days(30);
-    entries
-        .into_iter()
-        .filter_map(|v| {
-            let id = v
-                .get("sessionId")
-                .or_else(|| v.get("session_id"))
-                .and_then(|s| s.as_str())?
-                .to_string();
-            let summary = v
-                .get("summary")
-                .and_then(|s| s.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let first_prompt = v
-                .get("firstPrompt")
-                .or_else(|| v.get("first_prompt"))
-                .and_then(|s| s.as_str())
-                .map(String::from);
-            let is_conversation = v
-                .get("_meta")
-                .and_then(|m| m.get("x.ai/session"))
-                .and_then(|s| s.get("kind"))
-                .and_then(|k| k.as_str()) == Some("chat");
-            let parsed_updated: Option<chrono::DateTime<chrono::Utc>> = v
-                .get("updatedAt")
-                .or_else(|| v.get("updated_at"))
-                .and_then(|s| s.as_str())
-                .and_then(|s| s.parse().ok());
-            let parsed_created: Option<chrono::DateTime<chrono::Utc>> = v
-                .get("createdAt")
-                .or_else(|| v.get("created_at"))
-                .and_then(|s| s.as_str())
-                .and_then(|s| s.parse().ok());
-            let updated_at: chrono::DateTime<chrono::Utc> = match parsed_updated {
-                Some(ts) => {
-                    if !is_conversation && ts < cutoff {
-                        return None;
-                    }
-                    ts
-                }
-                None => {
-                    if !is_conversation {
-                        return None;
-                    }
-                    parsed_created.unwrap_or(chrono::DateTime::<chrono::Utc>::UNIX_EPOCH)
-                }
-            };
-            use xai_grok_tools::implementations::skills::skill::extract_skill_display_text;
-            let display = if let Some(ref fp) = first_prompt {
-                if let Some(d) = extract_skill_display_text(fp) {
-                    d
-                } else if !summary.is_empty() {
-                    extract_skill_display_text(&summary).unwrap_or(summary)
-                } else {
-                    fp.lines().next().unwrap_or_default().trim().to_string()
-                }
-            } else if !summary.is_empty() {
-                extract_skill_display_text(&summary).unwrap_or(summary)
-            } else {
-                let info_cwd = v
-                    .get("cwd")
-                    .and_then(|s| s.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let info = xai_grok_shell::session::info::Info {
-                    id: acp::SessionId::new(id.clone()),
-                    cwd: info_cwd,
-                };
-                extract_first_user_prompt(&info).unwrap_or_default()
-            };
-            let created_at: chrono::DateTime<chrono::Utc> = parsed_created
-                .unwrap_or(updated_at);
-            let cwd_str = v
-                .get("cwd")
-                .and_then(|s| s.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let hostname = v.get("hostname").and_then(|s| s.as_str()).map(String::from);
-            let source = if is_conversation {
-                "conversation".to_string()
-            } else {
-                v.get("source").and_then(|s| s.as_str()).unwrap_or("local").to_string()
-            };
-            let model_id = v
-                .get("modelId")
-                .or_else(|| v.get("model_id"))
-                .and_then(|s| s.as_str())
-                .map(String::from);
-            let num_messages = v
-                .get("numMessages")
-                .or_else(|| v.get("num_messages"))
-                .and_then(|n| n.as_u64())
-                .unwrap_or(0) as usize;
-            let last_active_at: Option<chrono::DateTime<chrono::Utc>> = v
-                .get("lastActiveAt")
-                .or_else(|| v.get("last_active_at"))
-                .and_then(|s| s.as_str())
-                .and_then(|s| s.parse().ok());
-            let branch = v.get("branch").and_then(|s| s.as_str()).map(String::from);
-            let worktree_label = v
-                .get("worktreeLabel")
-                .or_else(|| v.get("worktree_label"))
-                .and_then(|s| s.as_str())
-                .map(String::from);
-            let last_turn_summary = v
-                .get("lastTurnSummary")
-                .or_else(|| v.get("last_turn_summary"))
-                .and_then(|s| s.as_str())
-                .map(String::from);
-            let last_recap = v
-                .get("lastRecap")
-                .or_else(|| v.get("last_recap"))
-                .and_then(|s| s.as_str())
-                .map(String::from);
-            let session_kind = v
-                .get("sessionKind")
-                .or_else(|| v.get("session_kind"))
-                .and_then(|s| s.as_str())
-                .map(String::from);
-            let repo_name = crate::views::session_picker::repo_name_from_cwd(&cwd_str);
-            Some(SessionPickerEntry {
-                id,
-                summary: display,
-                updated_at,
-                created_at,
-                cwd: cwd_str,
-                hostname,
-                source,
-                model_id,
-                num_messages,
-                last_active_at,
-                branch,
-                repo_name,
-                worktree_label,
-                last_turn_summary,
-                last_recap,
-                session_kind,
-                card_detail: None,
-            })
-        })
-        .filter_map(|mut e| {
-            if e.summary.is_empty() {
-                if e.source == "conversation" {
-                    e.summary = "Untitled".to_string();
-                } else {
-                    return None;
-                }
-            }
-            if e.source == "remote"
-                && xai_grok_shell::session::resolve_local_session_any_cwd(&e.id)
-                    .is_some()
-            {
-                e.source = "local".to_string();
-            }
-            Some(e)
-        })
-        .collect()
-}
-/// Convert a resume-picker session into a dormant dashboard roster row.
-///
-/// Used by the non-leader dashboard fallback.
-/// Local on-disk sessions have no live activity signal, so they map to [`RosterActivity::Dormant`] and render in the dashboard's **Inactive** group.
-/// The label, cwd, model, and worktree badge all come straight from the picker entry.
-pub(super) fn session_picker_entry_to_roster(
-    e: &crate::app::app_view::SessionPickerEntry,
-) -> crate::app::roster::RosterEntry {
-    use crate::app::roster::{RosterActivity, RosterEntry, RosterOrigin};
-    let last_change = e.last_active_at.unwrap_or(e.updated_at);
-    RosterEntry {
-        session_id: e.id.clone(),
-        title: Some(e.summary.clone()).filter(|s| !s.trim().is_empty()),
-        cwd: e.cwd.clone(),
-        is_worktree: e.worktree_label.is_some(),
-        model_id: e.model_id.clone(),
-        yolo: false,
-        activity: RosterActivity::Dormant,
-        last_turn_summary: e.last_turn_summary.clone(),
-        resident: false,
-        last_change_unix_ms: last_change.timestamp_millis(),
-        origin: RosterOrigin {
-            kind: e.source.clone(),
-            host: e.hostname.clone(),
-        },
-    }
 }
 pub(super) async fn send_logout(tx: &AcpAgentTx) {
     let req = acp::ExtRequest::new(
@@ -1556,29 +1260,19 @@ pub(crate) async fn persist_setting(
     }
 }
 /// Body for `Effect::PersistPermissionMode`. Factored out for testability.
-///
-/// 1. Persist `ui.permission_mode` to disk.
-/// 2. Fire ACP `x.ai/yolo_mode_changed` (gated on disk success for `WithRollback`; always for `BestEffort`).
-/// 3. Return the matching `TaskResult`.
+/// `BestEffort` fires ACP `x.ai/yolo_mode_changed` before the disk write (it fires regardless of the outcome, and a queued first prompt sent right after must not overtake it behind the config lock).
+/// `WithRollback` persists first and notifies only on disk success, so the agent never sees a value the UI is about to roll back.
 pub(crate) async fn persist_permission_mode_and_notify(
     canonical: &'static str,
     session_id: Option<acp::SessionId>,
     persist: PermissionModePersist,
     tx: AcpAgentTx,
 ) -> TaskResult {
-    let enabled = canonical == "always-approve";
-    let auto_mode = canonical == "auto";
     let config_str: &'static str = canonical;
-    let disk_result = xai_grok_shell::util::config::update_config(|cfg| {
-            cfg.ui.permission_mode = Some(config_str.to_string());
-        })
-        .await;
-    let disk_outcome: Result<(), String> = disk_result.map_err(|e| e.to_string());
-    if should_send_yolo_acp_notification(&disk_outcome, persist) && session_id.is_some()
-    {
+    let notify = |tx: AcpAgentTx| async move {
         let params = serde_json::json!({
-            "yolo_mode": enabled,
-            "auto_mode": auto_mode,
+            "yolo_mode": canonical == "always-approve",
+            "auto_mode": canonical == "auto",
             "permission_mode": config_str,
         });
         let notification = acp::ExtNotification::new(
@@ -1590,6 +1284,21 @@ pub(crate) async fn persist_permission_mode_and_notify(
         if let Err(e) = acp_send(notification, &tx).await {
             tracing::warn!("Failed to send yolo_mode_changed notification: {e}");
         }
+    };
+    let notify_first = session_id.is_some()
+        && matches!(persist, PermissionModePersist::BestEffort);
+    if notify_first {
+        notify(tx.clone()).await;
+    }
+    let disk_result = xai_grok_shell::util::config::update_config(|cfg| {
+            cfg.ui.permission_mode = Some(config_str.to_string());
+        })
+        .await;
+    let disk_outcome: Result<(), String> = disk_result.map_err(|e| e.to_string());
+    if !notify_first && session_id.is_some()
+        && should_send_yolo_acp_notification(&disk_outcome, persist)
+    {
+        notify(tx).await;
     }
     route_permission_mode_result(disk_outcome, persist, config_str)
 }
@@ -1610,12 +1319,8 @@ pub(super) fn marketplace_outcome_succeeded(
 ) -> bool {
     outcome.status == xai_hooks_plugins_types::OutcomeStatus::Success
 }
-/// Extract the typed kill outcome from an `x.ai/task/kill` ext response.
-///
 /// The agent serializes `ExtMethodResult<KillTaskResponse>`, so the outcome lives at `result.outcome` (`{"result":{"taskId":..,"outcome":"not_found"}}`).
 /// Deserializes through the same wire DTOs the agent serializes so the contract stays typed end-to-end.
-/// Those DTOs are `xai_grok_shell::extensions::task::KillTaskResponse` and `xai_grok_shell::session::result::ExtMethodResult`.
-/// Returns `None` for error envelopes (`result: null`) or unparseable payloads; the dispatcher treats that as "clear pending state, keep the row".
 /// Probing the top level with untyped JSON here was why the tasks-pane ✗ never removed stale (`not_found`) rows after a session resume.
 pub(super) fn parse_kill_outcome(
     resp: &str,
@@ -1718,10 +1423,8 @@ pub(super) fn persist_hint(
         });
 }
 /// Map a billing config into a [`CreditBalance`].
-///
 /// Prefers the newer credits-config fields (`credit_usage_percent`, `current_period`).
 /// Falls back to the deprecated `monthly_limit`/`used`/`billing_period_end`.
-/// Shared by `Effect::FetchBilling` and `Effect::FetchAppBilling` so every pager UI path derives identical usage values from the same config.
 pub(super) fn credit_balance_from_config(
     c: xai_grok_shell::extensions::billing::BillingConfig,
 ) -> crate::views::credit_bar::CreditBalance {

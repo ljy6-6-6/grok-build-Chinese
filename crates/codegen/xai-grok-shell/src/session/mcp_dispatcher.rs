@@ -107,7 +107,6 @@ pub(crate) fn classify_source(name: &str) -> McpServerSource {
     }
 }
 
-/// `shutting_down` carries servers whose `Arc<McpClient>` the session dropped on purpose (config diff removal or `ToggleMcpServer enabled=false`).
 /// The auto-restart task consults this set before respawning.
 /// A `TransportClosed` that arrives *because* the dispatcher's `kill_on_drop` killed the child must NOT resurrect a server the user just deleted.
 /// `flush_window` is the only writer: `ConfigRemoved` marks, `Ready` clears, and nothing expires entries, so a removed server stays marked for good.
@@ -117,8 +116,6 @@ pub(crate) struct ShutdownState {
     /// Servers with an `auto_restart_stdio` task currently in flight.
     /// A second `TransportClosed` / `HandshakeFailed` arriving while the first respawn is mid-backoff or mid-handshake is short-circuited.
     /// A duplicate task would race on `start_mcp_server` and `owned_clients.insert`, orphaning an stdio child.
-    /// The spawned task's RAII guard releases the claim on every exit path.
-    /// Lives next to `shutting_down` so both share the one `SharedShutdownState` lock.
     in_flight_restart: HashSet<McpServerName>,
 }
 
@@ -317,10 +314,8 @@ pub(crate) fn build_payload(
     }
 }
 
-/// Per-flush side effects:
-/// - update `shutting_down` for `ConfigRemoved` / `Ready` keys,
-/// - emit one ACP `x.ai/mcp/server_status` push per surviving buffer entry, via the provided gateway.
-///
+/// update `shutting_down` for `ConfigRemoved` / `Ready` keys.
+/// emit one ACP `x.ai/mcp/server_status` push per surviving buffer entry, via the provided gateway.
 /// Failures are logged and dropped; the dispatcher must not block the session actor.
 pub(crate) fn flush_window(
     session_id: &str,
@@ -334,12 +329,9 @@ pub(crate) fn flush_window(
     let mut shutdown_guard = shutdown.lock().unwrap_or_else(|e| e.into_inner());
     for (key, event) in buf {
         let (server, kind) = &key;
-        // ONLY `ConfigRemoved` marks `shutting_down`: the mark signals user intent (config removed / toggled off), not transport death
-        // `run_dispatcher` feeds every `TransportClosed` key into `maybe_schedule_restart`
-        // That gate's first guard rail short-circuits on `is_in_shutting_down`
-        // Marking on `TransportClosed` would therefore classify every stdio crash as an intentional shutdown, and auto-restart would never fire
-        //
-        // `Ready` clears the mark: a server that just (re-)handshook is back, so future events on it are processed normally
+        // ONLY `ConfigRemoved` marks `shutting_down`: the mark signals user intent (config removed / toggled off), not transport death `run_dispatcher` feeds every `TransportClosed` key into `maybe_schedule_restart`.
+        // Marking on `TransportClosed` would therefore classify every stdio crash as an intentional shutdown, and auto-restart would never fire.
+        // `Ready` clears the mark: a server that just (re-)handshook is back, so future events on it are processed normally.
         match kind {
             McpClientEventKind::ConfigRemoved => {
                 shutdown_guard.mark(server.clone());
@@ -402,17 +394,9 @@ pub(crate) struct DeadClient {
     pub closed: HashSet<u64>,
 }
 
-/// Walk the coalesce window and return the close *candidates*.
-/// Those are servers whose owned `Arc<McpClient>` may need to be torn down from [`McpState::owned_clients`].
 /// [`drop_dead_clients`] then evicts only the ones whose registered client id actually matches a close.
-///
-/// Only stdio `TransportClosed` participates:
-///
-/// - HTTP `TransportClosed` (`http_servers`) is **excluded**.
-///   Those clients are recovered in place by [`collect_http_transport_closed`] so their tools stay valid.
-/// - `ConfigRemoved` is **excluded**: every `ConfigDiff` producer calls `McpState::update_configs_diff` first.
-///   That call removes the old client synchronously *before* the event is emitted.
-///   An entry still present at flush time can therefore only be a freshly-handshook replacement from a remove and re-add.
+/// Only stdio `TransportClosed` participates.
+/// An entry still present at flush time can therefore only be a freshly-handshook replacement from a remove and re-add.
 pub(crate) fn collect_close_candidates(
     win: &CoalescedWindow,
     http_servers: &HashSet<McpServerName>,
@@ -428,10 +412,8 @@ pub(crate) fn collect_close_candidates(
 }
 
 /// Names eligible for in-place HTTP recovery: enabled HTTP/SSE config entries.
-///
 /// MUST match the recovery gate (`SessionActor::is_http_server_configured`).
 /// If the two predicates diverge, a disabled HTTP server still in `configs` is kept here (not evicted) yet rejected by the gate (not recovered).
-/// That orphans a dead client in `owned_clients`.
 pub(crate) fn recoverable_http_servers(
     configs: &[acp::McpServer],
     disabled: &HashSet<String>,
@@ -465,12 +447,7 @@ pub(crate) fn collect_http_transport_closed(
 }
 
 /// Drop dead clients from `McpState::owned_clients`.
-/// Holds the `McpState` lock for the duration of the iteration; removing a server that isn't registered is a no-op.
-///
-/// Eviction is keyed by *client identity*.
 /// A close for id N must not evict a replacement (id M ≠ N) registered under the same name while the event sat in the coalesce window.
-///
-/// Returns the servers whose `TransportClosed` was *stale* (a current client exists and no closed id matches it).
 /// The caller must strip those buffered entries so a stale event is fully inert: no `unavailable` push, no disconnect span, no spurious restart.
 pub(crate) async fn drop_dead_clients(
     mcp_state: &Arc<TokioMutex<McpState>>,
@@ -506,19 +483,9 @@ pub(crate) async fn drop_dead_clients(
     stale
 }
 
-/// Drive the dispatcher loop. Runs until `rx` is closed.
-///
 /// Spawned via `tokio::task::spawn_local` from the session actor's LocalSet (the gateway is `!Send`, so this MUST run on a LocalSet).
-///
-/// Per-window pipeline:
-/// 1. `collect_window`: block on `rx.recv()`, then accumulate up to 50 ms of events (last-write-wins per `(server, kind)`).
-/// 2. `drop_dead_clients`: remove `TransportClosed` entries from [`McpState::owned_clients`] BEFORE pushing status notifications.
-///    Eviction is gated on client identity (see [`collect_close_candidates`]).
-///    Stale `TransportClosed` keys are stripped from the window so they push no status, emit no disconnect span, and schedule no restart.
-/// 3. `flush_window`: emit ACP `x.ai/mcp/server_status` per surviving entry.
-/// 4. `maybe_schedule_restart`: decide per `TransportClosed` / `HandshakeFailed` key whether to spawn an `auto_restart_stdio` task.
-///    The gate lives in [`crate::session::mcp_restart`].
-///    Skipped entirely when `restart_actions` is `None` (e.g. `mcp.auto_restart=false`).
+/// `drop_dead_clients`: remove `TransportClosed` entries from [`McpState::owned_clients`] BEFORE pushing status notifications.
+/// Skipped entirely when `restart_actions` is `None`.
 pub(crate) async fn run_dispatcher(
     session_id: String,
     mut rx: UnboundedReceiver<McpClientEvent>,
@@ -528,10 +495,9 @@ pub(crate) async fn run_dispatcher(
     restart_actions: Option<Rc<dyn crate::session::mcp_restart::RestartActions>>,
     cwd: std::path::PathBuf,
 ) {
-    // Cancellation source for spawned `auto_restart_stdio` tasks
-    // The dispatcher exiting (channel closed) means the session is shutting down, so we cancel
-    // An in-flight backoff sleep then aborts promptly instead of running for up to 21s and pushing status through a gateway that is tearing down
-    // Tasks select on this token during their backoff (see `mcp_restart::auto_restart_stdio`)
+    // Cancellation source for spawned `auto_restart_stdio` tasks.
+    // The dispatcher exiting (channel closed) means the session is shutting down, so we cancel.
+    // An in-flight backoff sleep then aborts promptly instead of running for up to 21s and pushing status through a gateway that is tearing down.
     let restart_cancel = tokio_util::sync::CancellationToken::new();
     loop {
         let Some(mut win) = collect_window(&mut rx, COALESCE_WINDOW).await else {
@@ -557,9 +523,8 @@ pub(crate) async fn run_dispatcher(
             .any(|(_, k)| matches!(k, McpClientEventKind::ConfigRemoved));
 
         // Classify each configured server's transport (single lock).
-        // `http_servers` decides recover-in-place vs evict; `transport_map` feeds the disconnect telemetry below
-        // `recoverable_http_servers` excludes disabled names so it stays in lockstep with the recovery gate `is_http_server_configured`
-        // Otherwise a disabled HTTP server would be neither evicted nor recovered
+        // `http_servers` decides recover-in-place vs evict; `transport_map` feeds the disconnect telemetry below `recoverable_http_servers` excludes disabled names so it stays in lockstep with the recovery gate.
+        // Otherwise a disabled HTTP server would be neither evicted nor recovered.
         let (http_servers, transport_map): (
             HashSet<McpServerName>,
             HashMap<McpServerName, &'static str>,
@@ -826,9 +791,7 @@ mod tests {
 
     /// End-to-end-ish: the live-config-reload path runs `update_configs_diff` and emits `McpClientEvent::ConfigDiff`.
     /// The dispatcher must then emit one `mcp/server_status` payload per added server with `reason: config_added`.
-    /// It must also emit one per removed server with `reason: config_removed`.
     /// Builds the per-key payload directly with the same `build_payload` the live `flush_window` calls.
-    /// The assertion therefore locks the exact wire shape `app.rs`'s `ProjectMcpServersChanged` arm produces downstream.
     #[test]
     fn project_config_change_emits_per_server_status_for_added_and_removed() {
         let added_key = ("server_x".to_string(), McpClientEventKind::ConfigAdded);
@@ -914,7 +877,6 @@ mod tests {
     }
 
     /// Snapshot of the wire shape for one TransportClosed status push.
-    ///
     /// Locks the camelCase field naming, lowercase enum values, and the `tools: null` placeholder.
     /// Update the expected JSON alongside any schema bumps so the wire contract and code stay in sync.
     #[test]
@@ -1280,13 +1242,8 @@ mod tests {
     }
 
     /// `RestartActions` test double for the integration test.
-    ///
     /// Uses `RefCell` for internal state, matching the `MockActions` convention in `mcp_restart.rs`.
-    /// Both doubles model the same `?Send` trait on a single-threaded `LocalSet`.
-    ///
     /// `is_in_shutting_down` consults a shared `SharedShutdownState`.
-    /// The integration test wires the SAME `SharedShutdownState` into both the dispatcher (via `run_dispatcher`'s `shutdown` parameter) and the mock.
-    /// The mock thus observes the dispatcher's `flush_window` mutations, mirroring how production `SessionRestartActions` reads from the same Arc.
     struct CountingActions {
         configured: std::cell::RefCell<HashSet<String>>,
         respawn_calls: std::cell::RefCell<Vec<String>>,
@@ -1320,21 +1277,19 @@ mod tests {
                 .expect("ShutdownState mutex poisoned")
                 .is_shutting_down(server)
         }
-        async fn respawn_stdio(&self, server: &str) -> Result<(), String> {
+        async fn respawn_stdio(
+            &self,
+            server: &str,
+        ) -> Result<crate::session::mcp_restart::Respawn, String> {
             self.respawn_calls.borrow_mut().push(server.to_string());
-            Ok(())
+            Ok(crate::session::mcp_restart::Respawn::Installed)
         }
         fn push_status(&self, _payload: &crate::session::mcp_dispatcher::McpServerStatusPayload) {}
     }
 
-    /// End-to-end: a `TransportClosed` event flowing through `run_dispatcher` schedules a `respawn_stdio` call.
-    ///
-    /// The mock's `is_in_shutting_down` reads from the same `SharedShutdownState` the dispatcher mutates.
     /// Pre-fix, the dispatcher's `flush_window` would mark `"svr"` on `TransportClosed` and the mock would observe `true`.
     /// `maybe_schedule_restart` would then short-circuit with `reason=shutting_down`, `respawn_calls` would stay empty, and this test would FAIL.
     /// With the fix, only `ConfigRemoved` marks the set, the mock observes `false` for `"svr"`, and the restart task fires.
-    ///
-    /// Uses `start_paused` and `tokio::time::advance` instead of a 1500 ms wall-clock sleep, so the test stays deterministic under loaded CI.
     #[tokio::test(start_paused = true, flavor = "current_thread")]
     async fn run_dispatcher_schedules_restart_on_transport_closed() {
         use xai_grok_mcp::servers::McpState;

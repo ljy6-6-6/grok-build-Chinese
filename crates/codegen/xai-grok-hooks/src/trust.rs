@@ -1,9 +1,7 @@
 use std::path::{Path, PathBuf};
 
 // Project-hook trust is no longer stored here: the shell's folder-trust store
-// (`~/.grok/trusted_folders.toml`) is the single authority for whether a repo's
-// project hooks run (the same gate as repo-local MCP/LSP). The helpers below
-// exist only to migrate prior grants out of the legacy file.
+// (`~/.grok/trusted_folders.toml`) is the single authority for whether a repo's project hooks run (the same gate as repo-local MCP/LSP). The helpers below exist only to migrate prior grants out of the legacy file.
 
 /// Path to the legacy project-hook trust file (`<user_grok_home>/trusted-hook-projects`), or `None` when no user grok home resolves.
 /// It is retained only for the one-time migration into folder-trust.
@@ -12,7 +10,6 @@ pub fn legacy_trust_file_path() -> Option<PathBuf> {
 }
 
 /// The legacy format is one canonical absolute path per line; blank and `#`-comment lines are skipped.
-/// A missing file yields `Ok(empty)` (nothing to migrate).
 /// Any other read error is returned as `Err` so the caller does not mistake an unreadable file for an empty one and consume it.
 /// The one-time migration that seeds folder-trust from prior grants consumes this list.
 pub fn list_trusted_projects_with_file(trust_file: &Path) -> std::io::Result<Vec<PathBuf>> {
@@ -55,6 +52,7 @@ pub fn hook_disabled_for_display_with(
 
 /// One-shot snapshot of the disabled-hooks file, for callers that evaluate many specs per pass (dispatch loops, the stop-gate guard).
 /// One `load()` replaces a file read per spec.
+#[derive(Debug, Default)]
 pub struct DisabledHooks(std::collections::HashSet<String>);
 
 impl DisabledHooks {

@@ -181,10 +181,8 @@ pub enum SuggestionAction {
     Debounce { generation: u64 },
 }
 
-/// Wire `limit` for `x.ai/suggest` fetches.
-/// Matches the shell file provider's ranked-result cap (`MAX_RESULTS` in the shell crate's `file_provider.rs`), which ranks BEFORE capping.
-/// The dropdown renders 6 rows and scrolls the rest.
-/// Both fetch sites (Tab and the as-you-type debounce) must send the same value or their candidate sets diverge.
+/// Wire `limit` for `x.ai/suggest` fetches. Both fetch sites (Tab and the as-you-type debounce)
+/// must send the same value or their candidate sets diverge.
 pub const SHELL_SUGGEST_WIRE_LIMIT: usize = 50;
 
 /// Terminal-Tab decision over the current dropdown items, computed by [`SuggestionController::tab_decision`] and executed by the view.
@@ -225,10 +223,9 @@ pub struct CompletionDropdownState {
     /// The request text `items` were computed for, set atomically with the items when a response lands.
     /// Item `replace_range` offsets therefore always validate against the text they actually index into.
     pub request_text: String,
-    /// Cursor position the request was built at.
-    /// Items target the token AT this cursor.
-    /// [`SuggestionController::tab_decision`] refuses items when the live cursor has moved anywhere else (e.g. a mouse click).
-    /// The only tolerated drift is typing at the end.
+    /// Cursor position the request was built at. Items target the token AT this cursor.
+    /// [`SuggestionController::tab_decision`] refuses items when the live cursor has moved anywhere
+    /// else (e.g. a mouse click). The only tolerated drift is typing at the end.
     pub request_cursor: usize,
 }
 
@@ -419,9 +416,6 @@ impl SuggestionController {
     }
 
     /// Accept the selected completion-dropdown item, refusing stale state.
-    /// Items populated for a superseded generation just close the dropdown and accept nothing (the refreshed fetch is already in flight).
-    /// The item's span is resolved against `current_text` BEFORE the dropdown closes (see [`CompletionSplice`]).
-    /// A successful accept bumps the generation so in-flight responses for the pre-accept text are discarded when they land.
     pub fn accept_completion(&mut self, current_text: &str) -> Option<CompletionSplice> {
         if self.dropdown.generation != self.generation {
             self.dropdown.close();
@@ -482,18 +476,16 @@ impl SuggestionController {
         self.last_request_text.push_str(text);
     }
 
-    /// The whole terminal-Tab policy over the current dropdown items, decided here so the view executes without reading item internals.
-    /// It covers staleness (generation AND cursor consistency), source shape, the single-candidate rule, and the shared-prefix rule.
-    /// Only complete token edits (path/file source AND a range-and-token pair AND an exhaustive scan) get the shell's Tab behavior.
-    /// Everything else (whole-line, mixed, or degraded sets) is always [`TabAction::Open`].
+    /// The whole terminal-Tab policy over the current dropdown items, decided here so the view executes
+    /// without reading item internals. Only complete token edits (path/file source AND a
+    /// range-and-token pair AND an exhaustive scan) get the shell's Tab behavior.
     pub fn tab_decision(&self, current_text: &str, current_cursor: usize) -> TabAction {
         if self.dropdown.generation != self.generation || self.dropdown.items.is_empty() {
             return TabAction::Nothing;
         }
-        // Items target the token at the FETCH-time cursor
-        // The only tolerated drift is typing at the end (the same growth the range stretch rule accepts)
-        // Any other cursor move (a mouse click in particular reports no text change) makes them stale
-        // Tab must then fetch for the token actually under the cursor
+        // Items target the token at the FETCH-time cursor. The only tolerated drift is typing at the end
+        // (the same growth the range stretch rule accepts). Tab must then fetch for the token actually
+        // under the cursor.
         let grown = current_text
             .len()
             .saturating_sub(self.dropdown.request_text.len());
@@ -522,10 +514,9 @@ impl SuggestionController {
         TabAction::Open
     }
 
-    /// Shared-prefix fill for terminal-like Tab (bash's first-Tab behavior): the validated span and the prefix to write.
-    /// `Some` only when every item targets the SAME span and their replacements share a prefix that strictly extends the typed token.
-    /// `None` on any ambiguity: stale generation, mixed or missing ranges, no shared prefix, or one that only matches what's typed (differing case).
-    /// [`Self::tab_decision`] then falls back to opening the dropdown.
+    /// `Some` only when every item targets the SAME span and their replacements share a prefix that
+    /// strictly extends the typed token. `None` on any ambiguity: stale generation, mixed or missing
+    /// ranges, no shared prefix, or one that only matches what's typed (differing case).
     fn common_prefix_fill(&self, current_text: &str) -> Option<(std::ops::Range<usize>, String)> {
         if self.dropdown.generation != self.generation {
             return None;
@@ -559,10 +550,9 @@ impl SuggestionController {
         (lcp.len() > typed.len() && lcp.starts_with(typed)).then(|| (range, lcp.to_owned()))
     }
 
-    /// Re-validate a completion item's `replace_range` against the current text.
-    /// Offsets index into [`CompletionDropdownState::request_text`]; the only drift a live dropdown survives is progressive typing.
-    /// A range that reached the request text's end absorbs the typed tail, but ONLY while the grown span is still a prefix of `replacement`.
-    /// Anything else returns `None`: a no-op, never a clobber.
+    /// Re-validate a completion item's `replace_range` against the current text. Offsets index into
+    /// [`CompletionDropdownState::request_text`]; the only drift a live dropdown survives is
+    /// progressive typing. Anything else returns `None`: a no-op, never a clobber.
     fn validated_replace_range(
         &self,
         range: std::ops::Range<usize>,
@@ -589,10 +579,9 @@ impl SuggestionController {
             .then_some(range.start..end)
     }
 
-    /// Arm a Tab-triggered deterministic completion fetch; the generation bump discards any in-flight response.
-    /// Deliberately independent of [`enabled`](Self::enabled): Tab in bash mode always completes.
-    /// `run_tab_on_load` makes the landing run the terminal Tab decision once.
-    /// The post-accept and post-fill refreshes pass `false` so their items land silently and wait for the next Tab.
+    /// Arm a Tab-triggered deterministic completion fetch; the generation bump discards any in-flight
+    /// response. Deliberately independent of [`enabled`](Self::enabled): Tab in bash mode always
+    /// completes.
     pub fn begin_tab_completion(&mut self, run_tab_on_load: bool) -> u64 {
         self.generation += 1;
         self.tab_pending = run_tab_on_load.then_some(self.generation);
@@ -620,10 +609,9 @@ impl SuggestionController {
         self.generation
     }
 
-    /// Called on each text change. Returns the action the caller should take.
-    ///
-    /// If slash is active (or has an inline ghost), suppresses the pipeline entirely.
-    /// Otherwise, tries progressive matching first; if no match, increments generation and requests a debounce.
+    /// Called on each text change. Returns the action the caller should take. If slash is active (or
+    /// has an inline ghost), suppresses the pipeline entirely. Otherwise, tries progressive matching
+    /// first; if no match, increments generation and requests a debounce.
     pub fn text_changed(
         &mut self,
         text: &str,

@@ -807,7 +807,6 @@ fn spawn_persistence_capture(
 }
 
 /// The strongest storage boundary: a blocked prompt's text reaches NO persistence channel.
-/// That covers the user-echo `updates.jsonl` stream, the `summary.json` content feed, and chat items.
 /// Chat-history rebuilds and resume scrollback replay both read the `updates.jsonl` stream.
 /// An allowed prompt's echo is the control proving the capture sees persistence traffic.
 #[tokio::test(flavor = "current_thread")]

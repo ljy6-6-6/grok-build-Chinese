@@ -36,19 +36,9 @@ pub fn intersect_capability_modes(
     }
 }
 
-/// Resolve effective runtime config from explicit overrides, role defaults, and persona defaults.
-///
-/// Precedence for each field:
-/// 1. Explicit spawn-time override (from `SubagentRuntimeOverrides`)
-/// 2. Role default (from `SubagentRole` in config)
-/// 3. Persona default (looked up by name from the personas map)
-/// 4. None (parent inheritance, handled downstream)
-///
-/// Persona instructions are loaded eagerly: if `instructions_file` is set, the file is read relative to `source_dir` (or `cwd` as fallback).
-/// If the file cannot be read, a fatal `persona_error` is set and the function returns early with only the persona name and error populated.
-/// This matches the shell, where a persona file error aborts resolution before any other field is set.
-///
-/// A role prompt file failure is softer: if `prompt_file` cannot be read, a warning is set and the spawn continues without the role prompt.
+/// Precedence for each field: If the file cannot be read, a fatal `persona_error` is set and the function returns early
+/// with only the persona name and error populated. A role prompt file failure is softer: if `prompt_file` cannot be read,
+/// a warning is set and the spawn continues without the role prompt.
 pub fn resolve_effective_overrides(
     overrides: &SubagentRuntimeOverrides,
     role: Option<&SubagentRole>,
@@ -87,10 +77,9 @@ pub fn resolve_effective_overrides(
     let reasoning_effort = reasoning_from_override_or_role
         .or_else(|| resolved_persona.and_then(|p| p.reasoning_effort.clone()));
 
-    // ── Persona instructions loading ─────────────────────────────
-    // Fail-closed: if persona resolution produces an error (file unreadable, not found, empty), return early with only persona and error populated
-    // All other fields are defaulted
-    // This matches the shell's behavior where persona errors abort spawn before wiring model/isolation
+    // ── Persona instructions loading ─────────────────────────────. Fail-closed: if persona resolution produces an error
+    // (file unreadable, not found, empty), return early with only persona and error populated. All other fields are
+    // defaulted. This matches the shell's behavior where persona errors abort spawn before wiring model/isolation
     let (persona_instructions, persona_error, persona_fatal) =
         resolve_persona_instructions(persona.as_deref(), personas, cwd);
     // File I/O errors are fatal: return early with defaults so the caller can abort the spawn
@@ -144,13 +133,9 @@ pub fn resolve_effective_overrides(
     }
 }
 
-/// Resolve persona instructions from inline text and/or instructions_file.
-///
-/// Returns `(instructions, error, fatal)`:
-/// - `(Some(text), None, false)` on success
-/// - `(None, Some(err), true)` for file I/O errors (caller should early-return with defaults)
-/// - `(None, Some(err), false)` for config-level errors (persona not found, no instructions)
-/// - `(None, None, false)` when no persona is requested
+/// Resolve persona instructions from inline text and/or instructions_file. Returns `(instructions, error, fatal)`:
+/// `(Some(text), None, false)` on success; `(None, Some(err), true)` for file I/O errors (caller should early-return with
+/// defaults); `(None, Some(err), false)` for config-level errors (persona not found, no instructions).
 fn resolve_persona_instructions(
     persona_name: Option<&str>,
     personas: &HashMap<String, SubagentPersona>,

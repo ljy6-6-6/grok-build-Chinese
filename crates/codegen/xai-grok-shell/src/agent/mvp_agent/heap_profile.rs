@@ -130,11 +130,8 @@ impl MvpAgent {
             .finish_tick(threshold, outcome);
     }
 
-    /// Fetches settings and reconfigures using only the jemalloc fields.
-    ///
-    /// Also patches the jemalloc fields on stored `remote_settings`.
-    /// Without that, a full reapply (`/new` calls `reconfigure_heap_profile_monitor`) could re-enable profiling from a stale enabled flag.
-    /// That matters when the wholesale refresh after a live kill-switch is skipped or fails.
+    /// Fetches settings and reconfigures using only the jemalloc fields. Also patches the jemalloc fields on stored `remote_settings`.
+    /// Without that, a full reapply (`/new` calls `reconfigure_heap_profile_monitor`) could re-enable profiling from a stale enabled flag. That matters when the wholesale refresh after a live kill-switch is skipped or fails.
     pub(super) async fn poll_scoped_jemalloc_kill_switch_once(&self) {
         if !self.heap_profile_monitor.borrow().config().enabled {
             return;

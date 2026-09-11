@@ -205,7 +205,7 @@ impl SessionActor {
             self.auto_pause_goal_if_active_with_message(
                 crate::session::goal_tracker::GoalPauseReason::Infra,
                 format!(
-                    "Goal verification infrastructure failed ({}). Resume with /goal to retry.",
+                    "Goal verification infrastructure failed ({}). Run /goal resume to retry.",
                     reason.as_const_str()
                 ),
             )
@@ -946,7 +946,8 @@ impl SessionActor {
                     self.maybe_run_goal_planner(&objective).await;
                     if self.goal_tracker.lock().status() != Some(GoalStatus::Active) {
                         return GoalResumeOutcome::Message(
-                            "Planning failed again; goal paused.".to_string(),
+                            "Planning failed again; goal paused. Run /goal resume to retry."
+                                .to_string(),
                         );
                     }
                 }

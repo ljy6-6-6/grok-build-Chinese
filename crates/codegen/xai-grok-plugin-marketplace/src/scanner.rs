@@ -9,7 +9,6 @@ use crate::index;
 use crate::types::{MarketplaceEntry, MarketplaceScan};
 
 /// Scan a marketplace directory for plugins, reporting whether a `plugin-index.json` component catalog was loaded.
-///
 /// Tries indexed mode first, falls back to filesystem scanning.
 /// The component catalog is only consulted in indexed mode: its keys are defined as index names, so the filesystem fallback ignores it.
 pub fn scan_marketplace(root: &Path) -> MarketplaceScan {

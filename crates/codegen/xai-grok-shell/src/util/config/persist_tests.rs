@@ -392,10 +392,8 @@ fn merge_section_session_explicit_value_does_not_drag_load_envrc() {
         "pre-existing load_envrc must survive a partial settings save"
     );
 }
-/// Follow-on: the user DOES explicitly set `load_envrc = false` via TOML.
-/// The value round-trips correctly through `load_config_from_toml`, a mutation, and `merge_section`.
-/// `None` means "absent on disk"; `Some(false)` means "user explicitly disabled".
-/// The distinction must survive a save.
+/// Follow-on: the user DOES explicitly set `load_envrc = false` via TOML. The value round-trips correctly through `load_config_from_toml`, a mutation, and `merge_section`.
+/// `None` means "absent on disk"; `Some(false)` means "user explicitly disabled". The distinction must survive a save.
 #[test]
 fn session_load_envrc_explicit_false_round_trips() {
     let raw_config: TomlValue = toml::from_str(
@@ -525,9 +523,7 @@ fn ui_config_serialization_behavior() {
     );
 }
 /// The settings-modal helpers in the parent module are 3-line wrappers around `update_config(|cfg| cfg.ui.<field> = ...)`.
-/// To guard against future drift between the wrapper and the schema field, this test simulates each helper's closure against an in-memory `Config`.
-/// We deliberately avoid disk I/O so the test stays hermetic.
-///
+/// To guard against future drift between the wrapper and the schema field, this test simulates each helper's closure against an in-memory `Config`. We deliberately avoid disk I/O so the test stays hermetic.
 /// The pattern mirrors exactly what `update_config` does internally: `let mut cfg = load_config_from_toml(...); f(&mut cfg);`.
 #[test]
 fn merge_section_full_save_config_simulation() {

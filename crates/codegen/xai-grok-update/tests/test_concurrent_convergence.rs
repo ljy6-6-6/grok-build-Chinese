@@ -135,10 +135,9 @@ fn setup_gh_release(running_version: &str) -> FakeBinGuard {
     FakeBinGuard::install("gh", fake_gh_serving_releases)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Convergence: ensure_latest_on_disk downloads once, then every subsequent pass (the leader's hourly re-entry) converges without re-downloading
-// This is the e2e companion to the decision-level tests in test_downgrade_matrix.rs; it asserts on actual download invocations
-// ─────────────────────────────────────────────────────────────────────────────
+// Convergence: ensure_latest_on_disk downloads once, then every subsequent pass (the leader's hourly re-entry) converges
+// without re-downloading. This is the e2e companion to the decision-level tests in test_downgrade_matrix.rs; it asserts
+// on actual download invocations ─────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
 #[serial]
@@ -170,9 +169,8 @@ async fn ensure_latest_downloads_once_then_converges_without_redownload() {
     );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Convergence: explicit `grok update` (the Ctrl+U fallback path) finds the binary another process already installed and skips the download
-// It still returns the target version so stale leaders get signalled
+// Convergence: explicit `grok update` (the Ctrl+U fallback path) finds the binary another process already installed and
+// skips the download. It still returns the target version so stale leaders get signalled
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -229,12 +227,9 @@ async fn run_update_force_still_redownloads_when_disk_current() {
     );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Installer gating: the disk-version probe must only be trusted for
-// installers that actually maintain the managed `~/.grok/bin/grok` symlink
-// (internal, gh-release). For npm, a symlink left over from a previous internal install LIES about the npm install's version.
-// In the worst direction (leftover "newer" than the registry) it would silently suppress npm updates forever
-// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────. Installer gating: the disk-version
+// probe must only be trusted for installers that actually maintain the managed `~/.grok/bin/grok` symlink (internal,
+// gh-release). For npm, a symlink left over from a previous internal install LIES about the npm install's version.
 
 fn setup_npm(running_version: &str) -> FakeBinGuard {
     let _ = test_home();
@@ -322,10 +317,9 @@ async fn disk_probe_preserves_prerelease_versions() {
 #[tokio::test]
 #[serial]
 async fn disk_probe_rejects_dangling_symlink() {
-    // If the symlink survives but its target binary was deleted (manual
-    // ~/.grok/downloads cleanup), the probe must report None — otherwise
-    // every updater would claim "already up to date" forever while no
-    // runnable binary exists, and nothing would ever repair the install.
+    // If the symlink survives but its target binary was deleted (manual ~/.grok/downloads cleanup), the probe must report
+    // None — otherwise every updater would claim "already up to date" forever while no runnable binary exists, and nothing
+    // would ever repair the install.
     let home = test_home();
     reset_home();
     let platform = host_platform();
@@ -381,11 +375,9 @@ async fn ensure_latest_repairs_dangling_symlink_by_downloading() {
     );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Race integrity: the accepted same-instant race must stay harmless
-// Two (or three) installers running concurrently, even for DIFFERENT versions, must never leave a corrupt active binary
-// Pre-fix, all 0.1.x downloads shared one `grok-0.1.tmp`, so a concurrent racer could atomically rename a half-written file into place
-// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────. Race integrity: the accepted
+// same-instant race must stay harmless. Two (or three) installers running concurrently, even for DIFFERENT versions,
+// must never leave a corrupt active binary.
 
 async fn run_concurrent_installs(
     server: &ArtifactServer,

@@ -134,7 +134,6 @@ fn resolve_bool_flag(
     Resolved::new(default, ConfigSource::Default)
 }
 /// Per-model configuration for the Layer-3 LazinessDetector.
-///
 /// Every field defaults to disabled.
 /// `enabled = true` alone only classifies and emits `LazinessClassifierFired`; a nudge also needs `max_nudges_per_session > 0`.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]

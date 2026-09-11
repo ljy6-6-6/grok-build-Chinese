@@ -99,7 +99,6 @@ pub struct ScheduledLoop<'a> {
     pub prompt: &'a str,
     pub recurring: bool,
     pub durable: bool,
-    pub foreground: bool,
 }
 
 /// Still-live workflow run. `run_id` is rendered verbatim.
@@ -614,7 +613,6 @@ mod tests {
             prompt: "monitor job",
             recurring: true,
             durable: true,
-            foreground: false,
         }];
         let workflows = [WorkflowRun {
             name: "review-changes",
@@ -670,7 +668,6 @@ mod tests {
             prompt: "monitor job\nand report",
             recurring: true,
             durable: true,
-            foreground: false,
         }];
         let workflows = [WorkflowRun {
             name: "review-changes",

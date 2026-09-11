@@ -10,9 +10,6 @@ pub struct KeywordCandidate<'a> {
     pub keywords: &'a [String],
 }
 
-/// Return the index of the single candidate whose keyword matches `draft`.
-///
-/// Returns `None` when `draft` has fewer than 3 characters or nothing matches.
 /// A candidate's effective keywords are its explicit `keywords`, its normalized `domains`, and its `name`.
 /// Domain normalization strips the scheme, a leading `www.`, and the path.
 /// Longer keywords take precedence; a keyword matches only when the occurrence is flanked by ASCII word boundaries.

@@ -145,11 +145,9 @@ pub(crate) fn encode_bwrap_runtime_socket_denies(paths: &[PathBuf]) -> io::Resul
     serde_json::to_string(paths).map_err(io::Error::other)
 }
 
-/// Recover only handed paths that belong to the static automatic socket policy.
-///
-/// The handoff is provenance for defense-in-depth masks, not network authority.
-/// The per-child seccomp policy remains authoritative, so an omitted entry cannot restore network access.
-/// Rejecting non-policy paths keeps explicit user denies on the strict verifier path even when the environment is forged.
+/// Recover only handed paths that belong to the static automatic socket policy. The handoff is provenance for
+/// defense-in-depth masks, not network authority. The per-child seccomp policy remains authoritative, so an omitted entry
+/// cannot restore network access.
 fn decode_bwrap_runtime_socket_denies_with_policy(
     encoded: &str,
     policy: Vec<PathBuf>,
@@ -225,15 +223,9 @@ fn normalize_existing_parent_alias(parent: &Path) -> io::Result<PathBuf> {
     Ok(normalized)
 }
 
-/// Append the runtime-socket denials a network-restricted profile needs.
-///
-/// Outside bwrap this discovers existing endpoints once.
-/// Inside bwrap it uses only the validated outer handoff, so mounts cannot create new auto entries.
-/// Explicit static-policy aliases collapse only when the materialized automatic set already covers the same endpoint.
-/// Every other explicit deny stays strict.
-///
-/// # Errors
-/// Returns an error when an existing automatic endpoint cannot be resolved or the inside-bwrap handoff is malformed or outside the static policy.
+/// Append the runtime-socket denials a network-restricted profile needs. Inside bwrap it uses only the validated outer
+/// handoff, so mounts cannot create new auto entries. Every other explicit deny stays strict. Returns an error when an
+/// existing automatic endpoint cannot be resolved or the inside-bwrap handoff is malformed or outside the static policy.
 pub(crate) fn append_runtime_socket_denies(
     deny: &mut Vec<PathBuf>,
     auto_sockets: &mut Vec<PathBuf>,

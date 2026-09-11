@@ -46,7 +46,7 @@ impl GrokSessionDetail {
     ) -> Self {
         Self {
             session_id,
-            kind: SessionKind::Build.as_str().to_string(),
+            kind: SessionKind::Build.as_ref().to_string(),
             cwd,
             current_model_id,
             title,
@@ -73,7 +73,7 @@ pub(crate) fn legacy_session_effort_options() -> Vec<ReasoningEffortOption> {
     SELECTABLE_REASONING_EFFORTS
         .iter()
         .map(|&effort| ReasoningEffortOption {
-            id: effort.as_str().to_string(),
+            id: effort.as_ref().to_string(),
             value: effort,
             label: effort_label(effort),
             description: None,
@@ -155,7 +155,7 @@ pub(crate) fn build_acp_config_options(
                 .iter()
                 .find(|option| option.value == effort)
                 .map(|option| option.id.clone())
-                .unwrap_or_else(|| effort.as_str().to_string()),
+                .unwrap_or_else(|| effort.as_ref().to_string()),
             None => effort_options
                 .iter()
                 .find(|option| option.default)

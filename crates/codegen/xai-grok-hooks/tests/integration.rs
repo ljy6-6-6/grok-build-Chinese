@@ -70,6 +70,7 @@ async fn hook_deny_via_exit_code_only() {
         session_id: "test",
         workspace_root: dir.path().to_str().unwrap(),
         process_scope: None,
+        disabled: Default::default(),
     };
 
     let pre_result =
@@ -100,6 +101,7 @@ async fn hook_fail_open_on_crash() {
         session_id: "test",
         workspace_root: dir.path().to_str().unwrap(),
         process_scope: None,
+        disabled: Default::default(),
     };
 
     let pre_result =
@@ -134,6 +136,7 @@ async fn matcher_filters_tool_name() {
         session_id: "test",
         workspace_root: dir.path().to_str().unwrap(),
         process_scope: None,
+        disabled: Default::default(),
     };
 
     let pre_result = dispatcher::dispatch_pre_tool_use(
@@ -167,6 +170,7 @@ async fn non_blocking_dispatch() {
         session_id: "test",
         workspace_root: dir.path().to_str().unwrap(),
         process_scope: None,
+        disabled: Default::default(),
     };
 
     let results = dispatcher::dispatch_non_blocking(
@@ -206,6 +210,7 @@ async fn first_deny_stops_chain() {
         session_id: "test",
         workspace_root: dir.path().to_str().unwrap(),
         process_scope: None,
+        disabled: Default::default(),
     };
 
     let pre_result = dispatcher::dispatch_pre_tool_use(
@@ -239,6 +244,7 @@ async fn hook_receives_stdin_envelope() {
         session_id: "test-sess-123",
         workspace_root: dir.path().to_str().unwrap(),
         process_scope: None,
+        disabled: Default::default(),
     };
 
     let pre_result =
@@ -399,6 +405,7 @@ async fn new_event_types_fire_and_receive_correct_envelope() {
             session_id: "test",
             workspace_root: dir.path().to_str().unwrap(),
             process_scope: None,
+            disabled: Default::default(),
         };
 
         let results =
@@ -483,6 +490,7 @@ async fn runner_injected_vars_override_extra_env_at_spawn() {
         session_id: real_session,
         workspace_root: real_workspace,
         process_scope: None,
+        disabled: Default::default(),
     };
 
     let result =
@@ -597,6 +605,7 @@ async fn direct_exec_command_with_env_var_resolves_at_load_time() {
         session_id: "test",
         workspace_root: dir.path().to_str().unwrap(),
         process_scope: None,
+        disabled: Default::default(),
     };
     let result =
         dispatcher::dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("read_file"), &ctx)
@@ -611,8 +620,6 @@ async fn direct_exec_command_with_env_var_resolves_at_load_time() {
 
 /// Regression: an HTTP hook whose `url` references `${VAR}` from the per-hook `env` map must reach the HTTP runner with the post-expansion URL.
 /// We can't make a real network call from CI.
-/// Pointing at a blocked private IP proves the runner sees the expanded URL: the SSRF block message references the post-expansion address.
-/// Pairs with the unit test `run_http_hook_uses_post_expansion_url_for_ssrf`.
 #[tokio::test]
 async fn http_hook_url_env_expansion_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
@@ -660,6 +667,7 @@ async fn http_hook_url_env_expansion_end_to_end() {
         session_id: "test",
         workspace_root: dir.path().to_str().unwrap(),
         process_scope: None,
+        disabled: Default::default(),
     };
     let pre_result =
         dispatcher::dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("read_file"), &ctx)
@@ -740,6 +748,7 @@ async fn lenient_parsing_with_mixed_claude_events() {
         session_id: "test",
         workspace_root: dir.path().to_str().unwrap(),
         process_scope: None,
+        disabled: Default::default(),
     };
     let result = dispatcher::dispatch_pre_tool_use(
         &registry,

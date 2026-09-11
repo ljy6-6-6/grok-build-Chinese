@@ -139,10 +139,7 @@ fn lines_are_scaffolding(text: &str) -> bool {
 }
 
 /// Compute the temporal decay multiplier for a chunk.
-///
-/// - Evergreen sources return `1.0` (no decay).
-/// - Session sources decay exponentially: `e^(-λ × age_days)` where `λ = ln(2) / half_life_days`; the score halves every `half_life_days`.
-/// - `half_life_days = None` disables decay and returns `1.0` for all sources.
+/// Evergreen sources return `1.0` (no decay); Session sources decay exponentially: `e^(-λ × age_days)` where `λ = ln(2) / half_life_days`; the score halves every `half_life_days`; `half_life_days = None` disables decay and returns `1.0` for all sources.
 fn temporal_decay_multiplier(
     source: &str,
     created_at: i64,
@@ -165,12 +162,8 @@ fn temporal_decay_multiplier(
 }
 
 /// Run a hybrid search across the memory index.
-///
-/// Combines FTS5 keyword search with optional vector KNN similarity.
 /// Falls back to FTS-only when vector search is unavailable.
-///
 /// `&MemoryIndex` is never held across `.await` points.
-/// That keeps the caller's future `Send` even though `MemoryIndex` is `!Sync`.
 #[tracing::instrument(name = "memory.hybrid_search", skip_all, fields(
     max_results = config.max_results,
 ))]
@@ -209,6 +202,8 @@ pub(super) fn hybrid_search_merge(
     query_embedding: Option<&[f32]>,
     config: &MemorySearchConfig,
 ) -> Result<SearchMerge, Box<dyn std::error::Error>> {
+    let span = tracing::info_span!("memory.merge_rank", candidate_count = tracing::field::Empty);
+    let _g = span.enter();
     let candidate_limit = config.max_results * 3;
 
     let (vec_results, is_vector_degraded) = if let Some(embedding) = query_embedding {
@@ -249,10 +244,7 @@ pub(super) fn hybrid_search_merge(
     }
 
     // Normalize vector distances to [0,1] similarity on an absolute scale
-    // For normalized embeddings, L2 distance ranges from 0 (identical) to 2 (opposite), so `similarity = 1.0 - distance / 2.0` maps it to [0, 1]
     // Relative normalization (`1 - d/max_d`) would collapse all scores to near-zero when candidates cluster in a narrow distance band
-    // High-dimensional embeddings cluster that way (concentration of measure)
-    // The constant `2.0` is the theoretical maximum L2 distance between two unit-norm vectors: `||u - v||₂ = sqrt(2 - 2·cos(θ)) ≤ sqrt(4) = 2`
     const MAX_L2_DISTANCE: f64 = 2.0;
     for (chunk_id, distance) in &vec_results {
         let similarity = (1.0 - (*distance as f64 / MAX_L2_DISTANCE)).clamp(0.0, 1.0);
@@ -266,6 +258,7 @@ pub(super) fn hybrid_search_merge(
 
     let all_chunk_ids: std::collections::HashSet<&String> =
         fts_scores.keys().chain(vec_scores.keys()).collect();
+    span.record("candidate_count", all_chunk_ids.len() as i64);
 
     for chunk_id in all_chunk_ids {
         let fts = fts_scores.get(chunk_id).copied().unwrap_or(0.0);
@@ -323,8 +316,6 @@ pub(super) fn hybrid_search_merge(
         let access_boost = 1.0 + (chunk.access_count as f64).ln_1p() * 0.05;
         // access_boost is an unbounded multiplier (> 1.0), so the product can exceed 1.0 for top evergreen chunks
         // Ranking uses the unclamped raw_score so the boost still orders chunks that would otherwise both clamp to 1.0
-        // The stored display_score is clamped so it reads as a [0,1] similarity
-        // Gating on display_score keeps the threshold and the stored value in agreement
         let raw_score = base_score * decay_multiplier * source_weight * access_boost;
         let display_score = raw_score.clamp(0.0, 1.0);
 
@@ -752,8 +743,6 @@ mod tests {
         idx.record_access(&chunk_b_id).unwrap();
 
         // Use the DEFAULT config (all source_weights = 1.0)
-        // Both chunks normalize to base_score = 1.0 as the top FTS matches, so their display scores both clamp to 1.0
-        // Ranking is performed on the UNCLAMPED score, so the access boost still orders the accessed chunk first
         // This exercises the common default-config path where the clamp would otherwise make the boost inert
         let config = MemorySearchConfig::default();
         let results = hybrid_search_merge(
@@ -796,8 +785,6 @@ mod tests {
 
     /// Covers the MMR-enabled path through `hybrid_search_merge`: building the aligned `relevance`/`results` vectors.
     /// No other search test exercises it because MMR is off by default.
-    ///
-    /// The raw-vs-clamped guarantee lives in the unit test `test_mmr_ranks_on_relevance_not_clamped_score`.
     /// Here `results` enters MMR already sorted by `raw_score`, so the boosted chunk would stay first even on a buggy `.score` read.
     #[tokio::test]
     async fn test_hybrid_search_merge_with_mmr_enabled() {
@@ -997,12 +984,7 @@ mod tests {
     }
 
     /// Vector normalization should use the absolute L2 distance scale (max = 2.0) instead of relative normalization.
-    /// That way vector scores still contribute meaningfully even when all candidates have similar distances.
-    ///
     /// `dimensions: 4` is chosen deliberately: the mock provider (blake3 bytes / 255.0) does not produce unit-norm vectors.
-    /// At low dimensions the L2 distances stay within `MAX_L2_DISTANCE = 2.0`, so the absolute normalization works.
-    /// At production dimensions (1024), mock distances could exceed 2.0 and clamp to 0.
-    /// Use real embeddings or normalize the mock output for high-dimensional tests.
     #[tokio::test]
     async fn test_vector_absolute_normalization() {
         let tmp = TempDir::new().unwrap();

@@ -30,14 +30,9 @@ pub enum ResumeValidationError {
     },
 }
 
-/// Validate that a resume request's identity fields match the source subagent.
-///
-/// Resume contract: the resumed child inherits the source's raw transcript, tool state, and model.
-/// System prompt and prompt context are freshly rendered from the current agent definition.
-/// Reject type/persona overrides that conflict with the inherited identity fields.
-/// Model overrides are not validated here; callers silently ignore them and pin the source model.
-///
-/// Returns `Ok(())` if identity fields match, or `Err(ResumeValidationError)` describing the first mismatch found.
+/// Resume contract: the resumed child inherits the source's raw transcript, tool state, and model. Model overrides are
+/// not validated here; callers silently ignore them and pin the source model. Returns `Ok(())` if identity fields match,
+/// or `Err(ResumeValidationError)` describing the first mismatch found.
 pub fn validate_resume_identity(
     requested_type: &str,
     requested_persona: Option<&str>,

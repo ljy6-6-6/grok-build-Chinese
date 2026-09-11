@@ -267,11 +267,8 @@ fn open_sqlite_transaction_with_journal_mode(
         JournalMode::Truncate => return None,
     }
     let opened = root.open_regular_file(path)?;
-    // These are same-user application stores
     // Canonical containment and a non-symlink final file are validated above
-    // Adversarial swap-and-restore races are outside this scanner's local-user threat model
     // Only local WAL reaches this direct read-only/query-only open
-    // Its native coordination may still update SHM read marks despite scanner SQL making no logical writes
     let connection = Connection::open_with_flags(
         &opened.path,
         OpenFlags::SQLITE_OPEN_READ_ONLY

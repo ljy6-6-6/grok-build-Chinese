@@ -40,6 +40,7 @@ fn worktree_forked_sets_session_id_eagerly_and_emits_load() {
             restore_summary: None,
             restore_degree: None,
             resume_session_id: Some("orig-sess".into()),
+            strategy_summary: None,
         }),
         &mut app,
     );
@@ -118,6 +119,7 @@ fn worktree_forked_clears_sticky_branch_from_main_repo() {
             restore_summary: None,
             restore_degree: None,
             resume_session_id: Some("orig-sess".into()),
+            strategy_summary: None,
         }),
         &mut app,
     );
@@ -160,6 +162,7 @@ fn worktree_forked_with_restore_shows_summary_in_scrollback() {
             ),
             restore_degree: Some(xai_grok_workspace::session::git::RestoreDegree::Full),
             resume_session_id: Some("orig-sess".into()),
+            strategy_summary: None,
         }),
         &mut app,
     );
@@ -182,6 +185,45 @@ fn worktree_forked_with_restore_shows_summary_in_scrollback() {
         Some(xai_grok_workspace::session::git::RestoreDegree::Full),
         "restore_degree must be stored on the session"
     );
+}
+
+#[test]
+fn worktree_forked_with_strategy_shows_summary_in_scrollback() {
+    let mut app = test_app_git();
+    dispatch(
+        Action::NewWorktreeSession {
+            load_session_id: Some("orig-sess".into()),
+            label: None,
+            git_ref: None,
+        },
+        &mut app,
+    );
+    let id = AgentId(0);
+    dispatch(
+        Action::TaskComplete(TaskResult::WorktreeForked {
+            agent_id: id,
+            session_id: acp::SessionId::new("forked-sess-strategy"),
+            worktree_path: PathBuf::from("/tmp/grok-worktrees/pager-fork"),
+            session_cwd: PathBuf::from("/tmp/grok-worktrees/pager-fork"),
+            code_restored: false,
+            restore_summary: None,
+            restore_degree: None,
+            resume_session_id: Some("orig-sess".into()),
+            strategy_summary: Some("Requested Grove; using `grove-fuse` (local objects).".into()),
+        }),
+        &mut app,
+    );
+    let has_strategy = app.agents[&id]
+        .scrollback
+        .entries_in_range(0..app.agents[&id].scrollback.len())
+        .iter()
+        .any(|e| {
+            matches!(
+                &e.block,
+                RenderBlock::System(s) if s.text.contains("Requested Grove; using `grove-fuse`")
+            )
+        });
+    assert!(has_strategy, "expected strategy summary in scrollback");
 }
 
 /// The server can emit `code_restored: false` with a non-empty summary (e.g. "restore aborted (checkout failed)…").
@@ -213,6 +255,7 @@ fn worktree_forked_with_restore_failure_shows_warning_banner() {
             ),
             restore_degree: None,
             resume_session_id: Some("orig-fail".into()),
+            strategy_summary: None,
         }),
         &mut app,
     );
@@ -299,7 +342,6 @@ fn fork_initiation_supersedes_open_reload_window() {
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -1153,6 +1195,7 @@ fn worktree_forked_retargets_suppress_to_child() {
             restore_summary: None,
             restore_degree: None,
             resume_session_id: Some("orig-sess".into()),
+            strategy_summary: None,
         }),
         &mut app,
     );
@@ -1187,6 +1230,7 @@ fn worktree_forked_does_not_retarget_unrelated_suppress() {
             restore_summary: None,
             restore_degree: None,
             resume_session_id: Some("orig-sess".into()),
+            strategy_summary: None,
         }),
         &mut app,
     );

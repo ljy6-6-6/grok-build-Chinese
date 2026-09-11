@@ -5,10 +5,8 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Backpressure signal emitted when the event-bus subscriber lags behind the producer and events are dropped.
-///
-/// Tagged with `tag = "type"` to match the global "all wire enums use `tag = \"type\"`" convention.
-/// The `Lagged(u64)` variant carries the number of events dropped between the previous successful receive and the current one.
+/// Backpressure signal when the event-bus subscriber lags and events are dropped. Tagged with `tag = "type"` like every wire enum.
+/// `Lagged(u64)` is the count dropped since the previous successful receive.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum EventLag {

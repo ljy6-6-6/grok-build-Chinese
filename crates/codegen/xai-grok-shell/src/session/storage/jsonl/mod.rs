@@ -300,10 +300,7 @@ impl JsonlStorageAdapter {
     /// Extra `summary.json` reads allowed past `limit` while skipping hidden/headless rows.
     /// The slack lets a mixed store still fill a page without scanning a headless-dominated tree.
     const RECENT_LIST_READ_SLACK: usize = 8;
-    /// List the N most recently modified session summaries across all workspaces.
-    ///
     /// Instead of reading every `summary.json` (expensive at scale, ~12K files), this stats each file to get its mtime.
-    /// It then sorts by mtime and reads newest-first only until `limit` rows are kept.
     /// On a machine with ~12K sessions this reduces cold-boot `workspace_list` from ~3s to ~200ms.
     /// Final order among candidates uses `last_active_at` else `updated_at`.
     pub async fn list_sessions_recent(&self, limit: usize) -> io::Result<Vec<Summary>> {
@@ -346,7 +343,9 @@ impl JsonlStorageAdapter {
                             &summary_path,
                             &lock_path,
                         );
-                        summaries.push(summary);
+                        if !summary.is_unused_optimistic_husk() {
+                            summaries.push(summary);
+                        }
                     }
                 }
                 Err(_) => continue,
@@ -393,13 +392,8 @@ impl JsonlStorageAdapter {
         .map_err(io::Error::other)?
     }
     /// Append one JSONL record, healing a torn tail before writing.
-    ///
     /// Appends are not crash-atomic: a process kill / `ENOSPC` mid-`write_all` leaves the file ending in a *partial* record with no trailing newline.
-    /// The next record's plain `O_APPEND` write would then concatenate onto that partial line.
-    /// The merged line fails to parse (``expected `,` or `}` at line 1 column N``).
-    ///
     /// Before writing, check the last byte: if it isn't `\n`, prepend one so the torn record is terminated as its own (single) corrupt line.
-    /// This bounds the damage of any torn write to exactly one record, which the lenient readers (e.g. [`Self::read_chat_history_sync`]) then skip.
     fn append_jsonl_line_sync(
         path: &Path,
         line: Vec<u8>,
@@ -684,13 +678,9 @@ impl JsonlStorageAdapter {
         .await
         .map_err(super::AppendUpdateError::Committed)
     }
-    /// Read session updates from an updates.jsonl file, handling both envelope and legacy formats.
-    ///
     /// The borrowing envelope and `&RawValue` avoid an intermediate `Value` allocation.
-    ///
     /// Corruption-tolerant like [`Self::read_chat_history_sync`]: a torn line (crashed or racing append) is skipped with a warning.
     /// Updates are display/replay data appended non-atomically, so skipping beats failing the session load.
-    /// The live replay and fork-copy paths are equally lenient.
     fn read_updates_jsonl(&self, path: PathBuf) -> io::Result<Vec<super::SessionUpdate>> {
         if !path.exists() {
             return Ok(Vec::new());
@@ -760,7 +750,8 @@ impl JsonlStorageAdapter {
     }
     /// A plain `std::fs::write` truncates before writing, so a concurrent reader may see an empty file.
     /// Writing a temp file then renaming avoids this.
-    fn write_summary_sync(&self, info: &Info, summary: &Summary) -> io::Result<()> {
+    /// Crate-visible so `new_with_explicit_dir` can stamp session kind before identity.
+    pub(crate) fn write_summary_sync(&self, info: &Info, summary: &Summary) -> io::Result<()> {
         let summary_path = self.summary_file(info);
         let bytes = serde_json::to_vec_pretty(summary)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -920,7 +911,7 @@ impl JsonlStorageAdapter {
                                 .map_err(|error| {
                                     io::Error::new(io::ErrorKind::InvalidData, error)
                                 })?;
-                            if effort != parsed.as_str() {
+                            if effort != parsed.as_ref() {
                                 return Err(io::Error::new(
                                     io::ErrorKind::InvalidData,
                                     "workflow effort is not canonical",
@@ -950,37 +941,9 @@ impl JsonlStorageAdapter {
         }
         Ok(restored)
     }
-    /// Read chat history from JSONL file, handling both legacy ChatRequestMessage format (version 0) and new ConversationItem format (version >= 1).
-    ///
-    /// Uses line-by-line format detection with fallback to handle mixed-format files that occur when continuing an old session with a newer binary.
-    ///
-    /// ## Corruption tolerance (torn / interleaved appends)
-    ///
-    /// Appends to `chat_history.jsonl` are not crash-atomic.
-    /// A process kill mid-append (auto-update leader relaunch), `ENOSPC`, or two racing writers can leave a torn or merged line.
-    /// (A second persistence actor on reconnect is one such racing writer.)
-    /// The classic symptom is a serde error like ``expected `,` or `}` at line 1 column 571``.
-    /// Failing the whole load on one bad line bricks the session forever ("Couldn't load session: FS_OTHER").
-    /// Unparseable / undecodable lines are therefore *skipped* with a warning.
-    /// The first time corruption is detected, the raw file is preserved as `chat_history.jsonl.corrupt` next to the original.
-    /// The post-load snapshot rewrite (`persist_chat_history_jsonl_sync`) scrubs the bad lines from the live file.
-    /// That leaves the quarantine copy as the only surviving evidence for debugging / manual recovery.
-    ///
-    /// Lines are split on raw `\n` bytes and parsed with `from_slice`.
-    /// A write torn mid-UTF-8-codepoint therefore poisons only its own line, not a whole-file `read_to_string`.
-    ///
-    /// ## Legacy reasoning reconstruction (in-memory upgrade)
-    ///
-    /// Older sessions stored reasoning inline on the assistant (`AssistantItem.reasoning`).
-    /// Early backend-search sessions stored it as `AssistantItem.raw_output: Vec<Value>`.
-    /// Newer sessions don't have those fields on `AssistantItem` so serde would silently drop them.
-    /// We pre-extract them via [`xai_grok_sampling_types::upgrade_legacy_reasoning`].
-    /// The sibling `Reasoning` / `BackendToolCall` items are emitted *before* the corresponding assistant.
-    /// That matches the order `response_to_conversation_items` would produce.
-    /// The file on disk is not rewritten; this is a load-time-only transform so resumed sessions get sibling-shape replay without disk-write risk.
-    /// Idempotent: newer sessions have no `reasoning` / `raw_output` / `reasoning_content` fields, so the upgrader produces no siblings.
-    /// The upgrader runs only for lines that decode successfully.
-    /// A skipped corrupt line therefore never emits orphaned siblings or pollutes the sibling-dedup set.
+    /// Load `chat_history.jsonl` across legacy and current item formats; skip unparseable lines instead of failing the whole session.
+    /// Appends are not crash-atomic, so one torn or raced line must not brick the load; the raw file is quarantined once as `chat_history.jsonl.corrupt`.
+    /// Legacy inline `reasoning` / `raw_output` is upgraded in memory to sibling items before the assistant; disk is not rewritten, and a skipped corrupt line emits no siblings.
     fn read_chat_history_sync(
         &self,
         path: PathBuf,
@@ -1102,6 +1065,25 @@ impl JsonlStorageAdapter {
     ) -> io::Result<()> {
         self.apply_summary_patch_reporting(info, patch).await?;
         Ok(())
+    }
+    pub(crate) async fn stamp_session_identity_if_absent(
+        &self,
+        info: &Info,
+        required_agent_id: Option<String>,
+        mint: impl FnOnce(Option<&str>) -> crate::session::persistence::SessionIdentity + Send + 'static,
+    ) -> io::Result<crate::session::persistence::SessionIdentity> {
+        let summary_path = self.summary_file(info);
+        let lock_path = self.summary_lock_file(info);
+        tokio::task::spawn_blocking(move || {
+            super::summary_write::stamp_session_identity_if_absent(
+                &summary_path,
+                &lock_path,
+                required_agent_id.as_deref(),
+                mint,
+            )
+        })
+        .await
+        .map_err(io::Error::other)?
     }
     /// Like [`Self::apply_summary_patch`], but returns whether a `generated_title_if_absent` was applied or a manual pin was cleared.
     /// (`reset_title_to_auto` clears the pin; see [`Summary::apply_patch`].)
@@ -1382,6 +1364,33 @@ impl StorageAdapter for JsonlStorageAdapter {
             },
         )
         .await
+    }
+    async fn update_wake_start(
+        &self,
+        info: &Info,
+        start: crate::session::persistence::WakeStart,
+        abort: tokio_util::sync::CancellationToken,
+    ) -> io::Result<()> {
+        let summary_path = self.summary_file(info);
+        let lock_path = self.summary_lock_file(info);
+        tokio::task::spawn_blocking(move || {
+            super::summary_write::update_wake_start_locked(&summary_path, &lock_path, start, &abort)
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+    async fn restore_wake_summary(
+        &self,
+        info: &Info,
+        prior: crate::session::persistence::WakeSummaryState,
+    ) -> io::Result<()> {
+        let summary_path = self.summary_file(info);
+        let lock_path = self.summary_lock_file(info);
+        tokio::task::spawn_blocking(move || {
+            super::summary_write::restore_wake_summary_locked(&summary_path, &lock_path, prior)
+        })
+        .await
+        .map_err(io::Error::other)?
     }
     async fn write_plan_state(&self, info: &Info, state: &TodoState) -> io::Result<()> {
         let state_json = serde_json::to_vec_pretty(state)
@@ -1926,11 +1935,7 @@ impl StorageAdapter for JsonlStorageAdapter {
 const MAX_LOADED_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 /// Strip data-URI images the API would reject from loaded conversation items, so a poisoned history recovers instead of 400ing on every turn.
 /// The verdicts come from [`persisted_image_reject_reason`](crate::session::image_normalize::persisted_image_reject_reason).
-/// They cover malformed/oversized payloads, truncated or API-rejected formats, and dimensions outside the floors/ceiling.
 /// User parts become a text placeholder; `ToolResultItem.images` entries are removed.
-/// HTTP(S) URLs are left untouched.
-///
-/// Returns the number of images stripped.
 pub(crate) fn strip_invalid_images(items: &mut [ConversationItem]) -> usize {
     fn invalid(part: &ContentPart) -> bool {
         match part {

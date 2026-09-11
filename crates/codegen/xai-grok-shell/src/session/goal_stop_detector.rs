@@ -149,16 +149,9 @@ const PATTERN_LABELS: &[&str] = &[
     PATTERN_PLEASE_DEFLECTION,
 ];
 
-/// Returns the first matched pattern label when the LAST non-empty paragraph of `text` contains a line that triggers a stop pattern.
-/// Patterns are tried in [`PATTERN_LABELS`] declaration order.
-///
-/// Matching contract:
-/// * `\r\n` line endings are normalised to `\n` on entry so CRLF paragraphs split the same way LF paragraphs do.
-/// * Whitespace at the start/end of `text` is ignored.
-/// * A "paragraph" is a run of consecutive non-blank lines; only the *last* such block is considered.
-///   A hit in an earlier paragraph does not fire.
-/// * Inside the last paragraph, every line is trimmed and matched against each pattern individually.
-///   The patterns are `^`-anchored, so the marker must start a line: "I can't continue without your input" inside a sentence does NOT match.
+/// A "paragraph" is a run of consecutive non-blank lines; only the *last* such block is considered.
+/// A hit in an earlier paragraph does not fire.
+/// The patterns are `^`-anchored, so the marker must start a line: "I can't continue without your input" inside a sentence does NOT match.
 pub(crate) fn matched_stop_pattern(text: &str) -> Option<&'static str> {
     let normalised = normalise_line_endings(text);
     let last_paragraph = last_non_empty_paragraph(&normalised)?;

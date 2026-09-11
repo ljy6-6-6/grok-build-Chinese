@@ -24,10 +24,7 @@ pub fn prompt_arrow() -> &'static str {
 /// Display width of [`prompt_arrow`] in columns.
 pub const PROMPT_ARROW_WIDTH: u16 = 2;
 
-/// Record indicator glyph shown above the prompt while voice capture is active: a dot inside a ring.
-/// The bright half of the pulse shows the filled FISHEYE (`◉`), the dim half the open BULLSEYE (`◎`).
-/// Together with a smooth color fade this reads like a studio recording light.
-/// ASCII fallback (`*`/`o`) on legacy ConHost. Always 1 column wide.
+/// Voice-capture pulse: filled vs open ring, with a 1-column ASCII fallback on legacy ConHost.
 pub fn record_dot(filled: bool) -> &'static str {
     if is_legacy_windows_console() {
         if filled { "*" } else { "o" }
@@ -58,10 +55,7 @@ pub fn ballot_x() -> &'static str {
     }
 }
 
-/// `"✓"` (U+2713 CHECK MARK) normally, `"√"` (U+221A SQUARE ROOT) on legacy ConHost. Always 1 column wide.
-///
-/// The success / done sibling of [`ballot_x`].
-/// The fallback `√` is a CP437 glyph (code 0xFB), so it renders even on the stripped-down raster font and still reads as a checkmark.
+/// Check mark; legacy ConHost uses CP437 `√` so the raster font still reads as done. Always 1 column.
 pub fn check_mark() -> &'static str {
     if is_legacy_windows_console() {
         "\u{221A}"
@@ -70,11 +64,7 @@ pub fn check_mark() -> &'static str {
     }
 }
 
-/// `"↗"` (U+2197 NORTH EAST ARROW) normally, `"o"` on legacy ConHost. Always 1 column wide.
-///
-/// The enlarge / view / fullscreen button glyph.
-/// The earlier `⛶` (U+26F6) is missing from many modern monospace fonts and rendered as tofu even on common macOS/Linux terminals.
-/// U+2197 sits in the core Arrows block, which fonts cover well.
+/// Enlarge glyph. U+26F6 is tofu in many monospace fonts; U+2197 is in the core Arrows block. Legacy ConHost uses `o`.
 pub fn enlarge() -> &'static str {
     if is_legacy_windows_console() {
         "o"
@@ -105,11 +95,8 @@ pub fn token_arrow() -> &'static str {
     }
 }
 
-/// Pulsing monitor-indicator frames (`○ ◎ ◉ ◎`) normally; a 1-column dot pulse (`·`, `○`, `•`, `○`) on legacy ConHost.
-///
-/// Animates the "N monitors still running" cue in the turn-status line: a concentric circle that breathes open and shut.
-/// Of the fancy frames only `○` is in CP437, so the fallback uses CP437 dots and pulses by fill (faint, ring, solid, ring) rather than by size.
-/// Every frame in both sets is exactly 1 column so the trailing label never shifts as the icon animates.
+/// Monitor-running pulse. Only `○` is CP437, so legacy ConHost pulses by fill, not size.
+/// Every frame is 1 column so the trailing label does not shift.
 pub fn monitor_icon_frames() -> &'static [&'static str] {
     const FANCY: &[&str] = &["\u{25CB}", "\u{25CE}", "\u{25C9}", "\u{25CE}"];
     const FALLBACK: &[&str] = &["\u{00B7}", "\u{25CB}", "\u{2022}", "\u{25CB}"];
@@ -120,10 +107,7 @@ pub fn monitor_icon_frames() -> &'static [&'static str] {
     }
 }
 
-/// `"◆"` (U+25C6 BLACK DIAMOND) normally, `"♦"` (U+2666 BLACK DIAMOND SUIT) on legacy ConHost. Always 1 column wide.
-///
-/// The filled diamond used across scrollback bullets, status cues, the `/context` bar, picker fold indicators, and dashboard row markers.
-/// The fallback `♦` is a CP437 glyph (code `0x04`), so it renders and still reads as a filled diamond.
+/// Filled diamond; legacy ConHost uses CP437 `♦` so the raster font still renders. Always 1 column.
 pub fn diamond_filled() -> &'static str {
     if is_legacy_windows_console() {
         "\u{2666}"
@@ -132,10 +116,7 @@ pub fn diamond_filled() -> &'static str {
     }
 }
 
-/// `"◇"` (U+25C7 WHITE DIAMOND) normally, `"○"` (U+25CB WHITE CIRCLE) on legacy ConHost. Always 1 column wide.
-///
-/// The hollow sibling of [`diamond_filled`]: the `/context` bar's free (unused) cells and the dashboard's idle row marker.
-/// The fallback `○` is a CP437 glyph (code `0x09`) and still reads as an empty marker.
+/// Hollow diamond for unused/idle markers; legacy ConHost uses CP437 `○`. Always 1 column.
 pub fn diamond_hollow() -> &'static str {
     if is_legacy_windows_console() {
         "\u{25CB}"
@@ -144,10 +125,7 @@ pub fn diamond_hollow() -> &'static str {
     }
 }
 
-/// `"◈"` (U+25C8 WHITE DIAMOND CONTAINING BLACK SMALL DIAMOND) normally, `"♦"` (U+2666) on legacy ConHost. Always 1 column wide.
-///
-/// Used for the `/context` bar's tool-definitions category and the collapsed-group scrollback header.
-/// Falls back to the same `♦` as [`diamond_filled`]; both call sites distinguish the category by color, so the collision is harmless.
+/// Dotted diamond; legacy ConHost shares [`diamond_filled`]'s `♦` because call sites already distinguish by color.
 pub fn diamond_dotted() -> &'static str {
     if is_legacy_windows_console() {
         "\u{2666}"
@@ -166,10 +144,7 @@ pub fn diamond_hollow_char() -> char {
     diamond_hollow().chars().next().unwrap_or('\u{25C7}')
 }
 
-/// Rotating braille progress-spinner frames (`⠋⠙⠹⠸⠼⠴⠦⠧`) normally; a 1-column ASCII spinner (`|`, `/`, `-`, `\`) on legacy ConHost.
-///
-/// The U+2800 Braille Patterns block is not in CP437, so every caller falls back to the classic ASCII spinner there.
-/// Every frame in both sets is exactly 1 column so the surrounding layout never shifts.
+/// Braille spinner; U+2800 is not CP437, so legacy ConHost uses a 1-column ASCII spinner. Frames stay 1 column so layout does not shift.
 pub fn braille_spinner_frames() -> &'static [&'static str] {
     const FANCY: &[&str] = &[
         "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}",
@@ -183,10 +158,7 @@ pub fn braille_spinner_frames() -> &'static [&'static str] {
     }
 }
 
-/// Pulsing dot progress-spinner frames (`⋅ : ⸬ ⁙`) normally; a quiet 1-column dot cycle (`.`, `:`, `·`) on legacy ConHost.
-///
-/// U+22C5 / U+2E2C / U+2059 are absent from CP437, so every caller falls back to a dot cycle the raster font does render.
-/// Every frame in both sets is exactly 1 column.
+/// Dot spinner; those code points are absent from CP437, so legacy ConHost uses a 1-column dot cycle.
 pub fn dot_spinner_frames() -> &'static [&'static str] {
     const FANCY: &[&str] = &[
         "\u{22c5}", ":", "\u{2e2c}", "\u{2059}", "\u{22c5}", ":", "\u{2e2c}", "\u{2059}",
@@ -199,10 +171,7 @@ pub fn dot_spinner_frames() -> &'static [&'static str] {
     }
 }
 
-/// `"┃"` (U+2503 HEAVY VERTICAL) normally, `"│"` (U+2502 LIGHT VERTICAL, CP437 `0xB3`) on legacy ConHost. Always 1 column wide.
-///
-/// The left accent rail painted beside scrollback blocks and modal panels.
-/// CP437 ships only the light `│` and double `║` verticals, so the heavy stroke falls back to the light one.
+/// Accent rail. CP437 has no heavy vertical, so legacy ConHost uses light `│`. Always 1 column.
 pub fn accent_bar() -> &'static str {
     if is_legacy_windows_console() {
         "\u{2502}"
@@ -211,10 +180,7 @@ pub fn accent_bar() -> &'static str {
     }
 }
 
-/// `"▴"` (U+25B4 SMALL UP-POINTING TRIANGLE) normally, `"▲"` (U+25B2, CP437 `0x1E`) on legacy ConHost. Always 1 column wide.
-///
-/// The timeline sidebar's previous-turn chevron.
-/// The small triangles are absent from CP437; the full-size ones are control-picture glyphs the raster font renders.
+/// Timeline up-chevron. Small triangles are absent from CP437; legacy ConHost uses full-size `▲`.
 pub fn timeline_chevron_up() -> &'static str {
     if is_legacy_windows_console() {
         "\u{25B2}"
@@ -267,10 +233,7 @@ pub fn timeline_tick_hover() -> &'static str {
     "\u{2500}\u{2500}"
 }
 
-/// `"●"` (U+25CF BLACK CIRCLE) normally, `"•"` (U+2022 BULLET, CP437 `0x07`) on legacy ConHost. Always 1 column wide.
-///
-/// The filled status / selection dot used in pickers, the settings and permission modals, the session list, and the file-search view.
-/// Its hollow partner `○` (U+25CB) is already a CP437 glyph (`0x09`) and renders unchanged, so only the filled variant needs a stand-in.
+/// Filled status dot. Hollow `○` is already CP437; only the filled form needs a `•` stand-in on legacy ConHost.
 pub fn filled_dot() -> &'static str {
     if is_legacy_windows_console() {
         "\u{2022}"
@@ -301,10 +264,7 @@ pub fn chevron() -> &'static str {
     }
 }
 
-/// `"‹"` (U+2039 SINGLE LEFT-POINTING ANGLE QUOTATION MARK) normally, `"<"` (ASCII) on legacy ConHost. Always 1 column wide.
-///
-/// The mirror of [`chevron`]: the integer-stepper decrement affordance and the dashboard "prev" button.
-/// Kept in lockstep so a fixed `›`/`>` never sits next to a tofu `‹`.
+/// Left chevron, kept in lockstep with [`chevron`] so a fixed `>` never sits next to tofu `‹` on legacy ConHost.
 pub fn chevron_left() -> &'static str {
     if is_legacy_windows_console() {
         "<"
@@ -313,10 +273,7 @@ pub fn chevron_left() -> &'static str {
     }
 }
 
-/// `"⌄"` (U+2304 DOWN ARROWHEAD) normally, `"v"` (ASCII) on legacy ConHost. Always 1 column wide.
-///
-/// The downward member of the [`chevron`] family; matches `›`'s light visual weight (unlike the solid `▾` disclosure triangle).
-/// Used by the scrollback expandable indicator when the selected row is an expanded verb-group header.
+/// Down chevron matching `›`'s light weight (not solid `▾`). Legacy ConHost uses `v`.
 pub fn chevron_down() -> &'static str {
     if is_legacy_windows_console() {
         "v"
@@ -336,15 +293,21 @@ pub fn disclosure_open() -> &'static str {
     }
 }
 
-/// `"▸"` (U+25B8 BLACK RIGHT-POINTING SMALL TRIANGLE) normally, `">"` (ASCII) on legacy ConHost. Always 1 column wide.
-///
-/// The "collapsed" disclosure indicator for a collapsible dashboard section header (the section's rows are hidden).
-/// Pairs with [`disclosure_open`].
+/// Collapsed disclosure; pairs with [`disclosure_open`]. Legacy ConHost uses `>`.
 pub fn disclosure_closed() -> &'static str {
     if is_legacy_windows_console() {
         ">"
     } else {
         "\u{25B8}"
+    }
+}
+
+/// `"▴"` (U+25B4 BLACK UP-POINTING SMALL TRIANGLE) normally, `"^"` (ASCII) on legacy ConHost. Always 1 column wide.
+pub fn disclosure_up() -> &'static str {
+    if is_legacy_windows_console() {
+        "^"
+    } else {
+        "\u{25B4}"
     }
 }
 
@@ -370,10 +333,7 @@ pub fn enlarge_button() -> &'static str {
     }
 }
 
-/// Substitute the chrome glyphs that legacy ConHost can't render (`✓` to `√`, `✗` to `x`, `⚠` to `!`) in flowing status text such as toasts.
-///
-/// Toasts are flowing text assembled in ~25 call sites, so one funnel where they enter view state beats threading a helper through every builder.
-/// Returns a borrow unchanged on every non-legacy platform, so toast strings stay byte-identical there.
+/// One funnel for toast chrome that legacy ConHost cannot render. Non-legacy platforms return the borrow unchanged.
 pub fn legacy_glyph_fallback(s: &str) -> Cow<'_, str> {
     if !is_legacy_windows_console() {
         return Cow::Borrowed(s);
@@ -412,11 +372,8 @@ fn to_legacy_glyphs(s: &str) -> String {
         .collect()
 }
 
-/// True when running on native Windows in a console host whose default font is known not to ship the Dingbats glyphs we use as chrome.
-/// Cached for process lifetime.
-///
-/// `GROK_FORCE_LEGACY_CONSOLE=1` (or `true`) forces this on regardless of host/terminal, and `=0` (or `false`) forces it off.
-/// That override lets QA eyeball the ASCII fallbacks (or confirm the fancy glyphs) on any platform without a real ConHost.
+/// Cached: native Windows console whose font lacks our Dingbats chrome.
+/// `GROK_FORCE_LEGACY_CONSOLE` overrides so QA can check fallbacks without ConHost.
 pub fn is_legacy_windows_console() -> bool {
     static CACHE: OnceLock<bool> = OnceLock::new();
     *CACHE.get_or_init(|| {

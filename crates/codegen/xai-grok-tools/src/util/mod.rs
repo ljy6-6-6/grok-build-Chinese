@@ -7,7 +7,7 @@ pub mod git_detect;
 pub mod grok_home;
 pub mod hash;
 pub mod image_compress;
-pub mod image_validate;
+pub use xai_grok_image as image_validate;
 pub mod mcp_truncate;
 pub mod path_suggestions;
 pub(crate) mod query_tools;

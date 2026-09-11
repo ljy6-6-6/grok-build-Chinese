@@ -24,20 +24,12 @@ use std::collections::BTreeMap;
 use std::sync::LazyLock;
 pub const DEFAULT_LIMIT: usize = 30;
 const CONV_PAGE_HEADROOM: usize = 5;
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::AsRefStr, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum PartialReason {
     Timeout,
     Error,
     NoOauth,
-}
-impl PartialReason {
-    fn as_str(self) -> &'static str {
-        match self {
-            PartialReason::Timeout => "timeout",
-            PartialReason::Error => "error",
-            PartialReason::NoOauth => "no_oauth",
-        }
-    }
 }
 static FACET_REGISTRY: LazyLock<FacetRegistry> = LazyLock::new(build_facet_registry);
 pub(crate) fn facet_registry() -> &'static FacetRegistry {
@@ -52,8 +44,7 @@ pub(crate) fn conversations_lane_enabled() -> bool {
 pub fn conversations_lane_active() -> bool {
     conversations_lane_enabled() || crate::agent::chat_modes::process_chat_mode_enabled()
 }
-/// Parse `x.ai/session/list` params and, under process-wide chat mode, force the conversations-only `kind` facet (see [`force_kind_chat`]).
-///
+/// Parse `x.ai/session/list` params and, under process-wide chat mode, force the conversations-only `kind` facet.
 /// Client-sent `kind` of `chat`/`build` is honored only behind `feature = "local-workspace"` (pager welcome Local history).
 /// Chat-only Desktop/ACP agents keep the force-rewrite so `kind: ["build"]` cannot surface Build rows.
 pub fn parse_list_req(raw: &str) -> Result<ListReq, serde_json::Error> {
@@ -122,7 +113,8 @@ pub struct ListReq {
 }
 /// Directory scope the returned sessions were drawn from.
 /// Wire form is the `as_str` value (`x.ai/listScope`), so no serde derive is needed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, strum::AsRefStr, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum ListScope {
     /// Scoped to the request cwd.
     #[default]
@@ -133,13 +125,6 @@ pub enum ListScope {
     All,
 }
 impl ListScope {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Cwd => "cwd",
-            Self::Repo => "repo",
-            Self::All => "all",
-        }
-    }
     /// True when the scope relaxed past the cwd, to the repo or to all directories.
     pub const fn is_relaxed(self) -> bool {
         !matches!(self, Self::Cwd)
@@ -195,8 +180,7 @@ fn value_list(v: &serde_json::Value) -> Vec<serde_json::Value> {
     }
 }
 /// Rewrite `req` so the `kind` facet filter is exactly `["chat"]`.
-///
-/// Used when process chat mode is on **and** the client omitted a recognized `kind` facet (see [`parse_list_req`]).
+/// Used when process chat mode is on and the client omitted a recognized `kind` facet.
 /// Welcome history sends an explicit `kind` (`chat` / `build`) that must not be rewritten.
 pub(crate) fn force_kind_chat(req: &mut ListReq) {
     force_kind(req, SessionKind::Chat);
@@ -213,7 +197,7 @@ pub(crate) fn force_kind(req: &mut ListReq, kind: SessionKind) {
     };
     filters.insert(
         KIND_FACET_KEY.to_owned(),
-        serde_json::json!([kind.as_str()]),
+        serde_json::json!([kind.as_ref()]),
     );
     meta.insert(
         "x.ai/facetFilters".to_owned(),
@@ -355,7 +339,7 @@ pub async fn build_unified_list(
     {
         let (conv_lane_status, conv_rows) = match &conv_lane {
             ConvLane::Skipped => ("skipped", 0),
-            ConvLane::Degraded(reason) => (reason.as_str(), 0),
+            ConvLane::Degraded(reason) => (reason.as_ref(), 0),
             ConvLane::Page { rows, .. } => ("ok", rows.len()),
         };
         tracing::debug!(
@@ -463,7 +447,7 @@ async fn maybe_relax(
         Some(relaxed) => {
             tracing::debug!(
                 rows = relaxed.len(),
-                scope = scope.as_str(),
+                scope = scope.as_ref(),
                 "cwd empty; relaxing scope"
             );
             (relaxed, scope)
@@ -501,7 +485,7 @@ fn excludes_conversations(
         || match filters.get(KIND_FACET_KEY) {
             Some(allowed) if !allowed.is_empty() => !allowed
                 .iter()
-                .any(|v| v.as_str() == Some(SessionKind::Chat.as_str())),
+                .any(|v| v.as_str() == Some(SessionKind::Chat.as_ref())),
             _ => false,
         }
 }
@@ -510,7 +494,7 @@ fn excludes_build(filters: &BTreeMap<String, Vec<serde_json::Value>>) -> bool {
     match filters.get(KIND_FACET_KEY) {
         Some(allowed) if !allowed.is_empty() => !allowed
             .iter()
-            .any(|v| v.as_str() == Some(SessionKind::Build.as_str())),
+            .any(|v| v.as_str() == Some(SessionKind::Build.as_ref())),
         _ => false,
     }
 }
@@ -543,9 +527,9 @@ fn list_response_meta(result: &UnifiedListResult) -> ExtListResponseMeta {
         facets: result.facets.clone(),
         partial: PartialInfo {
             conversations: result.conversations_partial.is_some(),
-            reason: result.conversations_partial.map(PartialReason::as_str),
+            reason: result.conversations_partial.map(Into::into),
         },
-        list_scope: result.scope.is_relaxed().then_some(result.scope.as_str()),
+        list_scope: result.scope.is_relaxed().then_some(result.scope.into()),
     }
 }
 pub(crate) fn ext_list_response(result: UnifiedListResult) -> ExtListResponse {
@@ -834,16 +818,16 @@ mod tests {
             Some(&vec![serde_json::json!("chat")])
         );
     }
-    fn xai_auth_manager(dir: &std::path::Path) -> std::sync::Arc<crate::auth::AuthManager> {
-        let am = std::sync::Arc::new(crate::auth::AuthManager::new(
+    fn xai_auth_manager(dir: &std::path::Path) -> std::sync::Arc<xai_grok_login::AuthManager> {
+        let am = std::sync::Arc::new(xai_grok_login::AuthManager::new(
             dir,
-            crate::auth::GrokComConfig::default(),
+            xai_grok_login::GrokComConfig::default(),
         ));
-        am.hot_swap(crate::auth::GrokAuth {
-            auth_mode: crate::auth::AuthMode::Oidc,
-            oidc_issuer: Some(crate::auth::xai_oauth2_issuer().to_owned()),
+        am.hot_swap(xai_grok_login::GrokAuth {
+            auth_mode: xai_grok_login::AuthMode::Oidc,
+            oidc_issuer: Some(xai_grok_login::xai_oauth2_issuer().to_owned()),
             expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
-            ..crate::auth::GrokAuth::test_default()
+            ..xai_grok_login::GrokAuth::test_default()
         });
         am
     }
@@ -919,11 +903,10 @@ mod tests {
     #[serial_test::serial]
     async fn degraded_conversations_lane_reports_no_oauth() {
         let home = tempfile::tempdir().expect("tempdir");
-        let auth = std::sync::Arc::new(crate::auth::AuthManager::new(
+        let auth = std::sync::Arc::new(xai_grok_login::AuthManager::new(
             home.path(),
-            crate::auth::GrokComConfig::default(),
+            xai_grok_login::GrokComConfig::default(),
         ));
-        auth.set_devbox_env_for_test(false);
         let client = ConversationsClient::new(auth);
         let mut req = ListReq::default();
         force_kind_chat(&mut req);
@@ -1248,6 +1231,9 @@ mod tests {
                     )
                     .expect("summary");
                     summary.num_messages = 0;
+                    // Named empty: merge keeps it. An unnamed husk is the
+                    // optimistic-home shape and is dropped from the list.
+                    summary.session_summary = "husk".into();
                     summary
                 }],
                 None,

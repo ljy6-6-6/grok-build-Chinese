@@ -237,11 +237,8 @@ impl SegmentId {
 // StringInterner - deduplicates path segments
 // ============================================================================
 
-/// Arena-based string interner for path segments.
-///
-/// All segments live in one contiguous buffer, cutting allocations and improving cache locality.
-/// A hash-based lookup gives O(1) average `intern()` and `get_id()`.
-/// Segments are arbitrary byte sequences, so OS-native paths that are not valid UTF-8 are stored losslessly.
+/// Arena-based string interner for path segments: one contiguous buffer, O(1) average lookup.
+/// Segments are arbitrary bytes so non-UTF-8 OS paths are stored losslessly.
 #[derive(Debug, Clone)]
 pub struct StringInterner {
     /// Contiguous storage for all interned byte strings
@@ -278,10 +275,8 @@ impl StringInterner {
         }
     }
 
-    /// Intern a byte string, returning its SegmentId.
-    /// If the string is already interned, returns the existing id.
-    ///
-    /// Complexity: O(1) average case, O(k) worst case where k is the number of hash collisions (typically 0 or 1).
+    /// Intern a byte string, returning its existing id if already present.
+    /// O(1) average; worst case is the hash-collision chain.
     pub fn intern_bytes(&mut self, s: &[u8]) -> SegmentId {
         let hash = Self::hash_bytes(s);
 
@@ -329,10 +324,7 @@ impl StringInterner {
         self.intern_bytes(s.to_string_lossy().as_bytes())
     }
 
-    /// Get the SegmentId for a byte string without interning it.
-    /// Returns None if the string is not in the interner.
-    ///
-    /// Complexity: O(1) average case.
+    /// SegmentId for a byte string without interning it, or `None` if absent. O(1) average.
     pub fn get_bytes_id(&self, s: &[u8]) -> Option<SegmentId> {
         let hash = Self::hash_bytes(s);
 
@@ -530,10 +522,8 @@ impl FileIndex {
         }
     }
 
-    /// Build an index by walking a directory.
-    ///
-    /// Uses the `ignore` crate to respect `.gitignore` files and other ignore patterns.
-    /// Excludes the `.git` directory by default.
+    /// Build an index by walking a directory, respecting ignore patterns via the `ignore` crate.
+    /// Excludes `.git` by default.
     pub fn from_walk(root: impl AsRef<Path>) -> io::Result<Self> {
         Self::from_walk_with_options(root, WalkOptions::default())
     }

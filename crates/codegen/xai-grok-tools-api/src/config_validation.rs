@@ -117,10 +117,8 @@ pub fn validate_name_override(
     Ok(())
 }
 
-/// Returns the first entry whose `id` is not in `allowed_ids`, as
-/// `(index, id)`, or `None` when all ids are allowed.
-///
-/// Pure so backend save-time validation and any future consumer share one rule.
+/// Returns the first entry whose `id` is not in `allowed_ids`, as `(index, id)`, or `None` when all
+/// ids are allowed. Pure so backend save-time validation and any future consumer share one rule.
 pub fn first_unknown_tool_id<'a>(
     entries: &'a [crate::ToolConfigEntry],
     allowed_ids: &std::collections::HashSet<String>,

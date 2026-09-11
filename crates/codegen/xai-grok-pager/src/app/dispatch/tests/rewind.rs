@@ -7,7 +7,6 @@ fn cancel_does_not_rewind_when_in_flight_block_committed() {
     // Minimal-mode regression: a user-prompt block commits to native scrollback immediately (it is never `is_running`)
     // A committed block can't be "un-printed", so cancelling must not rewind it
     // A rewind would `remove_entry` it from state while the printed copy stays on screen, then restore the text into the input, showing it twice
-    // The dogfood bug: double-Esc on a just-promoted queued prompt
     let mut app = test_app_with_agent();
     let id = AgentId(0);
 

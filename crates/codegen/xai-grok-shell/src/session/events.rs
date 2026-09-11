@@ -8,12 +8,9 @@ pub(crate) use xai_grok_session_events::types::{
     ToolCompletedSource, ToolOutcome, TurnOutcomeLabel,
 };
 
-// ── Laziness detector (Layer 3) discriminator vocabulary ─────────────
-//
-// Single source of truth for the `category` field on `Event::LazinessClassifierFired` / `LazinessNudgeFired`
-// It is also the source for the `reason` field on `Event::LazinessClassifierAborted`
-// The producer (acp_session.rs) wraps the category strings in `LazinessCategory::as_const_str()`
-// The abort reasons are emitted only via the `LAZINESS_ABORT_*` consts below; no string literals appear at any producer site
+// ── Laziness detector (Layer 3) discriminator vocabulary ─────────────.
+// Single source of truth for the `category` field on `Event::LazinessClassifierFired` / `LazinessNudgeFired`.
+// The abort reasons are emitted only via the `LAZINESS_ABORT_*` consts below; no string literals appear at any producer site.
 
 /// Stalled: the model emitted prose narration claiming progress without any real tool calls.
 pub(crate) const LAZINESS_STALLED_NARRATION: &str = "stalled_narration";
@@ -142,8 +139,7 @@ impl LazinessCategory {
     }
 }
 
-// ── TodoGate discriminator vocabulary ─────────────────────────────────
-//
+// ── TodoGate discriminator vocabulary ─────────────────────────────────.
 // Source of truth for the `reason` field on `Event::TodoGateFired`.
 // Producer wraps these via `TodoGateReason::as_str()` (acp_session.rs).
 
@@ -157,10 +153,9 @@ const _: () = assert!(
     "TodoGate discriminator consts must be non-empty",
 );
 
-/// Map a [`CancellationCategory`] to the [`PriorTurnInterrupt`] marker stamped onto the *next* real user turn.
 /// Automatic terminations (doom-loop, hook-denied) return `None`: they are not user interruptions, so the follow-up user message carries no marker.
 /// Exhaustive `match` (no wildcard) so a new `CancellationCategory` forces an explicit decision here.
-/// (Interjection has no `CancellationCategory` because it never cancels a turn, so it is mapped directly at the drain site.)
+/// (Interjection has no `CancellationCategory` because it never cancels a turn, so it is mapped directly at the drain site.).
 pub(crate) fn prior_turn_interrupt_from_cancellation(
     category: CancellationCategory,
 ) -> Option<xai_grok_sampling_types::PriorTurnInterrupt> {
@@ -173,11 +168,9 @@ pub(crate) fn prior_turn_interrupt_from_cancellation(
     }
 }
 
-// ── GoalClassifier discriminator vocabulary ───────────────────────────
-//
-// Single source of truth for the `reason` field on `Event::GoalClassifierFailOpen` / `Event::GoalClassifierFailClosed`
-// The producer wraps the reason strings via the `as_const_str()` methods on `GoalClassifierFailOpenReason` / `GoalClassifierFailClosedReason`
-// That keeps the variant set compiler-enforced; the consts here are the wire vocabulary the dashboards group by
+// ── GoalClassifier discriminator vocabulary ───────────────────────────.
+// Single source of truth for the `reason` field on `Event::GoalClassifierFailOpen` / `Event::GoalClassifierFailClosed`.
+// The producer wraps the reason strings via the `as_const_str()` methods on `GoalClassifierFailOpenReason` / `GoalClassifierFailClosedReason`.
 
 /// Fail-open: legacy wire string; the runner does not emit it.
 pub(crate) const GOAL_CLASSIFIER_FAIL_OPEN_TIMEOUT: &str = "timeout";
@@ -263,10 +256,9 @@ impl GoalClassifierFailClosedReason {
     }
 }
 
-// ── GoalPlanner discriminator vocabulary ──────────────────────────────
-//
+// ── GoalPlanner discriminator vocabulary ──────────────────────────────.
 // The planner is fail-CLOSED by design (the opposite of the classifier).
-// Every reason here represents a path that pauses the goal; there is no fail-open analogue
+// Every reason here represents a path that pauses the goal; there is no fail-open analogue.
 
 /// Planner subagent coordinator channel was unreachable.
 pub(crate) const GOAL_PLANNER_FAIL_CLOSED_TRANSPORT: &str = "transport";
@@ -315,11 +307,9 @@ impl GoalPlannerFailClosedReason {
     }
 }
 
-// ── GoalStrategist discriminator vocabulary ───────────────────────────
-//
+// ── GoalStrategist discriminator vocabulary ───────────────────────────.
 // The strategist is fail-OPEN by design (the opposite of the planner).
-// Every reason here represents a path that is logged and then ignored; the goal keeps running
-// The strategist is a best-effort advisory enhancement, never a gate
+// Every reason here represents a path that is logged and then ignored; the goal keeps running The strategist is a best-effort advisory enhancement, never a gate.
 
 /// Strategist subagent coordinator channel was unreachable.
 pub(crate) const GOAL_STRATEGIST_FAILED_TRANSPORT: &str = "transport";
@@ -398,10 +388,8 @@ impl GoalStrategistRestoreFailReason {
     }
 }
 
-// ── GoalSummarizer discriminator vocabulary ───────────────────────────
-//
-// The summarizer is fail-OPEN by design: it runs ONCE after the goal is already verified-achieved, so every reason here is logged and ignored
-// Goal completion is never blocked, paused, or un-achieved
+// ── GoalSummarizer discriminator vocabulary ───────────────────────────.
+// The summarizer is fail-OPEN by design: it runs ONCE after the goal is already verified-achieved, so every reason here is logged and ignored Goal completion is never blocked, paused, or un-achieved.
 
 /// Summarizer subagent coordinator channel was unreachable.
 pub(crate) const GOAL_SUMMARIZER_FAIL_OPEN_TRANSPORT: &str = "transport";
@@ -444,14 +432,9 @@ impl GoalSummarizerFailReason {
     }
 }
 
-// ── GoalRoleModel discriminator vocabulary ────────────────────────────
-//
+// ── GoalRoleModel discriminator vocabulary ────────────────────────────.
 // Source of truth for the `reason` field on `Event::GoalRoleModelFailOpen`.
-// Per-role model selection is fail-OPEN by design; the goal is never paused
-// A bad/unauthorized model, an unusable toolset, or a harness flavor the subagent system can't represent degrades that role (or skeptic index)
-// The degraded role falls back to the current model and the session harness
-// The goal spawn wiring (`resolve_goal_role_override`, `spawn_with_fail_open_retry`) is the producer
-// It wraps the reason strings via `GoalRoleModelFailOpenReason::as_const_str`; the consts here are the wire vocabulary dashboards group by
+// Per-role model selection is fail-OPEN by design; the goal is never paused A bad/unauthorized model, an unusable toolset, or a harness flavor the subagent system can't represent degrades that role (or skeptic index).
 
 /// Fail-open: the configured model id is not in the session's model catalog (`find_model_by_id` miss).
 pub(crate) const GOAL_ROLE_MODEL_FAIL_OPEN_MODEL_UNKNOWN: &str = "model_unknown";

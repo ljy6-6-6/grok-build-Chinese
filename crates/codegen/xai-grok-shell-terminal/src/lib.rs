@@ -38,9 +38,7 @@ pub use streaming_local_terminal::{
 pub const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 pub const DEFAULT_OUTPUT_BYTE_LIMIT: usize = 30_000;
 
-/// Resolved absolute path to bash.
-/// On Unix uses the `xai_grok_config` cascade (`$GROK_SHELL` > `$SHELL` > `which` > common dirs > `/bin/bash`), cached process-wide.
-/// On non-Unix returns `"/bin/bash"`.
+/// Resolved absolute path to bash. On Unix uses the `xai_grok_config` cascade (`$GROK_SHELL` > `$SHELL` > `which` > common dirs > `/bin/bash`), cached process-wide. On non-Unix returns `"/bin/bash"`.
 /// Every caller in this crate is gated behind `#[cfg(unix)]`, so the non-Unix value should not be observed in practice.
 pub(crate) fn default_shell_path() -> &'static str {
     #[cfg(unix)]

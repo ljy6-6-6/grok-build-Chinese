@@ -11,7 +11,7 @@ use ratatui::text::Span;
 use super::menu::render_menu;
 use super::{
     VersionBadgeMode, WelcomeLayout, WelcomeLayoutInput, WelcomeRenderResult, inset_horizontal,
-    prompt, render_logo, render_version_badge,
+    prompt, render_logo_tier, render_version_badge,
 };
 use crate::app::consent::{BodyCell, BodyRow, ConsentLegibility, ConsentNotice, row_cols, wrap};
 use crate::render::SafeBuf;
@@ -50,7 +50,7 @@ pub fn render_consent(
     let (layout, legibility) = fit_body(content_area, compact, &rows);
     let message = inset_horizontal(layout.error, h_margin);
 
-    render_logo(layout.logo, buf, theme, content_area.height);
+    render_logo_tier(layout.logo, buf, theme, layout.logo_tier);
 
     let link_rects = if legibility.can_accept() {
         let title = if notice.title == "Updates to our terms" {

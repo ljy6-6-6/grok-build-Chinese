@@ -143,10 +143,8 @@ pub struct ClientCapabilities {
     #[serde(default)]
     pub code_nav_enabled: bool,
 
-    /// Whether the client handles terminal ACP messages (create, output, kill, etc.).
-    /// When true, the leader injects `clientTerminal: true` into `session/new` and `session/load`.
-    /// The agent then routes terminal commands to the client via ACP instead of running them locally.
-    /// Per-client so a TUI (`terminal: false`) and a web client (`terminal: true`) sharing the same leader get independent routing.
+    /// Whether the client handles terminal ACP messages (create, output, kill, etc.). When true, the leader injects `clientTerminal: true` into `session/new` and `session/load`.
+    /// The agent then routes terminal commands to the client via ACP instead of running them locally. Per-client so a TUI (`terminal: false`) and a web client (`terminal: true`) sharing the same leader get independent routing.
     #[serde(default)]
     pub terminal: bool,
 
@@ -157,12 +155,17 @@ pub struct ClientCapabilities {
     #[serde(default)]
     pub fs_write: bool,
 
-    /// Whether this client will draw a status row (`x.ai/statusLine`).
-    /// When true, the leader injects `clientStatusLine: true`.
-    /// The agent then builds the payload for a client that asked, not for whichever one started the process.
-    /// The flag it sets is per session, so other subscribers of a shared session receive the payload too.
+    /// Whether this client will draw a status row (`x.ai/statusLine`). When true, the leader injects `clientStatusLine: true`.
+    /// The agent then builds the payload for a client that asked, not for whichever one started the process. The flag it sets is per session, so other subscribers of a shared session receive the payload too.
     #[serde(default)]
     pub status_line: bool,
+
+    /// Whether this client wants live `user_message_chunk` during a prompt (`x.ai/userMessageEcho`).
+    /// When true, the leader injects `clientUserMessageEcho: true`. False is omitted so a client
+    /// that advertised at initialize is not overridden (`grok agent` is persist-only).
+    /// The flag it sets is per session, so other subscribers of a shared session receive the echo too.
+    #[serde(default)]
+    pub user_message_echo: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -203,10 +206,8 @@ pub enum ControlCommand {
     WorkspaceResume,
     WorkspaceStop,
     WorkspaceStatus,
-    /// Ask the leader to relaunch onto a freshly-installed binary (driven by `grok update`).
-    /// The leader stops admitting new turns, waits a bounded grace period for in-flight turns, and flushes session state.
+    /// Ask the leader to relaunch onto a freshly-installed binary (driven by `grok update`). The leader stops admitting new turns, waits a bounded grace period for in-flight turns, and flushes session state.
     /// It then exits with [`ShutdownReason::AutoUpdate`] so connected clients reconnect onto the new binary and restore sessions via `session/load`.
-    ///
     /// `to_version` is the version `grok update` just installed; the leader declines if it already runs that version or newer.
     RelaunchForUpdate {
         to_version: String,
@@ -295,14 +296,7 @@ pub enum ClientMessage {
 }
 
 /// Reason for a planned leader shutdown, sent with [`ServerMessage::ShuttingDown`].
-///
-/// ## Runtime status
-///
-/// | Variant | Emitted today? | Notes |
-/// |---------|---------------|-------|
-/// | `AutoUpdate` | **Yes** — when `run_auto_update_checker` triggers shutdown | |
-/// | `Manual` | **Yes** — default for SIGTERM, test cancellation, all other paths | |
-/// | `IdleTimeout` | **No** — reserved for a future idle-timeout feature | |
+/// ## Runtime status | Variant | Emitted today? | Notes | |---------|---------------|-------| | `AutoUpdate` | **Yes** — when `run_auto_update_checker` triggers shutdown | | | `Manual` | **Yes** — default for SIGTERM, test cancellation, all other paths | | | `IdleTimeout` | **No** — reserved for a future idle-timeout feature | |
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ShutdownReason {
@@ -325,11 +319,8 @@ fn default_ready() -> bool {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
-    /// Registration confirmation.
-    ///
-    /// `ready` indicates whether the leader has already completed its startup (auth and model prefetch).
-    /// When `ready = false` the client **must** wait for a subsequent [`LeaderReady`](Self::LeaderReady) message before sending any ACP traffic.
-    /// The server holds the connection open until the leader is ready.
+    /// Registration confirmation. `ready` indicates whether the leader has already completed its startup (auth and model prefetch).
+    /// When `ready = false` the client **must** wait for a subsequent [`LeaderReady`](Self::LeaderReady) message before sending any ACP traffic. The server holds the connection open until the leader is ready.
     Registered {
         client_id: u64,
         /// Whether the leader is fully initialised and ready to forward ACP traffic.
@@ -356,15 +347,11 @@ pub enum ServerMessage {
     },
     /// Advance notice of a planned shutdown.
     /// Sent before [`Shutdown`](Self::Shutdown) to give clients time to prepare for reconnection.
-    ///
     /// Clients should treat this as a signal that [`Shutdown`](Self::Shutdown) is imminent and prepare their reconnection handlers (e.g. show a banner).
     ShuttingDown {
         reason: ShutdownReason,
-        /// Milliseconds until the actual [`Shutdown`](Self::Shutdown) message.
-        ///
-        /// **Currently always `0`**: the server sends `Shutdown` immediately after `ShuttingDown` with no intervening sleep.
-        /// Clients must not rely on this field providing a real grace window.
-        /// Treat `ShuttingDown` as an imminent `Shutdown` regardless of this value.
+        /// Milliseconds until the actual [`Shutdown`](Self::Shutdown) message. **Currently always `0`**: the server sends `Shutdown` immediately after `ShuttingDown` with no intervening sleep.
+        /// Clients must not rely on this field providing a real grace window. Treat `ShuttingDown` as an imminent `Shutdown` regardless of this value.
         delay_ms: u64,
     },
     Shutdown,

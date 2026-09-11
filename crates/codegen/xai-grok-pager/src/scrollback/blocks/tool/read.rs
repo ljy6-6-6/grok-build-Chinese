@@ -48,6 +48,8 @@ pub struct ReadToolCallBlock {
     pub image_ref: Option<ScrollbackImageRef>,
     /// Non-text media kind (image, PDF).
     pub media_kind: Option<ReadMediaKind>,
+    /// Whether this ordinary read targets a memory v2 scope.
+    pub is_memory_activity: bool,
 }
 
 impl ReadToolCallBlock {
@@ -64,7 +66,13 @@ impl ReadToolCallBlock {
             total_lines: None,
             image_ref: None,
             media_kind: None,
+            is_memory_activity: false,
         }
+    }
+
+    pub fn with_memory_activity(mut self) -> Self {
+        self.is_memory_activity = true;
+        self
     }
 
     pub fn with_line_range(mut self, range: LineRange) -> Self {
@@ -249,10 +257,6 @@ impl ReadToolCallBlock {
     }
 
     /// Header line with only the path (or skill name) span selectable.
-    ///
-    /// Spans: `["Read ", path, optional_range_suffix, optional_extra_suffix]` or `["Skill ", skill_name]`.
-    /// The prefix and suffixes stay out of the selection, with no `selection_text` override.
-    /// Non-skill paths also get a filesystem link target.
     fn header_block_line(&self, line: Line<'static>, cwd: Option<&std::path::Path>) -> BlockLine {
         let path_end = 2.min(line.spans.len()).max(1);
         let link_target = if self.skill_name().is_some() {

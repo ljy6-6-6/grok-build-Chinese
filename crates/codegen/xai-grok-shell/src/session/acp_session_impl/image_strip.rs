@@ -2,7 +2,8 @@
 //!
 //! - Only `ServerRejected` with unambiguous blame (exactly one unique URL in the rejected request) may touch history.
 //!   The server's verdict names the request, not an image.
-//! - The rewrite is deferred until that request's `Completed` proves the strip helped; `Failed` drops the buffer.
+//! - The rewrite waits for that request to terminal (`Completed` or `Failed`). The write is awaited
+//!   before the drain barrier releases so the next prompt cannot reread the image. Heuristic strips stay request-local.
 //! - The write is gated on a backup and acknowledged from disk ([`StripOutcome`]); only `Applied` claims the stored conversation changed.
 //! - Scope: `chat_history.jsonl` only.
 //!   A rebuild replaying `updates.jsonl` (e.g. a remote pull) restores the image and pays one more strip cycle.
@@ -83,7 +84,7 @@ impl SessionActor {
         let ownership = self.turn_stream_drained.lock();
         let mut pending = self.pending_image_strip.lock();
         pending.retain(|request_id, strip| match ownership.get(request_id) {
-            Some(waiter) if waiter.is_none() => {
+            Some(o) if o.waiter.is_none() => {
                 strip.timed_out = true;
                 true
             }
@@ -92,7 +93,7 @@ impl SessionActor {
         });
         for request_id in ownership
             .iter()
-            .filter_map(|(request_id, waiter)| waiter.is_none().then_some(request_id))
+            .filter_map(|(request_id, o)| o.waiter.is_none().then_some(request_id))
         {
             pending
                 .entry(request_id.clone())
@@ -106,13 +107,12 @@ impl SessionActor {
     }
 
     /// Drop the ordering waiter while retaining request-scoped strip ownership.
-    /// The placeholder admits a queued `ImagesStripped` event even if cancel clears ordinary stream ownership before the event drainer reaches it.
     pub(crate) fn mark_stream_drain_timed_out(&self, request_id: &RequestId) {
         let mut ownership = self.turn_stream_drained.lock();
-        let Some(waiter) = ownership.get_mut(request_id) else {
+        let Some(o) = ownership.get_mut(request_id) else {
             return;
         };
-        waiter.take();
+        o.waiter.take();
         let mut pending = self.pending_image_strip.lock();
         pending
             .entry(request_id.clone())
@@ -128,6 +128,7 @@ impl SessionActor {
     /// Relinquish normal stream ownership immediately when cancellation claims a turn.
     /// Retain only work still owned by a timeout from older turns; late events for the cancelled request are otherwise stale.
     pub(crate) fn cancel_active_sampling_requests(&self) {
+        self.close_stream_apply_span_any();
         self.turn_stream_drained.lock().clear();
         self.pending_image_strip
             .lock()
@@ -182,7 +183,7 @@ impl SessionActor {
             Some(serde_json::json!({
                 "sampler_request_id": request_id.as_str(),
                 "stripped": stripped,
-                "reason": reason.as_str(),
+                "reason": reason.as_ref(),
                 "persist_deferred": persist_deferred,
             })),
         );
@@ -198,8 +199,7 @@ impl SessionActor {
         }
     }
 
-    /// On `Completed`: the stripped retry succeeded, so the buffered strip is now blamed with evidence.
-    /// Persist it and tell the user once the disk write is acknowledged.
+    /// Persist a buffered `ServerRejected` strip once the stripped retry terminals (`Completed` or `Failed`).
     pub(crate) async fn apply_pending_image_strip(&self, request_id: &RequestId) {
         // Acquire rewrite ownership before claiming URLs
         // Rewind either clears queued work first, or waits until this proven strip finishes
@@ -260,16 +260,5 @@ impl SessionActor {
         };
         self.send_xai_notification(XaiSessionUpdate::ImageDropped { notes })
             .await;
-    }
-
-    /// On `Failed`: the stripped retry did not rescue the turn, so the buffered strip proves nothing and is dropped.
-    /// Stored history keeps its images; the next turn starts fresh.
-    pub(crate) fn drop_pending_image_strip(&self, request_id: &RequestId) {
-        if self.pending_image_strip.lock().remove(request_id).is_some() {
-            tracing::debug!(
-                sampler_request_id = request_id.as_str(),
-                "dropping buffered image strip: the stripped retry did not complete"
-            );
-        }
     }
 }

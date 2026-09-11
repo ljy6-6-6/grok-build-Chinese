@@ -73,12 +73,7 @@ impl LeaderCluster {
         self.content.home().join(".grok").join("sessions")
     }
 
-    /// The session-update payload of every record across every `updates.jsonl` under the cluster's [`sessions_dir`](Self::sessions_dir).
-    /// Each entry is the `params.update` object of a persisted envelope line, so a caller can match on its `sessionUpdate` tag directly.
-    /// Scans ALL sessions under the cluster (fine for the single-session clusters these tests build).
-    ///
-    /// Infallible by design: a file that vanishes mid-walk, or whose appended tail tore across a multi-byte UTF-8 boundary, is skipped.
-    /// `read_to_string` fails on such a file; the next call picks it up again.
+    /// `params.update` from every session file. A vanished or torn multi-byte tail is skipped; the next call retries.
     pub fn session_updates(&self) -> Vec<Value> {
         let mut files = Vec::new();
         collect_updates_files(&self.sessions_dir(), &mut files);
@@ -127,10 +122,7 @@ fn is_turn_completed(update: &Value) -> bool {
     update.get("sessionUpdate").and_then(Value::as_str) == Some("turn_completed")
 }
 
-/// Parse the `params.update` payload out of each non-blank line of an `updates.jsonl` body.
-/// Assumes the enveloped on-disk shape current sessions always write (`{..,"params":{"update":{..}}}`).
-/// A line that is blank, fails to parse (a torn trailing line that is still valid UTF-8), or carries no `params.update` is skipped.
-/// (A torn *multi-byte* tail instead fails the file read upstream, skipping the whole file for that poll; see [`LeaderCluster::session_updates`].)
+/// Skips blank, unparseable, or update-less lines. A torn multi-byte tail fails the file read upstream instead.
 fn parse_update_payloads(text: &str) -> Vec<Value> {
     text.lines()
         .filter_map(|line| {

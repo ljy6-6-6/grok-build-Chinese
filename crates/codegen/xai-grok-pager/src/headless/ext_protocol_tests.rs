@@ -145,7 +145,7 @@ fn headless_task_completed_parses_task_id() {
 }
 
 #[test]
-fn headless_subagent_spawned_and_finished_parse() {
+fn headless_subagent_spawn_and_finish_decode_lifecycle_identity() {
     let spawned = make_ext_notif(
         "x.ai/session_notification",
         serde_json::json!({
@@ -159,7 +159,7 @@ fn headless_subagent_spawned_and_finished_parse() {
     );
     assert!(matches!(
         handle_ext_notification(&spawned),
-        ExtEvent::SubagentSpawned { subagent_id } if subagent_id == "sub-1"
+        ExtEvent::SubagentSpawned { subagent_id, attempt_id: None, event_seq: None } if subagent_id == "sub-1"
     ));
     let finished = make_ext_notif(
         "x.ai/session_notification",
@@ -175,7 +175,52 @@ fn headless_subagent_spawned_and_finished_parse() {
     );
     assert!(matches!(
         handle_ext_notification(&finished),
-        ExtEvent::SubagentFinished { subagent_id } if subagent_id == "sub-1"
+        ExtEvent::SubagentFinished { subagent_id, attempt_id: None, event_seq: None } if subagent_id == "sub-1"
+    ));
+
+    let sequenced = make_raw_ext_notif(
+        "x.ai/session_notification",
+        serde_json::json!({
+            "sessionId": "sess-1",
+            "update": {
+                "sessionUpdate": "subagent_spawned",
+                "subagent_id": "sub-1",
+                "attempt_id": "at1.one"
+            },
+            "_meta": { "eventId": "sess-1-42" }
+        }),
+    );
+    assert!(matches!(
+        handle_ext_notification(&sequenced),
+        ExtEvent::SubagentSpawned {
+            attempt_id: Some(attempt_id),
+            event_seq: Some(42),
+            ..
+        } if attempt_id == "at1.one"
+    ));
+}
+
+#[test]
+fn headless_subagent_progress_decodes_lifecycle_identity() {
+    let progress = make_raw_ext_notif(
+        "x.ai/session_notification",
+        serde_json::json!({
+            "sessionId": "sess-1",
+            "update": {
+                "sessionUpdate": "subagent_progress",
+                "subagent_id": "sub-1",
+                "attempt_id": "at1.one"
+            },
+            "_meta": { "eventId": "sess-1-43" }
+        }),
+    );
+    assert!(matches!(
+        handle_ext_notification(&progress),
+        ExtEvent::SubagentProgress {
+            attempt_id: Some(attempt_id),
+            event_seq: Some(43),
+            ..
+        } if attempt_id == "at1.one"
     ));
 }
 

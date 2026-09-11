@@ -560,121 +560,6 @@ fn windowed_paint_labels_truncation_header_on_last_viewport_row() {
     );
 }
 
-#[test]
-fn rendered_verb_group_header_aggregates_hook_outcomes_and_keeps_compact_members() {
-    use crate::scrollback::ScrollbackState;
-    use crate::scrollback::blocks::tool::{HookPhase, HookRunEntry, HookRunStatus};
-
-    crate::appearance::cache::set_group_tool_verbs(true);
-    crate::appearance::cache::set_show_thinking_blocks(false);
-    let mut state = ScrollbackState::new();
-    let first = state.push_block(RenderBlock::read("a.rs", None));
-    let second = state.push_block(RenderBlock::list_dir_with_output("src", "a.rs"));
-    let third = state.push_block(RenderBlock::search("TODO", 1, Vec::new()));
-    let elapsed = std::time::Duration::from_millis(1);
-    state.attach_hooks(
-        first,
-        HookPhase::Post,
-        vec![HookRunEntry {
-            name: "ok-hook".to_owned(),
-            status: HookRunStatus::Success { elapsed },
-            output: None,
-        }],
-    );
-    state.attach_hooks(
-        second,
-        HookPhase::Post,
-        vec![HookRunEntry {
-            name: "blocked-hook".to_owned(),
-            status: HookRunStatus::Blocked {
-                detail: "denied".to_owned(),
-                elapsed,
-            },
-            output: None,
-        }],
-    );
-    state.attach_hooks(
-        third,
-        HookPhase::Post,
-        vec![HookRunEntry {
-            name: "failed-hook".to_owned(),
-            status: HookRunStatus::Failed {
-                error: "exit 1".to_owned(),
-                elapsed,
-            },
-            output: None,
-        }],
-    );
-    let narrow_viewport = Rect::new(0, 0, 80, 24);
-    state.prepare_layout(narrow_viewport.width, narrow_viewport.height);
-    let (narrow_buf, _) = render_state(&state, narrow_viewport, true);
-    let narrow_header = buffer_row_text(&narrow_buf, 0);
-    assert!(
-        narrow_header.contains("1 failed]"),
-        "narrow headers must reserve the complete outcome suffix: {narrow_header:?}"
-    );
-
-    let viewport = Rect::new(0, 0, 120, 24);
-    state.prepare_layout(viewport.width, viewport.height);
-    let (buf, _) = render_state(&state, viewport, true);
-    let header_row = buffer_row_text(&buf, 0);
-    assert!(
-        header_row.contains(
-            "Read 1 file, Listed 1 dir, Searched 1 pattern  [hooks: 1 ok, 1 blocked, 1 failed]"
-        ),
-        "collapsed header must show every hidden hook outcome: {header_row:?}"
-    );
-    // A collapsed group has no rail, so the diamond at the content column carries the error colour.
-    assert_eq!(
-        buf[(HorizontalLayout::ACCENT + 2, 0)].fg,
-        Theme::current().accent_error,
-        "failed hook marks the group header as errored"
-    );
-
-    state.set_selected(Some(0));
-    assert!(state.toggle_group_expansion());
-    state.prepare_layout(viewport.width, viewport.height);
-    let layouts = state.get_cached_entry_layouts().expect("layout cache");
-    let member_width = HorizontalLayout::new(viewport, &state.appearance().scrollback.layout)
-        .entry_content_area()
-        .width;
-    for (idx, layout) in layouts[..3].iter().enumerate() {
-        let member_height = EntryRenderer::new(state.entry(idx).unwrap(), &Theme::current())
-            .with_appearance_ref(state.appearance())
-            .with_cwd(state.cwd())
-            .desired_height(member_width);
-        assert_eq!(
-            layout.height,
-            member_height.saturating_add(u16::from(idx == 0)),
-            "expanded member {idx} keeps its ordinary collapsed row height"
-        );
-    }
-    let (buf, _) = render_state(&state, viewport, true);
-    let rows: Vec<String> = (0..viewport.height)
-        .map(|y| buffer_row_text(&buf, y))
-        .collect();
-    let hook_rows: Vec<_> = rows.iter().filter(|row| row.contains("[hooks:")).collect();
-    assert_eq!(
-        hook_rows.len(),
-        4,
-        "the group header and each member carry one compact hook summary: {rows:?}"
-    );
-    assert_eq!(
-        hook_rows
-            .iter()
-            .filter(|row| row.contains("[hooks: 1]"))
-            .count(),
-        3,
-        "each expanded member keeps one standalone compact suffix: {rows:?}"
-    );
-    assert!(
-        ["ok-hook", "blocked-hook", "failed-hook", "post_tool_use"]
-            .iter()
-            .all(|detail| rows.iter().all(|row| !row.contains(detail))),
-        "expanded groups must not reveal per-hook detail sections: {rows:?}"
-    );
-}
-
 /// A hidden thinking entry inside a folded run stays transparent through the whole production path.
 /// The layout fold spans it AND the rendered header label counts the members on both sides.
 /// This pins the `show_thinking` value the render loop passes into the label walk.
@@ -1344,12 +1229,9 @@ fn test_selected_entry_output_divergence_uses_selected_branch() {
     assert_eq!(result.selection_model.visible_blocks[0].entry_idx, 0);
 }
 
-/// Message-style blocks (`AgentMessage`, `UserPrompt`, `Btw`) reserve 10 columns on the right for the timestamp overlay.
-/// Their cached output is therefore wrapped at `content_area.width - 10`, not `content_area.width`.
-///
 /// `VisibleBlockGeometry.content_width` must report the same reduced width that was used to populate the cache.
-/// Otherwise code that re-derives the wrapped lines from the model (notably `finish_text_drag`) would call `effective_output` at the wrong width.
-/// A different wrapping there slices the wrong content for the clipboard.
+/// Otherwise code that re-derives the wrapped lines from the model (notably `finish_text_drag`) would call
+/// `effective_output` at the wrong width.
 #[test]
 fn message_block_content_width_subtracts_timestamp_reservation() {
     // Picked so the message wraps to a different line count at `content_width - 10` than at `content_width`
@@ -1554,10 +1436,9 @@ fn overlay_markdown_relative_link_opens_as_file_url() {
 
 #[test]
 fn overlay_word_wrap_splits_link() {
-    // Pre-wrap line "hello world" (11 chars) wrapped into two segments:
-    // wrapped line 0: "hello" (5 chars, joiner=None  → new pre-wrap line)
-    // wrapped line 1: "world" (5 chars, joiner=Some(" ") → continuation)
-    // The joiner " " is the space consumed at the wrap point (col 5).
+    // Pre-wrap line "hello world" (11 chars) wrapped into two segments: wrapped line 0: "hello" (5 chars, joiner=None
+    // → new pre-wrap line) wrapped line 1: "world" (5 chars, joiner=Some(" ") → continuation). The joiner " " is the
+    // space consumed at the wrap point (col 5).
     let output = make_block_output(&[("hello", None), ("world", Some(" "))]);
     // Link spans the full pre-wrap line: cols 0..11
     let links = [make_hyperlink(0, 0..11, "https://b.com", 2)];
@@ -3068,18 +2949,9 @@ fn read_header_link_is_dropped_when_path_has_no_visible_columns() {
     );
 }
 
-/// Collect all `OverlayLink`s for `url` grouped by `OverlayLink::id`, returning the largest id-group (the wrapped URL's fragment set).
-///
-/// In pretty mode `[text](url)` produces two HyperlinkTargets that BOTH reference `url` but have distinct ids.
-/// One covers the link text (lower id, parser-produced) and one the `(url)` suffix (higher id, url_scan-produced).
-/// The wrapped URL fragments share an id; for URL-wrap tests the url_scan group is the one that spans multiple rows.
-/// Panics with a verbose diagnostic if no group has at least one entry.
-///
-/// Ties: `Iterator::max_by_key` returns the LAST equally-maximum element, and `BTreeMap::into_iter()` yields entries in ascending key order.
-/// If both groups have the same number of fragments, the higher-id group wins.
-/// That is the url_scan-produced URL-suffix group, the right pick for these tests.
-/// The helper is unambiguous for all current callers.
-/// A future caller with a different `[parser, url_scan]` shape may want to filter `result.link_overlay.links()` directly.
+/// Collect all `OverlayLink`s for `url` grouped by `OverlayLink::id`, returning the largest id-group (the wrapped
+/// URL's fragment set). Panics with a verbose diagnostic if no group has at least one entry. If both groups have
+/// the same number of fragments, the higher-id group wins. The helper is unambiguous for all current callers.
 fn url_overlay_group<'a>(result: &'a ScrollRenderResult, url: &str) -> Vec<&'a OverlayLink> {
     let mut by_id: std::collections::BTreeMap<u32, Vec<&OverlayLink>> =
         std::collections::BTreeMap::new();
@@ -3147,10 +3019,8 @@ fn overlay_pretty_link_url_wraps_across_rows() {
     let viewport = Rect::new(0, 0, 50, 20);
     let result = render_with_scratch(&entries, viewport, 0, None);
 
-    // The pre-wrap line is ~185 cells wide and the per-block content area is ~35 cells (viewport - timestamp reservation - layout chrome)
-    // The link text takes row 0 (33 cells), then the URL portion wraps onto exactly 5 continuation rows
-    // This is a plain paragraph (no `subsequent_indent`), so the combined fragment widths must equal the URL's display width
-    // That invariant would fail under any row drop or off-by-N column-tracking regression
+    // This is a plain paragraph (no `subsequent_indent`), so the combined fragment widths must equal the URL's display
+    // width. That invariant would fail under any row drop or off-by-N column-tracking regression.
     let group = url_overlay_group(&result, url);
     assert_eq!(
         group.len(),
@@ -3211,11 +3081,9 @@ fn overlay_pretty_link_url_wraps_multi_row_paragraph() {
     );
 }
 
-/// CJK link text: column tracking must be display-width aware.
-/// If the bug had used byte length for `日` (3 bytes, but 2 display cells), the column accounting would be off by N cells per CJK character.
-/// The URL fragments then wouldn't sum to the URL's display width.
-/// We assert that combined fragment widths equal the URL's display width.
-/// That is the strongest cell-width invariant we can pin without re-deriving the entire wrap layout.
+/// CJK link text: column tracking must be display-width aware. If the bug had used byte length for `日` (3 bytes,
+/// but 2 display cells), the column accounting would be off by N cells per CJK character. That is the strongest
+/// cell-width invariant we can pin without re-deriving the entire wrap layout.
 #[test]
 fn overlay_pretty_link_url_with_cjk_text() {
     use unicode_width::UnicodeWidthStr;
@@ -3245,20 +3113,11 @@ fn overlay_pretty_link_url_with_cjk_text() {
 }
 
 /// Long URL inside a blockquote. The OverlayLink for the URL must cover continuation rows so OSC 8 is present on every wrapped row.
-///
-/// KNOWN-BUG: `map_hyperlinks_to_overlay` accumulates `cumulative_col` using `line.content.width()`.
-/// That width INCLUDES the `│ ` indent injected by `word_wrap_line_with_joiners` on continuation rows.
-/// Two consequences for blockquote/list URL wraps:
-///   (a) Cosmetic: the OverlayLink on continuation rows starts at `content_x`, covering the `│ ` indent.
-///       The indent characters are OSC 8 wrapped and inherit the terminal's auto-styling (underline/colour).
-///   (b) Functional: `cumulative_col` over-counts by `indent_width` cells per continuation row.
-///       The last `indent_width` cells of the URL on each continuation row are therefore not covered by an OverlayLink and are not clickable.
-///       With N continuation rows the unclickable tail accumulates to `N * indent_width` cells.
-/// The invariant that OSC 8 is present on every wrapped row of the URL IS satisfied, and this test pins it.
-/// Once the bug is fixed (needs `BlockLine` to carry the `subsequent_indent` width), tighten the assertions:
-/// `col_start == content_x + indent_width` on continuation rows, and `sum(fragment_widths) == url.display_width()`.
+/// Blockquote URL wrap: OSC 8 must cover every wrapped row.
+/// `map_hyperlinks_to_overlay` produces OverlayLinks whose combined width exactly equals the URL's display width.
 #[test]
 fn overlay_pretty_link_url_in_blockquote_wraps_correctly() {
+    use unicode_width::UnicodeWidthStr;
     let url = "https://example.com/blockquote/path/with/many/hyphens-and-segments-here";
     let markdown = format!("> See [docs]({url}) for more.\n");
     let entries = vec![make_markdown_entry(&markdown)];
@@ -3278,6 +3137,20 @@ fn overlay_pretty_link_url_in_blockquote_wraps_correctly() {
     );
     assert_consecutive_rows(&group);
 
+    // The indent width for blockquote continuation is 2 ("│ ")
+    let indent_width: u16 = 2;
+
+    // Continuation rows (all but the first) must start after the indent
+    for frag in &group[1..] {
+        assert_eq!(
+            frag.col_start,
+            content_x + indent_width,
+            "OverlayLink on continuation row must start exactly at content_x + indent_width; got col_start={} but expected {}",
+            frag.col_start,
+            content_x + indent_width
+        );
+    }
+
     // All fragments must be inside the viewport content area.
     for frag in &group {
         assert!(
@@ -3289,14 +3162,24 @@ fn overlay_pretty_link_url_in_blockquote_wraps_correctly() {
             "OverlayLink must not exceed the viewport content width",
         );
     }
+
+    // Combined fragment widths must equal the URL's display width (indent-corrected accounting)
+    let combined_width: u32 = group.iter().map(|o| (o.col_end - o.col_start) as u32).sum();
+    assert_eq!(
+        combined_width as usize,
+        UnicodeWidthStr::width(url),
+        "combined fragment widths must equal URL display width; got fragments: {:?}",
+        group
+            .iter()
+            .map(|o| (o.screen_row, o.col_start, o.col_end))
+            .collect::<Vec<_>>(),
+    );
 }
 
 /// Long URL inside a list item. Same OSC-coverage invariant as the blockquote test above.
-/// See that test for the rationale and the related indent-inclusion bug.
-/// Both its symptoms apply here too.
-/// The indent inherits the URL styling, and the last `indent_width` URL cells of each continuation row are not clickable.
 #[test]
 fn overlay_pretty_link_url_in_list_wraps_correctly() {
+    use unicode_width::UnicodeWidthStr;
     let url = "https://example.com/list/item/path/with/many/hyphens-and-segments-here";
     let markdown = format!("- See [docs]({url}) for more.\n");
     let entries = vec![make_markdown_entry(&markdown)];
@@ -3316,6 +3199,17 @@ fn overlay_pretty_link_url_in_list_wraps_correctly() {
     );
     assert_consecutive_rows(&group);
 
+    // Top-level list items render as "• …" with no quote-bar indent on continuation rows
+    // Continuation OverlayLinks start at content_x (no indent offset)
+    for frag in &group[1..] {
+        assert_eq!(
+            frag.col_start, content_x,
+            "OverlayLink on list continuation row must start at content_x (no quote-bar indent); got col_start={} but expected {}",
+            frag.col_start, content_x
+        );
+    }
+
+    // All fragments must be inside the viewport content area.
     for frag in &group {
         assert!(
             frag.col_start >= content_x,
@@ -3326,6 +3220,144 @@ fn overlay_pretty_link_url_in_list_wraps_correctly() {
             "OverlayLink must not exceed the viewport content width",
         );
     }
+
+    // Combined fragment widths must equal the URL's display width (indent-corrected accounting)
+    let combined_width: u32 = group.iter().map(|o| (o.col_end - o.col_start) as u32).sum();
+    assert_eq!(
+        combined_width as usize,
+        UnicodeWidthStr::width(url),
+        "combined fragment widths must equal URL display width; got fragments: {:?}",
+        group
+            .iter()
+            .map(|o| (o.screen_row, o.col_start, o.col_end))
+            .collect::<Vec<_>>(),
+    );
+}
+
+/// GBT-6459 regression: parenthetical mid-path URL soft-wraps (e.g. arxiv abs link).
+/// Both wrap fragments must share the same id and point to the FULL URL, not a truncated prefix.
+/// Symptom: row 0 opens `https://arxiv.org/` alone; continuation has no OSC8 (gray, not clickable).
+#[test]
+fn overlay_parenthetical_arxiv_url_wraps_correctly() {
+    use unicode_width::UnicodeWidthStr;
+    let url = "https://arxiv.org/abs/2309.14322";
+    let markdown = format!("See ({url}) for details.\n");
+    let entries = vec![make_markdown_entry(&markdown)];
+
+    // Viewport width chosen to wrap mid-URL: "See (https://arxiv.org/" on row 0, "abs/2309.14322) for details." on row 1
+    let viewport = Rect::new(0, 0, 30, 10);
+    let result = render_with_scratch(&entries, viewport, 0, None);
+
+    let group = url_overlay_group(&result, url);
+    assert!(
+        group.len() >= 2,
+        "parenthetical URL should wrap; got fragments: {:?}",
+        group
+            .iter()
+            .map(|o| (o.screen_row, o.col_start, o.col_end))
+            .collect::<Vec<_>>(),
+    );
+    assert_consecutive_rows(&group);
+
+    // All fragments must share the same id
+    let ids: Vec<_> = group.iter().filter_map(|o| o.id).collect();
+    assert!(
+        !ids.is_empty() && ids.windows(2).all(|w| w[0] == w[1]),
+        "all wrap fragments must share the same nonempty id; got ids: {:?}",
+        ids
+    );
+
+    // All fragments must point to the FULL URL, not a truncated prefix like "https://arxiv.org/"
+    for frag in &group {
+        let target_url = resolve_link_target(&frag.target)
+            .and_then(|resolved| resolved.osc8_url)
+            .expect("url");
+        assert_eq!(
+            target_url.as_ref(),
+            url,
+            "every wrap fragment must point to the full URL, not a truncated prefix"
+        );
+    }
+
+    // Combined fragment widths must equal the URL's display width
+    let combined_width: u32 = group.iter().map(|o| (o.col_end - o.col_start) as u32).sum();
+    assert_eq!(
+        combined_width as usize,
+        UnicodeWidthStr::width(url),
+        "combined fragment widths must equal URL display width; got fragments: {:?}",
+        group
+            .iter()
+            .map(|o| (o.screen_row, o.col_start, o.col_end))
+            .collect::<Vec<_>>(),
+    );
+}
+
+/// GBT-6459 variant: list-indented pretty link with arxiv-shaped URL wrapping mid-host/path.
+/// Screenshot context: list bullet + long `[title](https://arxiv.org/abs/…)` wrapping mid-host/path.
+/// Every URL cell must have OverlayLink with full URL + shared markdown id.
+#[test]
+fn overlay_list_arxiv_pretty_link_wraps_correctly() {
+    use unicode_width::UnicodeWidthStr;
+    let url = "https://arxiv.org/abs/2309.14322";
+    let markdown = format!("- See [paper]({url}) for details.\n");
+    let entries = vec![make_markdown_entry(&markdown)];
+
+    let viewport = Rect::new(0, 0, 35, 10);
+    let result = render_with_scratch(&entries, viewport, 0, None);
+    let content_x = result.selection_model.content_area.x;
+
+    let group = url_overlay_group(&result, url);
+    assert!(
+        group.len() >= 2,
+        "list arxiv URL should wrap; got fragments: {:?}",
+        group
+            .iter()
+            .map(|o| (o.screen_row, o.col_start, o.col_end))
+            .collect::<Vec<_>>(),
+    );
+    assert_consecutive_rows(&group);
+
+    // Top-level list items render as "• …" with no quote-bar indent on continuation rows
+    // Continuation OverlayLinks start at content_x (no indent offset)
+    for frag in &group[1..] {
+        assert_eq!(
+            frag.col_start, content_x,
+            "OverlayLink on list continuation row must start at content_x (no quote-bar indent); got col_start={} but expected {}",
+            frag.col_start, content_x
+        );
+    }
+
+    // All fragments must share the same id
+    let ids: Vec<_> = group.iter().filter_map(|o| o.id).collect();
+    assert!(
+        !ids.is_empty() && ids.windows(2).all(|w| w[0] == w[1]),
+        "all wrap fragments must share the same nonempty id; got ids: {:?}",
+        ids
+    );
+
+    // All fragments must point to the FULL URL
+    for frag in &group {
+        let target_url = resolve_link_target(&frag.target)
+            .and_then(|resolved| resolved.osc8_url)
+            .expect("url");
+        assert_eq!(
+            target_url.as_ref(),
+            url,
+            "every wrap fragment must point to the full URL, not a truncated prefix"
+        );
+    }
+
+    // Combined fragment widths must equal the URL's display width
+    let combined_width: u32 = group.iter().map(|o| (o.col_end - o.col_start) as u32).sum();
+    assert_eq!(
+        combined_width as usize,
+        UnicodeWidthStr::width(url),
+        "combined fragment widths must equal URL display width; got fragments: {:?}",
+        group
+            .iter()
+            .map(|o| (o.screen_row, o.col_start, o.col_end))
+            .collect::<Vec<_>>(),
+    );
 }
 
 /// Width changes trigger `set_max_table_width` resets inside `MarkdownContent::ensure_wrapped`.
@@ -3338,12 +3370,8 @@ fn overlay_url_hyperlinks_survive_width_change() {
     if let RenderBlock::AgentMessage(b) = &mut entries[0].block {
         b.finish();
     }
-    // Exercise multiple width transitions and back-and-forth: a wide viewport where the URL fits on one row, a narrow one where it wraps
-    // The URL must remain present at every step.
-    //
-    // The "wide" threshold (120) makes the per-block content area exceed the URL's display width plus the leading "link (" prefix
-    // That holds even after the 10-cell timestamp reservation and ~4 cells of layout chrome
-    // The "narrow" widths (30, 50) force wrapping
+    // Exercise multiple width transitions and back-and-forth: a wide viewport where the URL fits on one row, a narrow
+    // one where it wraps. The URL must remain present at every step.
     for width in [120u16, 50, 30, 50, 120, 30] {
         let result = render_with_scratch(&entries, Rect::new(0, 0, width, 10), 0, None);
         let group = url_overlay_group(&result, url);
@@ -3439,10 +3467,7 @@ fn overlay_pretty_two_wrapping_links_distinct_ids() {
     assert_consecutive_rows(&group_a);
     assert_consecutive_rows(&group_b);
 
-    // The set of OverlayLink ids referencing either URL must have at least 4 distinct entries
-    // Those are the parser link-text ids for "link-a" and "link-b" and the url_scan ids for `(url_a)` and `(url_b)`
-    // If any two collide, OSC 8 hyperlinks silently merge
-    // The known shape is parser hyperlink IDs not advanced past url_scan IDs across paragraphs
+    // The set of OverlayLink ids referencing either URL must have at least 4 distinct entries.
     let ids: std::collections::HashSet<u32> = result
         .link_overlay
         .links()
@@ -3592,4 +3617,72 @@ fn tool_media_overlay_exposes_filepath_click_rect() {
         media.screen_rect.y > rect.y,
         "the image sits below its filepath line",
     );
+}
+
+/// Rewind / inline-edit dimming (`dim_from_entry`) must not erase text on the terminal theme: there `gray_dim` is
+/// the same bright black as the user-message band, so the pass applies the DIM attribute and leaves the fg alone.
+#[test]
+fn dim_from_entry_stays_visible_on_terminal_theme() {
+    use ratatui::style::Modifier;
+
+    let _guard = crate::theme::cache::pin_theme();
+    let entries = make_entries(2);
+    let viewport = Rect::new(0, 0, 40, 10);
+
+    let render_dimmed = || {
+        let theme = Theme::current();
+        let appearance = AppearanceConfig::default();
+        let layouts = compute_layouts(&entries, viewport.width, &appearance);
+        let refs: Vec<&ScrollbackEntry> = entries.iter().collect();
+        let mut buf = Buffer::empty(viewport);
+        render_scrolled_entries_with_scratch(
+            &mut buf,
+            viewport,
+            &refs,
+            0,
+            None,
+            &theme,
+            &appearance,
+            &layouts,
+            0,
+            None,
+            Some(0), // dim everything from the first entry
+            None,
+            0,
+            0,
+            &[],
+            None,
+            None,
+        );
+        // Locate the first glyph of "Entry 0".
+        for y in 0..viewport.height {
+            let row = buffer_row_text(&buf, y);
+            if let Some(x) = row.find("Entry 0") {
+                return buf.cell((x as u16, y)).unwrap().clone();
+            }
+        }
+        panic!("'Entry 0' not rendered");
+    };
+
+    crate::theme::cache::set(crate::theme::ThemeKind::Terminal);
+    let cell = render_dimmed();
+    assert!(
+        cell.modifier.contains(Modifier::DIM),
+        "terminal theme: dimmed entries use the DIM attribute, got {cell:?}"
+    );
+    assert_ne!(
+        cell.fg,
+        Theme::current().gray_dim,
+        "terminal theme: fg must not be clobbered to gray_dim (invisible on \
+         the bright-black user-message band)"
+    );
+
+    crate::theme::cache::set(crate::theme::ThemeKind::GrokNight);
+    let cell = render_dimmed();
+    assert_eq!(
+        cell.fg,
+        Theme::current().gray_dim,
+        "RGB themes keep the gray_dim fg overwrite"
+    );
+    assert!(!cell.modifier.contains(Modifier::DIM));
 }

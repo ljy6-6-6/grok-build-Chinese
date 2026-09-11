@@ -40,10 +40,9 @@ pub enum GroupKind {
     /// Eagerly folded run of verb-groupable members (tool calls and subagent rows): the aggregated "Read 2 skills" header.
     /// `members` counts label-bearing members only; claimed thoughts fold in but never count.
     VerbRun { members: usize },
-    /// Budget truncation of an over-long dense run: the "N more" header.
-    /// `participants` counts the entries eligible to hide (hidden thinking excluded).
-    /// `hidden` is how many of them the collapsed state conceals (`participants - max_visible`, positive by the fold gate).
-    /// The header row is the first hidden participant, so its plain count shows `hidden - 1` while its aggregated label describes all `hidden`.
+    /// Budget truncation of an over-long dense run: the "N more" header. `participants` counts the entries eligible to
+    /// hide (hidden thinking excluded). `hidden` is how many of them the collapsed state conceals (`participants -
+    /// max_visible`, positive by the fold gate).
     Truncation { participants: usize, hidden: usize },
 }
 
@@ -163,18 +162,23 @@ fn scan_verb_runs(
     (spans, claimed)
 }
 
-/// Collapsed and groupable entries may join a truncation run.
-/// Hidden thinking is excluded so tools elect their own "N more" header.
-fn participates_in_truncation(entry: &ScrollbackEntry, show_thinking: bool) -> bool {
+/// Whether a groupable entry may join a dense (non-verb) run. A turn-terminal marker closes the turn and never
+/// joins, even after a stop-hook batch collapses it. Otherwise expand/collapse and "N more" would walk across the
+/// turn and key off the previous header. `collapsed_only` is Mode B (collapsed entries only).
+pub(super) fn can_join_dense_run(entry: &ScrollbackEntry, collapsed_only: bool) -> bool {
     entry.block.is_groupable()
-        && entry.display_mode == DisplayMode::Collapsed
-        && !entry.is_hidden_thinking(show_thinking)
+        && !entry.block.is_turn_terminal_marker()
+        && (!collapsed_only || entry.display_mode == DisplayMode::Collapsed)
 }
 
-/// Find consecutive runs of collapsed, groupable entries longer than `max_visible + 1`.
-/// Hidden thinking is transparent (skipped, not a run-breaker), mirroring the gap rule in `recompute_gap_after`.
-/// An interspersed thought thus can't split a run and suppress truncation.
-/// Entries claimed by the verb scan break runs.
+/// Collapsed groupable entries may join a truncation run.
+/// Hidden thinking is excluded so tools elect their own "N more" header.
+fn participates_in_truncation(entry: &ScrollbackEntry, show_thinking: bool) -> bool {
+    can_join_dense_run(entry, /*collapsed_only=*/ true) && !entry.is_hidden_thinking(show_thinking)
+}
+
+/// Find consecutive runs of collapsed, groupable entries longer than `max_visible + 1`. An interspersed thought
+/// thus can't split a run and suppress truncation.
 fn scan_truncations(
     entries: &IndexMap<EntryId, ScrollbackEntry>,
     max_visible: usize,
@@ -263,10 +267,8 @@ pub(super) fn project_to_layout(
     }
 }
 
-/// Collapsed: the header is `height=1`; other claimed entries are `height=0`.
-/// Expanded: every member keeps its measured rows while the header stacks above member 0.
-/// Gaps zero only within the run; the last claimed entry keeps the boundary gap to the following entry.
-/// Transparent entries keep their rows but donate their gap while collapsed.
+/// Collapsed: the header is `height=1`; other claimed entries are `height=0`. Gaps zero only within the run; the
+/// last claimed entry keeps the boundary gap to the following entry.
 fn project_verb_run(
     span: &GroupSpan,
     members: usize,
@@ -311,13 +313,8 @@ fn project_verb_run(
     }
 }
 
-/// Collapsed: the first participating entry becomes the "N more" header (count excludes the header itself).
-/// Older participants hide, and the last `max_visible` stay untouched.
-/// Expanded: entry 0 becomes a standalone collapse header (`height=1`, content replaced) counting the `participants - 1` entries below it.
-/// The entries below it all keep their own rows.
-/// Hidden thinking is skipped in both states.
-/// `verb_group::truncation_header_label` mirrors this walk's participant rule for the header's aggregated label.
-/// A new transparency category here must update that walk too.
+/// Collapsed: the first participating entry becomes the "N more" header (count excludes the header itself). A new
+/// transparency category here must update that walk too.
 fn project_truncation(
     span: &GroupSpan,
     participants: usize,

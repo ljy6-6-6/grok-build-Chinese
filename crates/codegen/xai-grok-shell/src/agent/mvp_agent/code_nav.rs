@@ -2,6 +2,7 @@
 //! Co-located child of `mvp_agent` (`use super::*`).
 
 use super::*;
+use crate::extensions::code_nav::CodeNavEligibility;
 
 impl MvpAgent {
     /// Parse the `x.ai/codeNavigation.enabled` capability from an initialize request.
@@ -16,13 +17,8 @@ impl MvpAgent {
             .unwrap_or(false)
     }
 
-    /// Start (or reuse) the codebase index for an eligible code-nav request.
-    ///
-    /// Returns `Some((handle, was_newly_started))` on success or `None` when config/git-root checks prevent starting.
-    /// The bool is the authoritative "first spawn vs reuse" signal threaded up from `CodebaseIndexManager`.
-    ///
-    /// This is the narrow `pub(crate)` entry point for lazy index startup from `extensions/code_nav.rs`.
-    /// Callers must verify eligibility with [`code_nav_eligibility_for_request`] before calling this.
+    /// Start (or reuse) the codebase index for an eligible code-nav request. The bool is the authoritative "first spawn vs reuse" signal threaded up from `CodebaseIndexManager`.
+    /// This is the narrow `pub(crate)` entry point for lazy index startup from `extensions/code_nav.rs`. Callers must verify eligibility with [`code_nav_eligibility_for_request`] before calling this.
     #[tracing::instrument(name = "code_nav.index_start", skip_all)]
     pub(crate) fn start_codebase_index_for_code_nav(
         &self,
@@ -39,7 +35,6 @@ impl MvpAgent {
     }
 
     /// Core eligibility check: a pure function that accepts explicit client context rather than reading global agent state.
-    ///
     /// This is the single place that applies all four gates.
     /// Call it via [`code_nav_eligibility_for_request`] (leader-mode safe) or [`code_nav_eligibility`] (global state, non-leader use only).
     pub(super) fn code_nav_eligibility_inner(
@@ -114,14 +109,9 @@ impl MvpAgent {
         Ok(())
     }
 
-    /// Check eligibility using per-session context (leader-mode safe).
-    ///
-    /// When `session_id` is provided, reads the session's own client type and code-nav capability.
-    /// Those are the values that were in effect when that specific client created the session.
-    /// This is correct in leader mode, where multiple clients share one agent process and `initialize()` is called once per connection.
-    /// The global fields on `MvpAgent` reflect only the **last** client to call `initialize()`.
-    ///
-    /// Falls back to global agent state when no session_id is given.
+    /// Check eligibility using per-session context (leader-mode safe). When `session_id` is provided, reads the session's own client type and code-nav capability.
+    /// Those are the values that were in effect when that specific client created the session. This is correct in leader mode, where multiple clients share one agent process and `initialize()` is called once per connection.
+    /// The global fields on `MvpAgent` reflect only the **last** client to call `initialize()`. Falls back to global agent state when no session_id is given.
     pub(crate) fn code_nav_eligibility_for_request(
         &self,
         session_id: Option<&acp::SessionId>,
@@ -148,7 +138,6 @@ impl MvpAgent {
     }
 
     /// Resolve and get-or-create the codebase index for `cwd`, applying config and git-root eligibility checks.
-    ///
     /// Returns `Some((handle, was_newly_started))` when an index is available, `None` when config or git-root checks rule it out.
     /// The bool is the authoritative "was this a first spawn?" signal from the manager.
     pub(super) fn resolve_codebase_index(

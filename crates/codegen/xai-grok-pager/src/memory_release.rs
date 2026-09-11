@@ -18,14 +18,8 @@ pub fn install_release_hook(hook: fn()) {
     let _ = RELEASE_HOOK.set(hook);
 }
 
-/// Ask the allocator to return freed-but-retained pages to the OS.
-/// The purge is tagged with `reason` for the memory trace (`memory_trace` module).
-/// Per-site purge frequency, duration, and released footprint are then analyzable offline.
-/// Use a short stable kebab-case tag (e.g. `"session-load-replay"`). No-op when no hook is installed.
-///
-/// Call this directly from dispatch/input paths (the stall lands between interactions).
-/// From draw/tick paths use [`request_release_after_draw`] instead.
-/// When a purge has real work to do (a ~50-300 MB frame set just dropped), the synchronous madvise lands inside the very frame the user waits for.
+/// Ask the allocator to return freed-but-retained pages to the OS. From draw/tick paths use
+/// [`request_release_after_draw`] instead.
 pub(crate) fn release_retained_memory(reason: &'static str) {
     let hook = RELEASE_HOOK.get();
     // Skip gauge sampling entirely when tracing is off (`GROK_MEMTRACE=0` or no sink): a disabled trace must add zero syscalls to purges
@@ -51,10 +45,8 @@ pub(crate) fn release_retained_memory(reason: &'static str) {
 /// `AtomicBool` rather than a thread-local: both sides are main-thread today, but the flag must not silently drop a request if that ever changes.
 static RELEASE_AFTER_DRAW: AtomicBool = AtomicBool::new(false);
 
-/// Memory-cliff tag for the pending deferred request.
-/// Coalescing requests keep the last writer's reason.
-/// That is precise enough for trace attribution: coalesced requests within one frame are the same user gesture.
-/// Every request writes a real tag before setting the flag below; the `"post-draw"` default only shows up if a drain ever races a set without one.
+/// Memory-cliff tag for the pending deferred request. the `"post-draw"` default only shows up if a drain ever races
+/// a set without one.
 static DEFER_REASON: Mutex<&'static str> = Mutex::new("post-draw");
 
 /// Request a purge to run right after the current frame flushes, drained by [`run_deferred_release`] at the end of `AppView::draw`.
@@ -82,7 +74,6 @@ pub(crate) fn run_deferred_release() {
 }
 
 /// Test support: a counting release hook with a **per-thread** counter.
-///
 /// The real `RELEASE_HOOK` is a process-global `OnceLock`, but dispatch/view code always calls [`release_retained_memory`] on the calling thread.
 /// A thread-local count lets parallel `cargo test` threads assert both "released" and "must not release" deltas without cross-test interference.
 #[cfg(test)]

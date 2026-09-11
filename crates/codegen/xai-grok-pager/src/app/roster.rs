@@ -74,10 +74,8 @@ pub struct RosterChanged {
 }
 
 /// Parse an `x.ai/sessions/list` ext-response body into a [`RosterListResponse`].
-///
 /// The agent answers through `ExtMethodResult::success(..).to_ext_response()`, which wraps the payload as `{ "result": { "sessions": [...] } }`.
 /// A bare `{ "sessions": [...] }` body (no envelope) is tolerated too.
-/// Unwrap `result` first: `sessions` is `#[serde(default)]` and unknown keys are ignored, so parsing the wrapped body yields an empty roster.
 pub fn parse_roster_list_response(body: &str) -> Option<RosterListResponse> {
     let value: serde_json::Value = serde_json::from_str(body).ok()?;
     let payload = value.get("result").unwrap_or(&value);
@@ -108,7 +106,6 @@ mod tests {
     }
 
     /// Serialize the agent's `RosterListResponse` exactly as `handle_roster_list` does and confirm the pager recovers the session.
-    ///
     /// Reproduces the production bug: a direct `from_str::<RosterListResponse>` on the enveloped body silently succeeds with an empty roster.
     /// The `naive` assertion below pins that trap; `parse_roster_list_response` must unwrap `result` first.
     #[test]

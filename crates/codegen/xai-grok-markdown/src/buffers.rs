@@ -25,7 +25,6 @@ pub struct Replace {
 }
 
 /// Internal representation of a hyperlink target discovered during parsing.
-///
 /// Populated in the `Tag::Link` / `Tag::Image` arm of `MarkdownParser::on_start`.
 /// Consumed during rendering to produce public `HyperlinkTarget`s in the output.
 #[derive(Debug, Clone)]
@@ -39,9 +38,6 @@ pub struct LinkTarget {
 }
 
 /// Parse-time record of a closed fenced code block.
-///
-/// Populated in the `Tag::CodeBlock` arm of `MarkdownParser`.
-/// Consumed during rendering (see `output::build_code_block_spans`) to produce [`crate::CodeBlockSpan`] once the output line range is known.
 /// Only **closed** fences are recorded; an unterminated trailing fence yields no entry.
 #[derive(Debug, Clone)]
 pub struct CodeBlockMeta {
@@ -61,9 +57,7 @@ pub struct Transform {
     /// Replacement text.
     pub(crate) to: String,
     /// Apply this transform even in raw (non-pretty) mode.
-    ///
     /// Invariant: `to.len() == range.end - range.start` and the substitution must stay valid UTF-8 at the same byte offsets.
-    /// `render_ansi` substitutes force transforms in place into a byte buffer.
     /// Violating the invariant panics at `copy_from_slice` or `String::from_utf8` before any bytes escape the renderer.
     pub(crate) force: bool,
 }
@@ -75,6 +69,7 @@ pub struct CellSpan {
     pub bold: bool,
     pub italic: bool,
     pub code: bool,
+    pub strike: bool,
     /// Hyperlink (url, id) when this span is inside a `[label](url)` link or autolink inside a table cell.
     /// `None` for plain text.
     pub link: Option<(String, u32)>,
@@ -86,6 +81,7 @@ impl CellSpan {
         bold: bool,
         italic: bool,
         code: bool,
+        strike: bool,
         link: Option<(String, u32)>,
     ) -> Self {
         Self {
@@ -93,6 +89,7 @@ impl CellSpan {
             bold,
             italic,
             code,
+            strike,
             link,
         }
     }
@@ -136,6 +133,7 @@ pub struct TableState {
     pub cell_bold: bool,
     pub cell_italic: bool,
     pub cell_code: bool,
+    pub cell_strike: bool,
     /// Current link state: `Some((url, id))` while inside a `Tag::Link` / `Tag::Image` inside a table cell.
     /// Text events while this is set produce link-tagged `CellSpan`s so the table renderer can apply link styling and emit `HyperlinkTarget`s.
     pub cell_link: Option<(String, u32)>,
@@ -156,6 +154,7 @@ impl TableState {
             cell_bold: false,
             cell_italic: false,
             cell_code: false,
+            cell_strike: false,
             cell_link: None,
             in_header: false,
             range: start..start,
@@ -169,6 +168,7 @@ impl TableState {
             self.cell_bold,
             self.cell_italic,
             self.cell_code,
+            self.cell_strike,
             self.cell_link.clone(),
         ));
     }
@@ -220,17 +220,11 @@ pub struct TableReplace {
     /// Source byte range this replaces.
     pub range: Range<usize>,
     /// Per-rendered-line source offset from the table start.
-    ///
-    /// Maps each entry in `styled_lines` to the source line offset within the table (0 = header, 1 = separator, 2+ = body rows).
     /// The renderer uses this to produce correct `line_source_map` entries instead of the naive `table_start + line_idx`.
-    /// The naive form overshoots when the rendered table has more lines than the source (borders, separators, wrapped cells).
     pub line_source_offsets: Vec<usize>,
     /// Hyperlinks for `[label](url)` / autolinks inside table cells.
-    ///
     /// The paragraph link path (`LinkTarget` then `chunk_link_offsets`) cannot project links onto a rendered table.
-    /// The table replace consumes the entire source range, so no text chunk's rendering walks over the link text.
     /// The parser instead emits `TableHyperlink`s during table formatting, with positions in table-local coordinates.
-    /// The renderer translates them to absolute `HyperlinkTarget`s.
     pub hyperlinks: Vec<TableHyperlink>,
     pub cell_copies: Vec<TableCellCopy>,
     pub n_cols: usize,
@@ -254,9 +248,6 @@ pub fn unicode_display_width(s: &str) -> usize {
 }
 
 /// Polyfill for `str::floor_char_boundary` (stable in Rust 1.91+).
-///
-/// Snaps `index` down to the nearest UTF-8 char boundary in `s`.
-/// Indices past the end of `s` are clamped to `s.len()`.
 /// Replace with the std method once the workspace toolchain is bumped to 1.91+.
 pub(crate) fn floor_char_boundary(s: &str, index: usize) -> usize {
     let mut i = index.min(s.len());
@@ -267,9 +258,6 @@ pub(crate) fn floor_char_boundary(s: &str, index: usize) -> usize {
 }
 
 /// Polyfill for `str::ceil_char_boundary` (stable in Rust 1.91+).
-///
-/// Snaps `index` up to the nearest UTF-8 char boundary in `s`.
-/// Indices past the end of `s` are clamped to `s.len()`.
 /// Replace with the std method once the workspace toolchain is bumped to 1.91+.
 pub(crate) fn ceil_char_boundary(s: &str, index: usize) -> usize {
     let mut i = index.min(s.len());

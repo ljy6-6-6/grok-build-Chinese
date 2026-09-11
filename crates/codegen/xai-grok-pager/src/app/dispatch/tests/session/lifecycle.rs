@@ -8,9 +8,6 @@ fn simulate_release_build() {
 }
 #[test]
 fn voice_on_welcome_creates_session_and_records() {
-    if !xai_grok_voice::AUDIO_SUPPORTED {
-        return;
-    }
     let mut app = test_app();
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
     app.voice_mode_enabled = true;
@@ -20,6 +17,9 @@ fn voice_on_welcome_creates_session_and_records() {
     let ActiveView::Agent(id) = app.active_view else {
         panic!("voice on welcome must create and switch to a session");
     };
+    if !xai_grok_voice::AUDIO_SUPPORTED {
+        return;
+    }
     assert!(app.voice_listening(), "capture starts into the new session");
     assert_eq!(app.voice_recording_target(), Some(VoiceTarget::Agent(id)));
     assert!(matches!(
@@ -133,7 +133,6 @@ fn session_created_sets_session_id() {
             agent_id: id,
             session_id: "new-session-123".into(),
             models: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -177,7 +176,6 @@ fn session_created_omits_cta_catalog_when_disabled() {
             agent_id: id,
             session_id: "new-session-123".into(),
             models: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -219,7 +217,6 @@ fn session_created_banner_advertises_resume_in_minimal_mode() {
             agent_id: id,
             session_id: "new-session-123".into(),
             models: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -301,7 +298,7 @@ fn worktree_session_created_sets_session_and_cwd() {
             worktree_path: worktree_path.clone(),
             session_cwd: session_cwd.clone(),
             models: None,
-            scheduler_background_loops: None,
+            strategy_summary: None,
         }),
         &mut app,
     );
@@ -364,7 +361,7 @@ fn worktree_session_created_clears_sticky_branch_from_main_repo() {
             worktree_path,
             session_cwd: session_cwd.clone(),
             models: None,
-            scheduler_background_loops: None,
+            strategy_summary: None,
         }),
         &mut app,
     );
@@ -401,7 +398,7 @@ fn worktree_session_preserves_subdirectory_offset() {
             worktree_path: worktree_root.clone(),
             session_cwd: session_cwd.clone(),
             models: None,
-            scheduler_background_loops: None,
+            strategy_summary: None,
         }),
         &mut app,
     );
@@ -530,7 +527,7 @@ fn worktree_session_created_drains_queued_prompts() {
             worktree_path,
             session_cwd: PathBuf::from("/tmp/grok-worktrees/pager-abc"),
             models: None,
-            scheduler_background_loops: None,
+            strategy_summary: None,
         }),
         &mut app,
     );
@@ -564,7 +561,6 @@ fn session_created_drains_queued_prompts() {
             agent_id: id,
             session_id: acp::SessionId::new("sess-drain-1"),
             models: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -601,7 +597,6 @@ fn session_created_with_flag_emits_five_fetches_and_clears_flag() {
             agent_id: id,
             session_id: acp::SessionId::new("s"),
             models: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -624,7 +619,6 @@ fn session_created_without_flag_emits_no_extension_fetches() {
             agent_id: id,
             session_id: acp::SessionId::new("s"),
             models: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -1010,7 +1004,6 @@ fn deferred_switch_threads_stash_prev_into_effect() {
             agent_id: id,
             session_id: "prev-session".into(),
             models: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -1039,7 +1032,6 @@ fn deferred_switch_prefers_authoritative_current_as_prev() {
             agent_id: id,
             session_id: "auth-session".into(),
             models: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -1070,7 +1062,6 @@ fn deferred_model_switch_applied_on_session_created() {
             agent_id: id,
             session_id: session_id.clone(),
             models: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -1115,7 +1106,7 @@ fn deferred_model_switch_applied_on_worktree_session_created() {
             worktree_path: PathBuf::from("/tmp/worktree"),
             session_cwd: PathBuf::from("/tmp/worktree"),
             models: None,
-            scheduler_background_loops: None,
+            strategy_summary: None,
         }),
         &mut app,
     );
@@ -1367,6 +1358,80 @@ fn trust_folder_grants_and_resolves() {
     assert!(
         TrustStore::load().is_trusted(&workspace),
         "accepting must persist the trust grant for the workspace",
+    );
+}
+#[serial_test::serial(GROK_HOME)]
+#[test]
+fn trust_folder_quits_when_store_unreadable() {
+    use xai_grok_workspace::trust::workspace_key;
+    let home = tempfile::tempdir().expect("home tempdir");
+    unsafe { std::env::set_var("GROK_HOME", home.path()) };
+    simulate_release_build();
+    let store_path = home.path().join("trusted_folders.toml");
+    let before = b"[[[not-toml";
+    std::fs::write(&store_path, before).unwrap();
+    let repo = tempfile::tempdir().expect("repo tempdir");
+    let workspace = workspace_key(repo.path());
+    let mut app = test_app();
+    app.trust_state = TrustState::Pending {
+        workspace: workspace.clone(),
+    };
+    let effects = dispatch(Action::TrustFolder, &mut app);
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::Quit)),
+        "unread store must quit like Welcome n"
+    );
+    assert!(
+        !matches!(app.trust_state, TrustState::Done),
+        "unread store must not finish trust"
+    );
+    assert_eq!(std::fs::read(&store_path).unwrap(), before);
+    assert!(
+        !xai_grok_workspace::folder_trust::is_trusted_this_process(&workspace),
+        "unread store must not record process-local trust"
+    );
+    let msg = app.trust_quit_error.as_deref().unwrap_or("");
+    assert!(
+        msg.contains("trust store could not be read"),
+        "unread store must record a post-exit error: {msg}"
+    );
+    assert!(
+        msg.contains("Fix or delete ~/.grok/trusted_folders.toml"),
+        "unread store must name the next step: {msg}"
+    );
+}
+#[serial_test::serial(GROK_HOME)]
+#[test]
+fn trust_folder_quits_when_persist_denied() {
+    use xai_grok_workspace::trust::workspace_key;
+    let home = tempfile::tempdir().expect("home tempdir");
+    let blocker = home.path().join("not-a-dir");
+    std::fs::write(&blocker, b"x").unwrap();
+    unsafe { std::env::set_var("GROK_HOME", &blocker) };
+    simulate_release_build();
+    let repo = tempfile::tempdir().expect("repo tempdir");
+    let workspace = workspace_key(repo.path());
+    let mut app = test_app();
+    app.trust_state = TrustState::Pending {
+        workspace: workspace.clone(),
+    };
+    let effects = dispatch(Action::TrustFolder, &mut app);
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::Quit)),
+        "failed store write must quit like Welcome n"
+    );
+    assert!(
+        !matches!(app.trust_state, TrustState::Done),
+        "failed store write must not finish trust"
+    );
+    let msg = app.trust_quit_error.as_deref().unwrap_or("");
+    assert!(
+        msg.starts_with("error: folder trust was not saved"),
+        "failed store write must record a post-exit error: {msg}"
+    );
+    assert!(
+        msg.contains("grok --trust"),
+        "failed store write must name the next step: {msg}"
     );
 }
 /// When BOTH auth and trust are pending, `AuthComplete` must NOT replay the deferred startup.
@@ -2334,6 +2399,41 @@ fn delete_current_session_confirm_from_dashboard_emits_dashboard_after() {
         "got {effects:?}"
     );
 }
+#[test]
+fn delete_current_session_refuses_known_read_only_workspace_member() {
+    let mut app = test_app_with_agent();
+    app.workspace_dashboard_enabled = true;
+    let temp = tempfile::tempdir().unwrap();
+    let store =
+        xai_grok_dashboard_store::WorkspaceStore::open(&temp.path().join("workspace.db")).unwrap();
+    app.workspace_membership.set_read_only_for_test(
+        store,
+        xai_grok_dashboard_store::WorkspaceSnapshot {
+            grouping: xai_grok_dashboard_store::Grouping::State,
+            members: vec![xai_grok_dashboard_store::Member {
+                session_id: xai_grok_dashboard_store::SessionId::new("test-session").unwrap(),
+                kind: xai_grok_dashboard_store::MemberKind::Build,
+                origin: xai_grok_dashboard_store::MemberOrigin::Local,
+                cwd: Some("/tmp".into()),
+                title: Some("Read only".into()),
+                model: None,
+                last_turn_summary: None,
+                is_worktree: false,
+                last_change_unix_ms: 1,
+                pin_rank: None,
+                order_rank: None,
+            }],
+            data_version: 1,
+        },
+    );
+    let effects = dispatch(
+        Action::DeleteCurrentSessionAnswered { confirmed: true },
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    assert!(app.agents.contains_key(&AgentId(0)));
+    assert!(read_toast(&app).contains("workspace is read-only"));
+}
 /// Dashboard state can exist without overlay attach; the delete must still land on Welcome.
 #[test]
 fn delete_current_session_dashboard_state_without_attach_stays_welcome() {
@@ -2422,6 +2522,7 @@ fn delete_current_session_stale_attach_other_agent_stays_welcome() {
 fn delete_current_session_complete_welcome_and_guard() {
     use crate::app::actions::{AfterSessionDelete, TaskResult};
     let mut app = test_app_with_agent();
+    app.workspace_dashboard_enabled = true;
     app.agents.get_mut(&AgentId(0)).unwrap().session.session_id =
         Some(acp::SessionId::new("sess-a"));
     let effects = dispatch_task_result(
@@ -2438,6 +2539,11 @@ fn delete_current_session_complete_welcome_and_guard() {
         effects
             .iter()
             .any(|e| matches!(e, Effect::UnregisterActiveSession { .. }))
+    );
+    assert!(
+        app.workspace_membership
+            .removal_pending_for_test(&xai_grok_dashboard_store::SessionId::new("sess-a").unwrap()),
+        "/delete success must remove dashboard membership"
     );
     let mut app = test_app_with_agent();
     app.agents.get_mut(&AgentId(0)).unwrap().session.session_id =
@@ -2758,8 +2864,10 @@ fn dashboard_stop_with_peek_open_moves_selection_and_peek_down_one() {
             None,
             &[],
             false,
+            crate::views::dashboard::WorkspaceRowInputs::default(),
             None,
             false,
+            None,
             None,
         );
     };
@@ -2819,9 +2927,6 @@ fn dashboard_stop_with_peek_open_moves_selection_and_peek_down_one() {
     );
 }
 /// Regression: the same Ctrl+X double-press path driven END-TO-END through `DashboardState::handle_input`.
-/// The existing `dashboard_stop_double_press_deletes_top_level` test bypasses it by calling `dispatch_dashboard_stop` directly.
-///
-/// The bug: the second `handle_input` call runs the top-of-`handle_key` toast/confirm clear BEFORE the registry resolves the key to `DashboardStop`.
 /// That wipes the just-set `delete_confirm`, so the dispatcher sees a fresh state and sets it again instead of deleting.
 /// The session never deletes no matter how many times the user presses Ctrl+X.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]

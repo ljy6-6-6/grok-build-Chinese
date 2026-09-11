@@ -17,11 +17,9 @@ use xai_grok_mcp::acp_transport::AcpReverseInvoker;
 use xai_grok_mcp::servers::AcpServerEntry;
 use xai_grok_mcp::wire;
 
-/// Parse `_meta["x.ai/mcp/servers"]` into [`AcpServerEntry`] registrations.
 /// Each entry deserializes directly into the canonical type, so serde checks the `serverId` wire field rather than hand-reading it.
 /// Entries missing `name`/`serverId` are skipped with a warning.
 /// A name seen twice keeps the first entry: server names are the tool namespace, so a duplicate would otherwise silently shadow the first.
-/// Absent meta yields none.
 pub(crate) fn parse_acp_mcp_servers(meta: Option<&acp::Meta>) -> Vec<AcpServerEntry> {
     let Some(array) = meta
         .and_then(|m| m.get(wire::MCP_SERVERS))
@@ -48,12 +46,9 @@ pub(crate) fn parse_acp_mcp_servers(meta: Option<&acp::Meta>) -> Vec<AcpServerEn
     servers
 }
 
-/// Reverse-RPC invoker for in-process SDK MCP servers.
-///
-/// Each [`invoke`](AcpReverseInvoker::invoke) sends one `x.ai/mcp/sdk_call` reverse request straight through the gateway.
-/// `AcpAgentGatewaySender::send` returns a `Send` future, unlike the `?Send` `acp::Client::ext_method` trait method.
-/// That satisfies the rmcp transport's `Send` invoker bound with no relay task.
-/// Calls are independent and may run concurrently; the gateway serializes them onto the session's message channel.
+/// Sends each SDK MCP `invoke` as one `x.ai/mcp/sdk_call` reverse request through the gateway.
+/// `AcpAgentGatewaySender::send` is `Send`, unlike `acp::Client::ext_method`, so the rmcp invoker bound is met with no relay task.
+/// Calls may run concurrently; the gateway serializes them onto the session channel.
 pub(crate) struct GatewayAcpInvoker {
     gateway: AcpAgentGatewaySender,
 }

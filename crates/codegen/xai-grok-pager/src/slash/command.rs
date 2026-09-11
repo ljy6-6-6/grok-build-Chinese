@@ -59,14 +59,8 @@ pub enum CommandResult {
         /// The real `ScheduledTaskCreated` notification from the shell replaces it.
         scheduled_task_preview: Option<ScheduledTaskPreview>,
     },
-    /// Command text should be sent as a regular prompt. The shell resolves it.
-    ///
-    /// This variant deliberately covers two different cases:
-    /// 1. ACP-advertised commands (shell explicitly supports them)
-    /// 2. Unknown commands (pager doesn't know them, shell might)
-    ///
-    /// Both are sent identically today.
-    /// If behavior ever needs to diverge (e.g., different error messaging or telemetry), split into `AcpPassThrough` and `UnknownPassThrough` variants.
+    /// Command text should be sent as a regular prompt. This variant deliberately covers two different cases. Unknown
+    /// commands (pager doesn't know them, shell might).
     PassThrough(String),
 }
 
@@ -169,7 +163,6 @@ impl WorkflowChoice {
 }
 
 /// Read-only context for generating suggestions.
-///
 /// Passed to `SlashCommand::suggest_args()` and `SlashCommand::visible()`.
 /// Kept minimal; extend as needed.
 pub struct AppCtx<'a> {
@@ -199,7 +192,6 @@ pub struct AppCtx<'a> {
 }
 
 /// Mutable execution context for `SlashCommand::run()`.
-///
 /// Wraps only what pager can cleanly provide.
 /// Commands that need async ACP calls return `CommandResult::Action(...)` and let dispatch handle the effect.
 pub struct CommandExecCtx<'a> {
@@ -261,6 +253,16 @@ pub trait SlashCommand: Send + Sync {
         CommandProvenance::Builtin
     }
 
+    /// Refuse before the submit path mutates the composer or stops voice input.
+    fn submission_refusal(
+        &self,
+        _args: &str,
+        _is_minimal: bool,
+        _voice_owns_prompt: bool,
+    ) -> Option<&'static str> {
+        None
+    }
+
     /// Usage string shown in help. E.g., `"/model <name>"`.
     fn usage(&self) -> &str;
 
@@ -269,24 +271,14 @@ pub trait SlashCommand: Send + Sync {
         false
     }
 
-    /// Whether the command accepts arguments right now (e.g. subcommands exist only for some auth modes).
-    /// Defaults to [`Self::takes_args`].
-    /// Only dropdown and completion paths consult this: the insert text's trailing space, the snapshot taken when the args phase starts, and argument suggestions.
-    /// Whether Enter may run the command ([`crate::slash::is_command_complete`]) keys off the static [`Self::takes_args`] / [`Self::args_required`] pair.
+    /// Whether the command accepts arguments right now. Only dropdown and completion paths consult this: the insert
+    /// text's trailing space, the snapshot taken when the args phase starts, and argument suggestions.
     #[allow(unused_variables)]
     fn takes_args_now(&self, ctx: &AppCtx) -> bool {
         self.takes_args()
     }
 
-    /// Whether arguments are required for execution.
-    ///
-    /// Only meaningful when `takes_args()` is true. The two-bit model:
-    ///
-    /// | `takes_args` | `args_required` | Example          | Enter with no args |
-    /// |-------------|----------------|------------------|-------------------|
-    /// | `false`     | `false`        | `/exit`          | Executes          |
-    /// | `true`      | `false`        | `/compact [ctx]` | Executes          |
-    /// | `true`      | `true`         | `/model <id>`    | Blocks            |
+    /// Whether arguments are required for execution. Only meaningful when `takes_args()` is true.
     fn args_required(&self) -> bool {
         false
     }
@@ -299,7 +291,6 @@ pub trait SlashCommand: Send + Sync {
     }
 
     /// Whether this command is currently visible / executable.
-    ///
     /// Default is `true` (every command is visible).
     /// Override to gate a command on session state.
     #[allow(unused_variables)]
@@ -307,49 +298,27 @@ pub trait SlashCommand: Send + Sync {
         true
     }
 
-    /// Whether this command operates on a single agent session (its conversation, context, model, turns, plan, etc.) rather than the pager as a whole.
-    ///
-    /// Session-scoped commands (`/compact`, `/fork`, `/rewind`, …) need a "current session" to act on, so they are suppressed on session-less surfaces.
-    /// Today that means the agent dashboard's dispatch input, which offers only pager-global commands (`/theme`, `/settings`, `/mcps`, …).
-    /// Surfaces that always have a session (the agent view) ignore this flag and continue to show every command.
-    ///
-    /// Defaults to `false` (pager-global).
+    /// Whether this command operates on a single agent session (its conversation, context, model, turns, plan, etc.)
+    /// rather than the pager as a whole. Surfaces that always have a session (the agent view) ignore this flag and
+    /// continue to show every command.
     fn session_scoped(&self) -> bool {
         false
     }
 
-    /// Whether a `session_scoped()` command should still be offered on session-less surfaces (the agent dashboard's dispatch input).
-    ///
-    /// A handful of session-scoped commands still mean something with no session:
-    /// `/model` and `/plan` configure the *next* agent the dashboard spawns; `/multiline` toggles compose mode on the dashboard inputs.
-    /// Those override this to `true` so they appear in the dashboard dropdown even though `session_scoped()` is `true`.
-    /// Has no effect for non-session-scoped commands (they're always offered).
-    ///
-    /// Defaults to `false`.
+    /// Whether a `session_scoped()` command should still be offered on session-less surfaces (the agent dashboard's
+    /// dispatch input). Has no effect for non-session-scoped commands (they're always offered).
     fn offered_when_session_less(&self) -> bool {
         false
     }
 
-    /// Whether this command should ONLY be offered on the session-less dashboard surface, the inverse of [`Self::session_scoped`].
-    /// The dashboard's dispatch input is the one surface where `hide_session_scoped` is set.
-    /// A `dashboard_only` command therefore shows there and is suppressed on every session surface (the agent view) and the welcome screen.
-    ///
-    /// `/cd` changes where the dashboard dispatches new agents, so it is meaningless in an agent session and hidden there.
-    /// Defaults to `false`.
+    /// Whether this command should ONLY be offered on the session-less dashboard surface, the inverse of
+    /// [`Self::session_scoped`]. `/cd` changes where the dashboard dispatches new agents, so it is meaningless in an
+    /// agent session and hidden there.
     fn dashboard_only(&self) -> bool {
         false
     }
 
-    /// Which render modes this command functions in.
-    ///
-    /// Minimal mode (`grok --minimal`) deletes the interactive fullscreen scrollback pane, the in-app mouse selection path, and the agent dashboard.
-    /// Scroll, search, and selection go back to the terminal.
     /// A few commands exist only in minimal mode, because the full TUI solves the same problem with a pane or a chord.
-    /// Declaring the mode here feeds both enforcement points:
-    /// `command_offered` hides the command from every completion surface in the modes it does not support,
-    /// and the central dispatch gate refuses a fully-typed invocation with a hint instead of running it against a surface that does not exist.
-    ///
-    /// Defaults to [`ModeSupport::Both`], a **denylist, not an allowlist**: new commands are available everywhere by default (minimal is converging toward parity).
     /// Clipboard helpers like `/copy` stay `Both`: they read scrollback state and do not need the fullscreen pane.
     fn mode_support(&self) -> ModeSupport {
         ModeSupport::Both
@@ -407,26 +376,18 @@ pub trait SlashCommand: Send + Sync {
     }
 
     /// Capture the current preview-relevant state as a string.
-    ///
     /// Called once when preview mode begins (first navigation in args dropdown).
     /// The returned value is stored and passed back to [`cancel_preview`] if the user dismisses the dropdown.
     fn preview_state(&self) -> Option<String> {
         None
     }
 
-    /// Live-preview the given argument suggestion.
-    ///
-    /// Called when the user navigates to a new suggestion in the dropdown (Up/Down).
-    /// The command should apply a temporary/preview state.
-    /// Only called when [`supports_preview`] returns true.
+    /// Live-preview the given argument suggestion. Only called when [`supports_preview`] returns true.
     #[allow(unused_variables)]
     fn preview_arg(&self, arg: &str) {}
 
-    /// Cancel a live preview, reverting to the state before the dropdown opened.
-    /// `previous` is the value returned by [`preview_state`] when preview started.
-    ///
-    /// Called when the user dismisses the dropdown (Esc) or clears the slash input.
-    /// Only called when [`supports_preview`] returns true.
+    /// Cancel a live preview, reverting to the state before the dropdown opened. Only called when [`supports_preview`]
+    /// returns true.
     #[allow(unused_variables)]
     fn cancel_preview(&self, previous: &str) {}
 
@@ -436,14 +397,9 @@ pub trait SlashCommand: Send + Sync {
     fn run(&self, ctx: &mut CommandExecCtx, args: &str) -> CommandResult;
 }
 
-/// Generates the [`SlashCommand`] methods that return constant metadata.
-///
-/// Expands inside an `impl SlashCommand for …` block.
-/// Every field is optional but must appear in the order below, the trait's declaration order.
-/// Only listed fields emit an override, so omitted methods keep the trait default.
-/// Methods with runtime logic (`run`, `visible`, `suggest_args`, …) are written out beside the invocation.
-///
-/// `arg_placeholder` takes the bare placeholder text (wrapped in `Some`), and `aliases` a bracketed list without the `&`.
+/// Every field is optional but must appear in the order below, the trait's declaration order. Only listed fields
+/// emit an override, so omitted methods keep the trait default. `arg_placeholder` takes the bare placeholder text
+/// (wrapped in `Some`), and `aliases` a bracketed list without the `&`.
 macro_rules! slash_meta {
     (
         $(name: $name:expr,)?

@@ -68,7 +68,6 @@ pub(crate) fn forward_to_hunk_tracker(
 }
 
 /// Dedup key for `x.ai/git_head_changed`, shared by the watcher's `GitHead` consumer and the post-edit `maybe_notify_git_branch` path.
-/// Both compute the same identity (branch | is_worktree | main_repo | commit).
 /// The commit SHA is included so a same-branch commit (agent runs `git commit`) still notifies clients.
 /// The changes panel must drop the now-committed files.
 pub(crate) fn git_head_dedup_key(
@@ -775,7 +774,6 @@ impl Debounce {
 /// Give-up bound on consecutive in-op deferrals: at the 500ms quiet cadence this is ~60s, matching the watcher's stale-lock threshold.
 /// A crashed git leaving `.git/index.lock` parks the source in its locked state forever.
 /// No Completed arrives, no resync, the buffer never overflows on a quiet workspace, so without a bound the deferral would starve refreshes forever.
-/// One forced fire per minute also caps the cost on pathologically long real ops.
 const MAX_CONSECUTIVE_IN_OP_DEFERS: u32 = 120;
 
 /// Decision for a due debounce deadline.
@@ -789,7 +787,6 @@ enum SettleAction {
 
 /// Defers while a git op is in flight: a debounce armed by pre-op edits or meta changes would otherwise scan a mid-op worktree.
 /// Completed bumps the window afterwards anyway.
-/// Also defers while the single-flight refresh is running, coalescing into the next pass.
 /// In-op deferrals are bounded by [`MAX_CONSECUTIVE_IN_OP_DEFERS`] so a wedged op (stale lock file) cannot starve refreshes forever.
 fn on_settle_due(
     in_op: bool,
@@ -1371,8 +1368,6 @@ mod tests {
     /// Feed the event stream a K-pick rebase produces through the real `on_event`/`note_refresh_request`/`on_settle_due` functions.
     /// Returns the number of refresh fires.
     /// Models how fsnotify settles: the source holds Completed for `SETTLE_MS` after each unlock.
-    /// Picks whose lock-free gap fits inside the settle window merge into a single Started/Completed pair.
-    /// Slower cadences emit per-pick pairs whose Completed lags the unlock by the settle window.
     async fn run_rebase_cadence(
         picks: usize,
         pick_period: Duration,

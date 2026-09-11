@@ -152,11 +152,9 @@ pub(crate) fn add_subtree_watches(
     flush(&mut backfill);
 }
 
-/// Per-dir mode: drop bookkeeping (and best-effort OS watches) for a removed
-/// or renamed-away directory subtree. The kernel already dropped watches on
-/// deleted dirs (`IN_IGNORED`), but the explicit unwatch keeps notify's
-/// path-keyed bookkeeping clean and — crucially for renames — frees the watch
-/// descriptor *before* the destination path is re-watched.
+/// Per-dir mode: drop bookkeeping (and best-effort OS watches) for a removed or renamed-away subtree.
+/// The kernel already dropped watches on deleted dirs; explicit unwatch frees the descriptor
+/// *before* the destination path is re-watched (required for renames).
 #[tracing::instrument(name = "fsnotify.prune_subtree_watches", level = "debug", skip_all)]
 pub(crate) fn prune_subtree_watches(
     debouncer: &mut Debouncer<notify::RecommendedWatcher, NoCache>,

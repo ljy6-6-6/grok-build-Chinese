@@ -129,9 +129,7 @@ pub(crate) fn extract_changed_files(diff: &str) -> Vec<String> {
 }
 
 /// `CHANGES_FILE` / `PLAN_FILE` carry an absolute path or the `(unavailable)` sentinel; each skeptic reads them with its own `read_file` tool.
-/// `changed_files` is the complete list of touched paths (verification's primary anchor; the skeptic reads their current contents).
 /// A `None` `plan_file` renders [`PLAN_UNAVAILABLE`].
-/// `plan_changes` is the diff from the plan baseline to the current plan, already sanitized and truncated by the caller.
 /// `None` renders [`PLAN_CHANGES_NONE`].
 pub(crate) fn build_classifier_evidence_packet(
     objective: &str,
@@ -252,35 +250,17 @@ pub(crate) struct CapturedChanges {
     pub changed_files: Vec<String>,
 }
 
-/// Capture the workspace diff that each verifier skeptic will reason over.
-///
-/// The capture strategy walks three layers of fallback, top down, and returns the first that yields a usable diff:
-///
-/// 1. **Recorded baseline.** If `baseline_commit` is `Some` (the `setup_goal` capture succeeded at goal-creation), run `git diff <baseline>`.
-///    This is the happy path.
-/// 2. **Lazy baseline.** `baseline_commit` is `None` but the agent ran `git init` and committed during the goal's lifespan.
-///    Re-run `git rev-parse HEAD`, find the OLDEST commit since `goal_created_at`, and emit the cumulative diff from its parent.
-///    `--root` is used if the oldest is the very first commit in the repo.
-/// 3. **Walkdir and mtime.** Git is unavailable even after the lazy retry.
-///    Recursively walk `workspace_root` for files with mtime newer than `goal_created_at` and synthesise a unified-diff-like blob.
-///    The blob is `--- /dev/null` / `+++ b/<relpath>` followed by `+` prefixed contents, per-file capped at [`WALKDIR_PER_FILE_MAX_BYTES`].
-///    Common vendor / build dirs are skipped.
-///
-/// `goal_created_at` is the unix-seconds timestamp recorded on `GoalOrchestration.created_at`.
-/// It bounds the lookback for `git log --since` and gates the walkdir mtime filter.
-///
+/// Recorded baseline. If `baseline_commit` is `Some` (the `setup_goal` capture succeeded at goal-creation), run `git diff <baseline>`.
+/// Common vendor / build dirs are skipped.
 /// The changed-file list comes from the FULL pre-truncation diff (an over-cap diff never drops tail files).
-/// The git layers also append untracked paths, which `git diff` omits; the walkdir layer already covers them via mtime.
 pub(crate) async fn capture_changes_diff(
     baseline_commit: Option<&str>,
     workspace_root: &Path,
     goal_created_at: i64,
 ) -> Result<CapturedChanges, ChangesCaptureError> {
-    // Layer 1: recorded baseline
-    // On `DiffCommandFailed` (stale SHA, workspace was `git reset --hard`'d, etc.) fall through to Layer 2/3 instead of propagating immediately
-    //
-    // Dashboards and log-grep tooling match on the `"goal classifier: …"` prefix of tracing messages in this file and in `goal_classifier.rs`
-    // Keep the prefix even though the runtime is now the skeptic-panel verification stage, not the legacy single classifier
+    // Layer 1: recorded baseline.
+    // Layer 2/3 instead of propagating immediately.
+    // Keep the prefix even though the runtime is now the skeptic-panel verification stage, not the legacy single classifier.
     if let Some(baseline) = baseline_commit {
         match run_git_diff_against_baseline(baseline, workspace_root).await {
             Ok(raw) => return Ok(finish_git_capture(raw, workspace_root).await),
@@ -374,7 +354,6 @@ async fn git_untracked_files(workspace_root: &Path) -> Vec<String> {
 }
 
 /// Unified diff of the plan baseline to the current plan for the `PLAN_CHANGES:` evidence section.
-/// The plan lives OUTSIDE the workspace repo, so this uses `git diff --no-index`, which works on arbitrary files.
 /// Returns `None` (rendering [`PLAN_CHANGES_NONE`]) when there is no baseline, either file is missing, the plan is unchanged, or git failed.
 /// Output is capped via [`truncate_diff`]; diff headers carry basenames, not the absolute session path, when both files share a parent dir.
 pub(crate) async fn capture_plan_changes(
@@ -646,7 +625,6 @@ async fn git_has_parent(workspace_root: &Path, commit: &str) -> bool {
 
 /// Walks `workspace_root` for files with mtime newer than `goal_created_at` and synthesises a unified-diff-like payload.
 /// Skips `.git/`, `target/`, `node_modules/`, etc. so a build cache does not dominate the diff budget.
-/// Per-file output is capped at [`WALKDIR_PER_FILE_MAX_BYTES`].
 /// The walk stops shortly past [`GOAL_CLASSIFIER_DIFF_MAX_BYTES`] and the caller applies the exact [`truncate_diff`] cap.
 async fn walkdir_changes_since(
     workspace_root: &Path,
@@ -969,15 +947,9 @@ const SANITIZE_TAGS: &[&str] = &[
     "</final_response>",
 ];
 
-/// Sanitize model-/workspace-derived evidence text (FINAL_RESPONSE and PLAN_CHANGES) for embedding in the evidence packet.
 /// Escapes the close tag of any system-reminder-ish block so the model can't escape its region by echoing `</system-reminder>` in its own prose.
-/// Other content passes through untouched; we deliberately avoid HTML-escaping the whole blob so diff-like text stays human-readable.
-///
 /// Returns `Cow::Borrowed(text)` when no tag is present so the common happy path does not allocate (FINAL_RESPONSE can be many KiB).
-///
-/// **Threat model:** only *closing* tags are escaped.
-/// A solo opening tag cannot terminate the outer system-reminder block.
-/// The verifier prompt also tells the subagent to treat FINAL_RESPONSE as untrusted, so any open/close pair inside is handled at the prompt level.
+/// Threat model: only *closing* tags are escaped.
 pub(crate) fn sanitize_final_response(text: &str) -> Cow<'_, str> {
     if !SANITIZE_TAGS.iter().any(|t| text.contains(t)) {
         return Cow::Borrowed(text);

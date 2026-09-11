@@ -3,7 +3,6 @@
 use std::time::Instant;
 
 use crate::events::PromptLatency;
-use crate::session_ctx::log_event;
 
 pub use crate::enums::McpInitStrategy;
 
@@ -12,7 +11,6 @@ pub struct PromptTiming {
     mcp_wait_ms: u64,
     tool_collection_ms: u64,
     repo_status_wait_ms: Option<u64>,
-    ttft_ms: Option<u64>,
     ttlb_ms: u64,
     attempts: u32,
     output_tokens: Option<u32>,
@@ -25,7 +23,6 @@ impl PromptTiming {
             mcp_wait_ms: 0,
             tool_collection_ms: 0,
             repo_status_wait_ms: None,
-            ttft_ms: None,
             ttlb_ms: 0,
             attempts: 1,
             output_tokens: None,
@@ -41,8 +38,9 @@ impl PromptTiming {
         self.repo_status_wait_ms = Some(wait_ms);
     }
 
-    pub fn record_stream_latency(&mut self, ttft_ms: Option<u64>, ttlb_ms: u64) {
-        self.ttft_ms = ttft_ms;
+    /// `ttft_ms` is not recorded here: the exported first-token latency is stamped on the
+    /// turn-start clock in [`crate::turn_phases`] and folded in when the event is emitted.
+    pub fn record_stream_latency(&mut self, ttlb_ms: u64) {
         self.ttlb_ms = ttlb_ms;
     }
 
@@ -51,7 +49,8 @@ impl PromptTiming {
         self.output_tokens = output_tokens;
     }
 
-    pub fn emit(
+    #[allow(clippy::too_many_arguments)]
+    pub fn build(
         self,
         model_call_ms: u64,
         turn_index: u32,
@@ -59,15 +58,15 @@ impl PromptTiming {
         mcp_tools_registered: u32,
         mcp_strategy: McpInitStrategy,
         model_id: String,
-    ) {
-        log_event(self.into_event(
+    ) -> PromptLatency {
+        self.into_event(
             model_call_ms,
             turn_index,
             mcp_server_count,
             mcp_tools_registered,
             mcp_strategy,
             model_id,
-        ));
+        )
     }
 
     fn into_event(
@@ -94,10 +93,21 @@ impl PromptTiming {
             mcp_tools_registered,
             mcp_strategy,
             model_id,
-            ttft_ms: self.ttft_ms,
+            // Folded in from `turn_phases` (turn-start clock) at emit time.
+            ttft_ms: None,
             ttlb_ms: self.ttlb_ms,
             attempts: self.attempts,
             output_tokens: self.output_tokens,
+            before_first_model_ms: 0,
+            sampling_ms: 0,
+            tool_blocking_ms: 0,
+            compaction_ms: 0,
+            between_sampling_overhead_ms: 0,
+            after_last_sampling_ms: 0,
+            turn_total_ms: 0,
+            sampling_request_count: 0,
+            sampling_retry_count: 0,
+            ttfm_ms: None,
         }
     }
 }
@@ -106,9 +116,8 @@ impl PromptTiming {
 mod tests {
     use super::*;
 
-    #[test]
-    fn prompt_latency_omits_absent_stream_fields() {
-        let v = serde_json::to_value(PromptLatency {
+    fn sample_event() -> PromptLatency {
+        PromptLatency {
             turn_index: 3,
             total_ms: 5200,
             mcp_wait_ms: 120,
@@ -124,8 +133,22 @@ mod tests {
             ttlb_ms: 4500,
             attempts: 2,
             output_tokens: None,
-        })
-        .unwrap();
+            before_first_model_ms: 400,
+            sampling_ms: 4800,
+            tool_blocking_ms: 0,
+            compaction_ms: 0,
+            between_sampling_overhead_ms: 0,
+            after_last_sampling_ms: 0,
+            turn_total_ms: 5200,
+            sampling_request_count: 1,
+            sampling_retry_count: 1,
+            ttfm_ms: None,
+        }
+    }
+
+    #[test]
+    fn prompt_latency_omits_absent_stream_fields() {
+        let v = serde_json::to_value(sample_event()).unwrap();
         assert_eq!(
             v,
             serde_json::json!({
@@ -141,6 +164,15 @@ mod tests {
                 "model_id": "grok-test",
                 "ttlb_ms": 4500,
                 "attempts": 2,
+                "before_first_model_ms": 400,
+                "sampling_ms": 4800,
+                "tool_blocking_ms": 0,
+                "compaction_ms": 0,
+                "between_sampling_overhead_ms": 0,
+                "after_last_sampling_ms": 0,
+                "turn_total_ms": 5200,
+                "sampling_request_count": 1,
+                "sampling_retry_count": 1,
             })
         );
     }

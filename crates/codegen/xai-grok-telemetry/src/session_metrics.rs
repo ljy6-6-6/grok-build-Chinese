@@ -146,7 +146,8 @@ pub struct TraceUploadFailed {
 
 /// Why trace uploads are enabled or disabled for a given prompt.
 /// Recorded on the `agent.prompt` span as `upload_reason` for analytics queries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::AsRefStr, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum TraceUploadReason {
     /// ZDR (zero data retention) team: all uploads disabled.
     ZdrTeam,
@@ -165,18 +166,6 @@ pub enum TraceUploadReason {
 }
 
 impl TraceUploadReason {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::ZdrTeam => "zdr_team",
-            Self::FeatureOff => "feature_off",
-            Self::NoCredentials => "no_credentials",
-            Self::DirectS3 => "direct_s3",
-            Self::Proxy => "proxy",
-            Self::DirectGcs => "direct_gcs",
-            Self::SessionNotFound => "session_not_found",
-        }
-    }
-
     pub fn from_upload_method(method: &Option<xai_file_utils::UploadMethod>) -> Self {
         match method {
             Some(xai_file_utils::UploadMethod::Proxy { .. }) => Self::Proxy,
@@ -325,14 +314,14 @@ mod tests {
     /// They are a wire contract and must not drift.
     #[test]
     fn as_str_values_are_stable() {
-        assert_eq!(TraceUploadReason::ZdrTeam.as_str(), "zdr_team");
-        assert_eq!(TraceUploadReason::FeatureOff.as_str(), "feature_off");
-        assert_eq!(TraceUploadReason::NoCredentials.as_str(), "no_credentials");
-        assert_eq!(TraceUploadReason::DirectS3.as_str(), "direct_s3");
-        assert_eq!(TraceUploadReason::Proxy.as_str(), "proxy");
-        assert_eq!(TraceUploadReason::DirectGcs.as_str(), "direct_gcs");
+        assert_eq!(TraceUploadReason::ZdrTeam.as_ref(), "zdr_team");
+        assert_eq!(TraceUploadReason::FeatureOff.as_ref(), "feature_off");
+        assert_eq!(TraceUploadReason::NoCredentials.as_ref(), "no_credentials");
+        assert_eq!(TraceUploadReason::DirectS3.as_ref(), "direct_s3");
+        assert_eq!(TraceUploadReason::Proxy.as_ref(), "proxy");
+        assert_eq!(TraceUploadReason::DirectGcs.as_ref(), "direct_gcs");
         assert_eq!(
-            TraceUploadReason::SessionNotFound.as_str(),
+            TraceUploadReason::SessionNotFound.as_ref(),
             "session_not_found"
         );
     }

@@ -143,12 +143,8 @@ fn order_bounds(lo: Picked, hi: Picked, def_lo: u32, def_hi: u32) -> (u32, u32) 
     }
 }
 
-/// Resolve display-refresh probe and auto-cadence policy.
-///
-/// Precedence per field: requirements > env (bools only) > user TOML > managed > remote `display_refresh` object > compiled defaults.
-///
-/// TOML/remote use tolerant [`DisplayRefreshSettings`].
-/// Floor/ceiling clamp `1..=100`; inverted bounds keep the higher-priority side.
+/// Resolve display-refresh probe and auto-cadence policy. Precedence per field: requirements > env (bools only) > user TOML > managed > remote `display_refresh` object > compiled defaults.
+/// TOML/remote use tolerant [`DisplayRefreshSettings`]. Floor/ceiling clamp `1..=100`; inverted bounds keep the higher-priority side.
 pub fn resolve_display_refresh(
     requirements: Option<&TomlValue>,
     user: Option<&TomlValue>,
@@ -244,12 +240,7 @@ pub fn resolve_display_refresh(
 }
 
 /// Pure auto-cadence derivation from policy and probe Hz.
-///
-/// - `policy.probe_enabled == false`: reason `disabled` (no Hz, no auto)
-/// - `auto_cadence_enabled == false`: reason `flag_off`
-/// - no `hz`: reason `probe_skip`
-/// - `hz` outside `[min_hz, max_hz]`: reason `hz_out_of_range`
-/// - else `ms = clamp(round(1000/hz), floor, ceiling)`, reason `applied`
+/// `policy.probe_enabled == false`: reason `disabled` (no Hz, no auto) `auto_cadence_enabled == false`: reason `flag_off` no `hz`: reason `probe_skip` `hz` outside `[min_hz, max_hz]`: reason `hz_out_of_range` else `ms = clamp(round(1000/hz), floor, ceiling)`, reason `applied`
 pub(crate) fn decide_auto_cadence(
     policy: &DisplayRefreshPolicy,
     probe_hz: Option<u32>,
@@ -288,13 +279,8 @@ pub(crate) fn decide_auto_cadence(
     }
 }
 
-/// Merge auto-cadence with optional env cadence overrides.
-///
-/// Env knobs always win when present (`Some(ms)` even if parse-defaulted).
-/// When env is `None`, auto `ms` is used if `Some`, else `default_ms`.
-///
-/// `reason` is `env_override` when **both** env knobs are set and auto is not gated off (`flag_off` / `disabled`).
-/// That includes the case where the probe was skipped for cadence because env already pins both clocks.
+/// Merge auto-cadence with optional env cadence overrides. Env knobs always win when present (`Some(ms)` even if parse-defaulted). When env is `None`, auto `ms` is used if `Some`, else `default_ms`.
+/// `reason` is `env_override` when **both** env knobs are set and auto is not gated off (`flag_off` / `disabled`). That includes the case where the probe was skipped for cadence because env already pins both clocks.
 pub(crate) fn merge_motion_cadence(
     auto: AutoCadenceDecision,
     min_draw_env: Option<u64>,

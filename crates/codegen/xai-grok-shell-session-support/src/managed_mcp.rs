@@ -107,8 +107,25 @@ pub struct GatewayToolCatalog {
     pub tools: Vec<GatewayTool>,
     #[serde(default)]
     pub total_tools: u32,
+    /// Display names only. Prefer [`Self::reauth_connectors`].
     #[serde(default)]
     pub connectors_needing_reauth: Vec<String>,
+    /// Keyed by the same `connector_id` / `connector_name` pair the tool rows carry.
+    #[serde(default)]
+    pub reauth_connectors: Vec<GatewayReauthConnector>,
+}
+
+/// Structured reauth identity from `GET /v1/mcp/tools/list`. Every field defaults so one
+/// incomplete row cannot fail the whole catalog parse; the catalog builder drops empty ids.
+/// `connector_uuid` is carried from the wire contract but has no client use yet.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct GatewayReauthConnector {
+    #[serde(default)]
+    pub connector_uuid: String,
+    #[serde(default)]
+    pub connector_id: String,
+    #[serde(default)]
+    pub connector_name: String,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -264,7 +281,6 @@ async fn gateway_error_message(status: reqwest::StatusCode, response: reqwest::R
 }
 
 /// Fetch the managed MCP gateway tool catalog from the Grok API (`GET /v1/mcp/tools/list`).
-///
 /// `Ok(catalog)` means the server answered and the catalog contents are authoritative for this fetch, even when empty.
 /// `Err(_)` means freshness is unknown and callers must leave any cache retryable rather than committing an empty catalog.
 pub async fn fetch_gateway_tool_catalog(
@@ -284,7 +300,8 @@ pub async fn fetch_gateway_tool_catalog(
     tracing::info!(
         count = catalog.tools.len(),
         total_tools = catalog.total_tools,
-        reauth = catalog.connectors_needing_reauth.len(),
+        reauth_names = catalog.connectors_needing_reauth.len(),
+        reauth_ids = catalog.reauth_connectors.len(),
         "Fetched managed MCP gateway tool catalog"
     );
     Ok(catalog)
@@ -297,9 +314,6 @@ pub async fn invalidate_gateway_tool_cache(handle: &ManagedMcpStateHandle) {
 }
 
 /// Fetch-or-wait for the managed MCP gateway tool catalog.
-///
-/// Returns `Some(catalog)` for either a cached catalog or a successful fresh fetch, including a genuine empty catalog.
-/// Returns `None` when gateway tools are disabled by the caller, auth is unavailable, or the fetch failed.
 /// Failed fetches roll back to `NotFetched`, so a later caller can retry.
 pub async fn get_or_fetch_gateway_tool_catalog(
     handle: &ManagedMcpStateHandle,
@@ -396,7 +410,14 @@ mod tests {
                 }
             ],
             "total_tools": 1,
-            "connectors_needing_reauth": ["Slack"]
+            "connectors_needing_reauth": ["Slack"],
+            "reauth_connectors": [
+                {
+                    "connector_uuid": "connector_slack",
+                    "connector_id": "slack",
+                    "connector_name": "Slack"
+                }
+            ]
         }"#,
         )
         .unwrap();
@@ -411,6 +432,9 @@ mod tests {
         .unwrap();
         assert_eq!(0, without_total_tools.total_tools);
         assert_eq!(vec!["Slack"], catalog.connectors_needing_reauth);
+        assert_eq!(1, catalog.reauth_connectors.len());
+        assert_eq!("slack", catalog.reauth_connectors[0].connector_id);
+        assert!(without_total_tools.reauth_connectors.is_empty());
         assert_eq!("gmail_search", catalog.tools[0].call_id);
         assert_eq!("gmail__search", catalog.tools[0].qualified_name());
         assert_eq!("gmail", catalog.tools[0].connector_id);
@@ -424,6 +448,28 @@ mod tests {
                 .pointer("/properties/query/type")
                 .and_then(|v| v.as_str())
         );
+    }
+
+    #[test]
+    fn parses_incomplete_reauth_rows_instead_of_failing_the_catalog() {
+        let catalog: GatewayToolCatalog = serde_json::from_str(
+            r#"{
+            "tools": [],
+            "reauth_connectors": [
+                { "connector_name": "Slack" },
+                { "connector_id": "github" },
+                {}
+            ]
+        }"#,
+        )
+        .unwrap();
+        let ids: Vec<&str> = catalog
+            .reauth_connectors
+            .iter()
+            .map(|c| c.connector_id.as_str())
+            .collect();
+        assert_eq!(ids, ["", "github", ""]);
+        assert_eq!(catalog.reauth_connectors[0].connector_name, "Slack");
     }
 
     #[tokio::test]
@@ -480,6 +526,7 @@ mod tests {
                 tools: vec![],
                 total_tools: 0,
                 connectors_needing_reauth: vec![],
+                reauth_connectors: vec![],
             }
         ));
         assert!(state.gateway_tools_active);
@@ -509,6 +556,7 @@ mod tests {
                 tools: vec![],
                 total_tools: 0,
                 connectors_needing_reauth: vec![],
+                reauth_connectors: vec![],
             },
         );
 
@@ -560,6 +608,7 @@ mod tests {
                 tools: vec![],
                 total_tools: 0,
                 connectors_needing_reauth: vec![],
+                reauth_connectors: vec![],
             },
         ));
 

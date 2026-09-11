@@ -11,11 +11,7 @@ const fn rgb(r: u8, g: u8, b: u8) -> Color {
     Color::Rgb(r, g, b)
 }
 
-// Backgrounds and text use a custom grayscale ramp anchored at:
-//   • bg  = #141414 (20)
-//   • fg  = #f3f3f3 (243)
-//
-// Accent colors are the original TokyoNight Night hex values.
+// Grayscale ramp anchored at bg #141414 / fg #f3f3f3. Accents are TokyoNight Night hex.
 #[allow(dead_code)]
 mod palette {
     use super::*;

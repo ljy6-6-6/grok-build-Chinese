@@ -3,18 +3,11 @@ use anyhow::Result;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::UNIX_EPOCH;
 
-// ---------------------------------------------------------------------------
-// Settings helpers: typed disk-write wrappers for each setting
-// All route through `update_config`, then `merge_section`, then `save_config`
-// ---------------------------------------------------------------------------
+// --------------------------------------------------------------------------- Settings helpers: typed disk-write wrappers for each setting
+// All route through `update_config`, then `merge_section`, then `save_config` ---------------------------------------------------------------------------
 
-// Process-wide cache for `[ui].follow_up_behavior == "steer"`.
-//
-// The shell agent is a separate process from the pager, so an in-process atomic updated in the pager never reaches the turn loop
-// Key the cache on config.toml mtime instead
-// A live settings write invalidates on the next safe-point drain (cheap stat; full parse only when the file changed)
-//
-// 0 = unknown, 1 = queue, 2 = steer.
+// Process-wide cache for `[ui].follow_up_behavior == "steer"`. The shell agent is a separate process from the pager, so an in-process atomic updated in the pager never reaches the turn loop
+// Key the cache on config.toml mtime instead A live settings write invalidates on the next safe-point drain (cheap stat; full parse only when the file changed) 0 = unknown, 1 = queue, 2 = steer.
 const FOLLOW_UP_CACHE_UNKNOWN: u8 = 0;
 const FOLLOW_UP_CACHE_QUEUE: u8 = 1;
 const FOLLOW_UP_CACHE_STEER: u8 = 2;
@@ -45,11 +38,8 @@ pub fn set_follow_up_steer_cache(steer: bool) {
     FOLLOW_UP_STEER_MTIME_NS.store(follow_up_config_mtime_ns(), Ordering::Relaxed);
 }
 
-/// Whether Steer is enabled in this process.
-///
-/// Hits disk only when the cache is cold or the `config.toml` mtime has changed since the last resolve.
-/// That lets the pager toggle Follow-up behavior live without restarting the shell agent.
-/// A failed effective-config load does not pin Queue: the previous cache is kept, or a cold failure returns false for this call only.
+/// Whether Steer is enabled in this process. Hits disk only when the cache is cold or the `config.toml` mtime has changed since the last resolve.
+/// That lets the pager toggle Follow-up behavior live without restarting the shell agent. A failed effective-config load does not pin Queue: the previous cache is kept, or a cold failure returns false for this call only.
 /// The cold failure writes neither QUEUE nor the mtime.
 pub async fn follow_up_steer_enabled() -> bool {
     let mtime = follow_up_config_mtime_ns();
@@ -190,15 +180,9 @@ pub async fn set_auto_light_theme(value: String) -> Result<()> {
 /// It defends against callers bypassing catalog validation.
 pub const MAX_DEFAULT_MODEL_LEN: usize = 256;
 
-/// Persist `[models].default`.
-///
-/// This is the only sanctioned writer of `models.default`.
-/// It routes through [`super::campaigns::persist_models_default`] so a user pick always dismisses an active campaign.
-/// Do not persist `models.default` via raw `update_config`, or a campaign would keep overriding the user's choice.
-///
-/// Caller must validate `value` against the model catalog first.
-/// Empty string clears the field (falls back to remote/built-in default).
-/// Length over [`MAX_DEFAULT_MODEL_LEN`] returns `Err`.
+/// Persist `[models].default`. This is the only sanctioned writer of `models.default`. It routes through [`super::campaigns::persist_models_default`] so a user pick always dismisses an active campaign.
+/// Do not persist `models.default` via raw `update_config`, or a campaign would keep overriding the user's choice. Caller must validate `value` against the model catalog first.
+/// Empty string clears the field (falls back to remote/built-in default). Length over [`MAX_DEFAULT_MODEL_LEN`] returns `Err`.
 pub async fn set_default_model(value: String) -> Result<()> {
     super::campaigns::persist_models_default(
         if value.is_empty() { None } else { Some(value) },
@@ -231,11 +215,7 @@ pub async fn set_feedback_trace_card(value: bool) -> Result<()> {
     .await
 }
 
-/// Persist `[ui].fork_secondary_model` via `update_config`.
-///
-/// Caller must validate against the model catalog.
-/// Empty string restores the built-in default.
-/// A length over [`MAX_DEFAULT_MODEL_LEN`] returns `Err`.
+/// Persist `[ui].fork_secondary_model` via `update_config`. Caller must validate against the model catalog. Empty string restores the built-in default. A length over [`MAX_DEFAULT_MODEL_LEN`] returns `Err`.
 pub async fn set_fork_secondary_model(value: String) -> Result<()> {
     if value.len() > MAX_DEFAULT_MODEL_LEN {
         anyhow::bail!(

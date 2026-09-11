@@ -448,7 +448,7 @@ async fn background_refresh_updates_snapshot_against_mock_idp() {
     let persist_path = auth_path.clone();
     let mut params = provider_params(base, Some(Utc::now() + chrono::TimeDelta::seconds(5)));
     params.on_refresh = Some(Arc::new(move |event: &RefreshEvent| {
-        crate::hub_auth::write_refreshed_token(&persist_path, "oidc", event).unwrap();
+        crate::hub_auth::write_refreshed_token(&persist_path, "oidc", "", event).unwrap();
     }));
     let provider = ProactiveOidcAuthProvider::new(params);
 
@@ -747,7 +747,7 @@ async fn invalid_expires_in_keeps_rotated_refresh_token() {
     let persist_path = auth_path.clone();
     let mut params = provider_params(base, Some(Utc::now() + chrono::TimeDelta::seconds(3)));
     params.on_refresh = Some(Arc::new(move |event: &RefreshEvent| {
-        crate::hub_auth::write_refreshed_token(&persist_path, "oidc", event).unwrap();
+        crate::hub_auth::write_refreshed_token(&persist_path, "oidc", "", event).unwrap();
     }));
     let provider = ProactiveOidcAuthProvider::new(params);
 
@@ -957,6 +957,7 @@ async fn stale_persist_does_not_clobber_newer_token() {
     params.on_refresh = Some(crate::hub_auth::persist_on_refresh(
         auth_path.clone(),
         "oidc".into(),
+        String::new(),
     ));
     let provider = ProactiveOidcAuthProvider::new(params);
 

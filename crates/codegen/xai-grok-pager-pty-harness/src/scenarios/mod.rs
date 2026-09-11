@@ -21,8 +21,21 @@ pub mod scroll_stress;
 pub mod streaming_render;
 pub mod x10_mouse_leak;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ValueEnum, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    ValueEnum,
+    Serialize,
+    Deserialize,
+    strum::AsRefStr,
+    strum::IntoStaticStr,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum Scenario {
     /// Inject rapid `j` keys against a large pre-rendered response.
     ScrollStress,
@@ -48,18 +61,6 @@ impl Scenario {
         Scenario::IdleCost,
         Scenario::MixedInteraction,
     ];
-
-    /// Stable slug used in JSON output and baseline files.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Scenario::ScrollStress => "scroll_stress",
-            Scenario::StreamingRender => "streaming_render",
-            Scenario::ResizeStorm => "resize_storm",
-            Scenario::LargeCodeblock => "large_codeblock",
-            Scenario::IdleCost => "idle_cost",
-            Scenario::MixedInteraction => "mixed_interaction",
-        }
-    }
 
     /// Dispatch to the scenario implementation.
     pub async fn run(

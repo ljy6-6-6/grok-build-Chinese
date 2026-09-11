@@ -15,8 +15,12 @@ mod mcp;
 pub use mcp::*;
 mod permission;
 pub use permission::*;
+mod auth_provider;
+pub use auth_provider::*;
 use serde::{Deserialize, Serialize};
 use xai_grok_announcements::RemoteAnnouncement;
+pub use xai_grok_config::DisplayRefreshSettings;
+use xai_grok_config::deserialize::optional_bool as de_opt_bool_tolerant;
 /// A remote `campaigns[]` entry: an `id` gate plus a flattened patch that can set any config key.
 /// It is the JSON sibling of a `[[campaigns]]` TOML override.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -163,178 +167,6 @@ pub struct WorktreeAutoGcSettings {
     )]
     pub rebuild_min_interval_secs: Option<u64>,
 }
-/// Display-refresh probe and auto-cadence settings: one struct for local `[ui.display_refresh]`, remote `display_refresh`, and `UiConfig`.
-/// Each field deserializes tolerantly (wrong types become `None`); unknown keys land in [`Self::extra`] so a settings save cannot drop future knobs.
-/// `resolve_display_refresh` resolves it.
-/// Client defaults: probe on, auto on, floor 8 ms, ceiling 16 ms, Hz band 55 to 240.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct DisplayRefreshSettings {
-    /// Probe the primary display's Hz once per process. `Some(false)` is a kill-switch.
-    #[serde(
-        default,
-        deserialize_with = "de_opt_bool_tolerant",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub probe_enabled: Option<bool>,
-    /// Derive paint/scroll cadence from a successful in-band probe (default off).
-    #[serde(
-        default,
-        deserialize_with = "de_opt_bool_tolerant",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub auto_cadence_enabled: Option<bool>,
-    /// Lower clamp for auto-derived ms (default 8).
-    #[serde(
-        default,
-        deserialize_with = "de_opt_u32_tolerant",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub floor_ms: Option<u32>,
-    /// Upper clamp for auto-derived ms (default 16).
-    #[serde(
-        default,
-        deserialize_with = "de_opt_u32_tolerant",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub ceiling_ms: Option<u32>,
-    /// Minimum accepted probe Hz for auto-cadence (default 55).
-    #[serde(
-        default,
-        deserialize_with = "de_opt_u32_tolerant",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub min_hz: Option<u32>,
-    /// Maximum accepted probe Hz for auto-cadence (default 165).
-    #[serde(
-        default,
-        deserialize_with = "de_opt_u32_tolerant",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub max_hz: Option<u32>,
-    /// Unknown or future object members, preserved across a config rewrite.
-    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
-    pub extra: serde_json::Map<String, serde_json::Value>,
-}
-impl DisplayRefreshSettings {
-    /// True when no field is set (all inherit remote/default).
-    pub fn is_default(&self) -> bool {
-        self.probe_enabled.is_none()
-            && self.auto_cadence_enabled.is_none()
-            && self.floor_ms.is_none()
-            && self.ceiling_ms.is_none()
-            && self.min_hz.is_none()
-            && self.max_hz.is_none()
-            && self.extra.is_empty()
-    }
-}
-fn de_opt_bool_tolerant<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<bool>, D::Error> {
-    struct V;
-    impl<'de> serde::de::Visitor<'de> for V {
-        type Value = Option<bool>;
-        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            f.write_str("bool (wrong types ignored)")
-        }
-        fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> {
-            Ok(Some(v))
-        }
-        fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-            Ok(None)
-        }
-        fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-            Ok(None)
-        }
-        fn visit_some<A: serde::de::Deserializer<'de>>(
-            self,
-            d: A,
-        ) -> Result<Self::Value, A::Error> {
-            d.deserialize_any(V)
-        }
-        fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Self::Value, E> {
-            Ok(None)
-        }
-        fn visit_string<E: serde::de::Error>(self, _: String) -> Result<Self::Value, E> {
-            Ok(None)
-        }
-        fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<Self::Value, E> {
-            Ok(None)
-        }
-        fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<Self::Value, E> {
-            Ok(None)
-        }
-        fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Self::Value, E> {
-            Ok(None)
-        }
-        fn visit_seq<A: serde::de::SeqAccess<'de>>(
-            self,
-            mut seq: A,
-        ) -> Result<Self::Value, A::Error> {
-            while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
-            Ok(None)
-        }
-        fn visit_map<A: serde::de::MapAccess<'de>>(
-            self,
-            mut map: A,
-        ) -> Result<Self::Value, A::Error> {
-            while map
-                .next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?
-                .is_some()
-            {}
-            Ok(None)
-        }
-    }
-    deserializer.deserialize_any(V)
-}
-fn de_opt_u32_tolerant<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<u32>, D::Error> {
-    struct V;
-    impl<'de> serde::de::Visitor<'de> for V {
-        type Value = Option<u32>;
-        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            f.write_str("u32 (wrong types ignored)")
-        }
-        fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
-            Ok(u32::try_from(v).ok())
-        }
-        fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
-            Ok(u32::try_from(v).ok())
-        }
-        fn visit_u32<E: serde::de::Error>(self, v: u32) -> Result<Self::Value, E> {
-            Ok(Some(v))
-        }
-        fn visit_i32<E: serde::de::Error>(self, v: i32) -> Result<Self::Value, E> {
-            Ok(u32::try_from(v).ok())
-        }
-        fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-            Ok(None)
-        }
-        fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-            Ok(None)
-        }
-        fn visit_some<A: serde::de::Deserializer<'de>>(
-            self,
-            d: A,
-        ) -> Result<Self::Value, A::Error> {
-            d.deserialize_any(V)
-        }
-        fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Self::Value, E> {
-            Ok(None)
-        }
-        fn visit_string<E: serde::de::Error>(self, _: String) -> Result<Self::Value, E> {
-            Ok(None)
-        }
-        fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Self::Value, E> {
-            Ok(None)
-        }
-        fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Self::Value, E> {
-            Ok(None)
-        }
-    }
-    deserializer.deserialize_any(V)
-}
 fn de_opt_u64_tolerant<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<u64>, D::Error> {
@@ -464,13 +296,14 @@ pub struct RemoteSettings {
     pub non_git_workspace_capture: Option<bool>,
     #[serde(default)]
     pub login_shell_capture: Option<bool>,
-    /// When `Some(false)`, scheduled task fires run as main-conversation turns instead of background subagents.
-    #[serde(default)]
-    pub scheduler_background_loops: Option<bool>,
     /// Fleet-wide kill switch for turn-level transient retries; it applies at the next spawn, and local config or env wins.
     /// Malformed values must not fail the parse.
     #[serde(default, deserialize_with = "de_opt_bool_tolerant")]
     pub turn_transient_retry: Option<bool>,
+    /// Kill switch for the credential-less-401 park: `Some(false)` restores terminal behavior;
+    /// absent = enabled. Resolved at spawn; running turns finish on their spawn-time value.
+    #[serde(default, deserialize_with = "de_opt_bool_tolerant")]
+    pub uncharged_401_park: Option<bool>,
     /// Release channel: `"stable"` or `"alpha"`.
     /// It is the fallback when no local `[cli] channel` or `--alpha`/`--stable` flag is set.
     #[serde(default)]
@@ -893,6 +726,11 @@ pub struct RemoteSettings {
     /// `GROK_DOCK` (or the older `GROK_DOCK_V2`) overrides it locally.
     #[serde(default)]
     pub dock_enabled: Option<bool>,
+    /// The terminal-native `terminal` color theme (staged rollout). Hidden when absent.
+    /// `Some(true)` from `grok_build_settings.terminal_theme_enabled` reveals it for the targeted cohort.
+    /// `GROK_TERMINAL_THEME` overrides it locally.
+    #[serde(default)]
+    pub terminal_theme_enabled: Option<bool>,
     /// Whether ZDR (Zero Data Retention) users are allowed to use the product.
     /// The default is `false` (blocked) during beta.
     #[serde(default)]
@@ -1086,7 +924,7 @@ pub struct ContextualHintsRemote {
     /// Clipboard-image input tip.
     #[serde(default)]
     pub image_input: Option<bool>,
-    /// Send-now tip after queuing a mid-turn follow-up (InterjectPrompt chord).
+    /// Send-now tip after queuing a mid-turn follow-up.
     #[serde(default)]
     pub send_now: Option<bool>,
     /// Small-screen tip (`/compact-mode` hint on smallish terminals).
@@ -1321,6 +1159,27 @@ mod tests {
         assert_eq!(round_trip.turn_transient_retry, Some(false));
         let absent: RemoteSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(absent.turn_transient_retry, None);
+    }
+    #[test]
+    fn remote_settings_uncharged_401_park_round_trip_and_default_absent() {
+        let s: RemoteSettings = serde_json::from_str(r#"{"uncharged_401_park": false}"#).unwrap();
+        assert_eq!(s.uncharged_401_park, Some(false));
+        let round_trip: RemoteSettings =
+            serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(round_trip.uncharged_401_park, Some(false));
+        let absent: RemoteSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(absent.uncharged_401_park, None);
+    }
+    #[test]
+    fn remote_settings_uncharged_401_park_malformed_value_does_not_poison_siblings() {
+        for bad in [
+            r#"{"uncharged_401_park": "false", "leader_mode": true}"#,
+            r#"{"uncharged_401_park": [1], "leader_mode": true}"#,
+        ] {
+            let s: RemoteSettings = serde_json::from_str(bad).unwrap();
+            assert_eq!(s.uncharged_401_park, None, "malformed value drops: {bad}");
+            assert_eq!(s.leader_mode, Some(true), "siblings survive: {bad}");
+        }
     }
     #[test]
     fn remote_settings_vendor_sessions_round_trip_and_default_absent() {

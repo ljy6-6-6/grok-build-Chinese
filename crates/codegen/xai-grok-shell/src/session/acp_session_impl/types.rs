@@ -11,9 +11,8 @@ pub(crate) enum McpReminderMode {
     Full,
 }
 
-/// Which credential store a successful 401 recovery minted into.
-/// An uncharged resubmit can only usefully wait on the store that recovered.
-/// Waiting on the session token for a provider-key 401 blocks 15s for a refresh that is irrelevant to the rejected credential.
+/// Which credential store the resubmit should wait on. Waiting on the session token for a
+/// provider-key 401 would hold the full pace for a refresh irrelevant to the rejected credential.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RecoveredStore {
     /// `AuthManager` session token (devbox re-mint, OIDC refresh); `wait_for_token_refresh` is meaningful.
@@ -22,14 +21,30 @@ pub(crate) enum RecoveredStore {
     AuthProvider,
 }
 
+/// Whether a turn iteration is a parked uncharged-401 resubmit — see the re-park arm in
+/// `SessionActor::handle_sampling_failure`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TurnParkState {
+    /// No park in effect: full prepare/preflight cadence.
+    Fresh,
+    /// Parked on the uncharged path since the last successful response.
+    Parked,
+}
+
+impl TurnParkState {
+    pub(crate) fn is_parked(self) -> bool {
+        matches!(self, Self::Parked)
+    }
+}
+
 /// Recovery decision returned by `SessionActor::handle_sampling_failure` for the sampler-based turn loop.
 pub(crate) enum SamplerFailureRecovery {
     /// Compaction ran.
     /// The turn loop should rebuild the request from the compacted conversation and resubmit.
     CompactAndResubmit,
-    /// Auth 401 recovery succeeded; the turn loop should resubmit with the fresh token.
-    /// `credential` records what credential the rejected request carried on the wire.
-    /// A 401 for a request that carried no credential (a fail-closed send) must not be charged against the per-incident auth-retry budget.
+    /// Resubmit through the auth-retry schedule: recovery succeeded, or the parked
+    /// credential-less case. `credential` is the rejected request's wire provenance;
+    /// credential-less sends are never charged against the per-incident budget.
     RefreshAuthAndResubmit {
         credential: xai_grok_sampling_types::SentCredential,
         store: RecoveredStore,
@@ -51,8 +66,8 @@ pub(crate) enum SamplerTurnOutcome {
         Box<xai_grok_sampler::InferenceLatencyStats>,
     ),
     CompactAndResubmit,
-    /// Auth recovery succeeded; the outer loop should retry.
-    /// Mirrors [`SamplerFailureRecovery::RefreshAuthAndResubmit`].
+    /// Retry through the auth-retry schedule. Mirrors
+    /// [`SamplerFailureRecovery::RefreshAuthAndResubmit`].
     RefreshAuthAndResubmit {
         credential: xai_grok_sampling_types::SentCredential,
         store: RecoveredStore,
@@ -77,11 +92,9 @@ pub(crate) enum CompletedStop {
 /// Outcome of `process_conversation_turn`, distinguishing normal completion from cancellation.
 pub(crate) enum TurnOutcome {
     /// The model finished responding (no more tool calls).
-    /// `snapshot` carries the turn-end signals for trace metadata.
     /// `tools_called` lists the tools invoked this turn, for completion-requirement tracking.
     /// `structured_output` is the schema-validated `--json-schema` output (`None` without a schema; `Some(Err)` on parse or validation failure).
     Completed {
-        snapshot: Box<Option<TurnDeltaSnapshot>>,
         tools_called: Vec<String>,
         structured_output: Option<Result<serde_json::Value, String>>,
         /// How the completed turn stopped; decided once at the return site.
@@ -97,9 +110,7 @@ pub(crate) enum TurnOutcome {
     MaxTurnsReached { limit: usize },
     /// Silent EndTurn after stationarity or true-noop thrash.
     /// Distinct from Completed so the recovery, goal, and stop-hook paths cannot re-open the sampling loop.
-    StationarityEnded {
-        snapshot: Box<Option<TurnDeltaSnapshot>>,
-    },
+    StationarityEnded,
 }
 
 #[derive(Debug)]
@@ -137,9 +148,7 @@ pub enum TodoGateReason {
 
 /// Outcome of `evaluate_todo_gate`.
 /// `Nudge` carries the rendered reminder text and the typed reason so the producer can emit telemetry without re-deriving the reason from the input.
-///
 /// Exposed as `pub` solely so the replay-trace integration test in `tests/trace_replay.rs` can match against the decision.
-/// Not part of the public API.
 #[doc(hidden)]
 pub enum TodoGateDecision {
     /// Gate is satisfied; the turn may end.
@@ -153,7 +162,6 @@ pub enum TodoGateDecision {
 
 /// Why `maybe_fire_laziness_check` aborted before producing a verdict.
 /// Maps 1:1 to the `LAZINESS_ABORT_*` telemetry consts via `as_const_str()`.
-/// That match is exhaustive with no wildcard, so a new variant forces a new const and a new arm.
 /// Mirrors the `TodoGateReason` pattern.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LazinessAbortReason {
@@ -249,11 +257,7 @@ pub(crate) enum StopGateDecision {
     KeepWorking { feedback: String },
 }
 
-/// What the model was doing at the moment the turn was cut off, per the capture's last touch.
 /// Serialized onto `streaming_partial.json` so trace inspection can tell whether the abort interrupted thinking, response text, or a tool call.
-///
-/// There is deliberately no `ToolExecution` variant.
-/// On `SamplingEvent::Completed` (where the canonical assistant message is committed) the in-progress generation is discarded from the capture.
 /// `Completed` always fires before the turn loop dispatches tools, so a streaming partial can only be tied to one of the model's own emission phases.
 /// Interruptions during tool execution are covered by the canonical `record_assistant_response` path instead.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

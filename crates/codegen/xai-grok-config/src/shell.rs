@@ -19,10 +19,7 @@ pub enum WindowsShell {
 }
 
 /// Detect the best available shell on Windows.
-///
 /// If `GROK_SHELL` is set, it takes precedence over auto-detection.
-/// Otherwise the cascade is: pwsh → powershell.exe → Git Bash → cmd.exe.
-///
 /// Result is cached for the process lifetime.
 #[cfg(not(unix))]
 pub fn detect_windows_shell() -> &'static WindowsShell {
@@ -177,11 +174,7 @@ impl WindowsShell {
     }
 }
 
-/// Returns the command chaining separator for the current platform and detected shell.
-///
-/// - Unix: always `"&&"` (bash/zsh).
-/// - Windows with pwsh or Git Bash: `"&&"` (both support pipeline chain operators).
-/// - Windows with powershell.exe (5.1) or cmd.exe: `";"`.
+/// Unix: always `"&&"` (bash/zsh); Windows with pwsh or Git Bash: `"&&"` (both support pipeline chain operators); Windows with powershell.exe (5.1) or cmd.exe: `";"`.
 pub fn chain_separator() -> &'static str {
     #[cfg(unix)]
     {
@@ -199,7 +192,6 @@ pub fn chain_separator() -> &'static str {
 
 /// Whether `grep`, `head`, `tail`, `sed`, `awk`, `find` are usable from the active shell.
 /// True on Unix and on Windows with Git Bash; false on Windows with PowerShell or `cmd.exe`.
-///
 /// Tool descriptions branch on this to swap Unix-centric guidance for shell-aware guidance and avoid `'grep' is not recognized` failures.
 pub fn has_unix_utilities() -> bool {
     #[cfg(unix)]
@@ -213,11 +205,7 @@ pub fn has_unix_utilities() -> bool {
 }
 
 /// Whether `name` resolves to an executable on the current `$PATH`.
-///
 /// The truncated-MCP steer uses this to name only tools present on the tool server's `$PATH`, with no "if available" hedge.
-/// `which` handles the platform details (PATHEXT and App Execution Aliases on Windows).
-/// Probes this process's environment (the tool server and the shell tool are co-located in production).
-/// Per-session `export PATH` changes inside the persistent shell are not reflected (uncommon for `jq`/`python`/`sed`/`cut`).
 pub fn is_command_available(name: &str) -> bool {
     which::which(name).is_ok()
 }
@@ -267,11 +255,7 @@ pub fn shell_command_argv(command: &str) -> ShellInvocation {
 /// Pure builder split out of `shell_command_argv` so tests can exercise every `WindowsShell` variant, not just the one installed on the test host.
 #[cfg(not(unix))]
 fn invocation_for(shell: &WindowsShell, command: &str) -> ShellInvocation {
-    // Force UTF-8 for descendant tools
     // Windows' legacy ANSI codepage (cp1252) makes locale-sensitive children mis-decode UTF-8 subprocess output
-    // Python's text-mode `subprocess`, for example, raised `UnicodeDecodeError` on `gh` output
-    // `PYTHONUTF8=1` is the fix (forces `locale.getpreferredencoding` to utf-8)
-    // `PYTHONIOENCODING` covers the interpreter's own stdio, with `surrogateescape` matching UTF-8 Mode's leniency
     // Applied before the per-request env, so an explicit caller value still overrides these defaults
     let utf8_env = [
         ("PYTHONUTF8", "1"),
@@ -317,21 +301,7 @@ fn invocation_for(shell: &WindowsShell, command: &str) -> ShellInvocation {
     }
 }
 
-// =============================================================================
-// Unix shell resolution
-// =============================================================================
-//
-// Locates an absolute path to a bash/zsh binary on Unix:
-//
-//   1. `$GROK_SHELL` override, if it names the requested kind and is runnable.
-//   2. `$SHELL`, if it names the requested kind and is runnable.
-//      Covers most NixOS / Homebrew / `nix-darwin` setups
-//      There the user's login shell already lives at the resolved path (e.g. `/run/current-system/sw/bin/bash`, `/opt/homebrew/bin/bash`).
-//   3. `which::which(name)` walks `$PATH`.
-//      Catches NixOS profile shells in `/nix/store/...` or `/etc/profiles/per-user/<u>/bin/` when `/bin/bash` is absent
-//   4. A fixed candidate list: `{/bin, /usr/bin, /usr/local/bin, /opt/homebrew/bin} × {bash,zsh}`.
-//   5. Hardcoded `/bin/<name>`: historical behavior, only reached when every earlier step has failed.
-//
+// `$GROK_SHELL` override, if it names the requested kind and is runnable; `$SHELL`, if it names the requested kind and is runnable. Covers most NixOS / Homebrew / `nix-darwin` setups There the user's login shell already lives at the resolved path; `which::which(name)` walks `$PATH`. Catches NixOS profile shells in `/nix/store/...` or `/etc/profiles/per-user/<u>/bin/` when `/bin/bash` is absent; A fixed candidate list: `{/bin, /usr/bin, /usr/local/bin, /opt/homebrew/bin} × {bash,zsh}`; Hardcoded `/bin/<name>`: historical behavior, only reached when every earlier step has failed.
 // The result is cached per kind in a process-wide `OnceLock`, so the cascade is run at most once per shell kind per process
 
 /// Bash and zsh are the only kinds supported by the persistent shell-state backend (the dump scripts are bash/zsh-specific).
@@ -431,7 +401,6 @@ fn resolve_unix_shell_path(kind: UnixShellKind) -> String {
 }
 
 /// Whether `path` is an executable file.
-///
 /// First tries the file's mode bits (any-x); if that's inconclusive, falls back to invoking `<path> --version`.
 /// The fallback exists for Nix: some overlay filesystems there expose binaries whose mode bits don't reflect their real executability.
 #[cfg(unix)]

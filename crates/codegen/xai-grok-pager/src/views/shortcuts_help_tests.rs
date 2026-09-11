@@ -590,7 +590,8 @@ fn build_entries_lists_undo_and_redo() {
 
     let (redo_keys, redo_help) = pseudo_hint(&entries, "redo").expect("redo row");
     assert!(redo_keys.contains(&key!('z', CONTROL | SHIFT)));
-    assert!(redo_keys.contains(&key!('r', CONTROL)));
+    // Some terminals collapse Ctrl+Shift+Z into plain Ctrl+Z, so redo needs a fallback key.
+    assert!(redo_keys.contains(&key!('z', ALT)));
     assert_eq!(redo_help, Some(REDO_LONG_HELP));
 }
 
@@ -728,9 +729,6 @@ fn build_entries_dims_both_pane_contexts_from_side_pane() {
 }
 
 /// The dashboard LIST and the session OVERLAY dim each other's shortcuts.
-/// On the list, overlay-scoped shortcuts (`When::DashboardOverlay`, e.g. "prev session") are dimmed.
-/// List shortcuts (`When::DashboardFocused`, e.g. "pin") are lit; inside the overlay it's the inverse.
-/// (Dashboard actions are registered under `cfg(test)`.)
 #[test]
 fn build_entries_dims_dashboard_list_vs_overlay() {
     let registry = ActionRegistry::defaults();
@@ -772,10 +770,9 @@ fn build_entries_dims_dashboard_list_vs_overlay() {
     );
 }
 
-/// `DashboardStop` (list) and `DashboardOverlayStop` (overlay) share Ctrl+X and the Dashboard category.
-/// The per-category dedup must keep whichever matches the active surface (lit) instead of always keeping the first-registered (list) def.
-/// Inside the overlay, the `ShortcutsHelp` row must drop its shadowed Ctrl+X alt while keeping its other binding.
-/// The overlay stop owns the key there.
+/// `DashboardStop` (list) and `DashboardOverlayStop` (overlay) share. CtrlCtrl+X and the Dashboard
+/// category. The per-category dedup must keep whichever matches the active surface (lit) instead of
+/// always keeping the first-registered (list) def.
 #[test]
 fn build_entries_overlay_stop_wins_dedup_and_shadows_cheatsheet_ctrl_x() {
     let registry = ActionRegistry::defaults();

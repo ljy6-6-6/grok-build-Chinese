@@ -30,10 +30,7 @@ pub(crate) fn current_hook_infos(
     hook_specs_to_infos(&registry.all_hooks(), &disabled, &registered)
 }
 
-/// Convert a whole spec list to wire DTOs. `removable` is source-level:
-/// `HooksAction::Remove` unregisters the entire `source_dir`, and a
-/// managed-policy member pins the directory (removal is refused), so no
-/// hook in such a source is removable.
+/// Convert a whole spec list to wire DTOs. `removable` is source-level: `HooksAction::Remove` unregisters the entire `source_dir`, and a managed-policy member pins the directory (removal is refused), so no hook in such a source is removable.
 fn hook_specs_to_infos(
     specs: &[&xai_grok_hooks::config::HookSpec],
     disabled: &xai_grok_hooks::trust::DisabledHooks,
@@ -346,9 +343,7 @@ mod tests {
         assert!(url(None, None).is_none());
     }
 
-    /// `removable` must mean "Remove can succeed": a managed-policy member
-    /// pins the whole source directory even when it is user-registered, and
-    /// an unpinned sibling in that directory is pinned along with it.
+    /// `removable` must mean "Remove can succeed": a managed-policy member pins the whole source directory even when it is user-registered, and an unpinned sibling in that directory is pinned along with it.
     /// Both managed tiers (`SystemManaged` and `Requirements`) pin identically.
     #[test]
     fn hook_specs_to_infos_pins_removable_at_source_level() {

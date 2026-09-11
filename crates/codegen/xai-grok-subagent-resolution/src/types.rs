@@ -71,6 +71,25 @@ pub struct ResumeSourceData {
     pub child_session_id: String,
 }
 
+impl From<xai_grok_tools::implementations::grok_build::task::types::SubagentResumeSource>
+    for ResumeSourceData
+{
+    fn from(
+        source: xai_grok_tools::implementations::grok_build::task::types::SubagentResumeSource,
+    ) -> Self {
+        ResumeSourceData {
+            subagent_id: source.subagent_id,
+            subagent_type: source.subagent_type,
+            persona: source.persona,
+            model_id: source.model_id,
+            child_cwd: source.child_cwd,
+            worktree_path: source.worktree_path.map(PathBuf::from),
+            snapshot_ref: source.snapshot_ref,
+            child_session_id: source.child_session_id,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ResolutionError {
     /// No production or session CLI definition has this name.

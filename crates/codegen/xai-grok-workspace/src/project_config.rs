@@ -54,20 +54,14 @@ fn is_user_grok_config_file(config_path: &Path) -> bool {
     canonical_config == canonical_user
 }
 
-/// Find all `.grok/config.toml` files from `cwd` upward to the git repo root.
-/// Returns paths ordered from repo root (lowest priority) to cwd (highest priority), matching the convention used by skills and AGENTS.md discovery.
-///
-/// If no git repo is found, only checks `cwd/.grok/config.toml`. Excludes the
-/// user-global config so `cwd == $HOME` does not treat `~/.grok/config.toml` as
-/// a project overlay.
+/// Find `.grok/config.toml` from `cwd` up to the git repo root, repo-root (lowest) to cwd (highest), matching skills and AGENTS.md discovery.
+/// No repo: only `cwd/.grok/config.toml`. Excludes user-global config so `cwd == $HOME` is not a project overlay.
 pub fn find_project_configs(cwd: &Path) -> Vec<PathBuf> {
     find_project_configs_in(&RepoDirChain::resolve(cwd).dirs)
 }
 
-/// [`find_project_configs`] over a precomputed cwd-to-git-root dir chain ([`RepoDirChain`]), repo-root-first.
-/// Excludes the user-global config so
-/// `cwd == $HOME` does not treat `~/.grok/config.toml` as a project overlay.
-/// `pub(crate)` so the folder-trust gate's `repo_configs_present` can call it.
+/// [`find_project_configs`] over a precomputed [`RepoDirChain`], repo-root-first.
+/// Excludes user-global config so `cwd == $HOME` is not a project overlay. `pub(crate)` for the folder-trust gate.
 pub(crate) fn find_project_configs_in(chain_dirs: &[PathBuf]) -> Vec<PathBuf> {
     // `dirs` is cwd-first; reverse so repo root comes first (lowest priority) and cwd last (highest)
     chain_dirs

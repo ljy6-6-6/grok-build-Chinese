@@ -49,6 +49,13 @@ pub struct ReplayPathHint<'a> {
     pub fallback: ReplayLookupFallback,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UnfinishedSubagent {
+    pub(crate) subagent_id: String,
+    pub(crate) attempt_id: Option<String>,
+    pub(crate) child_session_id: String,
+}
+
 #[doc(hidden)]
 pub struct PreparedReplay<'a> {
     /// Rewind-filtered replay lines, each borrowed from the input transcript.
@@ -57,12 +64,11 @@ pub struct PreparedReplay<'a> {
     pub(crate) last_tokens: u64,
     /// Highest `eventId` counter across all live (rewind-filtered) lines.
     /// It re-seeds the process-global event counter on resume so post-load live events keep monotonically increasing ids.
-    /// See [`crate::util::event_id::ensure_event_counter_at_least`].
     /// `None` when no line carried a parseable `eventId` (older shell).
     pub(crate) max_event_seq: Option<u64>,
     pub(crate) total_live: usize,
-    /// Replayed spawns with no matching finish (a rewind can drop the finish): `(subagent_id, child_session_id)`, reconciled on load.
-    pub(crate) unfinished_subagents: Vec<(String, String)>,
+    /// Replayed spawns with no matching finish (a rewind can drop the finish), reconciled on load.
+    pub(crate) unfinished_subagents: Vec<UnfinishedSubagent>,
 }
 
 /// Gates the caller's post-replay memory purge (`Empty` means nothing was reclaimable).
@@ -165,7 +171,6 @@ pub fn load_updates_for_replay(
 
 /// Like [`load_updates_for_replay`], but resolves the session under a specific grok home.
 /// Typed, materialize-all replay reader: collects every update into owned `Vec`s.
-/// Production forwards replay through [`stream_replay_updates_at`] to bound peak memory.
 /// Only tests call it: the `testkit_synth_roundtrip` and `session_load_perf` parity references and the in-crate relocation tests.
 #[cfg(any(test, feature = "test-support"))]
 pub fn load_updates_for_replay_at(
@@ -241,9 +246,6 @@ pub(crate) fn resolve_replay_updates_path(
 /// Invoke `f` once per client-replay ACP update for a session under `grok_home`, never building the full typed `Vec`.
 /// Skips ACU / InProgress lines before full notification serde and collapses a ToolCall with its updates.
 /// The typed [`load_updates_for_replay_at`] reference does not skip those.
-///
-/// `Empty` folds missing-session, missing-file, and no-ACP-updates.
-/// I/O errors from reading the file still propagate.
 pub fn stream_replay_updates_at<F: FnMut(acp::SessionUpdate)>(
     session_id: &str,
     grok_home: &std::path::Path,
@@ -257,10 +259,7 @@ pub fn stream_replay_updates_at<F: FnMut(acp::SessionUpdate)>(
 }
 
 /// Whether replaying `session_id`'s persisted transcript would emit at least one ACP update ([`ReplayEmission::Emitted`]), without applying anything.
-/// For callers deciding whether an in-memory copy can be dropped and rebuilt later: a non-empty file is NOT proof.
 /// xAI-only, torn, or catalog-only content replays `Empty`.
-/// This mirrors [`stream_replay_updates_at_hinted`]'s per-line emission exactly (same rewind and drop filters, same envelope parse).
-/// It stops at the first emitting line (typically the first line, the prompt echo).
 /// `false` and `Err` both mean "keep the in-memory copy".
 pub fn replay_would_emit(
     session_id: &str,
@@ -368,8 +367,9 @@ fn rewind_filtered_live(raw: &str) -> Vec<&str> {
 
 /// Unpaired spawns across the rewind-filtered timeline.
 /// The substring pre-filter keeps non-subagent lines off the JSON path.
-pub(crate) fn collect_unfinished_subagents(filtered: &[&str]) -> Vec<(String, String)> {
-    let mut pending: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+pub(crate) fn collect_unfinished_subagents(filtered: &[&str]) -> Vec<UnfinishedSubagent> {
+    let mut pending: std::collections::BTreeMap<String, UnfinishedSubagent> =
+        std::collections::BTreeMap::new();
     for line in filtered {
         if !line.contains("subagent_spawned") && !line.contains("subagent_finished") {
             continue;
@@ -384,10 +384,18 @@ pub(crate) fn collect_unfinished_subagents(filtered: &[&str]) -> Vec<(String, St
         match notification.update {
             XaiUpdate::SubagentSpawned {
                 subagent_id,
+                attempt_id,
                 child_session_id,
                 ..
             } => {
-                pending.insert(subagent_id, child_session_id);
+                pending.insert(
+                    subagent_id.clone(),
+                    UnfinishedSubagent {
+                        subagent_id,
+                        attempt_id,
+                        child_session_id,
+                    },
+                );
             }
             XaiUpdate::SubagentFinished { subagent_id, .. } => {
                 pending.remove(&subagent_id);
@@ -395,7 +403,7 @@ pub(crate) fn collect_unfinished_subagents(filtered: &[&str]) -> Vec<(String, St
             _ => {}
         }
     }
-    pending.into_iter().collect()
+    pending.into_values().collect()
 }
 
 /// The raw `_meta` object of a persisted line, if any, without allocating a `serde_json::Value`.
@@ -470,12 +478,8 @@ fn line_has_event_id(line: &str, cursor_id: &str) -> bool {
 }
 
 /// Rewind-filter, resolve the reconnect cursor, drop redundant command catalogs and InProgress tool_call_updates, and scan `totalTokens`.
-/// Pure data processing, no I/O.
-///
 /// The cursor is resolved before dropping ACUs / InProgress lines: an idle client often reconnects with one of those `eventId`s as its cursor.
 /// Resolving against the inclusive set keeps reconnect incremental instead of a full replay.
-///
-/// `#[doc(hidden)] pub` (not stable API): production replay uses it, and the session-load memory test drives it to check the peek stays zero-copy.
 #[doc(hidden)]
 pub fn prepare_replay_lines<'a>(contents: &'a str, cursor: Option<&str>) -> PreparedReplay<'a> {
     let filtered = filter_rewind_lines(contents.lines().filter(|l| !l.trim().is_empty()).collect());
@@ -545,7 +549,6 @@ pub fn prepare_replay_lines<'a>(contents: &'a str, cursor: Option<&str>) -> Prep
 /// Blank-strip, drop redundant command catalogs and InProgress tool updates, and rewind-filter a raw `updates.jsonl` segment.
 /// Shared by the delta-replay path (which has no reconnect cursor).
 /// The initial replay path is [`prepare_replay_lines`].
-/// That path additionally resolves a cursor, and so must see ACUs / InProgress lines before dropping them.
 pub(crate) fn filter_delta_replay_lines(contents: &str) -> Vec<&str> {
     let live: Vec<&str> = contents
         .lines()

@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::auth::AuthManager;
 use crate::session::repo_changes::{TraceExportConfig, UploadMethod};
 use crate::upload::gcs::WithAuth as _;
+use xai_grok_login::AuthManager;
 
 /// Hard cap for dump uploads: allowed sizes are `1..=HARD_DUMP_SIZE_CAP_BYTES`; larger dumps are skipped.
 pub const HARD_DUMP_SIZE_CAP_BYTES: u64 = 128 * 1024 * 1024;

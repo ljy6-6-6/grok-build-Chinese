@@ -252,6 +252,11 @@ pub(crate) async fn upload_tool_state_queued(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let object_path = format!("{session_id}/turn_{turn_number}/tool_state.json");
     let bytes_len = state_bytes.len();
+    let region = xai_grok_telemetry::region::Region::from_span(tracing::info_span!(
+        "workspace.tool_state_upload",
+        bytes = tracing::field::Empty,
+    ));
+    region.span().record("bytes", bytes_len as i64);
     match upload_queue
         .enqueue_bytes_blocking(
             &state_bytes,

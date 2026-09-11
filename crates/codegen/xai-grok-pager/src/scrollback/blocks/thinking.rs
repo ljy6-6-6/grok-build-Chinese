@@ -51,13 +51,9 @@ fn append_expand_hint(
     line
 }
 
-/// The de-emphasis patch applied to every reasoning body span when [`crate::appearance::ThinkingConfig::body_dim_italic`] is on.
-///
 /// Attributes only, no foreground: minimal's terminal-native palette makes color-based de-emphasis a no-op.
-/// SGR dim/italic survive `NO_COLOR` and either polarity.
-///
-/// Legacy Windows ConHost has no italic SGR and renders the request as palette noise.
-/// Terminals that merely *ignore* SGR 3 (tmux without `sitm`) are not gated: there is no reliable probe, and they keep the other two cues.
+/// Terminals that merely *ignore* SGR 3 (tmux without `sitm`) are not gated: there is no reliable probe, and they
+/// keep the other two cues.
 fn body_emphasis_patch(ctx: &BlockContext) -> Option<Style> {
     if !ctx.appearance.scrollback.blocks.thinking.body_dim_italic {
         return None;
@@ -67,6 +63,63 @@ fn body_emphasis_patch(ctx: &BlockContext) -> Option<Style> {
         modifiers |= Modifier::ITALIC;
     }
     Some(Style::new().add_modifier(modifiers))
+}
+
+/// Columns spent by the `┃ ` body prefix when the rail renders under the
+/// header's bullet ([`crate::appearance::ThinkingConfig::rail_under_bullet`]).
+const BODY_RAIL_WIDTH: usize = 2;
+
+/// Whether the reasoning rail renders inside the body rows (directly below the header's bullet) instead of as the reserved accent column.
+/// Minimal-only: there every other block starts flush at column 0 with its own `◆`.
+/// An accent column would indent the header's diamond out of line and read as a second, different gutter treatment.
+///
+/// Gated on `accent_enabled` like the accent-column rail it replaces (`rail_style`):
+/// a pager.toml `accent_enabled = false` turns off the reasoning rail wherever it is drawn.
+fn rail_under_bullet(ctx: &BlockContext) -> bool {
+    let cfg = &ctx.appearance.scrollback.blocks.thinking;
+    cfg.rail_under_bullet && cfg.accent_enabled
+}
+
+/// One body row's rail prefix: dim like the accent-column rail it replaces, so it stays a quiet structural cue under `NO_COLOR`.
+fn body_rail_span(ctx: &BlockContext) -> Span<'static> {
+    let cfg = &ctx.appearance.scrollback.blocks.thinking;
+    Span::styled(
+        format!("{} ", crate::glyphs::accent_bar()),
+        Style::default().fg(cfg.accent).add_modifier(Modifier::DIM),
+    )
+}
+
+/// Prefix every body row with [`body_rail_span`] so the rail runs from under the header's bullet down the whole body.
+/// The prefix span is excluded from selection (same mechanism as `prepend_bullet`).
+///
+/// Markdown leaves code-block fill on the line *style*, which `Buffer::set_line`
+/// patches under every span — the rail prefix included. Hoist it onto the
+/// per-line [`BlockLine::background`] starting after the rail (the same
+/// line-style → background split as `MarkdownContent::output`), so the fill
+/// spans the row's content but the rail cell stays unshaded.
+fn apply_body_rail(output: &mut BlockOutput, ctx: &BlockContext) {
+    if !rail_under_bullet(ctx) {
+        return;
+    }
+    for line in &mut output.lines {
+        line.content.spans.insert(0, body_rail_span(ctx));
+        crate::scrollback::types::shift_selection_metadata_for_prefix(line, 1);
+        if let Some(bg) = line.content.style.bg.take() {
+            line.background = Some(bg);
+            line.bg_start_col = BODY_RAIL_WIDTH as u16;
+        }
+    }
+}
+
+/// Body wrap width: the in-body rail prefix spends [`BODY_RAIL_WIDTH`] of the content columns.
+/// The markdown must wrap that much narrower to keep `desired_height` and the painted rows in agreement.
+fn body_wrap_width(ctx: &BlockContext) -> usize {
+    let width = ctx.width as usize;
+    if rail_under_bullet(ctx) {
+        width.saturating_sub(BODY_RAIL_WIDTH).max(1)
+    } else {
+        width
+    }
 }
 
 /// Block displaying agent thinking content with markdown rendering.
@@ -111,14 +164,8 @@ impl ThinkingBlock {
         }
     }
 
-    /// Create an empty streaming block for **historical replay**.
-    ///
-    /// Unlike [`streaming`], this does NOT start the local `started_at` timer.
-    /// Replay re-applies a whole session's persisted chunks back-to-back in microseconds.
-    /// A local wall-clock timer would then freeze to ~0ms in [`finish`] and render a bogus "Thought for 0.0s".
-    /// With no local timer, `finish` leaves `elapsed_time_ms` unset.
-    /// [`ScrollbackState::finish_running_with_time`] then falls back to the server elapsed.
-    /// That server elapsed (`agentTimestampMs - streamStartMs`) is the real duration the user originally experienced.
+    /// Create an empty streaming block for historical replay. A local wall-clock timer would then freeze to ~0ms in
+    /// [`finish`] and render a bogus "Thought for 0.0s".
     pub fn streaming_replay() -> Self {
         Self {
             content: MarkdownContent::streaming(),
@@ -139,7 +186,6 @@ impl ThinkingBlock {
     }
 
     /// Finish streaming and do a full re-render for safety.
-    ///
     /// Freezes the local elapsed time from `started_at`.
     /// The collapsed view then shows the actual wall-clock duration the user experienced, not the server-reported delta.
     pub fn finish(&mut self) {
@@ -197,7 +243,6 @@ impl ThinkingBlock {
     }
 
     /// Get copyable text for this block.
-    ///
     /// When `raw` is true, returns the raw markdown source.
     /// When `raw` is false, returns the rendered text (styles stripped).
     pub fn copy_text(&self, raw: bool) -> String {
@@ -222,11 +267,9 @@ impl ThinkingBlock {
         })
     }
 
-    /// Build the header line: "Thinking..." (running) or "Thought for Xs" (done).
-    ///
-    /// Respects muted_collapsed: when collapsed and muting is on, uses muted style.
-    /// When the entry is selected, the muted treatment is suppressed and the label is forced to the bright/primary style.
-    /// The selected header then reads as undimmed, the same rule as the tool-call variants.
+    /// Build the header line: "Thinking." (running) or "Thought for Xs" (done). Respects muted_collapsed: when
+    /// collapsed and muting is on, uses muted style. The selected header then reads as undimmed, the same rule as the
+    /// tool-call variants.
     fn header_line(&self, ctx: &BlockContext) -> Line<'static> {
         let theme = Theme::current();
         let tool_cfg = &ctx.appearance.scrollback.blocks.tool;
@@ -285,10 +328,13 @@ impl ThinkingBlock {
         }
     }
 
-    /// Prepend header and blank line to output, if header config is enabled.
+    /// Prepend header to output, if header config is enabled.
+    /// Full mode keeps a blank row under the title. Minimal (`rail_under_bullet`) does not — the body starts on the next row.
     fn maybe_prepend_header(&self, mut output: BlockOutput, ctx: &BlockContext) -> BlockOutput {
         if ctx.appearance.scrollback.blocks.thinking.header {
-            output.lines.insert(0, BlockLine::separator(Line::from("")));
+            if !rail_under_bullet(ctx) {
+                output.lines.insert(0, BlockLine::separator(Line::from("")));
+            }
             output
                 .lines
                 .insert(0, BlockLine::separator(self.header_line(ctx)));
@@ -296,12 +342,9 @@ impl ThinkingBlock {
         output
     }
 
-    /// One wrapped markdown line rendered as a selectable, blended [`BlockLine`].
-    ///
-    /// Quote-bar exclusion must run before blending: blending rewrites span fg colors, which would defeat the bar-style detection.
-    /// Blending preserves span structure, so the computed span indices stay valid after it.
-    ///
-    /// `emphasis` ([`body_emphasis_patch`]) is applied AFTER the blend for the same reason: patching styles preserves span structure.
+    /// One wrapped markdown line rendered as a selectable, blended [`BlockLine`]. Quote-bar exclusion must run before
+    /// blending: blending rewrites span fg colors, which would defeat the bar-style detection. Blending preserves span
+    /// structure, so the computed span indices stay valid after it.
     fn thinking_body_line(
         line: &Line<'static>,
         joiner: &Option<String>,
@@ -313,6 +356,11 @@ impl ThinkingBlock {
     ) -> BlockLine {
         let mut content = line.clone();
         let selectable = strip.selectable(&mut content);
+        let indent_width = if joiner.is_some() {
+            super::markdown_content::compute_subsequent_indent_width(line)
+        } else {
+            0
+        };
         let mut blended = blend_line_with_default(content, bg_base, fg_default, blend_factor);
         if let Some(emphasis) = emphasis {
             for span in &mut blended.spans {
@@ -323,6 +371,7 @@ impl ThinkingBlock {
             .with_selection_range(Some(0))
             .with_joiner(joiner.clone());
         block_line.selectable = selectable;
+        block_line.indent_width = indent_width;
         block_line
     }
 
@@ -330,7 +379,7 @@ impl ThinkingBlock {
     fn render_truncated(&self, ctx: &BlockContext) -> BlockOutput {
         let config = &ctx.appearance.scrollback.blocks.thinking;
         let n = config.truncated_lines as usize;
-        let width = ctx.width as usize;
+        let width = body_wrap_width(ctx);
         let blend_factor = config.bg_blend;
         let emphasis = body_emphasis_patch(ctx);
         let strip = QuoteBarStrip::new(!self.content.is_raw());
@@ -347,7 +396,7 @@ impl ThinkingBlock {
             let total = wrapped.lines.len();
             if total <= n {
                 // Content fits within N lines, show all (with blending)
-                let output = BlockOutput {
+                let mut output = BlockOutput {
                     lines: wrapped
                         .lines
                         .iter()
@@ -365,6 +414,7 @@ impl ThinkingBlock {
                         })
                         .collect(),
                 };
+                apply_body_rail(&mut output, ctx);
                 return self.maybe_prepend_header(output, ctx);
             }
 
@@ -389,19 +439,18 @@ impl ThinkingBlock {
                 ));
             }
 
-            self.maybe_prepend_header(
-                BlockOutput {
-                    lines: output_lines,
-                },
-                ctx,
-            )
+            let mut output = BlockOutput {
+                lines: output_lines,
+            };
+            apply_body_rail(&mut output, ctx);
+            self.maybe_prepend_header(output, ctx)
         })
     }
 
     /// Render expanded view: full content.
     fn render_expanded(&self, ctx: &BlockContext) -> BlockOutput {
         let config = &ctx.appearance.scrollback.blocks.thinking;
-        let width = ctx.width as usize;
+        let width = body_wrap_width(ctx);
         let blend_factor = config.bg_blend;
         let emphasis = body_emphasis_patch(ctx);
         let strip = QuoteBarStrip::new(!self.content.is_raw());
@@ -415,7 +464,7 @@ impl ThinkingBlock {
             let bg_base = theme.bg_base;
             let fg_default = theme.text_primary;
 
-            let output = BlockOutput {
+            let mut output = BlockOutput {
                 lines: wrapped
                     .lines
                     .iter()
@@ -433,6 +482,7 @@ impl ThinkingBlock {
                     })
                     .collect(),
             };
+            apply_body_rail(&mut output, ctx);
             self.maybe_prepend_header(output, ctx)
         })
     }
@@ -441,18 +491,10 @@ impl ThinkingBlock {
     fn render_empty_placeholder(&self, ctx: &BlockContext) -> BlockOutput {
         self.render_collapsed(ctx)
     }
-}
 
-impl BlockContent for ThinkingBlock {
-    fn output(&self, ctx: &BlockContext) -> BlockOutput {
-        match ctx.mode {
-            DisplayMode::Collapsed => self.render_collapsed(ctx),
-            DisplayMode::Truncated => self.render_truncated(ctx),
-            DisplayMode::Expanded => self.render_expanded(ctx),
-        }
-    }
-
-    fn accent(&self, ctx: &BlockContext) -> Option<AccentStyle> {
+    /// The rail's accent style (also the running bullet's), independent of
+    /// where the rail is drawn (accent column vs in-body prefix).
+    fn rail_style(&self, ctx: &BlockContext) -> Option<AccentStyle> {
         let cfg = &ctx.appearance.scrollback.blocks.thinking;
         if !cfg.accent_enabled {
             return None;
@@ -468,12 +510,33 @@ impl BlockContent for ThinkingBlock {
             Some(AccentStyle::static_color(cfg.accent))
         }
     }
+}
+
+impl BlockContent for ThinkingBlock {
+    fn output(&self, ctx: &BlockContext) -> BlockOutput {
+        match ctx.mode {
+            DisplayMode::Collapsed => self.render_collapsed(ctx),
+            DisplayMode::Truncated => self.render_truncated(ctx),
+            DisplayMode::Expanded => self.render_expanded(ctx),
+        }
+    }
+
+    fn accent(&self, ctx: &BlockContext) -> Option<AccentStyle> {
+        // With the in-body rail the accent column must stay unreserved and unpainted; the rail lives in the body rows instead
+        if rail_under_bullet(ctx) {
+            return None;
+        }
+        self.rail_style(ctx)
+    }
 
     /// Thinking bullet: default (None) when not running, animated when running.
     /// This means collapsed thinking shows gray bullet, running thinking syncs with accent.
     fn bullet(&self, ctx: &BlockContext) -> Option<AccentStyle> {
         if ctx.is_running {
-            self.accent(ctx) // sync bullet with accent animation when running
+            // Sync bullet with the rail animation when running — via
+            // `rail_style`, not `accent`, so the in-body rail mode keeps the
+            // animated bullet.
+            self.rail_style(ctx)
         } else {
             None // default gray/primary
         }
@@ -733,6 +796,85 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `accent_enabled = false` in pager.toml turned off the accent-column rail
+    /// (`rail_style`); the in-body rail must honor the same switch.
+    #[test]
+    fn body_rail_honors_accent_enabled() {
+        let appearance_with = |accent_enabled: bool| {
+            let mut appearance = AppearanceConfig::default();
+            appearance.scrollback.blocks.thinking.header = true;
+            appearance.scrollback.blocks.thinking.rail_under_bullet = true;
+            appearance.scrollback.blocks.thinking.accent_enabled = accent_enabled;
+            appearance
+        };
+        let block = ThinkingBlock::new("hello world");
+        let rail = crate::glyphs::accent_bar();
+
+        let with_rail = block.output(&BlockContext {
+            appearance: appearance_with(true),
+            ..ctx(DisplayMode::Expanded, 40)
+        });
+        assert!(
+            with_rail
+                .lines
+                .iter()
+                .skip(1)
+                .all(|l| crate::scrollback::types::line_plain_text(&l.content).starts_with(rail)),
+            "accent enabled: every row below the header carries the rail"
+        );
+
+        let without = block.output(&BlockContext {
+            appearance: appearance_with(false),
+            ..ctx(DisplayMode::Expanded, 40)
+        });
+        assert!(
+            without
+                .lines
+                .iter()
+                .all(|l| !crate::scrollback::types::line_plain_text(&l.content).contains(rail)),
+            "accent_enabled = false must not draw the in-body rail"
+        );
+    }
+
+    /// Markdown puts code-block fill on the line style, which `set_line` patches
+    /// under every span — the rail prefix included. `apply_body_rail` must hoist
+    /// it to the per-line background, starting after the rail.
+    ///
+    /// Exercises `apply_body_rail` with a synthetic filled line: the test theme
+    /// renders fenced code without a `code_background`, so a real markdown
+    /// round-trip cannot produce the fill here.
+    #[test]
+    fn body_rail_keeps_code_block_fill_off_the_rail_cell() {
+        let mut appearance = AppearanceConfig::default();
+        appearance.scrollback.blocks.thinking.rail_under_bullet = true;
+        let ctx = BlockContext {
+            appearance,
+            ..ctx(DisplayMode::Expanded, 40)
+        };
+
+        let fill = Color::Rgb(30, 30, 46);
+        let code_line = Line::from(Span::raw("let x = 1;")).style(Style::default().bg(fill));
+        let mut output = BlockOutput {
+            lines: vec![BlockLine::styled(code_line)],
+        };
+        apply_body_rail(&mut output, &ctx);
+
+        let line = &output.lines[0];
+        assert_eq!(
+            line.content.style.bg, None,
+            "a line-style bg would paint under the rail prefix"
+        );
+        assert_eq!(
+            line.background,
+            Some(fill),
+            "the fill must move onto the per-line background"
+        );
+        assert_eq!(
+            line.bg_start_col, BODY_RAIL_WIDTH as u16,
+            "the hoisted fill must start after the rail prefix"
+        );
     }
 
     #[test]

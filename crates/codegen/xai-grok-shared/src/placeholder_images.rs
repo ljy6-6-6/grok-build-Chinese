@@ -74,7 +74,7 @@ pub fn display_number_from_meta(meta: Option<&agent_client_protocol::Meta>) -> O
 }
 
 /// Build the per-turn registry mapping `[Image #N]` numbers to references from the user's inline attached images.
-/// See [`AttachedImages`](xai_grok_tools::types::resources::AttachedImages).
+/// See `xai_grok_tools::types::resources::AttachedImages`.
 ///
 /// The display number comes from each block's `_meta` (set by the TUI), falling back to 1-based position for callers that don't record it.
 /// The reference is one `image_edit`'s resolver can read directly.
@@ -402,7 +402,7 @@ pub fn load_canonical_placeholder_image(
 /// Header-only validation via the shared image_validate helper.
 /// Returns the matching MIME type, or `None` if the bytes fail validation.
 fn decode_image_mime(data: &[u8]) -> Option<&'static str> {
-    xai_grok_tools::util::image_validate::validate_image_bytes_with(data, false)
+    xai_grok_image::validate_image_bytes_with(data, false)
         .ok()
         .map(|(_, _, mime)| mime)
 }

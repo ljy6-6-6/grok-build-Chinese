@@ -32,8 +32,6 @@ struct ManagedConfigCache {
     fail_closed: bool,
     /// Local-clock high-water mark.
     /// At-rest signed checks use `max(now, floor)` so a rolled-back clock cannot un-expire a policy.
-    /// Session starts and the background tick raise it; a successful fetch resets it to `now`.
-    /// Reconnect therefore heals a floor inflated by a forward-set clock.
     /// As forgeable as the rest of the marker: defeats a passive clock change, not a file edit.
     #[serde(default)]
     rollback_floor: u64,
@@ -77,7 +75,6 @@ pub fn mark_managed_config_synced(marker: SyncMarker<'_>) {
 }
 
 /// Server-side GrokBuildDeployment UUID from the last deploy-key managed-config sync, bound to the key that synced it.
-/// Returns the marker's `principal` only when the marker's `key_fingerprint` equals `key_fingerprint`.
 /// A rotated or removed key therefore never reports the previous deployment's id.
 /// Team-path syncs store a team id and no fingerprint, so they never match.
 pub fn managed_deployment_id(key_fingerprint: &str) -> Option<String> {
@@ -120,7 +117,6 @@ pub fn mark_managed_config_synced_at(home: &Path, marker: SyncMarker<'_>) {
         // Reset (not max): reconnect must clear an inflated floor
         // Residual risk: fetch verify is unclamped and managed_config_url is user-writable
         // A rolled-back clock plus a still-valid replayed envelope can reinstate a superseded policy and reset the floor
-        // That path does not self-heal online
         rollback_floor: synced_at.unwrap_or(0),
         extra: Default::default(),
     };
@@ -176,11 +172,8 @@ fn write_marker_atomically(home: &Path, json: &str) {
 }
 
 /// Whether fail-closed managed policy is armed on disk for `home`.
-///
-/// True when the sync marker records `fail_closed`, on-disk `requirements.toml` parses as fail_closed, or the file exists but is unreadable.
 /// An unreadable file cannot be confirmed disarmed, so `clear_orphan` must not wipe.
 /// False only when neither the marker nor the file indicates fail_closed (including when the file is absent with `NotFound`).
-/// Companion to the signed session gate in [`managed_policy_compromised_for`].
 pub fn fail_closed_policy_armed_at(home: &Path) -> bool {
     if read_managed_config_cache(home).is_some_and(|c| c.fail_closed) {
         return true;
@@ -222,8 +215,6 @@ fn read_managed_config_cache(home: &Path) -> Option<ManagedConfigCache> {
 
 /// Confirmed identity switch vs the marker (both sides of a dimension known and differing).
 /// A missing marker, a blank value, or a pre-upgrade marker never counts.
-/// Callers evict prior artifacts on true.
-/// Takes the apply-lock holder's `home` (same dir as the lock).
 pub fn managed_config_identity_changed_at(
     home: &Path,
     new_principal: Option<&str>,
@@ -379,9 +370,7 @@ fn effective_now(cache: Option<&ManagedConfigCache>) -> u64 {
 }
 
 /// A signing-enabled build refetches a signed copy over a legacy unsigned, edited, forged, or foreign-bound cache.
-/// Likewise when an imposing claim has no policy sidecar satisfying it.
 /// These are the states the gate refuses on, so refusal always comes with a pending self-heal.
-/// A keyless build or no policy on disk returns false.
 fn signed_cache_needs_refetch(
     home: &Path,
     cache: Option<&ManagedConfigCache>,
@@ -413,7 +402,6 @@ fn is_managed_config_hard_stale_for_at(home: &Path, identity: &ServingIdentity) 
 /// No-network fail-closed predicate: true only on a `fail_closed` policy with tamper for the current identity.
 /// With a key compiled in, the SIGNED verdict leads: the opt-in is non-forgeable and catches edits the marker can't.
 /// A fail-closed marker then REQUIRES an authentic sidecar.
-/// The dark build uses only the best-effort marker decision.
 pub fn managed_policy_compromised_for(identity: &ServingIdentity) -> bool {
     user_grok_home().is_some_and(|home| managed_policy_compromised_for_at(&home, identity))
 }
@@ -441,12 +429,8 @@ fn managed_policy_compromised_for_at(home: &Path, identity: &ServingIdentity) ->
 }
 
 /// Combine the signed verdict with the best-effort marker fallback, one row per verdict.
-/// Each row's reasoning lives on its [`SignedVerdict`] variant doc.
-/// Split out so the signed and marker integration is unit-testable without a compiled-in key.
 /// `claim_imposes` ([`crate::signed_policy::managed_identity_claim_imposes`]) is consulted lazily, only on `NoAuthenticSidecar`.
-/// There it outranks the forgeable-marker fallbacks.
 /// Stripping the policy sidecar (even with a forged marker) cannot downgrade a claimed fail-closed principal.
-/// A read blip stays lenient.
 fn managed_policy_compromised_decision(
     signed_verdict: crate::signed_policy::SignedVerdict,
     claim_imposes: impl FnOnce() -> bool,
@@ -517,7 +501,6 @@ const MAX_FUTURE_SYNCED_AT_SKEW: std::time::Duration = std::time::Duration::from
 /// Stale when never synced, past the threshold, identity differs, or a served artifact is now missing.
 /// In keyed builds, also stale when the signed cache no longer verifies.
 /// No home means nothing to refresh into, so not stale.
-/// Reads the marker once.
 fn managed_config_stale_at(home: Option<&Path>, identity: &ServingIdentity) -> bool {
     let Some(home) = home else {
         return false;

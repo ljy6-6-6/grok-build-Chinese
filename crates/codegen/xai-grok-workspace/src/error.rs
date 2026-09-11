@@ -1,8 +1,6 @@
 use crate::capability::CapabilityMode;
 /// Errors surfaced by the workspace public API.
-///
-/// `#[non_exhaustive]` so adding new variants is a non-breaking change.
-/// Tests should match on variants rather than scrape the `Display` text.
+/// `#[non_exhaustive]` so new variants are non-breaking; match variants rather than scraping `Display`.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum WorkspaceError {

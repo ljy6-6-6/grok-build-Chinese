@@ -31,14 +31,9 @@ fn apply_wrap_child_env(
     }
 }
 
-/// Run an arbitrary command inside a local PTY with OSC 52 output filtering.
-///
-/// This is the engine behind `grok wrap`: it spawns `program` (with `args`) attached to a local pseudo-terminal.
-/// Size changes of the outer terminal are forwarded to the child.
-/// Output goes through `Osc52Filter`, which intercepts OSC 52 clipboard sequences and writes their payload to the local system clipboard.
-/// All other output passes through unchanged.
-///
-/// Returns the child exit code on success.
+/// Run an arbitrary command inside a local PTY with OSC 52 output filtering. This is the engine behind `grok wrap`:
+/// it spawns `program` (with `args`) attached to a local pseudo-terminal. Size changes of the outer terminal are
+/// forwarded to the child. All other output passes through unchanged.
 pub(crate) fn run_wrapped_command(program: &str, args: &[String]) -> Result<i32> {
     use portable_pty::{CommandBuilder, PtySize, native_pty_system};
     use std::io::Read;
@@ -66,11 +61,8 @@ pub(crate) fn run_wrapped_command(program: &str, args: &[String]) -> Result<i32>
     // Drop the slave so we get EOF when child exits.
     drop(pair.slave);
 
-    // Obtain reader from the master PTY
-    // All master *writes* (keystrokes and host-image inject frames) go through one dedicated writer thread via a channel
-    // Cross-thread use of portable-pty's `Write` impl observed EIO (errno 5) on macOS even for small inject payloads
-    // Confining `write_all` to a single owner thread avoids that
-    // Handles are intentionally detached: `grok wrap` is short-lived and exits with the child
+    // Obtain reader from the master PTY. Confining `write_all` to a single owner thread avoids that Handles are
+    // intentionally detached: `grok wrap` is short-lived and exits with the child.
     let mut pty_reader = pair.master.try_clone_reader()?;
 
     // We deliberately do NOT block SIGWINCH here
@@ -87,10 +79,9 @@ pub(crate) fn run_wrapped_command(program: &str, args: &[String]) -> Result<i32>
         tracker: Arc::clone(&tracker),
     };
 
-    // Terminating signals (external kill, terminal-close HUP) bypass Drop, so
-    // handle them explicitly: forward to the child, restore, exit 128+N.
-    // Handlers are installed here on the main thread so no signal can slip
-    // through before the loop thread gets scheduled.
+    // Terminating signals (external kill, terminal-close HUP) bypass Drop, so handle them explicitly: forward to the
+    // child, restore, exit 128+N. Handlers are installed here on the main thread so no signal can slip through before
+    // the loop thread gets scheduled.
     #[cfg(unix)]
     let child_reaped = Arc::new(std::sync::atomic::AtomicBool::new(false));
     #[cfg(unix)]
@@ -143,12 +134,9 @@ pub(crate) fn run_wrapped_command(program: &str, args: &[String]) -> Result<i32>
         }
     });
 
-    // SIGWINCH handling thread: resize the PTY when the outer terminal changes size.
-    // We move `pair.master` here since we've already cloned the reader and taken the writer above
-    //
-    // Unix only: there is no SIGWINCH on Windows
-    // On Windows `pair.master` is kept alive inside `pair` until this function returns (after `child.wait`), so the ConPTY stays open for the read loop
-    // The OSC 52 clipboard bridge works identically there; only live resize is unavailable
+    // Unix only: there is no SIGWINCH on Windows. On Windows `pair.master` is kept alive inside `pair` until this
+    // function returns (after `child.wait`), so the ConPTY stays open for the read loop. The OSC 52 clipboard bridge
+    // works identically there; only live resize is unavailable.
     #[cfg(unix)]
     {
         let master = pair.master;
@@ -157,10 +145,9 @@ pub(crate) fn run_wrapped_command(program: &str, args: &[String]) -> Result<i32>
         });
     }
 
-    // Output forwarding with OSC 52 filtering: the PTY reader feeds the filter, which feeds stdout
-    // Host-image requests spawn a short-lived worker for the clipboard I/O (osascript can take hundreds of ms)
-    // The worker then enqueues the bracketed-paste frame on the writer thread, plus a newline so ICANON slaves deliver it without another key
-    // Paste mashing can spawn multiple workers; fine for a short-lived wrap process
+    // Output forwarding with OSC 52 filtering: the PTY reader feeds the filter, which feeds stdout. The worker then
+    // enqueues the bracketed-paste frame on the writer thread, plus a newline so ICANON slaves deliver it without
+    // another key.
     {
         let mut stdout = std::io::stdout().lock();
         let mut filter = Osc52Filter::new()
@@ -200,16 +187,9 @@ pub(crate) fn run_wrapped_command(program: &str, args: &[String]) -> Result<i32>
     Ok(code)
 }
 
-/// Wait for `SIGWINCH` and resize the PTY master to match the outer terminal.
-///
-/// Uses `signal-hook` to install a real signal handler (self-pipe based).
-///
-/// A previous implementation blocked SIGWINCH and dequeued it with `nix`'s `sigwait`.
-/// That pattern is POSIX-correct but silently fails on macOS.
-/// SIGWINCH's default disposition is "ignore", and macOS discards a blocked default-ignore signal rather than leaving it pending for `sigwait`.
-/// The handler never woke, so the inner PTY was never resized and the remote TUI kept rendering at the original size.
-/// The user saw overlapping, stale frames after resizing their terminal.
-/// Installing an actual handler overrides the default-ignore disposition, which is what makes it work.
+/// That pattern is POSIX-correct but silently fails on macOS. SIGWINCH's default disposition is "ignore", and macOS
+/// discards a blocked default-ignore signal rather than leaving it pending for `sigwait`. The handler never woke,
+/// so the inner PTY was never resized and the remote TUI kept rendering at the original size.
 #[cfg(unix)]
 fn sigwinch_loop(master: Box<dyn portable_pty::MasterPty + Send>) {
     use portable_pty::PtySize;
@@ -234,11 +214,8 @@ fn sigwinch_loop(master: Box<dyn portable_pty::MasterPty + Send>) {
     }
 }
 
-/// Guard that restores terminal state when dropped (including on panic).
-///
-/// Covers child EOF (what a dropped connection turns into), a `wait()` error, and panics.
-/// It emits resets for whatever the child left latched, then leaves raw mode.
-/// The tracker's run-once claim is shared with the termination-signal thread so the restore never runs twice.
+/// Guard that restores terminal state when dropped (including on panic). The tracker's run-once claim is shared
+/// with the termination-signal thread so the restore never runs twice.
 struct TerminalRestoreGuard {
     tracker: Arc<ModeTracker>,
 }
@@ -249,11 +226,9 @@ impl Drop for TerminalRestoreGuard {
     }
 }
 
-/// Idempotently restore the outer terminal: emit resets for the latched modes (only while stdout is still a TTY), then leave raw mode.
-///
-/// Exactly one caller wins the tracker's claim and emits; every other exit path blocks (bounded) until the winner finishes.
-/// Both callers sit directly in front of a `process::exit` (`wrap_cmd::run` after the drop guard, `terminate_signal_loop` after this call).
-/// An exit racing the winner would kill the process mid-restore, keeping raw mode and leaving the resets partial.
+/// Idempotently restore the outer terminal: emit resets for the latched modes (only while stdout is still a TTY),
+/// then leave raw mode. An exit racing the winner would kill the process mid-restore, keeping raw mode and leaving
+/// the resets partial.
 fn restore_terminal(tracker: &ModeTracker) {
     use std::io::IsTerminal;
 
@@ -269,11 +244,8 @@ fn restore_terminal(tracker: &ModeTracker) {
     tracker.finish_restore();
 }
 
-/// Bounded wait for a claimed restore to complete; `true` when it did.
-///
-/// The bound matters: the claim winner's `write(2)` can block indefinitely on a flow-controlled TTY.
-/// An unbounded wait here would reintroduce the hang (a wrap process that never exits) the unlocked write exists to avoid.
-/// On timeout the caller proceeds to exit with a possibly-partial restore, no worse than losing the race outright.
+/// Bounded wait for a claimed restore to complete. An unbounded wait here would reintroduce the hang (a wrap
+/// process that never exits) the unlocked write exists to avoid.
 fn wait_restore_done(tracker: &ModeTracker, timeout: std::time::Duration) -> bool {
     let deadline = std::time::Instant::now() + timeout;
     loop {
@@ -287,14 +259,9 @@ fn wait_restore_done(tracker: &ModeTracker, timeout: std::time::Duration) -> boo
     }
 }
 
-/// Best-effort write of restore bytes to stdout, bypassing Rust's stdout lock.
-///
-/// The signal path can fire while the read loop holds the locked stdout (blocked on a PTY read).
-/// Taking the lock there would trade a broken terminal for a wrap process that never exits.
-/// The cost of not locking: this write can interleave with a chunk the read loop is writing, garbling part of the restore.
-/// It can land mid-escape-sequence after a short `write(2)`, or ahead of bytes still buffered between the loop's `write_all` and `flush`.
-/// Accepted: this only arises on the signal path of a process that exits immediately after.
-/// A partially-garbled restore attempt still beats the deadlock.
+/// Best-effort write of restore bytes to stdout, bypassing Rust's stdout lock. Taking the lock there would trade a
+/// broken terminal for a wrap process that never exits. Accepted: this only arises on the signal path of a process
+/// that exits immediately after.
 #[cfg(unix)]
 fn write_stdout_unlocked(bytes: &[u8]) {
     let mut written = 0;
@@ -328,18 +295,9 @@ fn write_stdout_unlocked(bytes: &[u8]) {
     let _ = stdout.flush();
 }
 
-/// Handle a terminating signal delivered to wrap itself (external kill, terminal-close HUP).
-/// It forwards the same signal to the child, restores the terminal from the latched-mode state, and exits `128 + N`.
-///
-/// Keyboard Ctrl-C never lands here: raw mode delivers it to wrap as a `0x03` byte that is forwarded to the child.
-/// Without this thread a signal death would skip `Drop` entirely, leaking raw mode and every latched mode.
-/// Runs on a normal thread via `signal_hook::iterator` (same pattern as `sigwinch_loop`), so no async-signal-safety constraints apply.
-///
-/// Accepted race with the read loop: the filter reports a mode to the tracker before the loop writes that chunk to stdout.
-/// The snapshot taken here can therefore include an enable the terminal never received.
-/// For kitty that direction means emitting a pop the terminal never saw pushed, which can pop an enclosing context's entry.
-/// The window is the microseconds between report and write inside a process being externally killed.
-/// Deferring the report until after the write would miss resets instead, and puts a per-CSI buffer on the hot output path.
+/// Without this thread a signal death would skip `Drop` entirely, leaking raw mode and every latched mode. The
+/// snapshot taken here can therefore include an enable the terminal never received. Deferring the report until
+/// after the write would miss resets instead, and puts a per-CSI buffer on the hot output path.
 #[cfg(unix)]
 fn terminate_signal_loop(
     mut signals: signal_hook::iterator::Signals,

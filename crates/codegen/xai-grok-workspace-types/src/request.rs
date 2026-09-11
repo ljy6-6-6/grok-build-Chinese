@@ -23,9 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::metadata::Metadata;
 
 /// Wire-side request envelope.
-///
-/// The runtime envelope adds cancellation and an in-process extensions map.
-/// This module's doc comment explains why those fields live there and not here.
+/// Cancellation and the in-process extensions map live on the runtime envelope, not here; see this module's doc.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestMessage<T> {
     /// The typed request payload (one of the `*Request` enums).
@@ -36,10 +34,8 @@ pub struct RequestMessage<T> {
     #[serde(default)]
     pub metadata: Metadata,
 
-    /// Optional absolute deadline for the call, in UTC.
-    ///
-    /// Encoded as an ISO-8601 string in JSON.
-    /// The runtime layer translates this into a tokio sleep or the gRPC `grpc-timeout` header.
+    /// Optional absolute deadline for the call, UTC, encoded as ISO-8601.
+    /// The runtime layer turns this into a tokio sleep or the gRPC `grpc-timeout` header.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline: Option<DateTime<Utc>>,
 }

@@ -170,13 +170,14 @@ impl SessionRegistryClient {
     }
 
     /// Attach an `AuthManager` so request signing and 401 recovery go through the shared auth path.
-    pub fn with_auth(mut self, auth_manager: std::sync::Arc<crate::auth::AuthManager>) -> Self {
+    pub fn with_auth(mut self, auth_manager: std::sync::Arc<xai_grok_login::AuthManager>) -> Self {
         let provider: std::sync::Arc<dyn xai_grok_auth::AuthCredentialProvider> =
             std::sync::Arc::new(
-                crate::auth::credential_provider::ShellAuthCredentialProvider::new(
+                xai_grok_login::credential_provider::ShellAuthCredentialProvider::with_deployment_id_resolver(
                     auth_manager.clone(),
                     self.credentials.deployment_key.clone(),
                     self.credentials.alpha_test_key.clone(),
+                    std::sync::Arc::new(crate::managed_config::resolve_deployment_id),
                 ),
             );
         self.credentials = self.credentials.with_auth_manager(auth_manager);
@@ -194,7 +195,7 @@ impl SessionRegistryClient {
         reqwest::Response,
         Option<xai_grok_auth::StampedBearerSuffix>,
     )> {
-        let builder = xai_file_utils::trace_context::inject_trace_context_into_request(builder);
+        let builder = xai_grok_otel::inject_trace_context_into_request(builder);
         let request = builder.build().context(op)?;
         xai_grok_auth::execute_with_stamp(&self.client, request)
             .await
@@ -228,10 +229,10 @@ impl SessionRegistryClient {
     /// `stamp` is what the middleware put on the wire; [`xai_grok_auth::StampedBearerSuffix`] explains why it is never re-resolved.
     fn record_401_attribution(&self, op: &str, stamp: Option<&xai_grok_auth::StampedBearerSuffix>) {
         if let Some(manager) = self.credentials.auth_manager() {
-            crate::auth::attribution::record_consumer_401(
+            xai_grok_login::attribution::record_consumer_401(
                 manager.as_ref(),
                 self.session_id.as_deref(),
-                crate::auth::attribution::ConsumerKind::SessionRegistryClient,
+                xai_grok_login::attribution::ConsumerKind::SessionRegistryClient,
                 op,
                 stamp.map(|s| s.0.as_str()),
             );
@@ -387,14 +388,8 @@ impl SessionRegistryClient {
 mod tests {
     use super::*;
 
-    // ── UpdateRequest wire shapes ────────────────────────────────────────────
-    //
-    // The registry writer sends two distinct update payloads at different times:
-    //
-    //   1. Immediately after a turn: `last_turn_number` and `repo_head_at_end`
-    //   2. Once restore artifacts are durable: `restorable_turn_number` only
-    //
-    // These tests verify `skip_serializing_if = "Option::is_none"` for each shape
+    // ── UpdateRequest wire shapes ──────────────────────────────────────────── The registry writer sends two distinct update payloads at different times: Immediately after a turn: `last_turn_number` and `repo_head_at_end`
+    // Once restore artifacts are durable: `restorable_turn_number` only These tests verify `skip_serializing_if = "Option::is_none"` for each shape
     // Old servers then silently ignore the new field and clients never overwrite unrelated fields with nulls
 
     #[test]
@@ -510,7 +505,6 @@ mod tests {
     }
 
     // ── SessionRecord backward compatibility ─────────────────────────────────
-    //
     // Older servers do not include `restorable_turn_number` in their response.
     // The field is `#[serde(default)]` so it must deserialize as `None` when absent, keeping new clients compatible with old servers
 
@@ -562,12 +556,12 @@ mod tests {
     /// Verifies that each request resolves auth again, so a rotated token is picked up.
     #[tokio::test]
     async fn session_registry_client_uses_active_auth_for_each_request() {
-        use crate::auth::{AuthManager, AuthMode, GrokAuth, GrokComConfig};
         use axum::{Router, response::IntoResponse, routing::post};
         use chrono::{Duration, Utc};
         use std::net::SocketAddr;
         use std::sync::Arc;
         use tokio::net::TcpListener;
+        use xai_grok_login::{AuthManager, AuthMode, GrokAuth, GrokComConfig};
 
         let captured = Arc::new(parking_lot::Mutex::new(None::<String>));
         let captured_for_handler = captured.clone();

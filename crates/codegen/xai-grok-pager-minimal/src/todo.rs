@@ -16,10 +16,7 @@ use xai_grok_shell::tools::TodoStatus;
 /// Default cap on visible todo rows (the last becomes a `+N more` overflow row); `Ctrl+T` expands past it.
 pub(super) const MAX_TODO_ROWS: u16 = 8;
 
-/// Whether the todo panel should render this frame.
 /// It hides when there are no todos, or when every todo is finished, so a completed list doesn't linger.
-/// A new turn that creates fresh pending todos re-shows it immediately.
-/// `force` (Ctrl+T) pins it visible regardless, e.g. to review a finished list.
 pub(super) fn todo_panel_visible(
     agent: &xai_grok_pager::app::agent_view::AgentView,
     force: bool,

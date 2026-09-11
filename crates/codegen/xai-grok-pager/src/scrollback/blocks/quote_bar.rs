@@ -37,10 +37,9 @@ impl QuoteBarStrip {
     }
 }
 
-/// The exact ratatui style the renderer paints parser-generated blockquote bars with.
-/// `md_style` sets `blockquote_outer = fg(md_muted).dimmed()`, and the anstyle round-trip drops a `Reset` fg, leaving DIM alone.
-/// This mirrors `blockquote_outer` in pager-render's theme/md_style.rs, and a comment there points back here.
-/// The end-to-end tests below trip if either side drifts.
+/// The exact ratatui style the renderer paints parser-generated blockquote bars with. This mirrors
+/// `blockquote_outer` in pager-render's theme/md_style.rs, and a comment there points back here. The end-to-end
+/// tests below trip if either side drifts.
 fn quote_bar_style() -> Style {
     let muted = Theme::current().md_muted;
     let style = Style::default().add_modifier(Modifier::DIM);
@@ -51,17 +50,9 @@ fn quote_bar_style() -> Style {
     }
 }
 
-/// Byte length of the rendered blockquote prefix at the start of `line`.
-/// The prefix is `bar_style`-styled bars separated by exactly one space, through the space before content: `│ text` gives 4, `│ │ deep` gives 8.
-/// A bar-only row (blank line inside a quote: `│`, `│ │`, optional trailing space) counts as all prefix.
-///
-/// Every prefix bar must carry `bar_style`.
-/// A differently-styled bar is quote CONTENT (source `> │ box art`): it ends the prefix and then trips the interior-bar rule.
-/// Returns `None` for anything else: a `│` after the prefix marks a table row, box art, or a literal bar inside quote content.
-/// That is the interior-bar rule `is_table_line` uses in the wrap layer, and the row conservatively stays fully selectable.
-///
-/// The shape must agree with the looser `blockquote_prefix_len` in pager-render's wrapping.rs.
-/// That function re-injects this prefix on wrapped continuation rows, preserving the bar spans and style this scanner keys on.
+/// Byte length of the rendered blockquote prefix at the start of `line`. A bar-only row (blank line inside a quote:
+/// `│`, `│ │`, optional trailing space) counts as all prefix. Every prefix bar must carry `bar_style`. The shape
+/// must agree with the looser `blockquote_prefix_len` in pager-render's wrapping.rs.
 fn rendered_quote_prefix_len(line: &Line<'_>, bar_style: Style) -> Option<usize> {
     const BAR: char = '\u{2502}';
     const BAR_LEN: usize = '\u{2502}'.len_utf8();
@@ -129,14 +120,9 @@ fn split_spans_at(line: &mut Line<'static>, byte_offset: usize) -> usize {
     line.spans.len()
 }
 
-/// Selection metadata for a pretty-mode markdown row.
-/// On a parser-generated blockquote line the `│ ` prefix (all nesting levels) is excluded from copy.
-/// The straddling span is split at the prefix boundary and the returned `Selectable::Spans` range starts past it.
-/// Bar-only rows (blank quote lines) return an empty end range so multi-line copies keep the blank line.
-/// Returns `Selectable::All` for every other row.
-///
-/// The bar must be the FIRST span: a quote indented under a list item (`- > quoted`, bullet span first) keeps its prefix in copies.
-/// That is an accepted conservative false negative, like interior bars.
+/// Selection metadata for a pretty-mode markdown row. Bar-only rows (blank quote lines) return an empty end range
+/// so multi-line copies keep the blank line. The bar must be the FIRST span: a quote indented under a list item (`-
+/// > quoted`, bullet span first) keeps its prefix in copies.
 fn quote_prefix_selectable(line: &mut Line<'static>, bar_style: Style) -> Selectable {
     // Only parser-generated bars are a lone 1-char span carrying the blockquote_outer style
     // A literal "│ " in prose or code stays glued to its content span or carries a different style, so it is left intact

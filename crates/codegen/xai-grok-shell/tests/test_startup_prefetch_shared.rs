@@ -2,11 +2,11 @@
 
 mod common;
 
-use xai_grok_shell::agent::models::startup_prefetch;
+use xai_grok_shell::agent::remote_config::settings_get::{SettingsQuery, get_startup_settings};
 use xai_grok_shell::util::config::RemoteSettings;
 
 #[test]
-fn one_fetch_serves_begin_wait_and_bootstrap() {
+fn one_fetch_serves_startup_getter_and_bootstrap() {
     let home = common::isolated_home();
     common::block_on(async {
         let server = common::start_seeded_mock(home.path()).await;
@@ -15,16 +15,17 @@ fn one_fetch_serves_begin_wait_and_bootstrap() {
             ..RemoteSettings::default()
         });
 
-        assert!(startup_prefetch::begin(None), "the first begin must start");
-        assert!(
-            startup_prefetch::begin(None),
-            "the second begin must join, not restart"
-        );
-        let waited = startup_prefetch::wait_settings(std::time::Duration::from_secs(10));
+        let first = get_startup_settings(SettingsQuery::from_auth(None)).await;
+        let second = get_startup_settings(SettingsQuery::from_auth(None)).await;
         assert_eq!(
-            waited.and_then(|s| s.tips),
+            first.settings().and_then(|s| s.tips.clone()),
             Some(vec!["from-server".to_string()]),
-            "the shared fetch must serve the early wait"
+            "the startup getter must serve the early wait"
+        );
+        assert_eq!(
+            second.settings().and_then(|s| s.tips.clone()),
+            first.settings().and_then(|s| s.tips.clone()),
+            "a second startup wait must join the startup load, not refetch"
         );
 
         let resolved = common::run_bootstrap()
@@ -32,12 +33,9 @@ fn one_fetch_serves_begin_wait_and_bootstrap() {
             .expect("bootstrap succeeds for a personal profile");
 
         assert_eq!(
-            (
-                server.request_count_for("/v1/models"),
-                server.request_count_for("/v1/settings"),
-            ),
-            (1, 1),
-            "begin, wait, and bootstrap together must spend one settings budget"
+            server.request_count_for("/v1/settings"),
+            1,
+            "startup getter and bootstrap together must spend one settings fetch"
         );
         assert_eq!(
             resolved
@@ -45,7 +43,6 @@ fn one_fetch_serves_begin_wait_and_bootstrap() {
                 .as_ref()
                 .and_then(|s| s.tips.clone()),
             Some(vec!["from-server".to_string()]),
-            "bootstrap must consume the same fetch the wait observed"
         );
     });
 }

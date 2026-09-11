@@ -1,10 +1,8 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
     use super::*;
 
-    /// Regression (resume sync): the on-disk replay stream re-emits persisted notifications through the generic `x.ai/session/update` envelope.
     /// A background `monitor`/bash task (`TaskBackgrounded`) must restore into `bg_tasks` on a resumed / second terminal.
     /// It must not be dropped by the default match arm.
-    /// The idle "watching" status line and the Tasks pane then match the originating terminal.
     /// (Before this routing only subagents survived resume.)
     #[test]
     fn ext_session_update_replay_restores_bg_task() {
@@ -38,7 +36,6 @@
     /// Companion for scheduled `/loop`s: a replayed `ScheduledTaskCreated` must restore `scheduled_tasks`.
     /// A later `ScheduledTaskDeleted` must net it back out.
     /// A resumed terminal's loop count then matches instead of staying empty until the next live fire.
-    /// (Pairs with the shell-side persistence of these notifications in `notification_bridge.rs`.)
     #[test]
     fn ext_session_update_replay_restores_then_removes_scheduled_task() {
         let mut app = make_app_with_agent("sess-1");
@@ -830,4 +827,3 @@
         let agent = app.agents.get(&AgentId(0)).unwrap();
         assert!(agent.session.bg_tasks["task-replay"].restored_from_replay);
     }
-

@@ -30,12 +30,9 @@ use crate::session::{SessionCommand, SessionHandle, ShutdownKind};
 /// How often [`AgentActivity::flush_all_sessions`] re-polls actors that have not yet exited.
 const FLUSH_POLL: Duration = Duration::from_millis(50);
 
-/// Default bound on a process-exit session flush ([`AgentActivity::flush_all_sessions`]).
-/// Leader auto-update shutdown and the in-process agent's `/exit` / headless-quit path both use it.
+/// Default bound on a process-exit session flush ([`AgentActivity::flush_all_sessions`]). Leader auto-update shutdown and the in-process agent's `/exit` / headless-quit path both use it.
 /// One wedged actor therefore delays exit by the same amount everywhere; sessions are normally idle and the flush completes in milliseconds.
-///
-/// Known gap: a `SessionEnd` hook configured with a longer `timeout` than this is still cut off at the grace.
-/// Aligning the two needs the hook registry's configured timeouts at flush time, which this layer does not see.
+/// Known gap: a `SessionEnd` hook configured with a longer `timeout` than this is still cut off at the grace. Aligning the two needs the hook registry's configured timeouts at flush time, which this layer does not see.
 pub const SESSION_FLUSH_GRACE: Duration = Duration::from_secs(10);
 
 /// Per-session slice of state shared with the session actor (the same `Arc`s the actor mutates; see the matching `SessionHandle` fields).
@@ -108,19 +105,9 @@ impl AgentActivity {
         self.lock_live_sessions().len()
     }
 
-    /// Send [`SessionCommand::Shutdown`] to every live session actor and wait up to `grace` for them to exit, observed via `cmd_tx.is_closed()`.
-    /// Shutdown runs the replay-buffer flush, then hooks, then the memory save, then the actor returns.
-    ///
-    /// This is a quiesce loop, not a one-shot broadcast.
-    /// Each poll re-snapshots the registry and signals actors that appeared after the flush started.
-    /// Signals are deduped by channel identity, so a session id rebuilt with a fresh actor gets its own signal.
-    /// Everything runs against one deadline; `grace` bounds the **total** shutdown delay.
-    ///
-    /// Callers: the leader's auto-update / `RelaunchForUpdate` shutdown, and the in-process agent worker on `/exit` / headless quit.
-    /// In the leader case, call **before** cancelling the root token.
-    /// In the in-process case, call **after** the cancel that ends the worker's run loop but before its `LocalSet` drops.
-    /// Either way, session state must be durable before the drop aborts remaining tasks.
-    /// Actors that miss the grace are logged and abandoned.
+    /// This is a quiesce loop, not a one-shot broadcast. Each poll re-snapshots the registry and signals actors that appeared after the flush started.
+    /// Signals are deduped by channel identity, so a session id rebuilt with a fresh actor gets its own signal. Everything runs against one deadline; `grace` bounds the **total** shutdown delay.
+    /// In the leader case, call **before** cancelling the root token. In the in-process case, call **after** the cancel that ends the worker's run loop but before its `LocalSet` drops. Either way, session state must be durable before the drop aborts remaining tasks.
     pub async fn flush_all_sessions(&self, grace: Duration) {
         let _span = session_end::span(Phase::SessionFlush);
         let deadline = tokio::time::Instant::now() + grace;
@@ -161,7 +148,6 @@ impl AgentActivity {
     }
 
     /// Lock the session list, dropping entries whose actor has exited.
-    ///
     /// Purging happens only here, so in modes with no periodic reader (no auto-update checker) a dead entry lingers until the next register.
     /// The leak is bounded and tiny: a sender handle and two `Arc`s per entry.
     fn lock_live_sessions(&self) -> std::sync::MutexGuard<'_, Vec<SessionActivityEntry>> {

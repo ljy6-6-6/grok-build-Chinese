@@ -71,6 +71,7 @@ pub(crate) struct SummaryPatch {
     pub chat_messages: Option<CounterOp>,
     pub chat_format_version: Option<u8>,
     pub trace_turn: Option<TraceTurnPatch>,
+    pub attempt_id: Option<String>,
     pub model: Option<ModelPatch>,
     pub git_head: Option<GitHeadPatch>,
     pub collection_id: Option<String>,
@@ -87,7 +88,6 @@ pub(crate) struct SummaryPatch {
     /// Ignored when `generated_title` (manual) is also set.
     pub generated_title_regenerate: Option<String>,
     /// `/rename --auto`: clear the manual pin.
-    /// Takes precedence over the generated-title fields.
     /// A successful clear blanks `generated_title` *and* `session_summary` so `display_title()` is empty and if-absent can adopt again.
     /// A leftover pre-rename auto title would otherwise block regeneration.
     pub reset_title_to_auto: bool,
@@ -107,11 +107,7 @@ pub(crate) struct SummaryPatch {
 impl Summary {
     /// Apply `patch` in place using the per-field merge rules.
     /// `now` is the single timestamp used for both `last_active_at` (when activity is recorded) and `updated_at`.
-    ///
     /// Returns `true` iff an auto title was adopted (`generated_title_if_absent` or `generated_title_regenerate`).
-    /// It also returns `true` when a `reset_title_to_auto` actually cleared a manual pin.
-    /// Callers use the former to propagate the adopted title.
-    /// They use the latter to reset the generator / remote pin only when the unpin changed disk.
     pub(crate) fn apply_patch(&mut self, patch: &SummaryPatch, now: DateTime<Utc>) -> bool {
         if patch.record_activity {
             // Monotonic: a stale concurrent writer can never move it backwards.
@@ -147,6 +143,9 @@ impl Summary {
                     self.request_id = Some(request_id.clone());
                 }
             }
+        }
+        if let Some(attempt_id) = &patch.attempt_id {
+            self.attempt_id = Some(attempt_id.clone());
         }
         if let Some(model) = &patch.model {
             self.current_model_id = model.model_id.clone();
@@ -248,16 +247,9 @@ impl WorktreeIdentityRepair {
     }
 }
 
-/// Stamp `identity` onto the summary at `summary_path` under the sidecar lock.
-/// An untagged summary gets the full stamp (kind, label, source).
 /// A kinded summary that is still missing `worktree_label` gets only the label.
 /// Kind and source stay put, so a legacy fork is not rewritten as `worktree`.
 /// A kinded and labeled summary is never rewritten.
-/// `Err` means the on-disk state is unknown; callers must keep their summary as-is rather than display a label the file may not have.
-///
-/// Repairs summaries created before identity was stamped at creation.
-/// Desktop hides local rows whose cwd sits under a grok worktree unless they carry a label (or `session_kind == "worktree"`).
-/// Those sessions never appear, so a repair that ran only on session load would never fire.
 pub(crate) fn repair_worktree_identity(
     summary_path: &Path,
     lock_path: &Path,
@@ -276,15 +268,9 @@ pub(crate) fn repair_worktree_identity(
         } else {
             return Ok(WorktreeIdentityRepair::AlreadyKinded(summary));
         }
-        // Deliberately not apply_patch: the stamp is metadata repair, not activity, so updated_at stays put
-        // Bumping it would reshuffle listings (it is the sort key when last_active_at is absent)
-        // The whole repaired backlog would look freshly active
-        //
-        // write_summary_atomic renames a new inode into place, which refreshes mtime even when updated_at is unchanged
-        // list_sessions_recent selects its candidate window by that mtime
-        // A heal across the full list of old summaries would push truly recent sessions out of the recent/roster window
-        // Restore the pre-write mtime so the candidate window still matches the unrepaired file
-        // A restore failure must not fail the heal: the stamp is already on disk and the caller would otherwise keep an untagged summary
+        // Deliberately not apply_patch: the stamp is metadata repair, not activity, so updated_at stays put.
+        // Bumping it would reshuffle listings (it is the sort key when last_active_at is absent).
+        // Restore the pre-write mtime so the candidate window still matches the unrepaired file A restore failure must not fail the heal: the stamp is already on disk and the caller would otherwise keep an untagged summary.
         let previous_mtime = std::fs::metadata(summary_path)
             .ok()
             .and_then(|meta| meta.modified().ok());
@@ -306,7 +292,6 @@ pub(crate) fn repair_worktree_identity(
 /// Read-site repair for a `summary` that is untagged, or kinded but still missing `worktree_label`, when its cwd is inside a grok-managed worktree.
 /// Stamps the missing identity on disk via [`repair_worktree_identity`] and replaces `summary` with the lock-fresh on-disk state.
 /// Memory then mirrors disk whichever way the repair went.
-/// On failure the summary stays as-is (logged); the next read retries.
 pub(crate) fn repair_untagged_worktree_summary(
     summary: &mut Summary,
     summary_path: &Path,
@@ -328,12 +313,110 @@ pub(crate) fn repair_untagged_worktree_summary(
     }
 }
 
-/// Read, apply `patch`, then write `summary_path`, serialized by an exclusive lock on the sidecar `lock_path`.
-/// The lock is held across the whole read-modify-write so concurrent writers cannot lose each other's updates.
-/// Synchronous: callers run it on `spawn_blocking` because the lock acquisition blocks.
-///
-/// Returns whether a `generated_title_if_absent` was applied (see [`Summary::apply_patch`]).
-/// Because the read-modify-write happens under the lock, this "set the title only if absent" check is atomic against a concurrent manual rename.
+/// Keep a parseable on-disk agent id and always mint a new attempt for this activation.
+/// A required id rejects a different persisted identity and adopts the id when none is stored.
+/// Synchronous: callers run it on `spawn_blocking` because lock acquisition blocks.
+pub(crate) fn stamp_session_identity_if_absent(
+    summary_path: &Path,
+    lock_path: &Path,
+    required_agent_id: Option<&str>,
+    mint: impl FnOnce(Option<&str>) -> crate::session::persistence::SessionIdentity,
+) -> io::Result<crate::session::persistence::SessionIdentity> {
+    let lock = open_lock_file(lock_path)?;
+    lock.lock_exclusive()?;
+    let result = (|| {
+        let mut summary = read_summary(summary_path)?;
+        let mut live_agent_id = summary
+            .agent_id
+            .as_deref()
+            .and_then(xai_message_delivery_core::AgentId::parse)
+            .map(|id| id.as_str().to_owned());
+        if let Some(required_agent_id) = required_agent_id {
+            match live_agent_id.as_deref() {
+                Some(live) if live != required_agent_id => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "persisted agent id does not match the requested agent",
+                    ));
+                }
+                Some(_) => {}
+                None => live_agent_id = Some(required_agent_id.to_owned()),
+            }
+        }
+        let mut identity = mint(live_agent_id.as_deref());
+        if let Some(agent_id) = live_agent_id {
+            identity.agent_id = agent_id;
+        }
+        summary.agent_id = Some(identity.agent_id.clone());
+        summary.attempt_id = Some(identity.attempt_id.clone());
+        summary.updated_at = chrono::Utc::now();
+        write_summary_atomic(summary_path, &summary)?;
+        Ok(identity)
+    })();
+    let _ = lock.unlock();
+    result
+}
+
+pub(crate) fn update_wake_start_locked(
+    summary_path: &Path,
+    lock_path: &Path,
+    start: crate::session::persistence::WakeStart,
+    abort: &tokio_util::sync::CancellationToken,
+) -> io::Result<()> {
+    let crate::session::persistence::WakeStart {
+        prior,
+        attempt_id,
+        next_trace_turn,
+        model_id,
+        agent_name,
+        reasoning_effort,
+    } = start;
+    let lock = open_lock_file(lock_path)?;
+    lock.lock_exclusive()?;
+    let result = (|| {
+        if abort.is_cancelled() {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "wake aborted"));
+        }
+        let mut summary = read_summary(summary_path)?;
+        if summary.attempt_id != prior.attempt_id
+            || summary.next_trace_turn != prior.next_trace_turn
+            || summary.current_model_id != prior.current_model_id
+            || summary.agent_name != prior.agent_name
+            || summary.reasoning_effort != prior.reasoning_effort
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "wake summary changed before start publication",
+            ));
+        }
+        summary.attempt_id = Some(attempt_id);
+        summary.next_trace_turn = next_trace_turn;
+        summary.current_model_id = model_id;
+        if let Some(agent_name) = agent_name {
+            summary.agent_name = Some(agent_name);
+        }
+        if let Some(reasoning_effort) = reasoning_effort {
+            summary.reasoning_effort = reasoning_effort;
+        }
+        summary.updated_at = Utc::now();
+        write_summary_atomic(summary_path, &summary)
+    })();
+    let _ = lock.unlock();
+    result
+}
+
+pub(crate) fn restore_wake_summary_locked(
+    summary_path: &Path,
+    lock_path: &Path,
+    prior: crate::session::persistence::WakeSummaryState,
+) -> io::Result<()> {
+    let lock = open_lock_file(lock_path)?;
+    lock.lock_exclusive()?;
+    let result = super::write_bytes_atomic(summary_path, &prior.summary_bytes);
+    let _ = lock.unlock();
+    result
+}
+
 pub(crate) fn apply_patch_locked(
     summary_path: &Path,
     lock_path: &Path,
@@ -419,8 +502,6 @@ mod tests {
     }
 
     /// Regression guard for the `/resume` "frozen `last_active_at`" lost-update race.
-    /// Two adapters (standing in for two persistence actors) hammer the SAME `summary.json` concurrently: one appends, the other writes metadata.
-    /// Every write is a whole-summary read-modify-write.
     /// Without the sidecar lock the metadata writer reverts the appender's `num_messages` / `last_active_at` (and vice versa).
     /// The invariants below are exact, so a regression that drops the lock fails this deterministically.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -508,6 +589,131 @@ mod tests {
             .await
             .unwrap();
         (adapter, info, session_dir.join("summary.json"))
+    }
+
+    #[tokio::test]
+    async fn second_identity_stamp_keeps_agent_id_and_rotates_attempt_id() {
+        let dir = TempDir::new().unwrap();
+        let (adapter, info, summary_path) = new_session(&dir).await;
+
+        let first = adapter
+            .stamp_session_identity_if_absent(&info, None, |_| {
+                crate::session::persistence::SessionIdentity {
+                    agent_id: "ag1.a1".to_owned(),
+                    attempt_id: "at1.a1".to_owned(),
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            first,
+            crate::session::persistence::SessionIdentity {
+                agent_id: "ag1.a1".to_owned(),
+                attempt_id: "at1.a1".to_owned(),
+            }
+        );
+
+        let second = adapter
+            .stamp_session_identity_if_absent(&info, None, |live_agent_id| {
+                assert_eq!(live_agent_id, Some("ag1.a1"));
+                crate::session::persistence::SessionIdentity {
+                    agent_id: "ag1.a2".to_owned(),
+                    attempt_id: "at1.a2".to_owned(),
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            second,
+            crate::session::persistence::SessionIdentity {
+                agent_id: "ag1.a1".to_owned(),
+                attempt_id: "at1.a2".to_owned(),
+            }
+        );
+
+        let summary = read_summary(&summary_path).unwrap();
+        assert_eq!(summary.agent_id.as_deref(), Some("ag1.a1"));
+        assert_eq!(summary.attempt_id.as_deref(), Some("at1.a2"));
+    }
+
+    #[tokio::test]
+    async fn identity_stamp_adopts_required_uuid() {
+        let dir = TempDir::new().unwrap();
+        let (adapter, info, summary_path) = new_session(&dir).await;
+        let agent_id = "019f972a-7c1b-7d92-a896-4f08f91b6864";
+
+        let stamped = adapter
+            .stamp_session_identity_if_absent(
+                &info,
+                Some(agent_id.to_owned()),
+                move |live_agent_id| {
+                    assert_eq!(live_agent_id, Some(agent_id));
+                    crate::session::persistence::SessionIdentity {
+                        agent_id: live_agent_id.unwrap().to_owned(),
+                        attempt_id: "at1.c1".to_owned(),
+                    }
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(stamped.agent_id, agent_id);
+        let summary = read_summary(&summary_path).unwrap();
+        assert_eq!(summary.agent_id.as_deref(), Some(agent_id));
+        assert_eq!(summary.attempt_id.as_deref(), Some("at1.c1"));
+    }
+
+    #[tokio::test]
+    async fn identity_stamp_rejects_mismatched_required_uuid() {
+        let dir = TempDir::new().unwrap();
+        let (adapter, info, summary_path) = new_session(&dir).await;
+        let mut summary = read_summary(&summary_path).unwrap();
+        summary.agent_id = Some("019f972a-7c1b-7d92-a896-4f08f91b6864".to_owned());
+        write_summary_atomic(&summary_path, &summary).unwrap();
+
+        let error = adapter
+            .stamp_session_identity_if_absent(
+                &info,
+                Some("019f972a-7c1b-7d92-a896-4f08f91b6865".to_owned()),
+                |_| unreachable!("mismatch must fail before minting"),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// An unparseable on-disk agent id is treated as absent: the mint closure sees `None` and its agent replaces the bad token.
+    #[tokio::test]
+    async fn identity_stamp_replaces_unparseable_agent_id() {
+        let dir = TempDir::new().unwrap();
+        let (adapter, info, summary_path) = new_session(&dir).await;
+
+        let mut summary = read_summary(&summary_path).unwrap();
+        summary.agent_id = Some("legacy-session-id".to_owned());
+        write_summary_atomic(&summary_path, &summary).unwrap();
+
+        let stamped = adapter
+            .stamp_session_identity_if_absent(&info, None, |live_agent_id| {
+                assert_eq!(live_agent_id, None);
+                crate::session::persistence::SessionIdentity {
+                    agent_id: "ag1.b1".to_owned(),
+                    attempt_id: "at1.b1".to_owned(),
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            stamped,
+            crate::session::persistence::SessionIdentity {
+                agent_id: "ag1.b1".to_owned(),
+                attempt_id: "at1.b1".to_owned(),
+            }
+        );
+
+        let summary = read_summary(&summary_path).unwrap();
+        assert_eq!(summary.agent_id.as_deref(), Some("ag1.b1"));
+        assert_eq!(summary.attempt_id.as_deref(), Some("at1.b1"));
     }
 
     /// Auto title generation writes (and reports `true`) when the session has no title yet, mirroring into `session_summary` for old clients.

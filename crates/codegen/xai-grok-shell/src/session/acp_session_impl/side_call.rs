@@ -133,7 +133,6 @@ impl SessionActor {
     }
 
     /// Prepare the shared pieces of a recap-style side-call (recap and turn summary): the sampling client and the config both need.
-    ///
     /// Recap-style side-calls preserve reasoning so their conversation prefix stays byte-identical to the parent turn.
     /// Messages strips reasoning only when the matching effort cannot emit a top-level thinking configuration.
     pub(crate) async fn prepare_side_call(&self) -> Result<SideCallSetup, acp::Error> {
@@ -159,10 +158,6 @@ impl SessionActor {
 
     /// Build the cache-aligned request for a recap-style side-call via [`Self::parent_cached_request`].
     /// Uses the main turn's tool and hosted-tool specs and matching reasoning effort so the prompt-cache prefix stays warm.
-    ///
-    /// Leaves BOTH temperature and max_output_tokens unset.
-    /// The cli-chat-proxy layer may inject a `thinking` budget for thinking-enabled models (which also forces temperature == 1).
-    /// A small max_output_tokens below that budget makes the call error or return empty.
     /// The instructions keep outputs short and the clean helpers cap length as a safety net, so an explicit token cap isn't needed.
     pub(crate) async fn side_call_request(
         &self,
@@ -189,16 +184,13 @@ impl SessionActor {
 
     /// Invalidate in-flight recap-style side-calls when a real user prompt is accepted (at queue time or turn start).
     /// Bumps the recap epoch so a finishing recap cannot commit, and aborts an in-flight turn summary.
-    /// Both would describe a conversation this prompt is about to extend.
     /// Idempotent under the queue-accept and turn-start double bump.
-    /// Keep this the single place that knows which side-calls to cancel on a new prompt.
     pub(crate) fn invalidate_side_calls_for_new_prompt(&self) {
         self.recap_epoch.set(self.recap_epoch.get().wrapping_add(1));
         self.abort_turn_summary();
-        // The title refresh is deliberately NOT aborted here
-        // It describes the whole conversation, so completing against the pre-prompt snapshot is still valid
-        // It runs at most once per checkpoint (one at a time)
-        // Aborting on every prompt would leave the checkpoint unconsumed and re-spawn a call each turn
+        // The title refresh is deliberately NOT aborted here.
+        // It describes the whole conversation, so completing against the pre-prompt snapshot is still valid.
+        // Aborting on every prompt would leave the checkpoint unconsumed and re-spawn a call each turn.
     }
 }
 

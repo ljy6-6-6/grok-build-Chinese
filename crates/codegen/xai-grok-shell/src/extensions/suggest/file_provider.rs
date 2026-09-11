@@ -36,11 +36,7 @@ const FILE_COMMANDS: &[&str] = &[
 
 /// Priority bump for candidates when the segment's command is a known file consumer.
 /// The bump puts them above $PATH rows (priority 0) and above the history tail, but below mid and top history rows (base up to 10, +30 exact).
-/// History base decays to 1 by list position, so boosted file rows deliberately displace the weakest history matches.
-///
-/// Every candidate in one response carries the SAME priority.
-/// Ordering within the response is provider-internal (tier, then score, then dirs-first, then name).
-/// It survives to the wire only because `aggregate`'s sort is STABLE (see `mod.rs`).
+/// History base decays to 1 by list position, so boosted file rows deliberately displace the weakest history matches. Every candidate in one response carries the SAME priority. Ordering within the response is provider-internal (tier, then score, then dirs-first, then name). It survives to the wire only because `aggregate`'s sort is STABLE (see `mod.rs`).
 const FILE_CMD_BOOST: i32 = 2;
 
 pub(crate) struct FilePathProvider;
@@ -95,10 +91,7 @@ impl FilePathProvider {
     }
 }
 
-/// Decide whether the token under the cursor file-completes:
-/// - flag-looking tokens (`-x`, `--foo`) never do;
-/// - any command's arguments (non-first tokens) and redirection targets do;
-/// - a first token only when path-like (`./script.sh`, `/bin/…`, `~`); plain first words belong to the $PATH provider.
+/// Decide whether the token under the cursor file-completes: flag-looking tokens (`-x`, `--foo`) never do; any command's arguments (non-first tokens) and redirection targets do; a first token only when path-like (`./script.sh`, `/bin/…`, `~`); plain first words belong to the $PATH provider.
 fn extract_file_context(prefix: &str) -> Option<CurrentToken> {
     let tok = parse_current_token(prefix);
     if tok.value.starts_with('-') {
@@ -132,11 +125,8 @@ fn split_token<'a>(
     home: Option<&Path>,
     lookup: impl Fn(&str) -> Option<String>,
 ) -> SplitToken<'a> {
-    // Bare `~` completes as `~/…`: list the home directory
-    // With NO resolvable home, `~` stays literal, exactly what the shell's own failed tilde expansion does
-    // So list `cwd/~` (usually nothing) like the `~/x` arm below
-    // Falling back to listing the cwd itself would show files the accepted `~/…` insert can never name
-    // A quoted or escaped `~` is shell-literal; the general path matches it against cwd entries instead
+    // Bare `~` completes as `~/…`: list the home directory With NO resolvable home, `~` stays literal, exactly what the shell's own failed tilde expansion does So list `cwd/~` (usually nothing) like the `~/x` arm below
+    // Falling back to listing the cwd itself would show files the accepted `~/…` insert can never name A quoted or escaped `~` is shell-literal; the general path matches it against cwd entries instead
     if tok.value == "~" && tok.dir_value_len.is_none() && tok.plain_mask.first() == Some(&true) {
         return SplitToken {
             list_dir: home.map_or_else(|| Path::new(cwd).join("~"), Path::to_path_buf),
@@ -167,8 +157,7 @@ fn split_token<'a>(
 
 /// Expand `~/` and `$VAR` or `${VAR}` in the directory part, for LISTING only and only where the shell itself would.
 /// `plain` (byte-aligned with `dir_value`) marks chars typed unquoted and unescaped, so `'$HOME'/x`, `\$HOME/x`, and `"~/x` stay literal.
-/// Deliberately conservative: double-quoted `$VAR`, which bash would expand, stays literal too.
-/// Unset variables and `~user` forms stay literal (the listing just comes up empty); the inserted text never contains the expansion.
+/// Deliberately conservative: double-quoted `$VAR`, which bash would expand, stays literal too. Unset variables and `~user` forms stay literal (the listing just comes up empty); the inserted text never contains the expansion.
 fn expand_for_listing(
     dir_value: &str,
     plain: &[bool],
@@ -243,14 +232,9 @@ struct ScoredEntry {
     score: u32,
 }
 
-/// List `dir` and rank matches: exact prefix, then case-insensitive prefix, then nucleo fuzzy.
-/// Ties break by score descending, then directories first, then name ascending.
-/// Ranking happens BEFORE the [`MAX_RESULTS`] cap so an alphabetical scan order can never crowd directories or better matches out.
-/// Hidden entries only list when the typed prefix starts with `.`.
-///
-/// The second return is `truncated`: the scan hit [`SCAN_CAP`] or the ranked matches exceeded [`MAX_RESULTS`].
-/// The returned set may then be incomplete, so the pager must not conclude from it.
-/// It must not auto-accept a single row or fill the longest common prefix; an entry the scan missed could disprove either.
+/// List `dir` and rank matches: exact prefix, then case-insensitive prefix, then nucleo fuzzy. Ties break by score descending, then directories first, then name ascending.
+/// Ranking happens BEFORE the [`MAX_RESULTS`] cap so an alphabetical scan order can never crowd directories or better matches out. Hidden entries only list when the typed prefix starts with `.`.
+/// The returned set may then be incomplete, so the pager must not conclude from it. It must not auto-accept a single row or fill the longest common prefix; an entry the scan missed could disprove either.
 async fn list_ranked_entries(dir: &Path, match_prefix: &str) -> (Vec<ScoredEntry>, bool) {
     let mut read_dir = match tokio::fs::read_dir(dir).await {
         Ok(rd) => rd,

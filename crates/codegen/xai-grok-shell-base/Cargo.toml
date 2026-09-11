@@ -14,6 +14,7 @@ test-support = ["xai-grok-env/test-support"]
 default-bazel = ["test-support"]
 
 [dependencies]
+xai-grok-locale = { path = "../xai-grok-locale" }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 reqwest = { workspace = true, features = ["blocking"] }
@@ -24,6 +25,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 tracing = { workspace = true }
 url = { workspace = true }
+xai-dirs = { workspace = true }
 xai-grok-config = { workspace = true }
 xai-grok-env = { workspace = true }
 xai-grok-product = { path = "../xai-grok-product" }

@@ -1,11 +1,8 @@
 use super::*;
 
 /// Regression test: exact incident that caused kimi-k2.5 / OpenRouter sessions to fail with 400 errors on every retry.
-///
 /// The model produced malformed JSON (missing `"` before `new_string`).
-/// The error message must include:
-///   1. The original broken arguments (up to MAX_ARGS_IN_ERROR chars) so the model can fix the one-character syntax error directly.
-///   2. The JSON parse error with the exact char position.
+/// The error message must include: 1. The original broken arguments (up to MAX_ARGS_IN_ERROR chars) so the model can fix the one-character syntax error directly.
 #[test]
 fn test_malformed_json_includes_original_args_and_position() {
     let bad_args = r#"{"file_path": "/testbed/cxx_polynomial/include/emsr/remez.h", "old_string": "", new_string": "content"}"#;

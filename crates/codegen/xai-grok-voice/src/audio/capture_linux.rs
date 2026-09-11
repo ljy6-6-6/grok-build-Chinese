@@ -64,10 +64,9 @@ impl Recorder {
         let rate = rate.to_string();
         match self {
             Recorder::PwRecord => vec![
-                // Without `--raw`, `pw-record` treats `--format`/`--rate`/`--channels` as a libsndfile container subformat
-                // It then wraps stdout in a container: WAV before PipeWire 1.6, AU with a header on 1.6 and later
-                // WAV cannot be written to a pipe ("this file format does not support pipe writing", exit 1); Ubuntu 24.04/Debian 12 ship 1.0/1.2
-                // Raw mode fwrites pure PCM16 frames, which is what the reader expects from every backend
+                // Without `--raw`, `pw-record` treats `--format`/`--rate`/`--channels` as a libsndfile container subformat. It then
+                // wraps stdout in a container: WAV before PipeWire 1.6, AU with a header on 1.6 and later WAV cannot be written to a
+                // pipe ("this file format does not support pipe writing", exit 1); Ubuntu 24.04/Debian 12 ship 1.0/1.2.
                 "--raw".into(),
                 "--rate".into(),
                 rate,
@@ -99,12 +98,9 @@ impl Recorder {
     }
 }
 
-/// Executable recorders on `PATH` in preference order: PipeWire, then PulseAudio, then ALSA.
-/// The order routes capture through the user's audio server rather than a raw ALSA `hw:` device.
-///
-/// A `pw-record` that the `--raw` probe rejects (PipeWire before ~1.0, e.g. Ubuntu 22.04's 0.3.48) is demoted below `parec`/`arecord`, not dropped.
-/// It stays as a last resort so a misjudged or wedged probe (a false negative) can never block an otherwise-working `pw-record`.
-/// The spawn in [`spawn_working_recorder`] is the source of truth; the probe only decides ordering.
+/// The order routes capture through the user's audio server rather than a raw ALSA `hw:` device. It stays as a last
+/// resort so a misjudged or wedged probe (a false negative) can never block an otherwise-working `pw-record`. The spawn
+/// in [`spawn_working_recorder`] is the source of truth; the probe only decides ordering.
 fn candidate_recorders(
     available: impl Fn(&str) -> bool,
     pw_record_supports_raw: impl Fn() -> bool,
@@ -142,10 +138,9 @@ fn binary_on_path(name: &str) -> bool {
     })
 }
 
-/// Whether `pw-record` accepts `--raw` (PipeWire ~1.0 and later), via `pw-record --help` (opens no capture device).
-/// Scans stdout and stderr since usage text lands on either.
-/// A probe that can't run, or outlives [`PW_HELP_TIMEOUT`], counts as "no `--raw`".
-/// That only demotes `pw-record`, never blocks it (see [`candidate_recorders`]).
+/// Whether `pw-record` accepts `--raw` (PipeWire ~1.0 and later), via `pw-record --help` (opens no capture device). Scans
+/// stdout and stderr since usage text lands on either. A probe that can't run, or outlives [`PW_HELP_TIMEOUT`], counts as
+/// "no `--raw`". That only demotes `pw-record`, never blocks it (see [`candidate_recorders`]).
 fn pw_record_supports_raw() -> bool {
     let mut cmd = Command::new("pw-record");
     cmd.arg("--help")
@@ -367,11 +362,9 @@ pub fn capture_pcm_for_duration(
     let duration = Duration::from_secs(seconds.max(1) as u64);
     let deadline = Instant::now() + duration;
 
-    // Watchdog: kill the recorder at the deadline so a `read` blocked waiting for PCM (recorder alive but idle, or a stalled pipe) gets EOF
-    // The read would otherwise run past the requested duration
-    // Killing at the deadline also ends a healthy capture, so the read loop below needs no between-read deadline check beyond its backstop
-    // Deliberately not joined: if the recorder dies early we return without waiting out the full duration
-    // The watchdog's late `kill` on an already-reaped `Child` is a harmless `InvalidInput` (std tracks the reap, so no PID-reuse hazard)
+    // The read would otherwise run past the requested duration. Deliberately not joined: if the recorder dies early we
+    // return without waiting out the full duration. The watchdog's late `kill` on an already-reaped `Child` is a harmless
+    // `InvalidInput` (std tracks the reap, so no PID-reuse hazard)
     let child = Arc::new(Mutex::new(child));
     let watchdog_child = Arc::clone(&child);
     thread::spawn(move || {

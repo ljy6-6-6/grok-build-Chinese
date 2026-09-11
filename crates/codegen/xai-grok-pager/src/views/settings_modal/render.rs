@@ -1083,15 +1083,8 @@ const PICKER_SEPARATOR_W: u16 = 3;
 
 const PICKER_MARKER_W: u16 = 1;
 
-/// Render the shared sub-pane header (a bold title row and a word-wrapped description).
-/// All four sub-pane renderers use it: the enum chooser, the group sub-sheet, and the string/int editors.
-/// Returns `header_rows`, the rows consumed (title + optional description + the 1-row gap).
-/// The caller positions its body at `area.y + header_rows`.
-/// The bodies differ and stay in each caller.
-///
-/// `min_non_desc_rows` is the vertical budget (excluding the description rows themselves) that must fit before the description renders at all.
-/// It is `2` for the choosers (title + gap) and `3` for the editors (title + gap + the input/stepper row).
-/// Callers keep their own `if area.height <= header_rows { return; }`.
+/// `min_non_desc_rows` is the vertical budget (excluding the description rows themselves) that must
+/// fit before the description renders at all.
 fn render_sub_pane_header(
     buf: &mut Buffer,
     area: Rect,
@@ -1332,6 +1325,11 @@ fn render_picking_enum_with_locale(
             height: layout.height,
         };
         buf.set_style(block_rect, Style::default().bg(bg));
+        // Reset palettes: reverse-video focus/hover cue (patched now; the
+        // spans below bake fg/bg only, which preserves the modifier)
+        if let Some(ov) = settings_row_overlay(theme, is_focused, is_hovered) {
+            buf.set_style(block_rect, ov);
+        }
         picker_choice_rects[choice_i] = block_rect;
 
         // ── Line 1: prefix, display, then "·" and the first wrap line ──
@@ -1560,6 +1558,10 @@ fn render_picking_group(
             height: 1,
         };
         buf.set_style(row_rect, Style::default().bg(bg));
+        // Reset palettes: reverse-video focus/hover cue.
+        if let Some(ov) = settings_row_overlay(theme, is_focused, is_hovered) {
+            buf.set_style(row_rect, ov);
+        }
         rects[i] = row_rect;
 
         let marker = if is_focused {
@@ -2135,20 +2137,10 @@ fn render_int_stepper(
         );
     }
 
-    // No in-pane key hint renders here
-    // Earlier revisions drew a centered hint strip, but the chrome footer's `build_int_editor_shortcuts` already exposes the same keys
-    // On tall viewports both rendered at once: same keys, different separator (`·` vs `|`), duplicate visual noise
-    // If the chrome ever fails to render its shortcut row, the user can still discover the keys via the shortcuts cheatsheet (`?`)
+    // No in-pane key hint renders here.
 
-    // ── Live wrap preview for max_thoughts_width. ─────────────────
-    //
-    // When the user is stepping `max_thoughts_width`, a sample thinking-text preview renders directly below the stepper
-    // It wraps live at the current pending value
-    // The preview occupies the rows immediately after the stepper (1 blank row + title + N content rows)
-    // Any rows below the last content row stay blank; the chrome footer sits below `inner_area`, not inside `area`
-    //
-    // Gated on `setting_key == MAX_THOUGHTS_WIDTH_KEY` so future Int settings don't inherit the preview behavior implicitly
-    // The string equality is sufficient because key uniqueness is enforced at registry-load time (see `SettingsRegistry::defaults` / `::from_entries`)
+    // Live wrap preview for max_thoughts_width. Gated on `setting_key == MAX_THOUGHTS_WIDTH_KEY` so
+    // future Int settings don't inherit the preview behavior implicitly.
     if setting_key == crate::settings::defs::MAX_THOUGHTS_WIDTH_KEY {
         let stepper_end_y = stepper_y.saturating_add(1);
         let area_end_y = area.y.saturating_add(area.height);
@@ -2166,12 +2158,9 @@ fn render_int_stepper(
     }
 }
 
-/// Parse the Int stepper's buffer back into a `u16` clamped to the `max_thoughts_width` registered bounds.
-/// Defensive: the stepper's step path keeps the buffer in range, but a test fixture or a future code path could seed an out-of-range buffer.
-///
-/// Both `MIN = 40` and `MAX = 500` fit inside `u16`, so the `clamp` result is always non-negative and at most `u16::MAX`.
-/// We use `u16::try_from(...).unwrap_or(u16::MAX)` instead of `as u16`.
-/// A future bump to `MAX > u16::MAX` then saturates rather than silently truncating mod 65536.
+/// Parse the Int stepper's buffer back into a `u16` clamped to the `max_thoughts_width` registered
+/// bounds. Both `MIN = 40` and `MAX = 500` fit inside `u16`, so the `clamp` result is always
+/// non-negative and at most `u16::MAX`.
 fn parse_max_thoughts_width_buffer(buffer: &str) -> u16 {
     let clamped = buffer
         .parse::<i64>()
@@ -2183,25 +2172,9 @@ fn parse_max_thoughts_width_buffer(buffer: &str) -> u16 {
     u16::try_from(clamped).unwrap_or(u16::MAX)
 }
 
-/// Render the `max_thoughts_width` live wrap preview block.
-///
-/// Vertical layout inside `area`, top-anchored: row 0 is a blank gap below the stepper, row 1 the title, rows 2 and on the wrapped content.
-/// When `pending_value > area.width` and at least two rows of slack sit below the content, a blank row and a `note: clamped at N cols` row follow.
-/// Rows below the note stay unpainted on purpose (the chrome footer sits below `inner_area`).
-///
-/// Edge cases:
-/// - `area.width < MAX_THOUGHTS_WIDTH_PREVIEW_MIN_WIDTH` (30): omit the preview entirely; too narrow for readable wrapped text.
-/// - `area.height < MAX_THOUGHTS_WIDTH_PREVIEW_MIN_HEIGHT` (5): omit; not enough rows for the gap, the title, and 2 content rows.
-/// - `pending_value > area.width`: clamp the preview width to `area.width`; the title stays plain `preview` and only the note carries the clamp.
-///   Content takes priority over the note; without room for the note row, it's silently omitted.
-/// - Gating on the setting key happens at the call site; this helper is pure on the `pending_value` it receives.
-///
-/// Theme tokens:
-/// - Title bg `theme.bg_visual`: the heavier, more saturated of the two "block" bg tokens; matches selection-bg saturation.
-/// - Content bg `theme.bg_highlight`: the lighter of the two, still distinguishable from `theme.bg_base` so the preview reads as a contained block.
-/// - Title and content fg `theme.text_primary`: the same color the scrollback's thinking output renders in.
-/// - The title is italic, bold, and underlined; content is italic only.
-///   UNDERLINED keeps the title distinct on themes where `bg_visual` vs `bg_highlight` is mostly a hue shift, not a luma shift (e.g. TokyoNight).
+/// When `pending_value > area.width` and at least two rows of slack sit below the content, a blank
+/// row and a `note: clamped at N cols` row follow. `pending_value > area.width`: clamp the preview
+/// width to `area.width`; the title stays plain `preview` and only the note carries the clamp.
 fn render_max_thoughts_width_preview(
     buf: &mut Buffer,
     area: Rect,
@@ -2246,10 +2219,9 @@ fn render_max_thoughts_width_preview(
     if wrapped.is_empty() {
         return;
     }
-    // Layout budget: a 1-row blank gap above the title, 1 title row, and N content rows
-    // Cap N at the available rows; the rest of `area` below the last content row stays blank
-    // The MIN_HEIGHT=5 gate above guarantees `area.height >= 5`, so `available_content_rows >= 3`, always enough for the minimum 2 content rows
-    // We cap at `wrapped.len()` so a short wrap doesn't paint beyond the wrap shape
+    // Layout budget: a 1-row blank gap above the title, 1 title row, and N content rows. The
+    // MIN_HEIGHT=5 gate above guarantees `area.height >= 5`, so `available_content_rows >= 3`, always
+    // enough for the minimum 2 content rows.
     let available_content_rows = area.height.saturating_sub(2) as usize;
     let visible_content = wrapped.len().min(available_content_rows);
     render_preview_block(
@@ -2263,18 +2235,8 @@ fn render_max_thoughts_width_preview(
     );
 }
 
-/// Inner painter for the preview block.
-/// Split out so the caller's edge-case dispatch (omit / truncate / full-fit) stays readable and the rendering logic isn't duplicated.
-///
-/// Caller guarantees:
-/// - `effective_width <= area.width`.
-/// - `wrapped.len() >= 1` AND `wrapped.len() + 2 <= area.height` (the 1-row gap, the title row, and the content rows must all fit inside `area`).
-/// - `area.width >= MAX_THOUGHTS_WIDTH_PREVIEW_MIN_WIDTH`.
-///
-/// When `clamped` is true and at least 2 rows of slack sit below the content (`area.height >= wrapped.len() + 4`), the clamp note renders.
-/// It is a blank row, then `note: clamped at N cols` in `theme.text_secondary`, no modifier, on `theme.bg_base`.
-/// The plain bg keeps the note reading as chrome below the preview, outside the two-tone preview block.
-/// When the slack is unavailable, the note is silently omitted; content takes priority.
+/// Inner painter for the preview block. Split out so the caller's edge-case dispatch (omit /
+/// truncate / full-fit) stays readable and the rendering logic isn't duplicated.
 fn render_preview_block(
     buf: &mut Buffer,
     area: Rect,
@@ -2369,12 +2331,7 @@ fn render_preview_block(
         }
     }
 
-    // ── Clamped note (optional, height-permitting). ───────────────
-    //
-    // When `clamped`, a low-key note row states the clamp immediately below the last content row
-    // The note is height-aware: content takes priority, so with no row of slack below the content we omit the note entirely
-    // The note sits OUTSIDE the two-tone preview bg block: it uses `theme.bg_base` so it reads as chrome/tip text, not as part of the wrap preview
-    // Left-aligned at the same x-offset as content (`area.x`)
+    // Clamped note (optional, height-permitting).
     if clamped {
         // One blank row sits between the last content row and the note so the note reads as a separate annotation, not a continuation of the preview
         let note_y = title_y
@@ -2591,14 +2548,11 @@ fn row_layout_with_restart_width(
     }
 }
 
-/// Terminal-native themes collapse selection tokens to `Reset`; use ANSI `DarkGray` (not silver `Gray`, which washes out default fg on dark profiles).
+/// Reset palettes (terminal theme, minimal) paint no selection band — the
+/// cue is the reverse-video overlay from [`settings_row_overlay`].
 pub(super) fn settings_list_row_bg(theme: &Theme, is_selected: bool, is_hovered: bool) -> Color {
-    if crate::theme::cache::terminal_native_locked() || matches!(theme.bg_visual, Color::Reset) {
-        return if is_selected || is_hovered {
-            Color::DarkGray
-        } else {
-            Color::Reset
-        };
+    if crate::theme::cache::terminal_native_locked() || theme.is_bandless() {
+        return Color::Reset;
     }
     if is_selected {
         theme.bg_visual
@@ -2606,6 +2560,22 @@ pub(super) fn settings_list_row_bg(theme: &Theme, is_selected: bool, is_hovered:
         theme.bg_hover
     } else {
         theme.bg_base
+    }
+}
+
+/// Selection/hover cue for Reset-palette rows: reverse video, applied over
+/// the fully painted row. `None` on RGB themes, whose
+/// [`settings_list_row_bg`] band is already baked into the row.
+pub(super) fn settings_row_overlay(
+    theme: &Theme,
+    is_selected: bool,
+    is_hovered: bool,
+) -> Option<Style> {
+    let reset_palette = crate::theme::cache::terminal_native_locked() || theme.is_bandless();
+    if reset_palette && (is_selected || is_hovered) {
+        Some(Style::default().add_modifier(Modifier::REVERSED))
+    } else {
+        None
     }
 }
 
@@ -2655,6 +2625,12 @@ fn render_setting_row_with_locale(
     let bg = settings_list_row_bg(theme, is_selected, is_hovered);
     // Paint the row bg across the full area (1 or 2 lines).
     buf.set_style(area, Style::default().bg(bg));
+    // Reset palettes: reverse-video selection/hover cue. Applied before the
+    // spans, which patch fg/bg and keep the modifier — so it covers every
+    // layout branch below.
+    if let Some(ov) = settings_row_overlay(theme, is_selected, is_hovered) {
+        buf.set_style(area, ov);
+    }
 
     let mut label_style = Style::default().fg(theme.text_primary).bg(bg);
     if is_selected {
@@ -2835,18 +2811,7 @@ fn render_setting_row_with_locale(
                 );
             }
 
-            // ── Line 2: right-aligned value + chevron column ──
-            //
-            // The chevron column is reserved for ALL rows so the `›` glyph is at a constant offset
-            // Bool rows leave it empty but the value still right-aligns to the column's left edge
-            // An earlier version anchored Bool rows on line 2 to `area.right - value_w - 1` (no chevron column reserved)
-            // That shifted their `on`/`off` text 2 cells to the right of chevron rows' values, a visual misalignment
-            //
-            // Anchor line-2's chevron-column LEFT EDGE at the same column the one-line layout uses:
-            // `area.right - ROW_RIGHT_PAD_W - ROW_CHEVRON_COL_W` (i.e. `restart_x_line1 - ROW_CHEVRON_COL_W` when no restart pill is on line 2).
-            // The earlier version anchored at `area.right - ROW_CHEVRON_COL_W`
-            // On a row that flipped from one-line to two-line layout the `›` glyph then jumped 1 cell rightward, a staircase between mixed-layout rows
-            // Subtracting `ROW_RIGHT_PAD_W` here brings line 2 into pixel parity with line 1
+            // Line 2: right-aligned value + chevron column.
             let y2 = area.y + 1;
             let chevron_x_line2 = (area.x + area.width)
                 .saturating_sub(ROW_RIGHT_PAD_W + ROW_CHEVRON_COL_W)
@@ -2947,6 +2912,10 @@ fn render_setting_row_no_value(
 ) {
     let bg = settings_list_row_bg(theme, is_selected, false);
     buf.set_style(area, Style::default().bg(bg));
+    // Reset palettes: reverse-video selection cue.
+    if let Some(ov) = settings_row_overlay(theme, is_selected, false) {
+        buf.set_style(area, ov);
+    }
     let label_style = Style::default()
         .fg(theme.accent_error)
         .bg(bg)
@@ -2986,6 +2955,10 @@ fn render_setting_group_row(
 ) -> Rect {
     let bg = settings_list_row_bg(theme, is_selected, is_hovered);
     buf.set_style(area, Style::default().bg(bg));
+    // Reset palettes: reverse-video selection/hover cue.
+    if let Some(ov) = settings_row_overlay(theme, is_selected, is_hovered) {
+        buf.set_style(area, ov);
+    }
     let mut label_style = Style::default().fg(theme.text_primary).bg(bg);
     if is_selected {
         label_style = label_style.add_modifier(Modifier::BOLD);
@@ -3217,6 +3190,11 @@ fn build_shortcuts_with_locale(
                         "settings.shortcut.enter_select",
                         "Enter select",
                     ),
+                    clickable: false,
+                    id: 0,
+                },
+                Shortcut {
+                    label: "double-click select",
                     clickable: false,
                     id: 0,
                 },

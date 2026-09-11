@@ -301,11 +301,9 @@ impl TodoPane {
         self.show_done = !self.show_done;
     }
 
-    /// Desired height in lines for layout computation.
-    ///
-    /// Returns 0 when hidden (overlay not visible or no items).
-    /// When visible but empty, returns 2 (for placeholder message).
-    /// Otherwise: `min(10, 15% of view_height)` but at least 1.
+    /// Desired height in lines for layout computation. Returns 0 when hidden (overlay not visible or no
+    /// items). When visible but empty, returns 2 (for placeholder message). Otherwise: `min(10, 15% of
+    /// view_height)` but at least 1.
     pub fn desired_height(&self, view_height: u16) -> u16 {
         if !self.overlay.visible {
             return 0;
@@ -331,10 +329,9 @@ impl TodoPane {
         }
     }
 
-    /// Rebuild `entries` from `todos`, filtered by `show_done`.
-    ///
-    /// Items preserve their original order from the agent (no reordering by status).
-    /// IDs are based on the original index in `todos` so that `ListPaneState` can maintain selection across rebuilds.
+    /// Rebuild `entries` from `todos`, filtered by `show_done`. Items preserve their original order
+    /// from the agent (no reordering by status). IDs are based on the original index in `todos` so that
+    /// `ListPaneState` can maintain selection across rebuilds.
     fn rebuild_entries(&mut self) {
         self.entries.clear();
         for (idx, item) in self.todos.iter().enumerate() {
@@ -371,10 +368,9 @@ impl TodoPane {
         self.list_state.handle_paste(text, &self.entries)
     }
 
-    /// Handle a mouse scroll event over the todo pane area.
-    ///
-    /// Caps scroll speed for small viewports.
-    /// The app-level scroll accumulator can produce deltas of 3-5 lines, which would jump past most items in a 4-row pane.
+    /// Handle a mouse scroll event over the todo pane area. Caps scroll speed for small viewports. The
+    /// app-level scroll accumulator can produce deltas of 3-5 lines, which would jump past most items
+    /// in a 4-row pane.
     pub fn handle_scroll(&mut self, lines: i32, col: u16, row: u16) {
         let max = match self.list_state.viewport_height() {
             0..=5 => 1,
@@ -410,10 +406,9 @@ impl TodoPane {
         }
     }
 
-    /// Render the todo pane into the given area.
-    ///
-    /// Rebuilds entries from `todos` each call, which is cheap at the typical count of under 20 items.
-    /// Runs layout, then renders the `ListPane` widget in a padded inner area matching the scrollback's horizontal layout.
+    /// Render the todo pane into the given area. Rebuilds entries from `todos` each call, which is
+    /// cheap at the typical count of under 20 items. Runs layout, then renders the `ListPane` widget in
+    /// a padded inner area matching the scrollback's horizontal layout.
     pub fn render(
         &mut self,
         area: Rect,

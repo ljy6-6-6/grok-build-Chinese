@@ -5,13 +5,8 @@ use super::markdown_content::MarkdownContent;
 use super::mermaid_content::{self, MermaidContent};
 use crate::appearance::AppearanceConfig;
 
-/// Block displaying an agent message with streaming markdown support.
-///
-/// This block uses [`MarkdownContent`] for incremental markdown rendering with cached word-wrapping.
-/// When text arrives in chunks, call `push_chunk()` to append without re-rendering everything.
-///
-/// When `ctx.raw` is false, renders pretty markdown (hiding syntax).
-/// When `ctx.raw` is true, renders the source markdown as-is.
+/// Block displaying an agent message with streaming markdown support. When text arrives in chunks, call
+/// `push_chunk()` to append without re-rendering everything.
 #[derive(Debug, Clone)]
 pub struct AgentMessageBlock {
     content: MarkdownContent,
@@ -100,7 +95,6 @@ impl AgentMessageBlock {
     }
 
     /// Get copyable text for this block.
-    ///
     /// When `raw` is true, returns the raw markdown source.
     /// When `raw` is false, returns the rendered text (styles stripped).
     pub fn copy_text(&self, raw: bool) -> String {
@@ -124,15 +118,9 @@ impl AgentMessageBlock {
         )
     }
 
-    /// Build the block's output and the diagram affordance rows together.
-    /// The inserted rows (in the output) and the anchored placements (their offsets) always derive from the same layout.
-    ///
-    /// [`output`](Self::output) and [`diagram_affordances`](Self::diagram_affordances) each call this independently.
-    /// It therefore runs twice per frame for a diagram message.
-    /// It is deterministic for a given `ctx`, so the two calls produce matching rows and offsets without a shared cache that could drift.
-    ///
-    /// Only callers that have already confirmed there are diagrams and we are not in raw mode should reach here.
-    /// The common diagram-free path never pays this build.
+    /// It is deterministic for a given `ctx`, so the two calls produce matching rows and offsets without a shared cache
+    /// that could drift. Only callers that have already confirmed there are diagrams and we are not in raw mode should
+    /// reach here. The common diagram-free path never pays this build.
     fn rendered_output(
         &self,
         ctx: &BlockContext,

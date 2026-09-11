@@ -78,7 +78,7 @@ Config-file hooks live in the same TOML your organization already controls; see 
 
 **Trusting a project**: The first time you open a project with hooks, you must trust it before its project hooks will run; until then they are silently skipped. Grant trust by running `/hooks-trust` (or launching with `--trust`); the decision is recorded in the unified folder-trust store (`~/.grok/trusted_folders.toml`), the same gate that governs repo-local MCP/LSP servers. Global hooks in `~/.grok/hooks/` are always trusted and need no entry. This prevents untrusted repos from running arbitrary code.
 
-Because hooks are unified under folder-trust, a `--trust` / `/hooks-trust` grant trusts the whole folder for **MCP, LSP, and hooks** together, and covers subdirectories of the same repository. A nested git checkout under that folder is a separate workspace and is not covered. Conversely, disabling folder-trust (`GROK_FOLDER_TRUST=0` or `[folder_trust] enabled = false`) ungates project hooks along with MCP/LSP.
+Because hooks are unified under folder-trust, a `--trust` / `/hooks-trust` grant trusts the whole folder for **MCP, LSP, hooks, project instructions, and project skills** together, and covers subdirectories of the same repository. A nested git checkout under that folder is a separate workspace and is not covered. Conversely, disabling folder-trust (`GROK_FOLDER_TRUST=0` or `[folder_trust] enabled = false`) ungates those surfaces together.
 
 ---
 
@@ -96,7 +96,7 @@ Events fire at three cadences: once per session (`SessionStart`, `SessionEnd`), 
 | `PermissionDenied` | The permission system denies a tool call. | No |
 | `Stop` | An agent turn ends on a genuine completion (an interrupt fires `StopCancelled` instead). | Yes: can block the stop |
 | `StopFailure` | A turn ends because of an API error. | No |
-| `StopCancelled` | Runs instead of `Stop` when a turn ends without completing: a user interrupt (Ctrl+C / Esc / a client stop), a declined permission prompt, the `--max-turns` limit, or a no-progress bail-out. | No |
+| `StopCancelled` | Runs instead of `Stop` when a turn ends without completing: a user interrupt (Ctrl+C / a client stop), a declined permission prompt, the `--max-turns` limit, or a no-progress bail-out. | No |
 | `Notification` | User-attention events (`idle_prompt`, `permission_prompt`, `task_complete`, …). | No |
 | `SubagentStart` | A subagent starts. | No |
 | `SubagentStop` | A subagent's turn ends (fires once, in the subagent, with stop decision control). | Yes: can block the stop |
@@ -343,7 +343,7 @@ The hook input includes `stopHookActive` and `lastAssistantMessage`. `stopHookAc
 
 `Stop`, `SubagentStop`, and `PostToolUse` hooks default to a 600-second timeout because these gates commonly run builds or test suites, and a timed-out hook fails open, so the check does not block anyway. Every other event keeps the 5-second default. Set `timeout` explicitly when a gate needs more: `{ "type": "command", "command": "bin/verify.sh", "timeout": 1200 }`.
 
-The gate runs only for genuine completions. A turn that was interrupted (Esc / Ctrl+C), refused, or cut off at the turn limit skips the Stop gate, though a Ctrl+C that lands while a Stop hook is already running kills it mid-flight (see below); API-error turns fire `StopFailure`, and cancelled turns fire `StopCancelled`. A separate Stop also fires at session end (`reason: "channel_closed"` or `"shutdown"`); its decision output is parsed but ignored, since there is no turn left to continue. A script that counts or gates on Stop fires should check `reason == "end_turn"` so the session-end fire doesn't skew it.
+The gate runs only for genuine completions. A turn that was interrupted (Ctrl+C), refused, or cut off at the turn limit skips the Stop gate, though a Ctrl+C that lands while a Stop hook is already running kills it mid-flight (see below); API-error turns fire `StopFailure`, and cancelled turns fire `StopCancelled`. `Esc` never cancels a running turn. A separate Stop also fires at session end (`reason: "channel_closed"` or `"shutdown"`); its decision output is parsed but ignored, since there is no turn left to continue. A script that counts or gates on Stop fires should check `reason == "end_turn"` so the session-end fire doesn't skew it.
 
 `StopFailure` is observation-only (use it to log failures or send alerts; output and exit code are ignored). Its input carries `error` (the classified type the matcher tests: `rate_limit`, `authentication_failed`, `invalid_request`, `server_error`, `max_output_tokens`, or `unknown` for anything the runtime cannot distinguish; capacity errors classify as `rate_limit`), `errorDetails` (the raw error detail, when available, clipped at 1000 characters; absent for a refusal, whose explanation rides `lastAssistantMessage` alone), `lastAssistantMessage` (the rendered error text shown in the conversation; for this event it is the error string, not assistant output), and `subagentType` (the subagent's type when the turn ran inside one).
 
@@ -376,9 +376,9 @@ Some turns report none of the three:
 
 `StopCancelled`'s input carries:
 
-- `reason`: the classified cause, and the value the matcher tests. `user_interrupt` (Ctrl+C, Esc, a client stop button, or a client `session/cancel`), `permission_rejected` (you declined a tool call), `permission_cancelled` (you dismissed the prompt), `max_turns`, `no_progress` (the agent bailed out after repeated no-op rounds), or `unknown` (a cancel the runtime could not classify, and the forward-compatible fallback). The matcher tests this field only, so a hook that wants every user-initiated stop matches the reasons it cares about and reads `cancelledBy` from the payload. New reasons may be added over time, so treat an unrecognized value the way you treat `unknown`.
+- `reason`: the classified cause, and the value the matcher tests. `user_interrupt` (Ctrl+C, a client stop button, or a client `session/cancel`), `permission_rejected` (you declined a tool call), `permission_cancelled` (you dismissed the prompt), `max_turns`, `no_progress` (the agent bailed out after repeated no-op rounds), or `unknown` (a cancel the runtime could not classify, and the forward-compatible fallback). The matcher tests this field only, so a hook that wants every user-initiated stop matches the reasons it cares about and reads `cancelledBy` from the payload. New reasons may be added over time, so treat an unrecognized value the way you treat `unknown`.
 - `cancelledBy`: `user` for an interrupt, a declined tool call, or a dismissed prompt; `runtime` for everything the agent decided itself, such as `max_turns` and `no_progress`; `unknown` when `reason` is `unknown`, because a cancel the runtime could not classify cannot claim the user was uninvolved. Derived from `reason`, so a new reason classifies automatically. Values may be added here too: treat one you do not recognize the way you treat `unknown`, rather than assuming anything that is not `user` was the runtime.
-- `cancelTrigger`: the gesture, when the client named one, clipped at 64 characters, since a gesture name is a token. The bundled pager sends one of four: `ctrl_c`, `esc`, `mouse` (the on-screen stop button), or `dashboard_stop`. Another client may send any string, and it is passed through verbatim. Every value here classifies as `user_interrupt`, including one that happens to spell an internal name such as `shutdown`, because a client asking to cancel is the user asking; read `cancelledBy` from the payload rather than parsing this string. Omitted for a bare `session/cancel` and for every runtime-initiated reason.
+- `cancelTrigger`: the gesture, when the client named one, clipped at 64 characters, since a gesture name is a token. The bundled pager sends one of three: `ctrl_c`, `mouse` (the on-screen stop button), or `dashboard_stop`. It never sends `esc` (Esc does not cancel a turn). Another client may send any string, including `esc`, and it is passed through verbatim. Every value here classifies as `user_interrupt`, including one that happens to spell an internal name such as `shutdown`, because a client asking to cancel is the user asking; read `cancelledBy` from the payload rather than parsing this string. Omitted for a bare `session/cancel` and for every runtime-initiated reason.
 - `reasonDetails`: the same kind of detail `StopFailure` puts in `errorDetails`, when the runtime has one. For a declined tool call it is `<tool>: <why>`. Clipped at 1000 characters, like `StopFailure`'s `errorDetails`.
 - `lastAssistantMessage`: whatever the turn had committed to the conversation at the interrupt, if any. A Ctrl+C during the final answer leaves the last committed text, or nothing if the turn never committed any. Clipped like the same field on `Stop` and `StopFailure`.
 - `subagentType`: the subagent's type when the turn ran inside one, so a hook can tell a nested agent's stop from the session's. Absent in the main session.
@@ -585,9 +585,18 @@ Press `r` in the Hooks tab to reload all hooks from disk. Grok re-reads every ho
 
 ---
 
-## Hook Annotations in Scrollback
+## Hooks in the Status Row and Scrollback
 
-When hooks execute, their results appear as annotations in the TUI scrollback. You can see which hooks ran, whether they allowed or denied an action, and any output they produced. These annotations appear only when the plugins UI is enabled (the default).
+Hooks are quiet unless they hold the turn up or change its course:
+
+- While the turn is blocked on a hook batch (a `PreToolUse` gate before a tool, the `UserPromptSubmit` gate, a `Stop` gate), the status row reads `Running pre_tool_use hook…` (or `Running 3 stop hooks…`) once the batch has run for about 300 ms. The timer counts from when the batch started, so a slow hook shows its full wait; a fast one never shows at all.
+- A hook that ran and allowed leaves no trace. Its stdout is not shown.
+- A hook that denies a tool call, blocks a prompt, or stops or continues the agent gets one annotation line with the reason. Hooks from `~/.grok`, project, and plugin files are named; hooks from managed configuration read as "a managed policy hook".
+- A hook that fails (non-zero exit, timeout, crash, malformed output) gets one line: `<event> hook (<name>) failed, ignored: <reason>`, where the reason is the exit code with the first stderr line, or the timeout. "Ignored" is literal: failures are fail-open, so the tool call or turn proceeds as if the hook had allowed it.
+
+Deny and failure lines carry the same bullet as the tool rows, so they read as part of the tool call above them.
+
+These lines appear only when the plugins UI is enabled (the default).
 
 ---
 

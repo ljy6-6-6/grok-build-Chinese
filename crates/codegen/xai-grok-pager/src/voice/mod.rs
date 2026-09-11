@@ -10,7 +10,7 @@
 //! - **Hold-to-talk**: on terminals that report key releases (Kitty protocol), hold `Ctrl+Space` to record and release to stop.
 //!   Elsewhere the same chord toggles: press starts, press again stops. Handled in `app::event_loop`.
 //!
-//! Final transcripts append to the recording target's prompt while capture stays open across speech pauses.
+//! Final transcripts are inserted at the current cursor position in the recording target's prompt while capture stays open across speech pauses.
 //! The target, captured at start via [`crate::app::app_view::VoiceTarget`], is the agent prompt or the dashboard's input for dispatching a new agent.
 //! The user always submits with Enter; nothing is auto-sent.
 //! Submit promotes any remaining interim text into the bound prompt, then resets capture completely.
@@ -20,7 +20,10 @@ mod handle;
 
 pub use auth::build_voice_auth;
 pub use handle::handle_voice_event;
-pub(crate) use handle::{combine_prompt_with_voice_text, commit_interim_into_prompt};
+pub(crate) use handle::{
+    VoiceInterimCommit, commit_interim_into_prompt, merge_voice_fragment, prompt_blank_for_voice,
+    space_voice_fragment,
+};
 // Re-exported for the composition-root binary, which links the pager library rather than the voice crate
 // It intercepts the hidden `__mic-capture` helper mode (macOS captures the mic out of process) and runs at the very top of `main`
 pub use xai_grok_voice::maybe_run_capture_subprocess;

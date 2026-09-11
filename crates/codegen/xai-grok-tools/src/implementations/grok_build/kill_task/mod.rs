@@ -24,15 +24,9 @@ use xai_tool_types::{KillTaskOutput, KillTaskResult, KillTaskToolInput};
 #[derive(Debug, Default)]
 pub struct KillTaskTool;
 
-// ── Legacy message helpers ───────────────────────────────────────────────
-//
-// Historical fixture captured from an earlier (0.4.10) revision of this tool.
-//
-// In 0.4.10, kill_task returned:
-//   Err(ToolError::ProcessManagerError(format!("Task {} not found", input.task_id)))
-//
-// The meaningful customer-facing message content is the inner string.
-// Subagent wording is out of scope — subagents didn't exist in 0.4.10.
+// Legacy message helpers Historical fixture captured from an earlier (0.4.10) revision of this tool. In 0.4.10, kill_task returned:
+// Err(ToolError::ProcessManagerError(format!("Task {} not found", input.task_id))) The meaningful customer-facing message content is the inner
+// string. Subagent wording is out of scope — subagents didn't exist in 0.4.10.
 
 /// Exact historical not-found message for `kill_task` in legacy-0.4.10.
 fn render_legacy_kill_task_not_found(task_id: &str) -> String {
@@ -43,6 +37,7 @@ fn render_legacy_kill_task_not_found(task_id: &str) -> String {
 async fn not_found_response(
     task_id: &str,
     terminal: &std::sync::Arc<dyn crate::computer::types::TerminalBackend>,
+    my_owner: Option<&str>,
     is_legacy: bool,
 ) -> KillTaskOutput {
     if is_legacy {
@@ -51,7 +46,9 @@ async fn not_found_response(
         return KillTaskOutput::TaskNotFound(render_legacy_kill_task_not_found(task_id));
     }
     // Current: include known task IDs for discoverability.
-    let known = terminal.list_tasks().await;
+    // The terminal backend is shared with the root session.
+    let mut known = terminal.list_tasks().await;
+    known.retain(|task| crate::reminders::task_completion::task_owned_by_session(task, my_owner));
     let msg = if known.is_empty() {
         format!(
             "Task or subagent {task_id} not found. No background tasks or subagents exist in this session.",
@@ -128,11 +125,9 @@ impl crate::types::tool_metadata::ToolMetadata for KillTaskTool {
     }
 }
 
-/// Resolve the model-facing `kill_task` description from the finalized toolset,
-/// honoring an explicit config override. Wording lives in the shared
-/// [`xai_tool_types::build_kill_task_description`] builder so the CLI and
-/// prod-chat can't drift; the monitor / subagent / bash clauses follow the
-/// tools actually registered this turn, and the kill verb follows the host OS.
+/// Resolve the model-facing `kill_task` description from the finalized toolset, honoring an explicit config override. Wording lives in the
+/// shared [`xai_tool_types::build_kill_task_description`] builder so the CLI and prod-chat can't drift; the monitor / subagent / bash clauses
+/// follow the tools actually registered this turn, and the kill verb follows the host OS.
 fn kill_task_description(
     renderer: &TemplateRenderer,
     description_override: Option<&str>,
@@ -196,11 +191,14 @@ impl xai_tool_runtime::Tool for KillTaskTool {
         let is_legacy = crate::versions::is_legacy_contract(
             crate::types::tool_metadata::behavior_version(&ctx).as_deref(),
         );
-        let terminal;
-        {
+        let (terminal, my_owner) = {
             let res = resources.lock().await;
-            terminal = res.require::<Terminal>()?.0.clone();
-        }
+            (
+                res.require::<Terminal>()?.0.clone(),
+                res.get::<crate::types::resources::OwnerSessionId>()
+                    .map(|owner| owner.0.clone()),
+            )
+        };
 
         match terminal
             .kill_task_with_source(&input.task_id, KillSource::ModelTool)
@@ -243,12 +241,21 @@ impl xai_tool_runtime::Tool for KillTaskTool {
                             })
                         }
                         SubagentCancelOutcome::NotFound => {
-                            not_found_response(&input.task_id, &terminal, is_legacy).await
+                            not_found_response(
+                                &input.task_id,
+                                &terminal,
+                                my_owner.as_deref(),
+                                is_legacy,
+                            )
+                            .await
                         }
                     });
                 }
 
-                Ok(not_found_response(&input.task_id, &terminal, is_legacy).await)
+                Ok(
+                    not_found_response(&input.task_id, &terminal, my_owner.as_deref(), is_legacy)
+                        .await,
+                )
             }
         }
     }
@@ -291,6 +298,7 @@ mod tests {
     struct MockTerminal {
         /// Pre-configured outcome for `kill_task` calls.
         outcome: KO,
+        tasks: Vec<TaskSnapshot>,
     }
 
     #[async_trait::async_trait]
@@ -326,15 +334,81 @@ mod tests {
         }
 
         async fn list_tasks(&self) -> Vec<TaskSnapshot> {
-            vec![]
+            self.tasks.clone()
         }
     }
 
     fn resources_with_terminal(outcome: KO) -> Resources {
+        resources_listing(outcome, Vec::new())
+    }
+
+    fn resources_listing(outcome: KO, tasks: Vec<TaskSnapshot>) -> Resources {
         let mut resources = Resources::new();
-        let backend: Arc<dyn TerminalBackend> = Arc::new(MockTerminal { outcome });
+        let backend: Arc<dyn TerminalBackend> = Arc::new(MockTerminal { outcome, tasks });
         resources.insert(Terminal(backend));
         resources
+    }
+
+    fn owned_tasks(owners: &[(&str, Option<&str>)]) -> Vec<TaskSnapshot> {
+        owners
+            .iter()
+            .map(|(id, owner)| TaskSnapshot {
+                owner_session_id: owner.map(str::to_owned),
+                ..crate::implementations::grok_build::task_output::test_helpers::make_snapshot(
+                    id, false, None,
+                )
+            })
+            .collect()
+    }
+
+    async fn not_found_message(resources: Resources) -> String {
+        let result = xai_tool_runtime::Tool::run(
+            &KillTaskTool,
+            test_ctx_with_call_id(resources.into_shared(), "tool_call"),
+            KillTaskToolInput {
+                task_id: "task-unknown".into(),
+            },
+        )
+        .await
+        .unwrap();
+        match result {
+            KillTaskOutput::TaskNotFound(msg) => msg,
+            other => panic!("Expected TaskNotFound, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn kill_task_not_found_lists_only_this_sessions_known_tasks() {
+        let mut resources = resources_listing(
+            KO::NotFound,
+            owned_tasks(&[
+                ("task-mine", Some("me")),
+                ("task-theirs", Some("other")),
+                ("task-legacy", None),
+            ]),
+        );
+        resources.insert(crate::types::resources::OwnerSessionId("me".into()));
+        let msg = not_found_message(resources).await;
+        assert!(msg.contains("Known bash task IDs"), "msg: {msg}");
+        assert!(msg.contains("task-mine"), "msg: {msg}");
+        assert!(msg.contains("task-legacy"), "msg: {msg}");
+        assert!(!msg.contains("task-theirs"), "msg: {msg}");
+
+        let mut resources = resources_listing(
+            KO::NotFound,
+            owned_tasks(&[("task-a", Some("other")), ("task-b", Some("other"))]),
+        );
+        resources.insert(crate::types::resources::OwnerSessionId("me".into()));
+        let msg = not_found_message(resources).await;
+        assert!(
+            msg.contains("No background tasks or subagents exist in this session."),
+            "msg: {msg}"
+        );
+        assert!(!msg.contains("Known bash task IDs"), "msg: {msg}");
+        assert!(
+            !msg.contains("task-a") && !msg.contains("task-b"),
+            "msg: {msg}"
+        );
     }
 
     #[test]
@@ -619,6 +693,7 @@ mod tests {
         let mut resources = Resources::new();
         let terminal: Arc<dyn TerminalBackend> = Arc::new(MockTerminal {
             outcome: KO::NotFound,
+            tasks: Vec::new(),
         });
         resources.insert(Terminal(terminal));
 

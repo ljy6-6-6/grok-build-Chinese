@@ -119,6 +119,14 @@ pub fn render_dropdown(
         };
         buf.set_style(row_rect, Style::default().bg(row_bg));
         buf.set_line_safe(area.x, y, &line, row_w as u16);
+        // Terminal theme (Reset bands): reverse video; no-op on RGB themes.
+        if crate::views::modal_window::embedded_row_style(theme, is_selected).is_none() {
+            if is_selected {
+                buf.set_style(row_rect, theme.selection_overlay());
+            } else if is_hovered {
+                buf.set_style(row_rect, theme.hover_overlay());
+            }
+        }
     }
 
     if needs_scrollbar {
@@ -162,12 +170,16 @@ fn build_item_line(
     };
     let embed = crate::views::modal_window::embedded_row_style(theme, is_selected);
     let primary_fg = embed.map_or(theme.text_primary, |e| e.fg(theme.text_primary));
-    let desc_fg = embed.map_or(theme.gray, |e| e.fg(theme.gray));
     let normal = Style::default()
         .fg(primary_fg)
         .bg(row_bg)
         .add_modifier(bold);
-    let desc_style = Style::default().fg(desc_fg).bg(row_bg);
+    // muted(): DIM on the terminal theme, where `gray` is Reset and the
+    // description would render as heavy as the label.
+    let desc_style = match embed {
+        Some(e) => Style::default().fg(e.fg(theme.gray)).bg(row_bg),
+        None => theme.muted().bg(row_bg),
+    };
     let bg_style = Style::default().bg(row_bg);
 
     let prefix = if is_selected {
@@ -206,6 +218,28 @@ fn build_item_line(
 mod tests {
     use super::*;
     use crate::views::suggestion_controller::SuggestionSource;
+
+    /// Menu descriptions render via `muted()`: DIM on the terminal theme
+    /// (where `gray` is Reset and the description would be as heavy as the
+    /// label), plain gray fg on RGB themes.
+    #[test]
+    fn description_is_muted_on_terminal_theme() {
+        let item = make_item("theme", "Switch the color theme", "/theme");
+
+        let theme = Theme::terminal();
+        let line = build_item_line(&item, false, 10, 60, theme.bg_light, &theme);
+        let desc = line.spans.last().unwrap().style;
+        assert!(
+            desc.add_modifier.contains(Modifier::DIM),
+            "terminal theme description must be dim, got {desc:?}"
+        );
+
+        let theme = Theme::groknight();
+        let line = build_item_line(&item, false, 10, 60, theme.bg_light, &theme);
+        let desc = line.spans.last().unwrap().style;
+        assert_eq!(desc.fg, Some(theme.gray), "RGB keeps the gray fg");
+        assert!(!desc.add_modifier.contains(Modifier::DIM));
+    }
 
     fn make_item(display: &str, desc: &str, insert: &str) -> CompletionItemParsed {
         CompletionItemParsed {

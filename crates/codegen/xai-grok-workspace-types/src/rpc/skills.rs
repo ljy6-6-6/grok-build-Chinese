@@ -30,11 +30,8 @@ impl WorkspaceRpc for DiscoverPluginsReq {
     type Response = Vec<Value>;
 }
 
-/// Scope/priority of a skill based on where it was discovered.
-/// Lower values have higher priority.
-///
-/// Serde is manual so that [`Unknown`](Self::Unknown) is lossless.
-/// A scope string from a newer server deserializes into `Unknown(original)` and re-serializes back to the original string.
+/// Scope/priority of a skill based on where it was discovered. Lower values have higher priority.
+/// Manual serde so [`Unknown`](Self::Unknown) round-trips a newer server's original string.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SkillScope {
     /// cwd/.grok/skills

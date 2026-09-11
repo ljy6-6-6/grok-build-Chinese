@@ -22,20 +22,9 @@ static CLEANUP_ONCE: std::sync::Once = std::sync::Once::new();
 
 static REGISTRATION_CLEANUP_ONCE: std::sync::Once = std::sync::Once::new();
 
-/// Remove pooled worktrees belonging to dead agent instances.
-///
-/// **The expensive part (directory walk and `git worktree remove`) runs at most once per process.**
+/// The expensive part (directory walk and `git worktree remove`) runs at most once per process.
 /// Multiple call sites (`initialize`, `new_session`) may race to invoke this; only the first caller does the real work, the rest return instantly.
-///
 /// Stale registration removal is gated separately: the first caller that provides a `source_git_root` triggers it.
-/// It runs even if the directory cleanup already ran from an earlier call with `None`.
-///
-/// Multi-instance safe: iterates instance subdirectories under
-/// `~/.grok/worktree_pool/`, reads each `.pid` file, and checks
-/// whether the PID is still alive.
-///
-/// This is a **synchronous** function intended to be called via `tokio::task::spawn_blocking`.
-/// It then runs on the thread pool and never competes with the agent's single-threaded `LocalSet`.
 #[tracing::instrument(skip_all)]
 pub fn cleanup_stale_pool_worktrees(source_git_root: Option<&Path>) {
     CLEANUP_ONCE.call_once(|| {

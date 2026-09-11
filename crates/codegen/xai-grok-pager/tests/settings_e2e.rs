@@ -1168,10 +1168,8 @@ fn programmatic_filter_query_is_single_line_and_cursor_ends() {
 fn filter_with_multiple_matches_navigates_between_settings() {
     let mut s = make_state();
     let _ = handle_settings_key(&mut s, &press(KeyCode::Char('/')));
-    // "compact" is a keyword on compact_mode; "simple" on simple_mode.
-    // The query "mode" alone matches too many things now (theme descriptions contain "mode")
-    // We instead use two distinct keyword matches that aren't in the theme catalog
-    // This tests the multi-word AND behavior on a tight set
+    // "compact" is a keyword on compact_mode; "simple" on simple_mode. We instead use two distinct keyword matches
+    // that aren't in the theme catalog.
     for c in "ascii minimal".chars() {
         let _ = handle_settings_key(&mut s, &press(KeyCode::Char(c)));
     }
@@ -2386,17 +2384,7 @@ fn pr2_filter_matches_multi_word_and() {
 }
 
 /// Enum chooser sub-mode: Esc inside `PickingEnum` reverts to the original value AND transitions back to Browse.
-/// This e2e exercises the FULL production path:
-///
-///   Browse (synthetic Enum row focused)
-///     → Enter      → try_enter_picking_enum() → PickingEnum
-///     → Down       → choices_idx 0 → 1 (preview dispatch)
-///     → Esc        → action_for_enum(key, original) → Browse
-///
-/// This drives the *production* entry path (`handle_browse::Enter` calls `try_enter_picking_enum`), not a hand-set `state.mode = PickingEnum {...}`.
 /// That call site is the only place `try_enter_picking_enum` is reachable in production code.
-///
-/// This verifies the *structural* outcome (mode and Changed); the Action variant assertion lands once `action_for_enum("theme", _)` ships.
 #[test]
 fn pr3_esc_in_picker_reverts_to_original() {
     // Synthetic Enum registry: `action_for_enum` returns None for this key
@@ -2482,20 +2470,9 @@ fn pr3_esc_in_picker_reverts_to_original() {
     );
 }
 
-/// Full theme picker e2e via the production entry path.
-///
-///   Browse (theme row focused)
-///     → Enter      → try_enter_picking_enum() → PickingEnum
-///     → Down       → choices_idx default → next, dispatches
-///                    `Action::PreviewTheme(...)` (preview-only,
-///                    no persist Effect, no toast)
-///     → Up         → preview-revert
-///     → Down       → preview to next
-///     → Enter      → dispatches `Action::SetTheme(current)` COMMIT
-///                    (single persist and toast per picker cycle)
-///
-/// The test (a) verifies the PREVIEW vs COMMIT split (Up/Down emit Preview Actions, Enter emits a Set/commit Action).
-/// It also (b) derives expected canonicals from the registry, so a future catalog reorder doesn't break the test for a non-bug reason.
+/// Full theme picker e2e via the production entry path. `Action::PreviewTheme(.)` (preview-only, no persist Effect,
+/// no toast). It also (b) derives expected canonicals from the registry, so a future catalog reorder doesn't break
+/// the test for a non-bug reason.
 #[test]
 fn pr4_theme_preview_and_commit_e2e() {
     let reg = SettingsRegistry::defaults();
@@ -2603,10 +2580,9 @@ fn pr4_theme_preview_and_commit_e2e() {
     );
 }
 
-// Strangler-fig dispatch-layer tests for the typed Actions are in `crates/codegen/xai-grok-pager/src/app/dispatch.rs::tests`
-// They sit next to the `set_compact_mode_emits_persist_setting_with_correct_payload` family
-// See `set_theme_emits_persist_setting_with_correct_payload` and friends
-// The dispatch tests live there because the `AppView` test fixture (`test_app_with_agent`) isn't exported across the crate boundary
+// Strangler-fig dispatch-layer tests for the typed Actions are in
+// `crates/codegen/xai-grok-pager/src/app/dispatch.rs::tests`. The dispatch tests live there because the `AppView`
+// test fixture (`test_app_with_agent`) isn't exported across the crate boundary.
 
 /// Esc inside the theme picker dispatches a PREVIEW Action (not a commit); Esc revert is a preview-style restore, not a re-persist.
 #[test]
@@ -2649,10 +2625,11 @@ fn pr4_theme_picker_esc_dispatches_revert_action() {
 
 /// `action_for_enum` (preview) and `action_for_enum_commit` map every theme-family key to the matching typed Action variant.
 /// The test is parameterised across keys AND derives the expected next-canonical from the registry (catalog-reorder-resilient).
-///
 /// Also exercises EVERY choice (not just the first Down), so a refactor that routes correctly for choice 0 but breaks for choice N>0 gets caught.
 #[test]
 fn pr4_picker_dispatches_each_theme_settings_action_variant() {
+    // The picker hides the rollout-gated `terminal` choice; the walk below covers the full catalog, so seed the gate on.
+    xai_grok_pager_render::theme::cache::set_terminal_theme_enabled(true);
     let reg = SettingsRegistry::defaults();
 
     for key in &["theme", "auto_dark_theme", "auto_light_theme"] {
@@ -2722,11 +2699,9 @@ fn pr4_picker_dispatches_each_theme_settings_action_variant() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Mouse-path coverage for the new Enum settings.
 // The `every_registered_setting_is_exercised` test's docstring promises a keyboard test and a mouse test per registered key
 // Earlier only keyboard tests shipped for the 3 new enums; these tests close that gap
-// ---------------------------------------------------------------------------
 
 /// Clicking on an Enum row in Browse mode selects it without firing any Action.
 /// Enum rows require an explicit Enter to open the picker (mouse picker-entry is deferred to a future change).
@@ -2804,16 +2779,9 @@ fn pr4_mouse_click_in_theme_picker_is_no_op() {
     assert!(matches!(s.mode(), SettingsModalMode::PickingEnum { .. }));
 }
 
-// ---------------------------------------------------------------------------
-// `multiline_mode` (first PAGER-owned setting)
-//
-// Unlike the SHARED bools (which round-trip through `Effect::PersistSetting` and the shell), `multiline_mode` is PAGER-owned
-// State lives on `AgentView.multiline_mode` and the modal reads from `PagerLocalSnapshot`
-// The dispatcher's `set_multiline_mode` is the single mutation owner
-// No disk persist, no `Effect`, no toast on the no-op fast path
-//
-// These tests mirror the keyboard and mouse coverage promised by `ALL_SETTINGS_EXERCISED`, same rigor as `compact_mode` et al
-// ---------------------------------------------------------------------------
+// `multiline_mode` (first PAGER-owned setting). State lives on `AgentView.multiline_mode` and the modal reads from
+// `PagerLocalSnapshot`. The dispatcher's `set_multiline_mode` is the single mutation owner. No disk persist, no
+// `Effect`, no toast on the no-op fast path.
 
 /// Keyboard Space on the multiline row dispatches the typed setter with the inverted snapshot value (default false toggles to true).
 /// The modal builds the bool from `PagerLocalSnapshot.multiline_mode` via the `current_value_for` arm.
@@ -3624,23 +3592,17 @@ fn pr11_permission_mode_kind_is_always_approve_projection() {
 
 // cycle_mode delegation tests live in `dispatch.rs::tests`.
 
-// The previous `pr7_d_key_opens_reset_confirmation_modal` duplicated `d_key_emits_open_reset_confirm_action_for_compact_mode` and was removed
-// The canonical contract (d dispatches OpenResetConfirm) is asserted there and by `d_key_emits_open_reset_confirm_for_every_setting`
-//
-// The full y/n-via-handle_modal_key dispatch path is exercised by the dispatch.rs::tests family
-// (dispatch_confirm_reset_setting_reset_dispatches_typed_setter_for_* and dispatch_confirm_reset_setting_cancel_preserves_modal_state)
+// The previous `pr7_d_key_opens_reset_confirmation_modal` duplicated
+// `d_key_emits_open_reset_confirm_action_for_compact_mode` and was removed. The full y/n-via-handle_modal_key
+// dispatch path is exercised by the dispatch.rs::tests family.
 
-// ---------------------------------------------------------------------------
 // Render-side tests for the reset-confirm overlay.
-//
 // These tests assert that the rendered buffer contains the confirmation prompt text, breadcrumb, and y/n shortcuts
 // Without them, a future change that breaks the overlay's rendering layer would silently regress to "user can't see the dialog"
-// ---------------------------------------------------------------------------
 
-/// User-feedback follow-up: the reset-confirm overlay applies a uniform "being reset" dim style to **every cell** of the focused row's rect.
-/// That covers label cells, value cells, AND description cells.
-/// The visual emphasis is the whole row about to be reset, not biased toward the description column.
-/// (The description column already had the dimmest fg before the overlay's blend was applied.)
+/// User-feedback follow-up: the reset-confirm overlay applies a uniform "being reset" dim style to every cell of
+/// the focused row's rect. That covers label cells, value cells, AND description cells. (The description column
+/// already had the dimmest fg before the overlay's blend was applied.).
 #[test]
 fn reset_overlay_dims_all_rows_except_target() {
     use ratatui::buffer::Buffer;
@@ -3700,10 +3662,7 @@ fn reset_overlay_dims_all_rows_except_target() {
         "target + non-target rows must be on distinct y-lines"
     );
 
-    // **Spotlight invariant.** The reset overlay applies `Modifier::DIM` to every cell outside the target row's y-range inside the list area
-    // The target row stays at full intensity. We assert both sides of that contract:
-    //   - every cell in the non-target row's rect has DIM
-    //   - no cell in the target row's rect has DIM
+    // Spotlight invariant. no cell in the target row's rect has DIM.
     let has_dim = |x: u16, y: u16| -> bool {
         buf.cell((x, y))
             .map(|c| c.modifier.contains(Modifier::DIM))
@@ -3736,13 +3695,9 @@ fn reset_overlay_dims_all_rows_except_target() {
         target_dim_count, target_rect.width
     );
 
-    // **Action-element invariant.** The prompt row (rendered ABOVE the row list) and the y/n action footer shortcuts must stay at full intensity
-    // They're the entire point of the overlay
-    // Earlier revisions only asserted dim/no-dim inside `list_area`
-    // So a refactor that widened the dim sweep to the prompt or the action footer would have silently regressed without test feedback
-    //
-    // The prompt row sits at `area.y` (line 0 of the modal's content area)
-    // Sample multiple x-positions to defend against a future regression that only dims a sub-region of the prompt line
+    // Action-element invariant. The prompt row (rendered ABOVE the row list) and the y/n action footer shortcuts must
+    // stay at full intensity. Earlier revisions only asserted dim/no-dim inside `list_area`. So a refactor that
+    // widened the dim sweep to the prompt or the action footer would have silently regressed without test feedback.
     let prompt_y = area.y;
     let mut prompt_dim_count = 0usize;
     for dx in 0..area.width {
@@ -3796,10 +3751,9 @@ fn reset_overlay_dims_all_rows_except_target() {
     }
 }
 
-/// The settings modal renders a 1-line "Ask Grok" tip footer at the bottom of the content area.
-/// It shows in Browse, FilterFocused, and PickingEnum modes (always-on tip).
-/// The footer is suppressed in `EditingValue` because the editor needs every line for input and validation.
-/// This pins the discoverability contract.
+/// The settings modal renders a 1-line "Ask Grok" tip footer at the bottom of the content area. It shows in Browse,
+/// FilterFocused, and PickingEnum modes (always-on tip). The footer is suppressed in `EditingValue` because the
+/// editor needs every line for input and validation.
 #[test]
 fn docs_footer_renders_for_browse_and_picker() {
     use ratatui::buffer::Buffer;
@@ -3842,13 +3796,8 @@ fn docs_footer_renders_for_browse_and_picker() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Expandable rows and the restart pill on expand/edit
-//
-// Right/`l` expands the focused row's description inline below the label line; Left/`h` collapses it
-// Multiple rows can be expanded simultaneously
-// The "restart" pill renders only while the row is expanded (change-time feedback is the toast's job)
-// ---------------------------------------------------------------------------
+// Expandable rows and the restart pill on expand/edit. The "restart" pill renders only while the row is expanded
+// (change-time feedback is the toast's job).
 
 /// Helper: render the modal into a sized buffer and return the full rendered text as a single newline-joined string.
 /// Used by the expand/collapse tests to detect description text in the buffer.
@@ -3999,18 +3948,14 @@ fn restart_pill_hidden_when_edited_but_collapsed() {
 #[test]
 fn expanded_description_wraps_to_modal_width() {
     let mut s = make_state();
-    // `permission_mode`'s description is long enough to wrap at 80 cols
-    // Expand and check that the entire description text is present in the buffer
-    //
-    // **Width.** The `→ expand` shortcut was added to the Browse footer, which can push the footer onto an extra line at narrower widths
-    // We render at 80 cols to keep the full wrapped description visible
+    // `permission_mode`'s description is long enough to wrap at 80 cols. Expand and check that the entire description
+    // text is present in the buffer. Width. The `→ expand` shortcut was added to the Browse footer, which can push the
+    // footer onto an extra line at narrower widths. We render at 80 cols to keep the full wrapped description visible.
     navigate_to(&mut s, "permission_mode");
     let _ = handle_settings_key(&mut s, &press(KeyCode::Right));
 
-    // **Height bump.** Each non-first section header earns a 1-line gap above it
-    // With permission_mode focused (Agent & Approval), two such gaps sit between Appearance and the expanded row's wrapped description
-    // That would squeeze the 3rd wrapped line off the bottom at height=30
-    // Render at 34 lines so the existing assertion about "automatically" still holds
+    // Height bump. That would squeeze the 3rd wrapped line off the bottom at height=30. Render at 34 lines so the
+    // existing assertion about "automatically" still holds.
     let rendered = render_modal_to_string(&mut s, 80, 34);
     // Distinctive phrases from the description text:
     assert!(
@@ -5229,10 +5174,9 @@ fn default_selected_permission_mouse_click_on_indicator_opens_picker_in_one_clic
     }
 }
 
-/// `/privacy` takes no arguments: it opens the settings page and nothing else.
-/// The alias parser it used to carry (`opt-in`, `share`, `out`, …) is gone.
-/// A one-word prompt alias could flip a privacy preference with none of the disclosure copy in front of the user.
-/// The ambiguous forms (`on`/`off`) risked landing on the opposite of the intent.
+/// `/privacy` takes no arguments: it opens the settings page and nothing else. The alias parser it used to carry
+/// (`opt-in`, `share`, `out`, …) is gone. The ambiguous forms (`on`/`off`) risked landing on the opposite of the
+/// intent.
 #[test]
 fn pr9_privacy_slash_command_takes_no_arguments() {
     use xai_grok_pager::slash::commands::builtin_commands;
@@ -5247,16 +5191,8 @@ fn pr9_privacy_slash_command_takes_no_arguments() {
     assert_eq!(cmd.usage(), "/privacy");
 }
 
-// ---------------------------------------------------------------------------
-// `plan_mode` (Agent-category Enum, PAGER-owned and ACP-mediated, supports_preview: false)
-//
-// Migrated from the per-Action `Action::EnterPlanMode` (no-description case) to the typed `Action::SetPlanMode(PlanModeKind)`
-// The typed Action goes through the unified `set_plan_mode` dispatch path
-// The dispatcher owns idempotency, optimistic mutation (`plan_mode_pending`), modal-snapshot refresh, toast, and the `Effect::SetSessionMode` emit
-//
-// **Why `supports_preview: false`**: toggling fires an ACP `session/set_mode` request that mutates per-agent state and gates tool dispatch
-// Per-keystroke preview would either fire N round-trips per nav OR commit on every keystroke. Both are unacceptable.
-// ---------------------------------------------------------------------------
+// `plan_mode` (Agent-category Enum, PAGER-owned and ACP-mediated, supports_preview: false). Per-keystroke preview
+// would either fire N round-trips per nav OR commit on every keystroke.
 
 /// `plan_mode` lives under the `Agent` section: pins the category against drift.
 #[test]
@@ -5505,11 +5441,8 @@ fn pr10_plan_mode_choices_use_canonical_strings() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Mouse path tests for plan_mode (keyboard and mouse parity)
-//
 // Mirrors the permission_mode / coding_data_sharing mouse tests. Every keyboard interaction has a mouse equivalent.
-// ---------------------------------------------------------------------------
 
 /// First mouse-click on a DIFFERENT (non-selected) `plan_mode` row only SELECTS the row (no picker entry, no Action).
 /// Mirrors the two-stage Bool-row select-then-toggle UX.
@@ -5596,17 +5529,8 @@ fn pr10_mouse_click_on_plan_mode_indicator_opens_picker_in_one_click() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// `render_mermaid` (SHELL-owned Enum, Appearance).
-//
-// Unlike `plan_mode` (PAGER-owned, snapshot-seeded), `render_mermaid` is SHELL-owned
-// The live value comes from the process-wide cache mirror (`appearance::cache::load_render_mermaid`, default `auto`)
-// This mirrors how `vim_mode` reads its cache
-// The picker commits the typed `Action::SetRenderMermaid(RenderMermaid)` (canonical to enum via `RenderMermaid::from_canonical`)
-// `supports_preview: false`, so picker nav and Esc must never dispatch an Action
-//
-// These tests honor the `ALL_SETTINGS_EXERCISED` contract: keyboard AND mouse coverage, same rigor as `plan_mode` / `coding_data_sharing`
-// ---------------------------------------------------------------------------
+// `render_mermaid` (SHELL-owned Enum, Appearance). `supports_preview: false`, so picker nav and Esc must never
+// dispatch an Action.
 
 /// `render_mermaid` lives under `Appearance` and is SHELL-owned (persisted to `[ui].render_mermaid`).
 /// Pins the category and owner against drift.
@@ -5850,11 +5774,9 @@ fn mouse_click_on_render_mermaid_indicator_opens_picker_in_one_click() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // screen_mode (SHELL Enum, Appearance, restart_required, no preview).
 // Catalog [fullscreen, minimal]; product default when unset is fullscreen.
 // Session-only switches stay on /minimal and /fullscreen (do not write config).
-// ---------------------------------------------------------------------------
 
 /// Enter on the `screen_mode` row opens the picker seeded at the product default `fullscreen`.
 /// (UiConfig.screen_mode None resolves to canonical fullscreen.)
@@ -5989,11 +5911,9 @@ fn mouse_click_on_screen_mode_indicator_opens_picker_in_one_click() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // hunk_tracker_mode (SHELL Enum, Advanced, restart_required, no preview).
 // Catalog [agent_only, all_dirty, off]; `disabled` aliases `off` at parse time
 // Mirrors the render_mermaid enum tests (keyboard and mouse parity)
-// ---------------------------------------------------------------------------
 
 /// Enter on the `hunk_tracker_mode` row opens the picker seeded at the default `off`.
 #[test]
@@ -6536,11 +6456,8 @@ fn simple_mode_label_distinguishes_input_from_scrollback() {
     assert!(vim.keywords.contains(&"vim"));
 }
 
-// ---------------------------------------------------------------------------
 // keep_text_selection: SHELL-owned Mouse Enum (`flash` | `hold`)
-//
 // Mirrors `render_mermaid`: `supports_preview: false`, Enter opens picker, commit dispatches `Action::SetKeepTextSelection(TextSelection)`
-// ---------------------------------------------------------------------------
 
 #[test]
 fn keep_text_selection_renders_under_mouse_shell_owned() {

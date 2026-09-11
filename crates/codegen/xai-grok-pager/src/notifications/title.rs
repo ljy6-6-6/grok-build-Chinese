@@ -9,15 +9,12 @@ const TITLE_SPINNER: &[char] = &[
     '\u{280B}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283C}', '\u{2834}', '\u{2826}', '\u{2827}',
 ];
 
-/// Hold each spinner frame for this many ticks before advancing.
-///
-/// Terminals (notably Ghostty) debounce tab title updates.
-/// Writing a new title every tick (~33ms at 30fps) produces more OSC 0 writes than the tab bar can render.
+/// Hold each spinner frame for this many ticks before advancing. Terminals (notably Ghostty) debounce tab title
+/// updates. Writing a new title every tick (~33ms at 30fps) produces more OSC 0 writes than the tab bar can render.
 /// A divisor of 8 gives ~264ms per frame, slow enough for debounced renderers while still looking animated.
 const TITLE_SPINNER_DIVISOR: u64 = 8;
 
 /// Hold the "⚠ Action Required" label for this many ticks before toggling (only while unfocused; see the focused field below).
-///
 /// A divisor of 15 at 30fps gives ~500ms visible, ~500ms hidden: a calm 1s blink cycle that reads as intentional rather than broken flickering.
 /// When focused we show the prefix statically to eliminate oscillation during active interaction (e.g. typing in permission modals).
 const ACTION_REQUIRED_BLINK_DIVISOR: u64 = 15;
@@ -59,7 +56,6 @@ impl TitleManager {
     }
 
     /// Compose the title string from the current state.
-    ///
     /// Returns the escape sequence bytes to set the terminal title when the composed title differs from the last one emitted.
     /// Returns `None` when the title is unchanged (dedup).
     pub fn update(&mut self, state: &TitleState<'_>) -> Option<String> {
@@ -310,11 +306,8 @@ fn write_truncated(buf: &mut String, s: &str, max: usize) {
     }
 }
 
-/// Build the escape sequence for setting the terminal title without writing it to stderr.
-/// The caller is responsible for routing these bytes through the frame pipeline.
-///
-/// Control characters are stripped here: title parts include strings from remote sources (e.g. grok.com conversation titles).
-/// Those must not terminate the OSC sequence early or inject escapes into the terminal.
+/// Build the escape sequence for setting the terminal title without writing it to stderr. Those must not terminate
+/// the OSC sequence early or inject escapes into the terminal.
 fn build_title_escape(title: &str) -> String {
     let sanitized: String = title.chars().filter(|c| !c.is_control()).collect();
     let mut buf = Vec::new();

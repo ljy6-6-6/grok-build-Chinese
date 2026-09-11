@@ -137,12 +137,15 @@ temperature                 = 0.7
 top_p                       = 0.95
 max_completion_tokens       = 8192
 max_retries                 = 8
+rate_limit_retry_threshold  = 4
 inference_idle_timeout_secs = 600
 subagent_rate_limit_max_attempts = 8
 stream_tool_calls           = true
 ```
 
 This is a small, fixed set of environment-wide knobs. Settings that identify a specific model (`model`, `base_url`, `api_key`, `context_window`, ...) cannot be defaulted this way, and a few settings with their own dedicated configuration -- auto-compaction (`[session]`), the system-prompt label (`[agent]`), and reasoning effort (`[models].default_reasoning_effort`) -- keep their existing homes.
+
+`rate_limit_retry_threshold` and `subagent_rate_limit_max_attempts` select different 429 retry paths for subagents. Configuring `rate_limit_retry_threshold` makes the sampler own those retries and disables the separate subagent wait loop, including its 150-second cumulative wait budget and wait telemetry. `subagent_rate_limit_max_attempts` applies only when the sampler threshold is unset.
 
 > **Note on `stream_tool_calls`:** this one affects request *shape*, not just sampling. A few endpoints (some BYOK providers) expect it left unset; if a global `stream_tool_calls = true` causes problems for such a model, opt that model out with `stream_tool_calls = false` in its `[model.<id>]` block.
 

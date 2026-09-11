@@ -2,21 +2,21 @@
 
 mod common;
 
-use xai_grok_shell::agent::models::startup_prefetch;
+use xai_grok_shell::agent::remote_config::settings_get::{SettingsQuery, get_settings};
 
 #[test]
-fn prefetch_never_starts_while_policy_repair_is_pending() {
+fn getter_does_not_fetch_while_policy_repair_is_pending() {
     let home = common::isolated_home();
     common::block_on(async {
         let server = common::start_seeded_mock(home.path()).await;
-        // A team principal with no serving managed policy: `ensure_managed_policy_present`
-        // will run a session-start repair, so no prefetch may egress before it.
-        let scope = xai_grok_shell::auth::GrokComConfig::default().auth_scope();
+        // A team principal with no serving managed policy: repair is pending,
+        // so the getter must return ineligible without egress.
+        let scope = xai_grok_login::GrokComConfig::default().auth_scope();
         let auth = serde_json::json!({
             scope: {
                 "key": "team-session-token",
                 "auth_mode": "oidc",
-                "oidc_issuer": xai_grok_shell::auth::xai_oauth2_issuer(),
+                "oidc_issuer": xai_grok_login::xai_oauth2_issuer(),
                 "create_time": "2026-01-01T00:00:00Z",
                 "expires_at": "2099-01-01T00:00:00Z",
                 "user_id": "test-user",
@@ -27,20 +27,14 @@ fn prefetch_never_starts_while_policy_repair_is_pending() {
         std::fs::write(home.path().join("auth.json"), auth.to_string())
             .expect("write team auth.json");
 
-        startup_prefetch::begin_before_policy_gate(
-            &xai_grok_shell::agent::config::Config::default(),
-        );
-
+        let outcome = get_settings(SettingsQuery::from_auth(None)).await;
         assert!(
-            !startup_prefetch::inflight_for_tests(),
-            "a pending policy repair must suppress the startup prefetch"
+            outcome.settings().is_none() && !outcome.attempted(),
+            "a pending policy repair must skip the settings getter"
         );
         assert_eq!(
-            (
-                server.request_count_for("/v1/models"),
-                server.request_count_for("/v1/settings"),
-            ),
-            (0, 0),
+            server.request_count_for("/v1/settings"),
+            0,
             "no authenticated request may leave before the policy repair"
         );
     });

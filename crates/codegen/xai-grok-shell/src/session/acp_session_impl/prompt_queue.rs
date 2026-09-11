@@ -35,7 +35,7 @@ pub(crate) struct QueueInputRequest {
     pub(crate) respond_to: oneshot::Sender<PromptTurnResult>,
     pub(crate) persist_ack: Option<oneshot::Sender<()>>,
     pub(crate) parsed_prompt_tx: Option<oneshot::Sender<ParsedPromptInfo>>,
-    pub(crate) initial_child_prompt_ready: Option<oneshot::Sender<()>>,
+    pub(crate) initial_child_prompt_ready: Option<oneshot::Sender<oneshot::Sender<()>>>,
     pub(crate) traceparent: Option<String>,
 }
 
@@ -107,8 +107,7 @@ impl SessionActor {
     }
 
     /// Queue a user-originated prompt (writes to prompt history).
-    ///
-    /// `send_now` (or a user prompt arriving during an interruptible wait) inserts the prompt to run next.
+    /// `send_now` inserts the prompt to run next.
     /// Returns `true` when the caller must cancel the running turn.
     #[must_use = "true means the caller must cancel the running turn"]
     pub(super) async fn queue_input(&self, request: QueueInputRequest) -> bool {
@@ -193,12 +192,6 @@ impl SessionActor {
             (trace_gcs_config, artifact_tracker)
         };
 
-        if let crate::session::PromptOrigin::SubagentCompleted { subagent_id } =
-            input_origin.as_prompt_origin()
-        {
-            self.mark_completions_reported(&[subagent_id]).await;
-        }
-
         // For synthetic prompts, derive trace config from the template captured during the first real user prompt
         let (trace_gcs_config, artifact_tracker) =
             if input_origin.is_synthetic() && trace_gcs_config.is_none() {
@@ -226,6 +219,9 @@ impl SessionActor {
             } else {
                 (trace_gcs_config, artifact_tracker)
             };
+
+        // Sampled before the lock: resolving it can touch disk.
+        let follow_up_steer = crate::util::config::follow_up_steer_enabled().await;
 
         let mut state = self.state.lock().await;
 
@@ -265,6 +261,7 @@ impl SessionActor {
             let kind = if matches!(
                 input_origin.as_prompt_origin(),
                 crate::session::PromptOrigin::ParentAgentMessage { .. }
+                    | crate::session::PromptOrigin::ParentHumanMessage { .. }
             ) {
                 "parent_agent_message"
             } else if Self::extract_bash_command(&prompt_blocks).is_some() {
@@ -324,7 +321,7 @@ impl SessionActor {
             queued.input_origin.policy().shutdown == ShutdownPolicy::Drain
                 && Some(queued.prompt_id.as_str()) != running_front_id.as_deref()
         });
-        let auto_send_now = turn_running && blocked_in_wait && !held_user_queue;
+        let auto_send_now = follow_up_steer && turn_running && blocked_in_wait && !held_user_queue;
         let send_now = item.is_queue_editable() && (send_now || auto_send_now);
         let front_awaiting_commit_now = Self::front_awaiting_commit(&state);
         let cancel_running_turn =
@@ -382,12 +379,9 @@ impl SessionActor {
         cancel_running_turn
     }
 
-    /// Extract a plain-text summary of a prompt's content blocks for the shared queue display.
-    ///
     /// Prefers a block's `displayText` meta (the compact user-facing form, e.g. `/loop 5s echo "x"`) over the raw wire text.
     /// A client that expands a slash skill locally sends the full expansion as the wire text, with the compact invocation in `displayText`.
     /// The shared queue (and the turn-start shim that renders other clients' user block from it) must show the compact form, not the raw expansion.
-    /// Falls back to the joined block text when no `displayText` is present.
     pub(super) fn queue_text_from_blocks(blocks: &[acp::ContentBlock]) -> String {
         if let Some(display) = blocks.iter().find_map(|block| {
             let acp::ContentBlock::Text(t) = block else {
@@ -543,7 +537,7 @@ impl SessionActor {
     /// True when `prompt_id` is the in-flight turn, which a queue edit must never remove or reorder.
     /// Keys on `state.running_task` (race-free under the caller's state lock), not the `current_prompt_id` pin.
     /// `handle_completion` clears the pin while the finished front is still unpopped; a queue edit in that window must still refuse the front.
-    fn is_running_prompt(state: &State, prompt_id: &str) -> bool {
+    pub(super) fn is_running_prompt(state: &State, prompt_id: &str) -> bool {
         state.running_prompt_id() == Some(prompt_id)
     }
 
@@ -584,12 +578,8 @@ impl SessionActor {
     }
 
     /// True when the next drainable user row (FIFO, non-synthetic, not the running front) is free of a live edit hold.
-    /// The goal round loop yields on this so queued user work runs between rounds instead of starving behind continuations.
     /// A row under an unexpired hold must not yield: promote is blocked while editing, so a yield would only re-queue the goal behind a parked queue.
-    /// Synthetics ahead of the user row do not block the yield.
-    /// A hold older than `EDIT_HOLD_TTL` counts as expired here.
     /// The leaked-hold GC runs only in `maybe_start_running_task`, which cannot fire while the in-turn goal loop keeps looping.
-    /// Without the expiry check here, a crashed or disconnected editor's stale hold would park the queue for the whole goal.
     pub(super) async fn has_runnable_queued_user_row(&self) -> bool {
         let state = self.state.lock().await;
         let running = state.running_prompt_id();
@@ -679,15 +669,8 @@ impl SessionActor {
     }
 
     /// Move held user prompts into `pending_interjections` so the next drain injects them.
-    /// Stops (does not skip over) at:
-    /// - a non-editable or protected row (its queue mutation policy pins it);
-    /// - a bash row (bash stays FIFO);
-    /// - a send-now row ("cancel and run next" must not become "continue with an interjection");
-    /// - a row under an edit hold (it would inject the text as it was before the edit);
-    /// - a row with a different `queue_meta.owner` than the running prompt (leader mode: another client's next-turn row stays queued);
-    /// - a row with `tool_overrides_update` (interjection discards the override payload that a normal turn drain would apply).
-    ///
-    /// No-op when idle or the held queue is empty.
+    /// Stops (does not skip over) at.
+    /// a send-now row ("cancel and run next" must not become "continue with an interjection");.
     pub(super) async fn promote_queued_as_interjections(&self) {
         let mut state = self.state.lock().await;
         let running_front_id = state.running_prompt_id().map(str::to_string);
@@ -771,50 +754,48 @@ impl SessionActor {
         owner: Option<&str>,
     ) -> bool {
         let mut state = self.state.lock().await;
-        let mut removed = false;
-        if !Self::is_running_prompt(&state, id)
+        let removed = if !Self::is_running_prompt(&state, id)
             && let Some(pos) = state
                 .pending_inputs
                 .iter()
                 .position(|item| item.editable_queue_meta_matches(id, expected_version, owner))
         {
-            if let Some(item) = state.pending_inputs.remove(pos) {
-                Self::respond_removed_prompt(item.respond_to);
+            Self::remove_pending_row(&mut state, pos);
+            true
+        } else {
+            // A remove that misses (row gone or version stale) still clears a leaked hold; a protected row is a no-op
+            if !Self::has_protected_row(&state, id) {
+                state.edit_holds.remove(id);
             }
-            removed = true;
-        }
-        // A remove that misses (row gone or version stale) still clears a leaked hold; a protected row is a no-op
-        if !Self::has_protected_row(&state, id) {
-            state.edit_holds.remove(id);
-        }
-        if !removed {
             tracing::debug!(
                 queued_id = %id,
                 expected_version,
                 "queue remove was a no-op (drained / stale / not owner); rebroadcasting"
             );
-        }
+            false
+        };
         // Always re-broadcast the authoritative queue so the client reconciles.
         self.broadcast_queue_changed(&state);
         removed
     }
 
+    /// Drop the queued row at `pos`, resolve its RPC as `RemovedFromQueue`, and release the edit hold it may have leaked.
+    /// A protected row keeps its hold. Callers rebroadcast the queue.
+    pub(super) fn remove_pending_row(state: &mut State, pos: usize) {
+        let Some(item) = state.pending_inputs.remove(pos) else {
+            return;
+        };
+        // Holds are keyed by the queue id, which `queue_input` mints as the prompt id
+        let id = item.prompt_id.clone();
+        Self::respond_removed_prompt(item.respond_to);
+        if !Self::has_protected_row(state, &id) {
+            state.edit_holds.remove(&id);
+        }
+    }
+
     /// Atomically interject a queued (not-yet-running) prompt into the running turn.
-    /// In a single state-lock hold the actor removes the prompt from `pending_inputs` and pushes its text into `pending_interjections`.
-    /// The in-flight turn merges it at the next safe point (`drain_pending_interjections`).
     /// The prompt can never both interject and later run as its own turn, the race the client-side interject and remove calls could not avoid.
-    ///
-    /// Mirrors [`handle_remove_queued_prompt`]'s versioned/owner gate and [`SessionCommand::Interject`]'s broadcast-then-buffer order.
     /// An uncommitted front is never cancelled; the promoted row still runs next.
-    ///
-    /// During an active goal, plain prompts become steering while bash stays queued.
-    /// Missing, stale, running, or foreign rows are benign no-ops.
-    ///
-    /// Always re-broadcasts `x.ai/queue/changed` so every client reconciles (the row vanishes on success, is unchanged on a no-op).
-    /// `new_text` (when `Some`) replaces the stored queue text in the interjection: the client edited the row before interjecting.
-    /// It goes through the same version check, so a stale version no-ops the edit too.
-    /// Exception: when the interject no-ops but the row is still queued, a version-matching `new_text` is saved to the row as an LWW edit.
-    /// That way the edit isn't silently lost when the row later drains as its own turn.
     pub(super) async fn handle_interject_queued_prompt(
         &self,
         id: &str,
@@ -916,10 +897,8 @@ impl SessionActor {
     }
 
     /// Reorder queued prompts to match `ordered_ids`.
-    /// The running turn (front, if active) stays pinned at the front.
     /// Queued items not named in `ordered_ids` keep their relative order behind the named ones.
     /// Idempotent; re-broadcasts the result.
-    /// Returns whether the order actually changed.
     pub(super) async fn handle_reorder_queue(&self, ordered_ids: &[String]) -> bool {
         let mut state = self.state.lock().await;
         let order_before: Vec<String> = state
@@ -1003,22 +982,9 @@ impl SessionActor {
         cleared_any
     }
 
-    /// Replace the text of a queued (not-yet-running) prompt in place (LWW).
-    ///
-    /// Last write wins via the actor's serialized mailbox.
-    /// Concretely, for an entry whose `queue_meta.id == id`:
-    /// 1. Rebuild the underlying `prompt_blocks` as a single [`acp::TextContent`] block carrying `new_text`.
-    ///    (Any non-text blocks such as pasted images on the original prompt are not preserved: the user has explicitly typed replacement text.)
-    /// 2. Update `queue_meta.text`, bump `queue_meta.version`, and record `last_editor` (the original `owner` attribution is preserved).
-    /// 3. Re-broadcast `x.ai/queue/changed` so every subscriber renders the new text and version.
-    ///
-    /// **No-op cases** (the edit is discarded, and no re-broadcast is needed since promote or remove already broadcast the queue change):
-    /// - The id is not in `pending_inputs` (already drained / removed).
-    /// - The id names the currently-running turn (editing the live turn is out of scope).
-    /// - `new_text` is blank (a queued prompt is never blanked).
-    ///
+    /// (Any non-text blocks such as pasted images on the original prompt are not preserved: the user has explicitly typed replacement text.) 2.
+    /// `new_text` is blank (a queued prompt is never blanked).
     /// Every path clears the id's hold under the queue lock so a stale edit request cannot leave promote parked.
-    /// Returns whether the edit was applied.
     pub(super) async fn handle_edit_queued_prompt(
         &self,
         id: &str,
@@ -1261,12 +1227,7 @@ impl SessionActor {
     }
 
     /// Replace a queued item's prompt body with `new_text` and bump its LWW version metadata.
-    /// Shared by `handle_edit_queued_prompt` and the turn-ended fallback in `handle_interject_queued_prompt`.
-    ///
-    /// Replaces the text blocks with a single text block carrying the new text; Image blocks are RETAINED.
     /// The queue-edit wire is text-only, so a text edit must never silently detach the row's pasted images.
-    /// This mirrors how the pager edits its local rows.
-    /// Other non-text blocks are still dropped: an explicit retype is a fresh prompt body.
     /// The `displayText` meta is left unset so the queue text shown to other clients is exactly what the editor typed (no stale skill expansion).
     fn apply_queued_prompt_edit(item: &mut InputItem, new_text: String, editor: Option<&str>) {
         // A bash row executes `extract_bash_command`'s meta value, not the block text

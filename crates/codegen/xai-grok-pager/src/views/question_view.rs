@@ -30,7 +30,7 @@ use crate::render::wrapping::word_wrap_lines_with_joiners;
 use crate::syntax::get_syntect;
 use crate::theme::Theme;
 use crate::theme::md_style;
-use crate::views::prompt_widget::{PromptBg, PromptStyle, StashedPrompt};
+use crate::views::prompt_widget::StashedPrompt;
 
 /// Maximum description lines shown in the question chrome before truncation.
 const DEFAULT_MAX_CHROME_DESC_LINES: u16 = 5;
@@ -80,20 +80,11 @@ pub enum QuestionFocus {
     InputMode,
 }
 
-/// Pager-internal origin for a locally-opened question (one that was NOT driven by an ACP `x.ai/ask_user_question` request).
-///
-/// Drives what `submit_question_answers` returns when the user submits.
-/// Mutually exclusive with `QuestionViewState.response_tx`: a local question never has an ACP sender.
-///
-/// Each variant carries the data the local handler needs to translate the submitted selection into an [`crate::app::actions::Action`].
-///
-/// Not `Clone`: `FeedbackTrace` owns its attachments' staged temp files.
+/// Mutually exclusive with `QuestionViewState.response_tx`: a local question never has an ACP
+/// sender.
 #[derive(Debug)]
 pub enum LocalQuestionKind {
     /// Hard-modal card opened when a `UserPromptSubmit` hook blocks a prompt.
-    /// Carries the local queue row the blocked prompt was requeued into.
-    /// Esc, Ctrl+C, and dismissal are refused: the queue stays parked until the user picks Edit, Resend, or Discard.
-    /// The pick is translated into [`crate::app::actions::Action::PromptBlockAnswered`].
     PromptBlocked {
         row_id: u64,
     },
@@ -107,10 +98,9 @@ pub enum LocalQuestionKind {
     /// Modal opened by `/new` to resolve the worktree question.
     /// On submit, the selected option index is translated into an [`crate::app::actions::Action::NewSessionAnswered`].
     NewSession,
-    /// Modal shown when the user hits the credit/rate limit (403).
-    /// Options map to upsell URLs (upgrade tier when not max-tier, buy
-    /// credits / PAYG) plus "Try Again". `choices` maps each option
-    /// index to a telemetry choice variant.
+    /// Modal shown when the user hits the credit/rate limit (403). Options map to upsell URLs (upgrade
+    /// tier when not max-tier, buy credits / PAYG) plus "Try Again". `choices` maps each option index
+    /// to a telemetry choice variant.
     CreditLimitUpsell {
         choices: Vec<xai_grok_telemetry::events::CreditLimitChoice>,
     },
@@ -131,38 +121,13 @@ pub enum LocalQuestionKind {
         plan: Box<crate::diagnostics::FixPlan>,
     },
     DeleteCurrentSession,
-    /// Freeform report modal opened by `/feedback`.
-    Feedback,
-    /// Second stage of the `/feedback` card: trace consent.
-    /// Carries the committed report (text and drained image attachments) so Esc can skip the question without dropping it.
-    FeedbackTrace {
-        report: String,
-        images: crate::views::prompt_widget::FeedbackImages,
-    },
 }
-
-/// Bare `/feedback` pane label (first paragraph of the question chrome).
-pub const FEEDBACK_QUESTION_LABEL: &str = "How can we improve Grok Build?";
-
-/// Trace-consent question shown after the report is submitted.
-/// The wording comes from legal review: it discloses retention/training scope, not just debugging.
-pub const FEEDBACK_TRACE_QUESTION_LABEL: &str = "Opt-in to provide your trace for debugging \
-     purposes. This will also provide SpaceXAI the ability to retain and train on coding data, \
-     e.g., prompts, traces, & metrics.";
-
-/// Option ids for the trace-consent question; the submit handler maps ids (never positions) back to a [`crate::app::actions::FeedbackTraceChoice`].
-pub const FEEDBACK_TRACE_OPTION_OPT_IN: &str = "always_upload";
-pub const FEEDBACK_TRACE_OPTION_OPT_OUT: &str = "no_upload";
-pub const FEEDBACK_TRACE_OPTION_NEVER_ASK: &str = "never_ask";
 
 // ── State ──────────────────────────────────────────────────────────────
 
-/// Complete state for the question view overlay.
-///
-/// Created when an `x.ai/ask_user_question` ext-method request arrives;
-/// destroyed on submit, skip, or cancel.
-///
-/// Not `Clone` because it owns a `oneshot::Sender` for the ACP response.
+/// Complete state for the question view overlay. Created when an `x.ai/ask_user_question`
+/// ext-method request arrives; destroyed on submit, skip, or cancel. Not `Clone` because it owns a
+/// `oneshot::Sender` for the ACP response.
 #[derive(Debug)]
 pub struct QuestionViewState {
     /// The tool call ID of the `AskUserQuestion` invocation.
@@ -198,10 +163,8 @@ pub struct QuestionViewState {
     /// Cached cap on preview lines in chrome (capped in non-fullscreen).
     pub cached_preview_cap: u16,
 
-    // ── ACP response channel ──
-    /// Stashed ACP response sender.
-    /// When the user submits/cancels, the pager serializes the response and sends it here.
-    /// `take()` ensures we never send twice.
+    // ACP response channel. Stashed ACP response sender. When the user submits/cancels, the pager
+    // serializes the response and sends it here. `take()` ensures we never send twice.
     pub response_tx:
         Option<tokio::sync::oneshot::Sender<AcpResult<agent_client_protocol::ExtResponse>>>,
     /// Mode context from the ext-method request.
@@ -210,10 +173,9 @@ pub struct QuestionViewState {
     /// Bottom panel selection index (plan mode only).
     /// `None` means the options list has focus; `Some(0)` is Chat about this and `Some(1)` is Skip interview.
     pub bottom_panel_index: Option<usize>,
-    /// `Some` when this question was opened locally (e.g. by `/fork`) instead of by an ACP `x.ai/ask_user_question` request.
-    /// `None` for ACP questions.
-    ///
-    /// Mutually exclusive with `response_tx`: a local question never has an ACP sender.
+    /// `Some` when this question was opened locally (e.g. by `/fork`) instead of by an ACP
+    /// `x.ai/ask_user_question` request. `None` for ACP questions. Mutually exclusive with
+    /// `response_tx`: a local question never has an ACP sender.
     pub local_kind: Option<LocalQuestionKind>,
     /// When this question view was created. Used to pause the turn timer while the user is answering questions.
     /// The time spent in the question view is subtracted from the turn elapsed display.
@@ -225,12 +187,6 @@ pub struct QuestionViewState {
     /// When `true`, the freeform "Other" input row is hidden.
     /// Used by locally-driven questions (e.g. the credit-limit upsell) that only offer fixed options with no free-text fallback.
     pub no_freeform: bool,
-
-    /// Whether Enter on the report advances to the trace-consent question.
-    pub feedback_offer_trace: bool,
-    /// Opted-out account: the "Opt in" option also switches coding-data
-    /// sharing back on (and says so in its description).
-    pub feedback_offer_reenables_sharing: bool,
 }
 
 // ── Constructor & basic helpers ────────────────────────────────────────
@@ -296,15 +252,12 @@ impl QuestionViewState {
             opened_at: Instant::now(),
             opened_at_wall_ms: chrono::Utc::now().timestamp_millis(),
             no_freeform: false,
-            feedback_offer_trace: false,
-            feedback_offer_reenables_sharing: false,
         }
     }
 
-    /// Builder-style helper to attach a [`LocalQuestionKind`].
-    ///
-    /// Used by `open_fork_question` to mark a freshly-built `QuestionViewState` as locally-driven.
-    /// Submit/cancel then routes through the synchronous `Action` path instead of the ACP `response_tx`.
+    /// Builder-style helper to attach a [`LocalQuestionKind`]. Used by `open_fork_question` to mark a
+    /// freshly-built `QuestionViewState` as locally-driven. Submit/cancel then routes through the
+    /// synchronous `Action` path instead of the ACP `response_tx`.
     pub fn with_local_kind(mut self, kind: LocalQuestionKind) -> Self {
         self.local_kind = Some(kind);
         self
@@ -390,10 +343,8 @@ impl QuestionViewState {
         }
     }
 
-    /// Adjust scroll so the cursor row is visible within `visible_h` lines.
-    ///
-    /// Call this after every cursor change.
-    /// `content_w` is needed to compute per-option visual heights for stacked layout.
+    /// Adjust scroll so the cursor row is visible within `visible_h` lines. Call this after every
+    /// cursor change. `content_w` is needed to compute per-option visual heights for stacked layout.
     pub fn ensure_cursor_visible(&mut self, visible_h: u16, content_w: usize) {
         let q_idx = self.active_tab;
         let Some(question) = self.questions.get(q_idx) else {
@@ -506,10 +457,9 @@ pub fn scroll_offset_for_item_delta(
     cursor: usize,
     phantom_freeform_h: u16,
 ) -> u16 {
-    // Line-based scrolling: add delta directly to the scroll offset, clamped to [0, max_scroll]
-    // Each visual line (including wrapped description lines) is independent, so we scroll by individual lines instead of jumping whole items
-    //
-    // For `no_freeform` questions, `phantom_freeform_h` removes the never-rendered freeform line from the scrollable total
+    // Line-based scrolling: add delta directly to the scroll offset, clamped to [0, max_scroll]. Each
+    // visual line (including wrapped description lines) is independent, so we scroll by individual
+    // lines instead of jumping whole items.
     let max_scroll = total_options_height(question, content_w, cursor)
         .saturating_sub(phantom_freeform_h)
         .saturating_sub(viewport_height);
@@ -599,10 +549,6 @@ pub fn item_index_at_screen_row(
 // ── Layout helpers ─────────────────────────────────────────────────────
 
 /// Compute the aligned label column width.
-///
-/// The column fits the longest label, capped at 60% of the available width.
-/// Labels stay visible while the collapsed description (with its `…` affordance) keeps the remaining space.
-/// Labels longer than the cap are truncated with `…` on unfocused rows and get stacked/wrapped layout when focused.
 pub fn compute_max_label_w(options: &[QuestionOption], content_w: usize) -> usize {
     let cap = content_w * 3 / 5;
     options
@@ -613,11 +559,7 @@ pub fn compute_max_label_w(options: &[QuestionOption], content_w: usize) -> usiz
         .min(cap)
 }
 
-/// Visual height of a single option row.
-///
-/// - Unfocused: always 1 line (collapsed `label  description…`).
-/// - Focused: full description. The label shares the first description line when it fits the column (description wrapped in the column to its right).
-///   An overflowing label wraps full-width with the description stacked below it, both indented at `prefix_w`.
+/// Visual height of a single option row. Unfocused: always 1 line (collapsed `label description…`).
 pub fn option_visual_height(
     option: &QuestionOption,
     content_w: usize,
@@ -643,10 +585,9 @@ pub fn option_visual_height(
     }
 }
 
-/// Inner chrome-height computation with explicit description/preview caps.
-///
-/// Same logic as [`chrome_height`] but accepts caps as parameters instead of branching on `fullscreen`.
-/// Used by the dynamic-cap fallback in [`question_view_height`].
+/// Inner chrome-height computation with explicit description/preview caps. Same logic as
+/// [`chrome_height`] but accepts caps as parameters instead of branching on `fullscreen`. Used by
+/// the dynamic-cap fallback in [`question_view_height`].
 fn chrome_height_with_dynamic_caps(
     question: &Question,
     content_w: usize,
@@ -705,14 +646,8 @@ fn label_gap_suppressed(question: &Question) -> bool {
     desc.is_empty() && question.options.is_empty()
 }
 
-/// Chrome height for a question: vpad + label lines + gap + [description lines] + gap.
-///
-/// The label (first paragraph of the question text) word-wraps across multiple lines.
-/// If the question contains a paragraph break (`\n\n`), the remaining text is rendered as a description below the label.
-/// Must match `render_question_chrome`.
-///
-/// When `fullscreen` is false, description and preview lines are capped to `desc_cap` / `preview_cap` (with room for a truncation indicator).
-/// When `fullscreen` is true the caps are ignored and all lines are counted.
+/// Chrome height for a question: vpad + label lines + gap + [description lines] + gap. Must match
+/// `render_question_chrome`.
 pub fn chrome_height(
     question: &Question,
     content_w: usize,
@@ -728,10 +663,8 @@ pub fn chrome_height(
     }
 }
 
-/// Split question text into a label (first paragraph) and description (rest).
-///
-/// A paragraph break is `\n\n`.
-/// If no break exists, the full text is the label and the description is empty.
+/// Split question text into a label (first paragraph) and description (rest). A paragraph break is
+/// `\n\n`. If no break exists, the full text is the label and the description is empty.
 fn split_question_label_desc(text: &str) -> (&str, &str) {
     if let Some(pos) = text.find("\n\n") {
         (text[..pos].trim(), text[pos + 2..].trim())
@@ -743,10 +676,8 @@ fn split_question_label_desc(text: &str) -> (&str, &str) {
 // ── Selection helpers ──────────────────────────────────────────────────
 
 impl QuestionViewState {
-    /// Toggle an option for a question.
-    ///
-    /// - Multi: toggle in/out of the HashSet.
-    /// - Single: set to `Some(option_idx)`, or `None` if already selected (deselect).
+    /// Toggle an option for a question. Multi: toggle in/out of the HashSet. Single: set to
+    /// `Some(option_idx)`, or `None` if already selected (deselect).
     pub fn toggle_option(&mut self, question_idx: usize, option_idx: usize) {
         let Some(sel) = self.selections.get_mut(question_idx) else {
             return;
@@ -767,10 +698,8 @@ impl QuestionViewState {
         }
     }
 
-    /// Select an option (no toggle; always selects).
-    ///
-    /// - Single: set to `Some(option_idx)`.
-    /// - Multi: add to set.
+    /// Select an option (no toggle; always selects). Single: set to `Some(option_idx)`. Multi: add to
+    /// set.
     pub fn select_option(&mut self, question_idx: usize, option_idx: usize) {
         let Some(sel) = self.selections.get_mut(question_idx) else {
             return;
@@ -785,14 +714,8 @@ impl QuestionViewState {
         }
     }
 
-    /// Activate freeform input for the active question.
-    ///
-    /// Marks the freeform row as selected, clears the option selection (single-select exclusivity), and sets focus to `InputMode`.
-    /// Returns the current freeform text so the caller can load it into the prompt.
-    ///
-    /// No-op returning an empty string when `no_freeform` is set.
-    /// Such questions (e.g. the SuperGrok upsell) have no freeform row, so `InputMode` must be unreachable.
-    /// Callers gate on `no_freeform` / [`Self::is_on_freeform_row`] too; this is defense in depth.
+    /// Activate freeform input for the active question. Such questions (e.g. the SuperGrok upsell) have
+    /// no freeform row, so `InputMode` must be unreachable.
     pub fn activate_freeform_input(&mut self) -> String {
         if self.no_freeform {
             return String::new();
@@ -811,28 +734,13 @@ impl QuestionViewState {
             .unwrap_or_default()
     }
 
-    /// Preview text for the currently focused option, if any.
-    ///
-    /// Returns `Some(preview)` when the cursor is on an option (not freeform)
-    /// and that option has a `preview` field set.
+    /// Preview text for the currently focused option, if any. Returns `Some(preview)` when the cursor
+    /// is on an option (not freeform) and that option has a `preview` field set.
     pub fn focused_preview(&self) -> Option<&str> {
         let q = self.questions.get(self.active_tab)?;
         let cursor = self.cursor();
         let option = q.options.get(cursor)?;
         option.preview.as_deref()
-    }
-
-    /// Either stage of the `/feedback` card (report or trace consent).
-    pub fn is_feedback(&self) -> bool {
-        matches!(
-            self.local_kind,
-            Some(LocalQuestionKind::Feedback | LocalQuestionKind::FeedbackTrace { .. })
-        )
-    }
-
-    /// The freeform report stage of the `/feedback` card.
-    pub fn is_feedback_report(&self) -> bool {
-        matches!(self.local_kind, Some(LocalQuestionKind::Feedback))
     }
 
     /// The hard-modal blocked-prompt card: dismissal is refused, so the footer must not advertise it.
@@ -841,102 +749,6 @@ impl QuestionViewState {
             self.local_kind,
             Some(LocalQuestionKind::PromptBlocked { .. })
         )
-    }
-
-    /// The trace-consent stage of the `/feedback` card.
-    pub fn is_feedback_trace(&self) -> bool {
-        matches!(
-            self.local_kind,
-            Some(LocalQuestionKind::FeedbackTrace { .. })
-        )
-    }
-
-    pub fn feedback_report(&self) -> String {
-        self.per_question_freeform
-            .first()
-            .map(|s| s.trim().to_string())
-            .unwrap_or_default()
-    }
-
-    /// Swap the report card for the trace-consent question, keeping the stashed prompt.
-    /// Built through the constructor so the per-question vector-length invariant lives in exactly one place.
-    pub fn begin_feedback_trace_stage(
-        &mut self,
-        report: String,
-        images: Vec<crate::prompt_images::PastedImage>,
-    ) {
-        self.begin_feedback_trace_stage_with_locale(report, images, None);
-    }
-
-    pub fn begin_feedback_trace_stage_with_locale(
-        &mut self,
-        report: String,
-        images: Vec<crate::prompt_images::PastedImage>,
-        locale: Option<&crate::locale::LocaleContext>,
-    ) {
-        let text = |id: &str, english: &str| {
-            locale
-                .map(|locale| locale.named_text(id, english).into_owned())
-                .unwrap_or_else(|| english.to_owned())
-        };
-        // "Opt in" is a persistent grant, so its description names what it
-        // turns on beyond this one upload.
-        let opt_in_description = if self.feedback_offer_reenables_sharing {
-            text(
-                "feedback.trace.opt_in.description.persisted",
-                "Turns on trace upload for future sessions on this machine and switches coding \
-                 data sharing back on for this account.",
-            )
-        } else {
-            text(
-                "feedback.trace.opt_in.description.reenable",
-                "Turns on trace upload for future sessions on this machine (change any time with \
-                 [telemetry] trace_upload in config.toml).",
-            )
-        };
-        let question = Question {
-            question: text("feedback.trace.question", FEEDBACK_TRACE_QUESTION_LABEL),
-            options: vec![
-                QuestionOption {
-                    label: text("feedback.trace.opt_in", "Opt in"),
-                    description: opt_in_description,
-                    preview: None,
-                    id: Some(FEEDBACK_TRACE_OPTION_OPT_IN.into()),
-                },
-                QuestionOption {
-                    label: text("feedback.trace.opt_out_once", "Opt out this time"),
-                    description: String::new(),
-                    preview: None,
-                    id: Some(FEEDBACK_TRACE_OPTION_OPT_OUT.into()),
-                },
-                QuestionOption {
-                    label: text("feedback.trace.never_ask", "Opt out and don't ask again"),
-                    description: String::new(),
-                    preview: None,
-                    id: Some(FEEDBACK_TRACE_OPTION_NEVER_ASK.into()),
-                },
-            ],
-            multi_select: Some(false),
-            id: None,
-        };
-        let mut next = QuestionViewState::new(
-            std::mem::take(&mut self.tool_call_id),
-            vec![question],
-            std::mem::take(&mut self.stashed_prompt),
-        );
-        next.selections = vec![QuestionSelection::Single(Some(0))];
-        next.no_freeform = true;
-        next.fullscreen = self.fullscreen;
-        // Card-open time spans both stages (pause accounting).
-        next.opened_at = self.opened_at;
-        next.opened_at_wall_ms = self.opened_at_wall_ms;
-        next.feedback_offer_trace = self.feedback_offer_trace;
-        next.feedback_offer_reenables_sharing = self.feedback_offer_reenables_sharing;
-        next.local_kind = Some(LocalQuestionKind::FeedbackTrace {
-            report,
-            images: images.into(),
-        });
-        *self = next;
     }
 
     /// Labels of the selected options for a given question.
@@ -981,14 +793,9 @@ impl QuestionViewState {
 // ── ACP response builders ──────────────────────────────────────────────
 
 impl QuestionViewState {
-    /// Build the `Accepted` ext-method response from the current state.
-    ///
-    /// Rules:
-    /// - Only answered questions appear in `answers` (unanswered omitted).
-    /// - Multi-select: labels joined with `, `.
-    /// - Freeform-only (no option, only typed text): the label is `"Other"` and the typed text goes in `annotations[q].notes`.
-    /// - Preview included for single-select only, verbatim from the option.
-    /// - Notes included when freeform text is non-empty and selected.
+    /// Only answered questions appear in `answers` (unanswered omitted). Freeform-only (no option, only
+    /// typed text): the label is `"Other"` and the typed text goes in `annotations[q].notes`. Preview
+    /// included for single-select only, verbatim from the option.
     pub fn build_accepted_response(
         &self,
     ) -> xai_grok_tools::implementations::grok_build::ask_user_question::AskUserQuestionExtResponse
@@ -1104,15 +911,8 @@ impl QuestionViewState {
 
 // ── Rendering ──────────────────────────────────────────────────────────
 
-/// Desired height for the question view overlay.
-///
-/// Height cap: 33% of `screen_h`, clamped to min 8, max 80%.
-/// Fullscreen mode removes the cap.
-///
-/// The description and preview caps shrink dynamically so at least [`MIN_VISIBLE_OPTION_ROWS`] option rows stay visible under the chrome.
-/// The guarantee holds when the terminal is large enough for the fixed chrome overhead.
-/// On extremely small terminals this is best-effort: it may not hold when even zero desc/preview lines cannot free enough space.
-/// The effective caps are written to `state.cached_desc_cap` / `state.cached_preview_cap` so the renderer uses matching values.
+/// Desired height for the question view overlay. The description and preview caps shrink
+/// dynamically so at least [`MIN_VISIBLE_OPTION_ROWS`] option rows stay visible under the chrome.
 pub fn question_view_height(state: &mut QuestionViewState, screen_h: u16, content_w: usize) -> u16 {
     let q_idx = state.active_tab;
     let Some(question) = state.questions.get(q_idx) else {
@@ -1220,10 +1020,8 @@ pub fn question_view_height(state: &mut QuestionViewState, screen_h: u16, conten
     total.min(cap)
 }
 
-/// Shortcut label for an option index: 1-9 then a-z.
-///
-/// Returns `'1'`..`'9'` for indices 0..8, `'a'`..`'z'` for 9..34.
-/// Returns `None` for indices 35 and above.
+/// Shortcut label for an option index: 1-9 then a-z. Returns `'1'`..`'9'` for indices 0..8,
+/// `'a'`..`'z'` for 9..34. Returns `None` for indices 35 and above.
 pub fn option_shortcut_label(idx: usize) -> Option<char> {
     match idx {
         0..=8 => Some((b'1' + idx as u8) as char),
@@ -1232,11 +1030,9 @@ pub fn option_shortcut_label(idx: usize) -> Option<char> {
     }
 }
 
-/// Map a pressed key character to an option index.
-///
-/// Maps `'1'`..`'9'` to 0..8 and `'a'`..`'f'` to 9..14.
-/// Only a-f are mapped as shortcuts to avoid conflicts with navigation keys
-/// (g=top, h=prev-question, j=down, k=up, l=next-question, n=next, s=skip).
+/// Map a pressed key character to an option index. Maps `'1'`..`'9'` to 0..8 and `'a'`..`'f'` to
+/// 9..14. Only a-f are mapped as shortcuts to avoid conflicts with navigation keys. (g=top,
+/// h=prev-question, j=down, k=up, l=next-question, n=next, s=skip).
 pub fn option_index_for_key(c: char) -> Option<usize> {
     match c {
         '1'..='9' => Some((c as usize) - ('1' as usize)),
@@ -1248,86 +1044,14 @@ pub fn option_index_for_key(c: char) -> Option<usize> {
 /// Horizontal padding: 3 left (accent + pad) + 2 right (scrollbar gutter).
 pub const QUESTION_VIEW_HPAD: u16 = 5;
 
-/// Prefix width for option rows.
-///
-/// The shortcut column is always 1 character wide (1-9, a-z), followed by a
-/// space, then the marker/radio/checkbox, then a space:
-///   Multi:  `X [✓] ` = 1 + 1 + 3 + 1 = 6
-///   Single: `X (●) ` = 1 + 1 + 3 + 1 = 6
+/// Prefix width for option rows. The shortcut column is always 1 character wide (1-9, a-z),
+/// followed by a space, then the marker/radio/checkbox, then a space: Multi: `X [✓] ` = 1 + 1 + 3 +
+/// 1 = 6. Single: `X (●) ` = 1 + 1 + 3 + 1 = 6.
 pub fn option_prefix_w(_question: &Question) -> usize {
     6 // both multi and single use 3-char markers
 }
 
-/// Report area of the bare `/feedback` card: a multi-line box standing in for the option rows, shared by the full TUI and minimal renderers.
-/// `draw` needs a blank [`crate::views::prompt_widget::PromptInfo`] to put the bottom rule in place.
-pub mod feedback_input {
-    use super::{PromptBg, PromptStyle, QUESTION_VIEW_HPAD, Theme};
-
-    /// Rows at rest: top rule, five text rows, bottom rule. The box grows with the report up to the caller's cap.
-    pub const HEIGHT: u16 = 7;
-
-    /// Rows of that height spent on the outline rather than text.
-    pub const CHROME_H: u16 = 2;
-
-    /// Smallest box that can still carry its outline: the two rules plus one row of text. Below this the renderers drop to [`flat_style`].
-    pub const MIN_HEIGHT: u16 = CHROME_H + 1;
-
-    /// Shown while the box is empty, including while it has focus.
-    pub const PLACEHOLDER: &str = "Please provide as much detail as possible.";
-
-    /// The card's content column, so the box lines up under the label.
-    pub fn width(area_width: u16) -> u16 {
-        area_width.saturating_sub(QUESTION_VIEW_HPAD)
-    }
-
-    pub fn style(theme: &Theme) -> PromptStyle {
-        style_with_locale(theme, None)
-    }
-
-    pub fn style_with_locale(
-        theme: &Theme,
-        locale: Option<&crate::locale::LocaleContext>,
-    ) -> PromptStyle {
-        PromptStyle {
-            // Sits on the card, so it takes the card's surface rather than the composer's, and pads symmetrically inside its own rules.
-            bg: PromptBg::Panel(theme.bg_light),
-            chrome_pad_right: 2,
-            placeholder_when_focused: true,
-            placeholder_override: Some(
-                locale
-                    .map(|locale| {
-                        locale.named_static_text("feedback.placeholder.detailed", PLACEHOLDER)
-                    })
-                    .unwrap_or(PLACEHOLDER),
-            ),
-            ..PromptStyle::default()
-        }
-    }
-
-    /// Unoutlined variant for a panel too short to spare the two rows the rules cost.
-    pub fn flat_style(theme: &Theme) -> PromptStyle {
-        flat_style_with_locale(theme, None)
-    }
-
-    pub fn flat_style_with_locale(
-        theme: &Theme,
-        locale: Option<&crate::locale::LocaleContext>,
-    ) -> PromptStyle {
-        PromptStyle {
-            vpad_top: 0,
-            chrome: false,
-            show_borders: false,
-            ..style_with_locale(theme, locale)
-        }
-    }
-}
-
 /// Width available for inline prompt text given the full area width.
-///
-/// Subtracts left padding (accent col + 2 = 3), the option prefix
-/// (`"z [x] "` = 6 chars), and the prompt indicator (`"❯ "` = 2 chars).
-/// Matches the `text_w` computed during rendering so `desired_height`
-/// wraps at the same width as the draw area.
 pub fn inline_text_width(area_width: u16) -> u16 {
     const LEFT_PAD: u16 = 3; // accent column + 2 padding
     const OPTION_PREFIX_W: u16 = 6; // shortcut + marker ("z [x] ")
@@ -1402,9 +1126,6 @@ fn styled_description_lines(
 }
 
 /// Build a flat list of styled lines for all option rows and the freeform row.
-///
-/// Each visual line (including wrapped description continuation lines) is a separate `Line<'static>`.
-/// The caller can render a scrolled window by slicing `[scroll .. scroll + visible_h]`, which makes scrolling smooth and line-granular.
 #[allow(clippy::too_many_arguments)]
 pub fn build_flat_option_lines(
     question: &Question,
@@ -1474,6 +1195,7 @@ fn build_flat_option_lines_with_placeholder(
             None => theme.bg_light,
         };
 
+        let start = all_lines.len();
         build_single_option_lines(
             &mut all_lines,
             i,
@@ -1488,6 +1210,23 @@ fn build_flat_option_lines_with_placeholder(
             theme,
             is_cursor_item,
         );
+        // Terminal theme (Reset bands): the overlay adds reverse video to
+        // the row's line style, which the painter applies to the whole row
+        // rect. RGB themes already bake the band bg; the patch is a no-op.
+        if embed.is_none() {
+            let overlay = if is_cursor_item && panel_focused {
+                Some(theme.selection_overlay())
+            } else if is_hovered_item {
+                Some(theme.hover_overlay())
+            } else {
+                None
+            };
+            if let Some(ov) = overlay {
+                for line in &mut all_lines[start..] {
+                    line.style = line.style.patch(ov);
+                }
+            }
+        }
     }
 
     // The freeform row is hidden in InputMode (the prompt widget below replaces it)
@@ -1770,6 +1509,15 @@ fn build_freeform_line_with_placeholder(
         None if is_hovered => hovered_bg(theme),
         None => theme.bg_light,
     };
+    // Terminal theme (Reset bands): reverse video via the line style, which
+    // the painter applies to the whole row rect. No-op on RGB themes.
+    let overlay = if embed.is_none() && is_cursor && panel_focused {
+        Some(theme.selection_overlay())
+    } else if embed.is_none() && is_hovered {
+        Some(theme.hover_overlay())
+    } else {
+        None
+    };
 
     // Multi-select: [x]/[ ] checkboxes.  Single-select: (●)/(○) radio buttons.
     // Both are 3 display cells, same as option rows
@@ -1832,14 +1580,16 @@ fn build_freeform_line_with_placeholder(
     }
     spans.push(Span::styled(label, label_style));
 
-    Line::from(spans).style(Style::default().bg(row_bg))
+    let mut style = Style::default().bg(row_bg);
+    if let Some(ov) = overlay {
+        style = style.patch(ov);
+    }
+    Line::from(spans).style(style)
 }
 
-/// Render the complete question view into the given area.
-///
-/// `area` is the region above the textarea allocated for the question chrome and option rows.
-/// The accent `┃` line and background are rendered here.
-/// Return value from [`render_question_view`] with layout info for mouse handling.
+/// Render the complete question view into the given area. `area` is the region above the textarea
+/// allocated for the question chrome and option rows. The accent `┃` line and background are
+/// rendered here. Return value from [`render_question_view`] with layout info for mouse handling.
 pub struct QuestionViewRenderResult {
     /// Y coordinate where the scrollable options area starts (after chrome header).
     pub options_start_y: u16,
@@ -2024,7 +1774,7 @@ pub fn render_question_view_with_placeholder(
     // Unfocus dim: when the user has navigated to the scrollback (or any other pane), blend foregrounds toward `bg_light` so the panel recedes
     // Mirrors the unfocused prompt widget pattern (`prompt_widget.rs:1948`)
     if !focused {
-        crate::render::color::blend_area(buf, area, Some((theme.bg_light, 0.66)), None);
+        crate::render::color::recede_area(buf, area, theme.bg_light, 0.66);
     }
 
     let options_end_y = visible_bottom.saturating_sub(freeform_h);
@@ -2035,9 +1785,6 @@ pub fn render_question_view_with_placeholder(
 }
 
 /// Render the question view scrollbar. Call this AFTER `render_prompt_chrome`.
-///
-/// `scrollbar_x` is the column to render the scrollbar in; it should be outside the selection box border (same column as the scrollback scrollbar).
-/// Returns the scrollbar track rect if one was rendered (for mouse hit-testing).
 pub fn render_question_scrollbar(
     buf: &mut Buffer,
     scrollbar_x: u16,
@@ -2110,12 +1857,6 @@ fn render_truncation_indicator(
 }
 
 /// Render question chrome: label line and description.
-///
-/// Returns the Y position after the rendered chrome.
-///
-/// All writes are clipped to `max_y` (exclusive).
-/// The accounted chrome height (`chrome_height`) and the rendered height can drift (e.g. wrap-width differences).
-/// An unclipped `set_line` below the buffer bottom panics inside ratatui; clipping degrades to truncation instead.
 #[allow(clippy::too_many_arguments)]
 fn render_question_chrome(
     buf: &mut Buffer,
@@ -2314,11 +2055,8 @@ mod tests {
     }
 
     /// Regression: `draw()` used to size the question panel by wrapping at the full inner width.
-    /// The renderer wraps at `width - QUESTION_VIEW_HPAD`, so the under-allocated panel let the unclipped chrome walk past the buffer bottom.
-    /// That aborted in ratatui (`index outside of buffer: ... but index is (5, H)`).
-    ///
-    /// Recreates that exact under-allocation (height computed at `w`, render at `w - HPAD`) across terminal sizes: rendering must clip, never panic.
-    /// Fails on pre-fix code at e.g. 31x14 with `(5, 14)`.
+    /// Recreates that exact under-allocation (height computed at `w`, render at `w - HPAD`) across
+    /// terminal sizes: rendering must clip, never panic.
     #[test]
     fn gb3747_regression_mis_sized_area_never_panics() {
         let theme = Theme::default();
@@ -2384,61 +2122,6 @@ mod tests {
                 "chrome accounting vs render drift at content_w={content_w}"
             );
         }
-    }
-
-    #[test]
-    fn begin_feedback_trace_stage_swaps_report_for_consent_options() {
-        let mut state = QuestionViewState::new(
-            "fb".into(),
-            vec![Question {
-                question: FEEDBACK_QUESTION_LABEL.into(),
-                options: vec![],
-                multi_select: Some(false),
-                id: None,
-            }],
-            StashedPrompt::default(),
-        )
-        .with_local_kind(LocalQuestionKind::Feedback);
-        state.per_question_freeform[0] = "clipboard is broken over ssh".into();
-
-        state.begin_feedback_trace_stage(state.feedback_report(), vec![]);
-
-        assert!(
-            state.is_feedback(),
-            "trace stage is still the feedback card"
-        );
-        assert!(state.is_feedback_trace());
-        assert!(!state.is_feedback_report());
-        assert_eq!(state.questions.len(), 1);
-        assert_eq!(state.questions[0].question, FEEDBACK_TRACE_QUESTION_LABEL);
-        assert_eq!(state.questions[0].options.len(), 3);
-        assert_eq!(
-            state.questions[0].options[2].label,
-            "Opt out and don't ask again"
-        );
-        assert_eq!(
-            state.questions[0]
-                .options
-                .iter()
-                .map(|o| o.id.as_deref())
-                .collect::<Vec<_>>(),
-            vec![
-                Some(FEEDBACK_TRACE_OPTION_OPT_IN),
-                Some(FEEDBACK_TRACE_OPTION_OPT_OUT),
-                Some(FEEDBACK_TRACE_OPTION_NEVER_ASK),
-            ],
-            "consent maps from ids, so every option must carry one"
-        );
-        assert!(
-            matches!(state.selections[0], QuestionSelection::Single(Some(0))),
-            "turning trace upload on is the default"
-        );
-        assert!(state.no_freeform, "consent card has no free-text row");
-        assert_eq!(state.focus, QuestionFocus::Navigation);
-        let Some(LocalQuestionKind::FeedbackTrace { report, .. }) = &state.local_kind else {
-            panic!("local kind must carry the report");
-        };
-        assert_eq!(report, "clipboard is broken over ssh");
     }
 
     /// Helper: build a question with N options.
@@ -2567,6 +2250,41 @@ mod tests {
                 .iter()
                 .any(|s| s.content.contains("Alpha") && s.style.fg == Some(theme.text_primary)),
             "full TUI label keeps text_primary (no accent recolor)"
+        );
+    }
+
+    /// Terminal theme (zero opaque cells): the cursor row carries reverse
+    /// video on its line style instead of a painted band.
+    #[test]
+    #[serial_test::serial]
+    fn full_tui_terminal_theme_cursor_row_uses_reverse_video() {
+        use ratatui::style::Modifier;
+
+        crate::views::modal_window::set_embedded(false);
+        let theme = Theme::terminal();
+        let q = make_question("Pick one?", &["Alpha", "Beta"], false);
+        let lines = build_flat_option_lines(
+            &q,
+            80,
+            0,
+            None,
+            &QuestionSelection::Single(None),
+            &theme,
+            true,
+            "",
+            false,
+            true,
+        );
+        // The overlay travels on the line style; the painter applies it to
+        // the whole row rect (zero opaque cells — no painted band).
+        assert!(
+            lines[0].style.add_modifier.contains(Modifier::REVERSED),
+            "cursor row carries reverse video, got {:?}",
+            lines[0].style
+        );
+        assert!(
+            !lines[1].style.add_modifier.contains(Modifier::REVERSED),
+            "non-cursor rows stay unreversed"
         );
     }
 
@@ -3012,7 +2730,7 @@ mod tests {
 
     #[test]
     fn chrome_height_option_less_question_drops_the_label_gap() {
-        // Nothing under the label to separate it from, so the gap goes: vpad(1) + label(1) + gap(1) = 3. This is the bare `/feedback` card.
+        // Nothing under the label to separate it from, so the gap goes: vpad(1) + label(1) + gap(1) = 3.
         let q = make_question("How can we improve Grok Build?", &[], false);
         assert_eq!(
             chrome_height(
@@ -3086,25 +2804,8 @@ mod tests {
 
     #[test]
     fn chrome_height_wraps_extra_long_question() {
-        // 150-char question wraps across multiple lines depending on width.
-        //
-        // At width 75 (typical terminal with chrome):
-        //   ┃  Given the requirements for high availability, horizontal
-        //   ┃  scaling, and strict ACID compliance, which database engine
-        //   ┃  and replication topology should we adopt for the user
-        //   ┃  accounts microservice?
-        //   ┃
-        //   ┃  1 [ ] PostgreSQL   ...
-        //
-        // At width 40 (narrow):
-        //   ┃  Given the requirements for high
-        //   ┃  availability, horizontal scaling,
-        //   ┃  and strict ACID compliance, which
-        //   ┃  database engine and replication
-        //   ┃  topology should we adopt for the
-        //   ┃  user accounts microservice?
-        //   ┃
-        //   ┃  1 [ ] PostgreSQL   ...
+        // At width 75 (typical terminal with chrome): ┃ Given the requirements for high availability,
+        // horizontal.
         let q = make_question(
             "Given the requirements for high availability, horizontal scaling, \
              and strict ACID compliance, which database engine and replication \

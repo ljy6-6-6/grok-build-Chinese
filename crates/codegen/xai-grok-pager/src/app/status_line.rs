@@ -16,7 +16,6 @@ pub(crate) mod metrics;
 /// Shortest gap between event-driven recomputes; it keeps a busy turn from re-running a script every frame.
 /// A constant rather than a config knob: the one cadence a user can set is the `refresh_interval` timer.
 /// A force and a due refresh drop to [`MIN_REFRESH_INTERVAL_MS`] instead, so those may run after 100ms rather than 300.
-/// Together the two intervals are what comments here and in `status_line_policy` call the throttle.
 pub(crate) const EVENT_DEBOUNCE: Duration = Duration::from_millis(300);
 
 pub(crate) const MIN_REFRESH_INTERVAL_MS: Duration = Duration::from_millis(100);

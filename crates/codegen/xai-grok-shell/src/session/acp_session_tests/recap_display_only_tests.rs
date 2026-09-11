@@ -790,9 +790,8 @@ async fn manual_recap_over_budget_trims_persisted_request_and_is_display_only() 
 }
 
 /// Over-budget recap serializes to a well-formed Anthropic Messages payload:
-/// system preserved, reasoning stripped, no dangling `tool_use`/`tool_result`, no
-/// `tool_result` before the appended instruction. (Messages is the strictest
-/// shape, so it also covers the laxer grok ChatCompletions/Responses shapes.)
+/// system preserved, reasoning stripped, no dangling `tool_use`/`tool_result`, no.
+/// `tool_result` before the appended instruction. (Messages is the strictest.
 #[test]
 fn over_budget_recap_serializes_to_well_formed_messages_request() {
     use crate::session::helpers::session_recap;

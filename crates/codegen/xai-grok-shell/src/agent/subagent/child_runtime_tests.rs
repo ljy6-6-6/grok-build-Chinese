@@ -120,7 +120,13 @@ impl ChildRunner for SnapshotProbeRunner {
         Box::pin(std::future::pending())
     }
 
-    fn on_completed(&self, _: ChildCompletion<()>) {}
+    fn supports_wake(&self) -> bool {
+        true
+    }
+
+    fn on_completed(&self, _: ChildCompletion<()>, terminal_published: Box<dyn FnOnce() + Send>) {
+        terminal_published();
+    }
 }
 
 fn request() -> SubagentRequest {
@@ -140,6 +146,7 @@ fn request() -> SubagentRequest {
         fork_context: false,
         owner: SubagentOwner::Task,
         cancel_token: CancellationToken::new(),
+        spawn_root: Default::default(),
     }
 }
 

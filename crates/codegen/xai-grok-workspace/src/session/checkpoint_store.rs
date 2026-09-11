@@ -58,9 +58,7 @@ pub(crate) struct CheckpointStore {
 
 impl CheckpointStore {
     /// Build a store for `session_id` rooted at the session `cwd`.
-    ///
-    /// With the durable flag **off** this does no disk I/O.
-    /// With it **on** it rehydrates the cache from any blobs the rootfs snapshot carried (see [`with_cap`](Self::with_cap)).
+    /// Durable flag off: no disk I/O. On: rehydrate from blobs the rootfs snapshot carried (see [`with_cap`](Self::with_cap)).
     pub(crate) fn new(cwd: &Path, session_id: &str) -> Self {
         Self::with_cap(cwd, session_id, DEFAULT_CHECKPOINT_CAP)
     }
@@ -302,10 +300,8 @@ fn checkpoint_file_path(dir: &Path, prompt_index: usize) -> PathBuf {
     dir.join(format!("checkpoint-{prompt_index}.json"))
 }
 
-/// Derive the on-disk store directory name for a caller-controlled `session_id`.
-/// Must be (1) a single traversal-safe component (`../../etc` must not escape the root) and (2) collision-free across distinct raw ids.
-/// The name is a readable sanitized prefix (`[^A-Za-z0-9_-]` mapped to `_`, length-bounded) plus a short hash of the *raw* id.
-/// It is deterministic, so a restored session reads back the same directory.
+/// On-disk directory name for a caller-controlled `session_id`: one traversal-safe component, collision-free across distinct raw ids.
+/// Sanitized prefix plus a hash of the raw id, deterministic so a restored session reads the same directory.
 fn session_store_dir_name(session_id: &str) -> String {
     const PREFIX_MAX: usize = 48;
     let prefix: String = session_id

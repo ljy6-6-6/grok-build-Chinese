@@ -22,12 +22,8 @@ struct InterjectRequest {
     content: Vec<acp::ContentBlock>,
 }
 
-/// Split a `content` array into the model-safe text and the image blocks.
-///
-/// The Text block (when present and non-empty) is the client's REWRITTEN text.
-/// The rewrite strips failed-orphan placeholders and drops `[Image #N: <path>]` paths.
-/// It must win over the raw `text` param, which exists for legacy clients and display.
-/// Returns `(text_override, images)`.
+/// Split a `content` array into the model-safe text and the image blocks. The Text block (when present and non-empty) is the client's REWRITTEN text.
+/// The rewrite strips failed-orphan placeholders and drops `[Image #N: <path>]` paths. It must win over the raw `text` param, which exists for legacy clients and display.
 fn split_content(content: Vec<acp::ContentBlock>) -> (Option<String>, Vec<acp::ImageContent>) {
     let text_override = content.iter().find_map(|block| match block {
         acp::ContentBlock::Text(tb) if !tb.text.trim().is_empty() => Some(tb.text.clone()),

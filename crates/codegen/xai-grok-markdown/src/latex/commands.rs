@@ -11,7 +11,6 @@ use super::symbols::{
 use super::{MAX_DEPTH, Mode};
 
 /// Render an atom's source to a flat (single-line) Unicode string.
-///
 /// Atoms are arguments to commands (fraction sides, script bodies, accent targets).
 /// They always render flat; multi-row content inside them joins with `; `.
 pub(super) fn render_atom(atom: &str, depth: usize, mode: Mode) -> String {
@@ -108,10 +107,7 @@ enum Script {
 }
 
 /// Render `^atom` / `_atom` using Unicode script chars when every char of the rendered atom has a script form; otherwise `^x` / `^(...)` fallback.
-///
 /// Word-like atoms take the fallback even when fully mappable: labels like `p_{\text{torso}}` or `x_{max}` would become long runs like `pₜₒᵣₛₒ`.
-/// Those modifier-letter runs are hard to read and render with visible gaps in terminal fonts lacking those glyphs.
-/// Index-like atoms (`x_{ij}`, `T_{i+1}`, `n^{th}`) keep the compact Unicode form.
 fn render_script(
     cursor: &mut Cursor<'_>,
     out: &mut MathBox,
@@ -155,12 +151,7 @@ fn render_script(
 }
 
 /// `true` if a script atom is a word-like label rather than indices.
-///
-/// Two signals, checked on the atom *source* and its rendered form:
-///
-/// - the source routes through a text-family command (`\text{…}`, `\mathrm{…}`, `\operatorname{…}`, …): the author marked the content as a word.
-/// - the rendered form contains a run of 3+ ASCII letters: multi-letter runs read as words (`max`, `torso`).
-///   One- or two-letter runs read as indices (`ij`, `th`) and stay compact.
+/// the source routes through a text-family command (`\text{…}`, `\mathrm{…}`, `\operatorname{…}`, …): the author marked the content as a word; the rendered form contains a run of 3+ ASCII letters: multi-letter runs read as words (`max`, `torso`). Oneor two-letter runs read as indices (`ij`, `th`) and stay compact.
 fn script_atom_is_wordlike(atom: &str, rendered: &str) -> bool {
     // `\text` also catches `\textrm`/`\textbf`/`\textit`/`\textsf`/`\texttt`/`\textnormal` by prefix; `\math…` variants and box commands likewise
     const TEXT_MARKERS: [&str; 8] = [

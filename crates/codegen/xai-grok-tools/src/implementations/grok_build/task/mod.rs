@@ -19,7 +19,7 @@ pub mod admission;
 pub mod backend;
 pub mod coordinator;
 mod coordinator_state;
-pub use coordinator_state::{cap_completion_output, completion_summary};
+pub use coordinator_state::{cap_completion_output, completion_summary, terminal_snapshot};
 pub mod types;
 
 use self::backend::SubagentBackendResource;
@@ -28,7 +28,6 @@ use self::types::CurrentPromptIdResource;
 use self::types::*;
 use crate::types::output::ToolOutput;
 use crate::types::requirements::{Expr, ToolRequirement};
-#[allow(unused_imports)]
 use crate::types::resources::{SessionFolder, SharedResources};
 use crate::types::tool::{ToolKind, ToolNamespace};
 use regex::Regex;
@@ -171,19 +170,12 @@ async fn resolve_background_notice_names(resources: &SharedResources) -> (String
     )
 }
 
-// ───────────────────────────────────────────────────────────────────────────
-// Tool implementation
-// ───────────────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Default)]
 pub struct TaskTool;
 
-/// True when `name` is a wire name of the subagent-spawn ("task") tool.
-///
-/// Accepts every spelling regardless of enabled features: names arrive over
-/// the wire from arbitrary toolsets. Spellings other than [`TASK_TOOL_NAME`]
-/// are defined downstream and pinned to this predicate by tests at their
-/// definition sites.
+/// True when `name` is a wire name of the subagent-spawn ("task") tool. Accepts every spelling regardless of enabled
+/// features: names arrive over the wire from arbitrary toolsets. Spellings other than [`TASK_TOOL_NAME`] are defined
+/// downstream and pinned to this predicate by tests at their definition sites.
 pub fn is_task_tool_id(name: &str) -> bool {
     matches!(name, TASK_TOOL_NAME | "Task" | "spawn_subagent")
 }
@@ -250,10 +242,6 @@ fn log_background_spawn_after_start(
     }
 }
 
-// ───────────────────────────────────────────────────────────────────────────
-// Tests
-// ───────────────────────────────────────────────────────────────────────────
-
 impl crate::types::tool_metadata::ToolMetadata for TaskTool {
     fn kind(&self) -> ToolKind {
         ToolKind::Task
@@ -264,21 +252,9 @@ impl crate::types::tool_metadata::ToolMetadata for TaskTool {
     }
 
     fn description_template(&self) -> &str {
-        // Grok Build normally supplies the description via
-        // `ToolConfig::with_description(...)` using `build_task_description()`
-        // in xai-grok-agent/src/builder.rs (live subagent roster). But a
-        // registration without an override must still ship a real
-        // description, never a placeholder: default to the built-in roster
-        // with templated tool/param names, resolved by the registry renderer
-        // at finalize time.
-        /// Wrap each `${{ tools.by_kind.X }}` token in an if/else so kinds
-        /// absent from the registry render as the bare kind name instead of
-        /// an empty slot ("read, , and plan"), mirroring the bare-kind
-        /// fallback of `BuiltinSubagent::render_tools`.
-        ///
-        /// These guards sit inline in the roster, so they use the
-        /// non-stripping `${% %}` form: `${%-` would eat the ", " before
-        /// each token and render "has access to:read,grep".
+        // Grok Build normally supplies the description via `ToolConfig::with_description(...)` using `build_task_description()` in
+        // xai-grok-agent/src/builder.rs (live subagent roster). But a registration without an override must still ship a real description, never a
+        // placeholder: default to the built-in roster with templated tool/param names, resolved by the registry renderer at finalize time.
         fn guard_kind_tokens(template: &str) -> String {
             static TOKEN: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
                 Regex::new(r"\$\{\{\s*tools\.by_kind\.([a-z_]+)\s*\}\}").expect("valid regex")
@@ -434,10 +410,30 @@ impl xai_tool_runtime::Tool for TaskTool {
             )));
         }
 
+        let agent_id = input.task_id.map_or_else(
+            || {
+                let generated = uuid::Uuid::now_v7().to_string();
+                xai_message_delivery_core::AgentId::from_uuid_v7(generated).ok_or_else(|| {
+                    xai_tool_runtime::ToolError::custom(
+                        "identity_generation_failed",
+                        "Generated subagent identity was not a UUIDv7.",
+                    )
+                })
+            },
+            |task_id| {
+                xai_message_delivery_core::AgentId::from_uuid_v7(task_id).ok_or_else(|| {
+                    xai_tool_runtime::ToolError::invalid_arguments(
+                        "Injected task_id must be a UUIDv7.",
+                    )
+                })
+            },
+        )?;
+        let id = agent_id.to_string();
+
         // Treat blank/empty/"null" resume_from as absent (models sometimes emit these).
         let resume_from = input.resume_from.and_then(|s| {
             let trimmed = s.trim();
-            is_valid_resume_id(trimmed).then(|| trimmed.to_string())
+            xai_tool_types::is_not_sentinel(trimmed).then(|| trimmed.to_string())
         });
 
         // Model overrides are soft-ignored on resume (source model is always pinned).
@@ -458,10 +454,9 @@ impl xai_tool_runtime::Tool for TaskTool {
         // Also strip stray surrounding quote characters and expand `~`.
         let cwd = input.cwd.as_deref().and_then(sanitize_cwd_value);
 
-        // Validate mutual exclusion: cwd and isolation=worktree cannot both
-        // be set. Both set the effective cwd — setting both is ambiguous.
-        // However, if the cwd path doesn't exist as a real directory on disk,
-        // the model likely passed a nonsense path — just clear it so worktree wins.
+        // Validate mutual exclusion: cwd and isolation=worktree cannot both be set. Both set the effective cwd — setting both
+        // is ambiguous. However, if the cwd path doesn't exist as a real directory on disk, the model likely passed a nonsense
+        // path — just clear it so worktree wins.
         let cwd = if cwd.is_some() && input.isolation == Some(SubagentIsolationMode::Worktree) {
             if cwd
                 .as_deref()
@@ -572,10 +567,14 @@ impl xai_tool_runtime::Tool for TaskTool {
         }
 
         // 3. Build the subagent request
-        let id = input
-            .task_id
-            .clone()
-            .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+        let spawn_root_span = tracing::info_span!(
+            parent: None,
+            "subagent.spawn",
+            subagent_type = %input.subagent_type,
+            isolation = tracing::field::Empty,
+            subagent_id = %id,
+        );
+        spawn_root_span.follows_from(tracing::Span::current().id());
         let child_cancellation = tokio_util::sync::CancellationToken::new();
         let cancellation_forwarder = (!input.run_in_background)
             .then(|| {
@@ -624,6 +623,7 @@ impl xai_tool_runtime::Tool for TaskTool {
             fork_context: false,
             owner: SubagentOwner::Task,
             cancel_token: child_cancellation,
+            spawn_root: SpawnRootSpan::new(spawn_root_span),
         };
 
         // 4. Background mode: await registration (pending/queued), not the
@@ -864,6 +864,28 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("depth limit exceeded"), "error: {err}");
+    }
+
+    #[tokio::test]
+    async fn invalid_injected_task_id_is_rejected_before_validation() {
+        let (backend, mut rx) = make_backend();
+        let mut input = task_input("general-purpose", false);
+        input.task_id = Some("not-a-uuid".to_owned());
+        input.isolation = Some(SubagentIsolationMode::Worktree);
+
+        let result = xai_tool_runtime::Tool::run(
+            &TaskTool,
+            test_ctx(resources_for_task(backend).into_shared()),
+            input,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("UUIDv7"));
+        assert!(
+            rx.try_recv().is_err(),
+            "coordinator must not receive the request"
+        );
     }
 
     #[tokio::test]
@@ -3164,5 +3186,39 @@ mod tests {
             ToolOutput::SubagentCompleted(sub) => assert!(sub.output.contains("resumed")),
             other => panic!("Expected SubagentCompleted, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn spawn_opens_root_span_and_carries_it_on_the_request() {
+        let (backend, mut rx) = make_backend();
+        let resources = resources_for_task(backend);
+
+        let drain = tokio::spawn(async move {
+            let mut spawn = unwrap_spawn(rx.recv().await.expect("spawn event"));
+            spawn.notify_registered();
+            spawn
+        });
+
+        xai_tool_runtime::Tool::run(
+            &TaskTool,
+            test_ctx(resources.into_shared()),
+            task_input("explore", true),
+        )
+        .await
+        .expect("background spawn accepted");
+
+        let mut spawn = tokio::time::timeout(std::time::Duration::from_secs(5), drain)
+            .await
+            .expect("spawn event within timeout")
+            .expect("drain task");
+
+        assert!(
+            spawn.request.spawn_root.take_span().is_some(),
+            "request must carry the root span"
+        );
+        assert!(
+            spawn.request.spawn_root.take_span().is_none(),
+            "slot must be single-take"
+        );
     }
 }

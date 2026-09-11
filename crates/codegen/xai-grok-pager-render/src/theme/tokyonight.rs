@@ -42,7 +42,7 @@ pub mod palette {
 use palette::*;
 
 /// Theme for v3 pager rendering.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Theme {
     // Backgrounds
     pub bg_base: Color,
@@ -235,13 +235,19 @@ impl Theme {
         Style::new().fg(color)
     }
 
-    /// Get a style with muted text (gray, medium).
-    ///
-    /// When `gray` is [`Color::Reset`] (terminal-native / minimal palette), de-emphasize with [`Modifier::DIM`] rather than ANSI bright black.
-    /// DIM scales the terminal's own default fg, so contrast stays polarity-safe; RGB themes keep an explicit gray foreground.
+    /// `Reset` gray uses DIM so contrast stays polarity-safe; RGB themes keep an explicit gray foreground.
     pub const fn muted(&self) -> Style {
         match self.gray {
             Color::Reset => Style::new().add_modifier(Modifier::DIM),
+            c => Style::new().fg(c),
+        }
+    }
+
+    /// [`Self::muted`] for caption text painted over colored chrome (borders, header rails).
+    /// The bandless palette's `muted()` carries no fg, so text patched over a border cell would inherit that cell's fg — pin `Reset` (the terminal default) in that case.
+    pub const fn muted_over_chrome(&self) -> Style {
+        match self.gray {
+            Color::Reset => Style::new().add_modifier(Modifier::DIM).fg(Color::Reset),
             c => Style::new().fg(c),
         }
     }
@@ -255,11 +261,12 @@ impl Theme {
 
     /// Get a style with dim text (gray_dim, dimmest).
     ///
-    /// Same Reset-to-DIM rule as [`Self::muted`] for the terminal-native palette.
+    /// Same Reset-to-DIM rule as [`Self::muted`]: bandless palettes retarget `gray_dim` to bright black for decoration, so content stays on the polarity-safe DIM path and only direct `fg(gray_dim)` sites pick up the bright black.
     pub const fn dim(&self) -> Style {
-        match self.gray_dim {
-            Color::Reset => Style::new().add_modifier(Modifier::DIM),
-            c => Style::new().fg(c),
+        if self.is_bandless() || matches!(self.gray_dim, Color::Reset) {
+            Style::new().add_modifier(Modifier::DIM)
+        } else {
+            Style::new().fg(self.gray_dim)
         }
     }
 
@@ -267,15 +274,65 @@ impl Theme {
         Style::new().fg(self.text_primary)
     }
 
+    /// Whether this is the bandless terminal-native palette: every band slot is `Reset` so the terminal's own canvas shows through.
+    /// The canonical predicate for "reverse video / decoration fallback instead of a color band" — key every such branch off this, not off individual slots.
+    pub const fn is_bandless(&self) -> bool {
+        matches!(self.bg_visual, Color::Reset)
+    }
+
+    /// Bandless palette: both slots are `Reset` and composite to nothing, so reverse video keeps the cursor visible.
+    pub const fn block_cursor_over(&self, surface: Color) -> Style {
+        if self.is_bandless() {
+            Style::new().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::new().fg(surface).bg(self.text_primary)
+        }
+    }
+
+    /// Patch over the already-rendered row. Bandless uses reverse video: a bright-black band can sit too close to default fg.
+    pub const fn selection_overlay(&self) -> Style {
+        if self.is_bandless() {
+            Style::new().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::new().bg(self.bg_visual)
+        }
+    }
+
+    /// Hover analog of [`Self::selection_overlay`], keyed off `bg_hover`.
+    /// On the bandless palette hover and selection share reverse video (they shared the same band before); the cursor row stays distinguishable by its marker/bold.
+    /// Dropdowns and chips use this. Inline terminal rows use [`Self::row_hover_bg`] instead.
+    pub const fn hover_overlay(&self) -> Style {
+        if self.is_bandless() {
+            Style::new().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::new().bg(self.bg_hover)
+        }
+    }
+
+    /// Dim row background for hover inside the terminal itself (scrollback tool
+    /// rows, the queue pane, the dock). Half-blend of `bg_base` toward `bg_dark`,
+    /// softer than the dropdown `bg_hover` token. Named ANSI and Reset palettes
+    /// cannot blend, so fall back to `bg_hover` (Reset on the terminal theme: no band).
+    pub fn row_hover_bg(&self) -> Color {
+        crate::render::color::blend_color(self.bg_base, self.bg_dark, 0.5).unwrap_or(self.bg_hover)
+    }
+
+    /// Hairline fg for panel dividers/borders that RGB themes draw in the `bg_highlight` tone.
+    /// On the bandless palette that would be a full-brightness line, so decoration falls back to bright black (`gray_dim`).
+    pub const fn panel_border_fg(&self) -> Color {
+        if self.is_bandless() {
+            self.gray_dim
+        } else {
+            self.bg_highlight
+        }
+    }
+
     pub const fn bold(&self) -> Style {
         Style::new().add_modifier(Modifier::BOLD)
     }
 }
 
-/// Compute animated brightness for a wave traveling along the accent line.
-///
-/// Each row has a fixed phase offset (`wave_rows` rows per full cycle), so the wave moves smoothly regardless of block height.
-/// `tick` is the frame counter, `speed` is radians per tick (e.g. 0.15); returns brightness in [0.0, 1.0].
+/// Per-row phase offset (`wave_rows` per cycle) so the wave is smooth regardless of block height. Brightness in [0.0, 1.0].
 pub fn wave_brightness(tick: u64, row: u16, wave_rows: u16, speed: f32) -> f32 {
     use std::f32::consts::PI;
 
@@ -289,10 +346,7 @@ pub fn wave_brightness(tick: u64, row: u16, wave_rows: u16, speed: f32) -> f32 {
     sin_val * sin_val
 }
 
-/// Compute a pulsing brightness in [0.0, 1.0] for a single element (icon, indicator); everything sharing the same tick pulses in unison.
-///
-/// `tick` is the frame counter, `speed` is radians per tick, and `sin²` has period π, so one full pulse takes `π / (speed * fps)` seconds.
-/// At 30fps, `speed = 0.08` gives about a 1.3s cycle; for a 2.5s cycle pass about `0.042`.
+/// Shared-tick pulse in [0.0, 1.0]. `sin²` has period π, so one cycle is `π / (speed * fps)` seconds.
 pub fn pulse_brightness(tick: u64, speed: f32) -> f32 {
     let t = tick as f32 * speed;
     let sin_val = t.sin();

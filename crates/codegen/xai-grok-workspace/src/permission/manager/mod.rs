@@ -11,7 +11,7 @@ use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
 
 use crate::permission::auto_mode::{
     BashSecurityAssessment, ClassifierSecurityFinding, ClassifierVerdict, EnvRisk,
-    KUBECTL_UNSAFE_FLAGS, script_env_risk,
+    KUBECTL_UNSAFE_FLAGS, rg_has_unsafe_flag, script_env_risk,
 };
 use crate::permission::bash_command_splitting::{
     is_setup_command, try_parse_shell, try_parse_word_only_commands_sequence, unwrap_wrappers,
@@ -102,11 +102,7 @@ fn mcp_server_prefix_allowed(name: &str, servers: &HashSet<String>) -> bool {
         && parse_mcp_qualified_name(name).is_some_and(|(_, server, _)| servers.contains(server))
 }
 
-/// Pre-decision lookup for an MCP tool.
-/// A remembered "never allow" rejects, checked before the `ask`-floor early return so a deny wins over any grant (mirroring the bash disallow path).
-/// A tool or server-prefix grant allows; anything else returns `None` and falls through to the prompt.
-///
-/// An `ask` policy rule (`policy_forced_prompt`) normally overrides a grant and forces a re-prompt.
+/// Pre-decision lookup for an MCP tool. A remembered "never allow" rejects, checked before the `ask`-floor early return so a deny wins over any grant (mirroring the bash disallow path).
 /// With `remember_tool_approvals` on, an existing grant instead satisfies the rule (ask once, then remember); ungranted tools still prompt.
 fn mcp_pre_decision(
     name: &str,
@@ -143,10 +139,7 @@ fn mcp_pre_decision(
     None
 }
 
-/// Canonical key for a persisted web_fetch deny: the host lowercased with the trailing dot trimmed.
-/// `www.` stays, unlike in the allow side's `normalize_domain`.
-/// The deny matcher covers subdomains, so `www.com` stored as `com` would deny every `.com` host.
-/// Entry `example.com` still denies `www.example.com`, because `www.` is an ordinary subdomain label to the matcher.
+/// Canonical key for a persisted web_fetch deny: the host lowercased with the trailing dot trimmed. Entry `example.com` still denies `www.example.com`, because `www.` is an ordinary subdomain label to the matcher.
 pub(crate) fn web_fetch_deny_key(host: &str) -> String {
     host.trim().trim_end_matches('.').to_lowercase()
 }
@@ -157,10 +150,8 @@ pub(crate) fn web_fetch_deny_key_from_url(url: &str) -> Option<String> {
     (!key.is_empty()).then_some(key)
 }
 
-/// The persisted "never allow" entry matching a web_fetch host, if any.
-/// A deny covers the exact host and its subdomains, but never a parent of the entry.
+/// The persisted "never allow" entry matching a web_fetch host, if any. A deny covers the exact host and its subdomains, but never a parent of the entry.
 /// That is broader than the exact-match allow lookup on purpose: denies fail safe.
-/// Returns the matched entry so the rejection reason names the persisted key.
 fn denied_web_fetch_domain<'a>(host: &str, disallowed: &'a HashSet<String>) -> Option<&'a str> {
     if disallowed.is_empty() {
         return None;
@@ -195,27 +186,9 @@ fn web_fetch_deny_pre_decision(parsed_url: &url::Url, state: &PermissionState) -
     )))
 }
 
-/// True when `words` is an `rg` invocation that enables a preprocessor.
-///
-/// `rg --pre COMMAND` (or `--pre=COMMAND`) runs `COMMAND <file>` for every searched file, so it can execute arbitrary programs.
-/// It must not ride the built-in safe-command auto-allow (unlike a pipeline, `--pre` stays one bash segment whose primary is still `rg`).
-///
-/// Deliberately does **not** match `--pre-glob`, which only filters when a preprocessor runs and does not itself spawn processes.
-fn rg_has_pre_flag(words: &[String]) -> bool {
-    if crate::permission::policy::normalized_command_head(words).as_deref() != Some("rg") {
-        return false;
-    }
-    words
-        .iter()
-        .any(|w| w == "--pre" || w.starts_with("--pre="))
-}
-
 /// True when `words` is a `kubectl` invocation that selects a caller-controlled kubeconfig, endpoint, auth, or identity.
-///
-/// A kubeconfig `users[].user.exec` credential plugin runs an arbitrary local process.
 /// A read verb like `get`/`logs`/`describe` is not side-effect-free once any of these flags point kubectl at attacker-supplied config/auth.
 /// Such invocations must not ride the safe-command auto-allow (nor a broader whitelist *prefix* grant, see `evaluate_bash`).
-/// The flag list lives in [`KUBECTL_UNSAFE_FLAGS`] so the two classifiers cannot drift.
 fn kubectl_has_unsafe_flag(words: &[String]) -> bool {
     if crate::permission::policy::normalized_command_head(words).as_deref() != Some("kubectl") {
         return false;
@@ -226,14 +199,8 @@ fn kubectl_has_unsafe_flag(words: &[String]) -> bool {
     })
 }
 
-/// True when `words` is a `ps` that dumps process environments.
-///
-/// Dashless `e`/`E` dumps env on BSD/macOS/Linux (`ps e`, `ps auxe`).
-/// Uppercase `E` dumps env on macOS (`-E`); we prompt on any `E` on all platforms because the runtime OS is unknown (fail-safe).
-/// Lowercase `-e` stays select-all.
-/// Linux procps reinterprets dash clusters containing the lowercase BSD selectors `a`/`x` as BSD mode, so `-auxe`/`-axe` dump env.
+/// True when `words` is a `ps` that dumps process environments. Uppercase `E` dumps env on macOS (`-E`); we prompt on any `E` on all platforms because the runtime OS is unknown (fail-safe).
 /// Plain UNIX `-e`/`-ef`/`-Ae` stay select-all; the `a`/`x` match is deliberately case-sensitive so `-Ae` is not treated as BSD.
-/// Value operands of format/select flags (`-o etime`, `o command`, `-eo pid,cmd`) are skipped so they are not mistaken for option clusters.
 fn ps_dumps_environment(words: &[String]) -> bool {
     if crate::permission::policy::normalized_command_head(words).as_deref() != Some("ps") {
         return false;
@@ -310,7 +277,7 @@ fn is_safe_command_words(words: &[String]) -> bool {
     if words.is_empty() {
         return false;
     }
-    if rg_has_pre_flag(words) {
+    if rg_has_unsafe_flag(words) {
         return false;
     }
     if kubectl_has_unsafe_flag(words) {
@@ -371,7 +338,7 @@ fn is_safe_command_words_str(cmd: &str) -> bool {
         || matches_command_prefix(cmd, "printf")
     // CWE-863: `tee` is not safe-listed; it writes stdin to arbitrary files, so pipelines like `cat data | tee /target` could bypass edit permissions
     //
-    // `rg --pre` is excluded at the words level via [`rg_has_pre_flag`]; the string form here cannot see flag structure reliably after join
+    // [`rg_has_unsafe_flag`] is checked at the words level; the string form here cannot see flag structure reliably after join
 }
 
 /// Commands which are always safe to execute and should never prompt the user.
@@ -407,15 +374,13 @@ fn is_safe_creation_command(words: &[String]) -> bool {
         .is_some_and(is_creation_program)
 }
 
-/// Check whether parsed command words match the always-safe list.
-///
-/// Applied per chained segment so that scripts like `ls && rm -rf /` cannot auto-approve via the always-safe primary alone.
+/// Check whether parsed command words match the always-safe list. Applied per chained segment so that scripts like `ls && rm -rf /` cannot auto-approve via the always-safe primary alone.
 /// Every non-setup segment must independently pass this check (or the broader `is_safe_command_words`, or a user whitelist).
 fn is_always_safe_command_words(words: &[String]) -> bool {
     if words.is_empty() {
         return false;
     }
-    if rg_has_pre_flag(words) {
+    if rg_has_unsafe_flag(words) {
         return false;
     }
     if kubectl_has_unsafe_flag(words) {
@@ -441,12 +406,8 @@ fn is_always_safe_command_words(words: &[String]) -> bool {
     false
 }
 
-/// Whether an always-allow grant for `words` must pin to the exact full command instead of a narrower prefix.
-/// Dangerous verbs (`rm`, `git push`, …) qualify because enforcement honors them only as exact whole-command grants.
+/// Whether an always-allow grant for `words` must pin to the exact full command instead of a narrower prefix. Dangerous verbs (`rm`, `git push`, …) qualify because enforcement honors them only as exact whole-command grants.
 /// Exec vehicles (interpreters, package runners, `sudo`/`ssh`) qualify because a bare `python3`/`sudo git` prefix would authorize any arguments.
-/// Both [`default_always_allow_scope`] and [`minimum_always_allow_scope`] pin to the full command for these.
-/// The offered default scope is never below the minimum, so the two cannot drift.
-/// [`always_allow_scope_persists`] is the predicate the prompt arrows use.
 fn always_allow_scope_pinned(words: &[String]) -> bool {
     // `sed` writes via script content (`-i`, `1w/path`), not a word prefix, so a `sed -n` prefix grant would silently cover those writes; pin it
     is_dangerous_command_words(words)
@@ -454,23 +415,15 @@ fn always_allow_scope_pinned(words: &[String]) -> bool {
         || crate::permission::policy::normalized_command_head(words).as_deref() == Some("sed")
 }
 
-/// Default always-allow whitelist scope (word count) for a parsed command.
-///
-/// Safe-listed prefixes (`ls`, `grep`, `git status`, `kubectl get`, …) scope to exactly the safe prefix.
-/// Persisting the prefix grants nothing beyond the built-in safe-command auto-allow.
-/// Baking the first path or pattern into the prefix made every different-arg invocation re-prompt.
-/// Everything else keeps the first-two-words-plus-flags default.
-///
-/// Scope narrowing applies only when the **full** invocation is safe-listed.
+/// Default always-allow whitelist scope (word count) for a parsed command. Scope narrowing applies only when the **full** invocation is safe-listed.
 /// Otherwise a non-auto-allowed form like `rg --pre …` would still scope to bare `rg`, and "Always allow" would re-open the preprocessor exec hole.
 pub fn default_always_allow_scope(words: &[String]) -> usize {
     if words.is_empty() {
         return 0;
     }
-    // Pinned commands (dangerous verbs, exec vehicles) offer only the full command
-    // A narrowed default like "Always allow: git push" would save a rule that can never match
-    // "Always allow: sudo git" or "python3" would authorize arbitrary arguments
-    // Wrapped/chained forms whose full-scope grant still cannot match get no row at all (`always_allow_row_is_effective`)
+    // Pinned commands (dangerous verbs, exec vehicles) offer only the full command A narrowed default like "Always allow:
+    // git push" would save a rule that can never match "Always allow: sudo git" or "python3" would authorize arbitrary
+    // arguments Wrapped/chained forms whose full-scope grant still cannot match get no row at all (`always_allow_row_is_effective`)
     if always_allow_scope_pinned(words) {
         return words.len();
     }
@@ -520,10 +473,7 @@ fn base_scope(words: &[String]) -> usize {
     n
 }
 
-/// Narrowest always-allow scope (word count) the prompt may offer for a parsed command.
-/// Pinned commands ([`always_allow_scope_pinned`]: dangerous verbs and exec vehicles) are held at the full command.
-/// Only the exact command the user saw may persist.
-/// Everything else narrows down to one word.
+/// Narrowest always-allow scope (word count) the prompt may offer for a parsed command. Only the exact command the user saw may persist.
 /// Deny scopes are not pinned (see [`default_always_deny_scope`]).
 pub fn minimum_always_allow_scope(words: &[String]) -> usize {
     if always_allow_scope_pinned(words) {
@@ -533,9 +483,7 @@ pub fn minimum_always_allow_scope(words: &[String]) -> usize {
     gh_always_allow_scope(words).unwrap_or(1)
 }
 
-/// Check whether parsed command words begin with a known dangerous command.
-///
-/// Applied per chained segment, not only the start of the script.
+/// Check whether parsed command words begin with a known dangerous command. Applied per chained segment, not only the start of the script.
 /// A segment matching this check is NEVER auto-approved via a user whitelist; the user must always be prompted for it.
 fn is_dangerous_command_words(words: &[String]) -> bool {
     // Match on the normalized basename so `/bin/rm`, `RM`, and `rm.exe` are all caught (consistent with `head_is_exec_vehicle` and the sed pin)
@@ -782,14 +730,10 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
             continue;
         }
 
-        // kubectl config/auth flags, `rg --pre`, and env-dumping `ps` (BSD `e`/`E`) must prompt even under a whitelist prefix or blanket grant
-        // So must the git driver/write options (`--textconv`, `--filters`, `--output`, `--ext-diff`, `grep -O`)
-        // Always-allow persists only the verb prefix (e.g. "kubectl get", "git cat-file", or a bare "ps" from approving `ps aux`).
-        // So a prefix grant cannot be trusted to auto-allow these secret-exposing or exec-capable variants
-        // An exact segment grant still auto-allows below
-        // Do NOT insert DangerousCommand; that would also block exact grants
+        // kubectl config/auth flags, `rg --pre`, env-dumping `ps`, and git driver/write options must prompt even under a whitelist prefix or blanket grant
+        // Always-allow persists only the verb prefix, so that grant cannot cover these variants. An exact segment grant still auto-allows. Do not insert DangerousCommand; that would also block exact grants
         if (kubectl_has_unsafe_flag(words)
-            || rg_has_pre_flag(words)
+            || rg_has_unsafe_flag(words)
             || ps_dumps_environment(words)
             || git_words_have_unsafe_query_option(words))
             && !state.allowed_bash_commands.contains(&s)
@@ -1112,21 +1056,14 @@ fn persisted_bash_auto_allows(
     (state.allow_bash_execute && yolo_pin.is_none()) || state.allowed_bash_commands.contains(cmd)
 }
 
-/// A broad grant must prompt rather than auto-allow when the request's assessment carries a grant-floor finding.
-/// Broad covers the session `allow_bash_execute` blanket, prefix/glob grants, and sandbox auto-allow.
+/// A broad grant must prompt rather than auto-allow when the request's assessment carries a grant-floor finding. Broad covers the session `allow_bash_execute` blanket, prefix/glob grants, and sandbox auto-allow.
 /// It also covers a broad configured policy Allow deferred to the confirmation floor.
-/// An exact whole-command grant is explicit user authority and bypasses this.
-/// Delegates to the single canonical [`BashSecurityAssessment`]; no re-derivation of per-effect fields.
 fn bash_request_floor_requires_prompt(evaluation: Option<&BashEvaluation>) -> bool {
     evaluation.is_some_and(|e| !e.exact_grant && e.assessment.constrains_broad_grant())
 }
 
-/// Whether a configured allow rule clears the bash request floor in ask/dontAsk.
-/// Requires ALL of the following.
-/// The assessment is `FileWrite`-only (other floor findings describe effects outside the rule's matched words).
+/// Whether a configured allow rule clears the bash request floor in ask/dontAsk. The assessment is `FileWrite`-only (other floor findings describe effects outside the rule's matched words).
 /// The writes are command-word operands rather than redirects (which word matching cannot see).
-/// Narrow allow rules authorize every segment (`Bash(*)` catch-alls stay floored).
-/// Auto mode instead routes floored commands to its classifier.
 fn narrow_allow_clears_write_floor(
     evaluation: Option<&BashEvaluation>,
     policy: Option<&CompiledPolicy>,
@@ -1252,12 +1189,7 @@ fn bash_grant_pre_decision(
     }
 }
 
-/// Session always-allow consulted before the auto classifier.
-/// Caller must skip under policy/shell Ask floors.
-///
-/// `honor_static_web_allowlist` is false when auto mode must classify built-in-default web-fetch domains instead of granting them.
-/// The default list is an egress boundary, not a user grant.
-/// User-configured lists and session grants keep short-circuiting.
+/// Session always-allow consulted before the auto classifier. Caller must skip under policy/shell Ask floors. `honor_static_web_allowlist` is false when auto mode must classify built-in-default web-fetch domains instead of granting them.
 fn session_grant_pre_decision(
     access: &AccessKind,
     bash_evaluation: Option<&BashEvaluation>,
@@ -1344,8 +1276,6 @@ pub fn spawn_permission_manager(
 
 /// Like [`spawn_permission_manager`] but routes the permission prompt to chat over the server (the HITL live path) when `hub_permission` is `Some`.
 /// The caller builds the transport only when [`hitl_permission_live_enabled`] and a server is connected; `None` keeps the local ACP prompt.
-///
-/// [`hitl_permission_live_enabled`]: crate::permission::hitl_permission_live_enabled
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_permission_manager_with_hub(
     session_id: acp::SessionId,
@@ -2650,6 +2580,9 @@ mod tests {
     use crate::permission::bash_command_splitting::primary_command_from_script;
     use crate::permission::types::RequestPathContext;
 
+    #[path = "stack_routing_tests.rs"]
+    mod stack_routing_tests;
+
     async fn decide(
         handle: &PermissionHandle,
         access: AccessKind,
@@ -3583,13 +3516,9 @@ mod tests {
             .await;
     }
 
-    // ── Prompt-loop regression: a managed `Ask Bash(...)` rule on an
-    //    auto-allowed command must reach the user prompt, never silently
-    //    auto-allow ──
-    //
-    // The `Ask` helpers above wire a *dropped* gateway receiver and only infer "a prompt was attempted" from a non-`Allow` decision
-    // These tests instead drive the real request loop end to end through a live `acp_gateway` receiver and a mock client that RECORDS each prompt
-    // That lets us positively assert whether the user was prompted, the exact behavior the segment loop's `!policy_forced_prompt` guard protects
+    // ── Prompt-loop regression: a managed `Ask Bash(...)` rule on an auto-allowed command must reach the user prompt, never silently auto-allow ── The `Ask` helpers above wire a
+    // *dropped* gateway receiver and only infer "a prompt was attempted" from a non-`Allow` decision These tests instead drive the real request loop end to end through a live
+    // `acp_gateway` receiver and a mock client that RECORDS each prompt That lets us positively assert whether the user was prompted, the exact behavior the segment loop's `!policy_forced_prompt` guard protects
 
     /// Mock ACP client that records every permission prompt and answers `reject-once`.
     /// The `Decision::Reject` it produces is unmistakably distinct from a silent auto-allow (`Decision::Allow`).
@@ -5144,6 +5073,7 @@ mod tests {
                     for cmd in [
                         "kubectl get pods --kubeconfig=/tmp/evil.yaml",
                         "rg --pre ./pre.sh TODO .",
+                        "rg --hostname-bin=./payload needle",
                         "ps auxe",
                         "git cat-file --textconv HEAD:x",
                     ] {
@@ -6842,11 +6772,9 @@ mod tests {
             .await;
     }
 
-    // ── Test-only bridging helpers ─────────────────────────────────
-    //
-    // The production helpers operate on parsed segment word lists
-    // These shims preserve the previous string-based test signatures
-    // Existing assertions translate verbatim while exercising the new word-based helpers
+    // ── Test-only bridging helpers ───────────────────────────────── The production helpers
+    // operate on parsed segment word lists These shims preserve the previous string-based test
+    // signatures Existing assertions translate verbatim while exercising the new word-based helpers
 
     /// Test shim: a script is "safe" iff `evaluate_bash_segments` returns `AutoAllow` against an empty permission state.
     /// Mirrors the previous behavior of the deleted `is_safe_command(&str)` helper.
@@ -6965,6 +6893,8 @@ mod tests {
         assert!(!is_safe_command(
             "rg --pre-glob '*.pdf' --pre pdftotext pattern"
         ));
+        assert!(!is_safe_command("rg --hostname-bin=./payload needle"));
+        assert!(!is_safe_command("rg --hostname-bin ./payload needle"));
 
         // The shared unsafe-option table applies to EVERY read-only git verb
         // `--filters`/`--textconv` (and unique long-option abbreviations) run repo-configured content drivers
@@ -7071,6 +7001,10 @@ mod tests {
         // `rg --pre` is not fully safe-listed, so do not narrow to bare `rg`.
         assert_eq!(
             default_always_allow_scope(&words("rg --pre cat pattern")),
+            2
+        );
+        assert_eq!(
+            default_always_allow_scope(&words("rg --hostname-bin=./payload needle")),
             2
         );
         assert_eq!(
@@ -7497,10 +7431,9 @@ mod tests {
         ]));
     }
 
-    // ── evaluate_bash_segments: per-segment scrutiny tests ─────────
-    //
-    // These cover the security bypasses the previous primary-only check allowed (`ls && rm -rf`, `cargo test && git push --force`, ...)
-    // They also cover the natural multi-segment cases
+    // ── evaluate_bash_segments: per-segment scrutiny tests ───────── These cover the
+    // security bypasses the previous primary-only check allowed (`ls && rm -rf`,
+    // `cargo test && git push --force`, ...) They also cover the natural multi-segment cases
 
     #[test]
     fn evaluate_chained_dangerous_with_safe_primary_needs_prompt() {
@@ -7839,8 +7772,7 @@ mod tests {
         git2::Repository::init(tmp.path()).unwrap();
         std::fs::write(
             tmp.path().join(".git/config"),
-            "[core]\n\trepositoryformatversion = 0\n\tfsmonitor = true\n\
-             [filter \"lfs\"]\n\tprocess = git-lfs filter-process\n",
+            "[core]\n\trepositoryformatversion = 0\n\tfsmonitor = true\n",
         )
         .unwrap();
         let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();

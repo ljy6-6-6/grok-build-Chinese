@@ -14,10 +14,8 @@ use unicode_width::UnicodeWidthStr;
 use crate::input::key::KeyShortcut;
 use crate::theme::Theme;
 
-/// A single hint for the shortcuts bar.
-///
-/// It carries the keys as structured data; the bar decides how they render.
-/// Views build these dynamically from the registry, widget keymaps, or local state.
+/// A single hint for the shortcuts bar. It carries the keys as structured data; the bar decides how
+/// they render. Views build these dynamically from the registry, widget keymaps, or local state.
 #[derive(Debug, Clone)]
 pub struct HintItem {
     /// Keys to display. Multiple keys are shown joined with "/" (e.g., j/k).
@@ -229,10 +227,12 @@ impl Widget for ShortcutsBar<'_> {
             .bg(theme.bg_base)
             .add_modifier(Modifier::BOLD);
 
-        let action_style = Style::default()
-            .fg(theme.gray)
+        // muted(): DIM on the terminal theme, where `gray` is Reset and the
+        // label would otherwise be indistinguishable from the bold key.
+        let action_style = theme
+            .muted()
             .bg(theme.bg_base)
-            .remove_modifier(Modifier::BOLD | Modifier::DIM);
+            .remove_modifier(Modifier::BOLD);
 
         // If pending confirmation, show only "press again to {label}"
         if let Some(pending) = &self.pending_confirmation {
@@ -310,7 +310,7 @@ impl Widget for ShortcutsBar<'_> {
 
         // Right-aligned text (team name etc.)
         if let Some(text) = self.right_text {
-            let right_style = Style::default().fg(theme.gray).bg(theme.bg_base);
+            let right_style = theme.muted().bg(theme.bg_base);
             let display = format!("{text} ");
             let rw = display.width() as u16;
             if rw > 0 && rw < area.width {
@@ -388,11 +388,9 @@ fn paint_hint_keys(
     x
 }
 
-/// Compute the hint list the bar will actually render.
-///
-/// Without `compact`: returns every hint from the input slice.
-/// With `compact`: pinned hints are always included; the remaining `max_visible − pinned_count` slots take unpinned hints in their original order.
-/// The trailing `help_hint` is unconditionally appended so users always see how to discover the rest.
+/// Without `compact`: returns every hint from the input slice. With `compact`: pinned hints are
+/// always included; the remaining `max_visible − pinned_count` slots take unpinned hints in their
+/// original order.
 pub fn compute_effective_hints<'a>(
     hints: &'a [HintItem],
     compact: Option<&'a CompactConfig>,
@@ -586,10 +584,46 @@ mod tests {
         text
     }
 
+    /// Terminal theme: the action label renders via `muted()` — the DIM attribute — so it reads dimmer
+    /// than the bold key even though both sit on the terminal's default fg (`gray` and `text_secondary`
+    /// are both muted slots there). RGB themes keep the plain gray label fg.
+    #[test]
+    fn label_is_dimmer_than_key_on_terminal_theme() {
+        use ratatui::style::Modifier;
+
+        let _guard = crate::theme::cache::pin_theme();
+        let hints = [h("send", key!('x', CONTROL))];
+
+        crate::theme::cache::set(crate::theme::ThemeKind::Terminal);
+        let buf = render_hints(&hints);
+        // "Ctrl+x:send" — key cell at col 0, label cell after the colon.
+        let text = leading_text(&buf, 12);
+        let label_x = text.find(":send").expect("label rendered") as u16 + 1;
+        let key = buf.cell((0, 0)).unwrap().style();
+        let label = buf.cell((label_x, 0)).unwrap().style();
+        assert!(key.add_modifier.contains(Modifier::BOLD));
+        assert!(
+            !key.add_modifier.contains(Modifier::DIM),
+            "key must stay full-brightness, got {key:?}"
+        );
+        assert!(
+            label.add_modifier.contains(Modifier::DIM),
+            "terminal-theme label must be dimmed, got {label:?}"
+        );
+
+        crate::theme::cache::set(crate::theme::ThemeKind::GrokNight);
+        let buf = render_hints(&hints);
+        let label = buf.cell((label_x, 0)).unwrap().style();
+        assert_eq!(label.fg, Some(Theme::current().gray), "RGB keeps gray");
+        assert!(!label.add_modifier.contains(Modifier::DIM));
+    }
+
     #[test]
     fn multi_key_shared_mod_compact_join_slash_uses_label_style() {
         use ratatui::style::Modifier;
 
+        // Pinned: asserts exact ambient-theme colors.
+        let _guard = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         let key_fg = theme.text_secondary;
         let action_fg = theme.gray;
@@ -641,6 +675,8 @@ mod tests {
     fn multi_key_ignores_custom_display() {
         use ratatui::style::Modifier;
 
+        // Pinned: asserts exact ambient-theme colors.
+        let _guard = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         let action_fg = theme.gray;
 
@@ -668,6 +704,8 @@ mod tests {
     fn custom_display_with_slash_is_fully_key_styled() {
         use ratatui::style::Modifier;
 
+        // Pinned: asserts exact ambient-theme colors.
+        let _guard = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         let key_fg = theme.text_secondary;
 
@@ -696,6 +734,8 @@ mod tests {
     fn bare_slash_key_is_fully_key_styled() {
         use ratatui::style::Modifier;
 
+        // Pinned: asserts exact ambient-theme colors.
+        let _guard = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         let key_fg = theme.text_secondary;
 
@@ -715,6 +755,8 @@ mod tests {
     fn ctrl_slash_key_is_fully_key_styled() {
         use ratatui::style::Modifier;
 
+        // Pinned: asserts exact ambient-theme colors.
+        let _guard = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         let key_fg = theme.text_secondary;
 
@@ -740,6 +782,8 @@ mod tests {
     fn multi_key_different_mods_uses_full_forms() {
         use ratatui::style::Modifier;
 
+        // Pinned: asserts exact ambient-theme colors.
+        let _guard = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         let key_fg = theme.text_secondary;
         let action_fg = theme.gray;

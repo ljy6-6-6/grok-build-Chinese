@@ -25,7 +25,6 @@ pub struct Cent {
 }
 
 /// A usage period (weekly or monthly) from the newer credits config.
-///
 /// `start`/`end` are RFC 3339 timestamps.
 /// `period_type` is the proto enum name (e.g. `USAGE_PERIOD_TYPE_WEEKLY`); it is kept so callers can distinguish weekly from monthly cycles.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,11 +52,8 @@ pub struct BillingPeriodUsage {
     pub total_used: Option<Cent>,
 }
 
-/// Current billing configuration for Grok Build coding credits.
-///
-/// Carries the newer credits-config fields (`credit_usage_percent`, `current_period`).
-/// It also carries the deprecated `GrokBuildBillingConfig` fields (`monthly_limit`, `used`, `billing_period_*`).
-/// Consumers should prefer the new fields and fall back to the deprecated ones.
+/// Current billing configuration for Grok Build coding credits. Carries the newer credits-config fields (`credit_usage_percent`, `current_period`).
+/// It also carries the deprecated `GrokBuildBillingConfig` fields (`monthly_limit`, `used`, `billing_period_*`). Consumers should prefer the new fields and fall back to the deprecated ones.
 /// The same struct then works against both the new `GetGrokCreditsConfig` and the legacy `GetGrokBuildBillingConfig` responses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -149,9 +145,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 }
 
 /// Structured context for unified-log entries from a successful billing fetch.
-///
-/// Keeps history to a count + the most recent period so `~/.grok/logs/unified.jsonl`
-/// stays useful without dumping unbounded period arrays.
+/// Keeps history to a count + the most recent period so `~/.grok/logs/unified.jsonl` stays useful without dumping unbounded period arrays.
 fn billing_unified_log_ctx(billing: &BillingConfigResponse) -> serde_json::Value {
     let history_len = billing
         .config
@@ -202,7 +196,7 @@ async fn handle_get_billing(agent: &MvpAgent) -> ExtResult {
         .header("Authorization", format!("Bearer {}", &auth.key))
         .header(
             "X-XAI-Token-Auth",
-            crate::auth::GrokComConfig::default().token_header,
+            xai_grok_login::GrokComConfig::default().token_header,
         )
         .header("x-userid", &auth.user_id)
         .header("x-grok-client-version", xai_grok_version::VERSION)
@@ -292,7 +286,7 @@ async fn handle_get_auto_topup_rule(agent: &MvpAgent) -> ExtResult {
         .header("Authorization", format!("Bearer {}", &auth.key))
         .header(
             "X-XAI-Token-Auth",
-            crate::auth::GrokComConfig::default().token_header,
+            xai_grok_login::GrokComConfig::default().token_header,
         )
         .header("x-userid", &auth.user_id)
         .header("x-grok-client-version", xai_grok_version::VERSION)

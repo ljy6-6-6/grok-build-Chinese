@@ -42,10 +42,8 @@ impl FileReference {
         })
     }
 }
-/// When `is_cursor` is true, renders `<code_selection path="..." lines="X-Y">` format.
-/// When `is_cursor` is false, renders the original `<file_contents path="..." startLine/endLine/isFullFile>` format.
-///
-/// Content over [`MAX_FILE_TOKENS`] estimated tokens is replaced by a metadata-only stub so the model still knows the file exists.
+/// Cursor clients get `<code_selection>`; others get `<file_contents>`.
+/// Content over [`MAX_FILE_TOKENS`] becomes a metadata-only stub so the model still knows the file exists.
 pub async fn render_file_reference(file_ref: FileReference, is_cursor: bool) -> Option<String> {
     let read_file = tokio::fs::read(&file_ref.path).await;
     let file_content = if let Ok(read_file_output) = read_file {
@@ -90,14 +88,8 @@ pub async fn render_file_reference(file_ref: FileReference, is_cursor: bool) -> 
         })
 }
 const FILE_REGEX: &str = r"^(?:file://)?([^#]+)(?:#L(\d+)-L?(\d+))?$";
-/// When `is_cursor` is true, renders `<code_selection>` tags. Otherwise uses `<file_contents>`.
-/// Parses URIs in the format: `file://[path]#L[start]-[end]` or `file://[path]#L[start]-L[end]`
-///
-/// When content exceeds [`MAX_FILE_TOKENS`], the text is written to
-/// `~/.grok/sessions/{cwd}/{session_id}/pasted/` so the model can `read_file`
-/// specific sections instead of receiving the full content inline.
-///
-/// Binary blob resources are written to `attachments/` and a path hint is returned.
+/// Cursor clients get `<code_selection>`; others get `<file_contents>`. URIs are `file://[path]#L[start]-[end]`.
+/// Over [`MAX_FILE_TOKENS`], text is written under `pasted/` so the model can `read_file` sections; binary blobs go to `attachments/` with a path hint.
 pub async fn render_embedded_resource(
     resource: &EmbeddedResource,
     is_cursor: bool,

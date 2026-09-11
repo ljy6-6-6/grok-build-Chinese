@@ -19,12 +19,16 @@ fn test_config() -> SamplingConfig {
 fn test_config_with_window(context_window: u64) -> SamplingConfig {
     SamplingConfig {
         base_url: "https://api.example.com".to_string(),
+        mtls_cert_dir: None,
         model: "test-model".to_string(),
         max_completion_tokens: None,
         temperature: None,
         top_p: None,
+        max_retries: None,
+        rate_limit_retry_threshold: None,
         api_backend: Default::default(),
         extra_headers: Default::default(),
+        conversation_group_id: None,
         query_params: Default::default(),
         env_http_headers: Default::default(),
         context_window: NonZeroU64::new(context_window)
@@ -664,10 +668,8 @@ async fn estimated_tokens_tracks_synthetic_user_message_delta() {
     assert_eq!(h.handle.get_total_tokens().await, 100_000);
 }
 
-/// Regression: a normal user prompt pushed at turn start must increment
-/// the delta. The bump is voided when the model responds and
-/// `record_token_usage` includes the prompt in `usage.total_tokens`,
-/// keeping the post-response total accurate.
+/// Regression: a normal user prompt pushed at turn start must increment the delta.
+/// The bump is voided when the model responds and usage already includes the prompt.
 #[tokio::test]
 async fn estimated_tokens_tracks_real_user_message_and_resets_on_response() {
     let h = TestHarness::new();
@@ -690,10 +692,8 @@ async fn estimated_tokens_tracks_real_user_message_and_resets_on_response() {
     assert_eq!(h.handle.get_total_tokens().await, 103_000);
 }
 
-/// Regression: pushing the assistant response back into the chat
-/// must NOT bump the delta — the model already counted it in
-/// `usage.completion_tokens` (which is folded into the just-applied
-/// `total_tokens`). Bumping again would double-count the assistant.
+/// Regression: pushing the assistant response back must NOT bump the delta.
+/// The model already counted it in `usage.completion_tokens`; bumping again double-counts.
 #[tokio::test]
 async fn assistant_response_push_does_not_bump_estimated_delta() {
     let h = TestHarness::new();
@@ -1264,10 +1264,8 @@ async fn replace_system_head_inserts_when_absent() {
     assert!(matches!(conv[1], ConversationItem::User(_)));
 }
 
-/// Lost-update safety: an item pushed just before the head swap survives, because
-/// both operations serialize through the actor mailbox — the swap acts on the
-/// actor's current conversation, never a stale caller-side snapshot. This is the
-/// property that makes a mid-turn reconnect safe.
+/// Lost-update safety: an item pushed just before the head swap survives.
+/// Both operations serialize through the actor mailbox, so a mid-turn reconnect is safe.
 #[tokio::test]
 async fn replace_system_head_retains_concurrently_pushed_item() {
     let h = TestHarness::with_conversation(vec![ConversationItem::system("old")]);
@@ -1285,10 +1283,8 @@ async fn replace_system_head_retains_concurrently_pushed_item() {
     assert!(matches!(conv[1], ConversationItem::Assistant(_)));
 }
 
-/// A head swap during an active turn capture must not drop the in-flight
-/// turn's captured tail (regression: `mem::take`ing the conversation before
-/// `replace_conversation` snapshotted it emptied the tail — a `debug_assert`
-/// panic in dev, a silently truncated capture in release).
+/// A head swap during an active turn capture must not drop the in-flight captured tail.
+/// `mem::take` before `replace_conversation` snapshotted emptied the tail (panic in dev, truncated in release).
 #[tokio::test]
 async fn replace_system_head_preserves_active_turn_capture() {
     let h = TestHarness::with_conversation(vec![ConversationItem::system("old")]);
@@ -1371,12 +1367,16 @@ async fn update_sampling_config_is_queryable() {
     let h = TestHarness::new();
     let new_config = SamplingConfig {
         base_url: "https://new.example.com".to_string(),
+        mtls_cert_dir: None,
         model: "grok-3".to_string(),
         max_completion_tokens: Some(4096),
         temperature: Some(0.5),
         top_p: None,
+        max_retries: Some(6),
+        rate_limit_retry_threshold: Some(4),
         api_backend: Default::default(),
         extra_headers: Default::default(),
+        conversation_group_id: None,
         query_params: Default::default(),
         env_http_headers: Default::default(),
         context_window: NonZeroU64::new(200_000).unwrap(),
@@ -1388,6 +1388,8 @@ async fn update_sampling_config_is_queryable() {
     let config = h.handle.get_sampling_config().await.unwrap();
     assert_eq!(config.model, "grok-3");
     assert_eq!(config.context_window, NonZeroU64::new(200_000).unwrap());
+    assert_eq!(config.max_retries, Some(6));
+    assert_eq!(config.rate_limit_retry_threshold, Some(4));
 }
 
 #[tokio::test]
@@ -1786,12 +1788,16 @@ async fn build_request_with_tool_definitions() {
 async fn build_request_uses_sampling_config() {
     let config = SamplingConfig {
         base_url: "https://api.example.com".to_string(),
+        mtls_cert_dir: None,
         model: "grok-3".to_string(),
         max_completion_tokens: Some(8192),
         temperature: Some(0.7),
         top_p: Some(0.9),
+        max_retries: None,
+        rate_limit_retry_threshold: None,
         api_backend: Default::default(),
         extra_headers: Default::default(),
+        conversation_group_id: None,
         query_params: Default::default(),
         env_http_headers: Default::default(),
         context_window: NonZeroU64::new(128_000).unwrap(),
@@ -1920,23 +1926,8 @@ async fn build_request_with_multiple_tool_calls_and_results() {
 // Parallel tool calls with mixed accept/reject
 // ============================================================================
 
-/// Simulates the exact sequence that `xai-grok-shell`'s `execute_tool_calls`
-/// produces when the model emits 3 parallel tool calls and:
-///   - Tool #1 (read_file):       user **accepts** → executed successfully
-///   - Tool #2 (edit_file):       user **rejects** → handle_tool_not_executed
-///   - Tool #3 (run_terminal_cmd): **skipped** due to earlier rejection
-///
-/// In the shell, `execute_tool_calls` iterates sequentially. When tool #2 is
-/// rejected, `final_result` is set to `PermissionReject`, causing tool #3 to
-/// be skipped with a synthetic cancellation message pushed as a ToolResult.
-///
-/// The conversation should end up as:
-///   [0] System
-///   [1] User
-///   [2] Assistant (3 tool calls)
-///   [3] ToolResult for call_1 (success)
-///   [4] ToolResult for call_2 (rejection reason)
-///   [5] ToolResult for call_3 (cancellation due to earlier rejection)
+/// Parallel tool-call sequence: accept, reject, then skip the rest with a synthetic cancel.
+/// The conversation must end with a ToolResult for every call, including the skipped one.
 #[tokio::test]
 async fn parallel_tool_calls_accept_first_reject_second_skip_third() {
     use xai_grok_sampling_types::ToolCall;
@@ -1956,10 +1947,8 @@ async fn parallel_tool_calls_accept_first_reject_second_skip_third() {
 
     h.handle.increment_prompt_index();
 
-    // ── Model response: 3 parallel tool calls ───────────────────────────
-    // The model's single assistant message contains all 3 tool calls.
-    // In the real code, this is built from the streaming response and pushed
-    // via `push_assistant_response`.
+    // Model response: one assistant message holding all 3 parallel tool calls.
+    // In production this is built from the stream and pushed via `push_assistant_response`.
     let assistant_with_tools =
         ConversationItem::Assistant(xai_grok_sampling_types::AssistantItem {
             content: "I'll read the file, fix it, and run tests.".into(),
@@ -2091,10 +2080,8 @@ async fn parallel_tool_calls_accept_first_reject_second_skip_third() {
     }
 }
 
-/// After parallel tool calls with rejection, verify that `build_request`
-/// sees no dangling tool calls (every call has a matching ToolResult).
-/// This is important because dangling calls trigger synthetic repair which
-/// would corrupt the rejection messages.
+/// After parallel tool calls with rejection, `build_request` must see no dangling calls.
+/// Dangling calls trigger synthetic repair which would corrupt the rejection messages.
 #[tokio::test]
 async fn parallel_tool_calls_with_rejection_has_no_dangling_calls() {
     use xai_grok_sampling_types::ToolCall;
@@ -2228,15 +2215,8 @@ async fn parallel_tool_calls_with_rejection_persists_all_items() {
 // Race condition: cancellation mid-tool-execution → dangling calls on reload
 // ============================================================================
 
-/// Simulates the race condition where:
-///   1. Model emits 3 parallel tool calls (single assistant message)
-///   2. Tool #1 executes and its result is persisted
-///   3. User cancels (Ctrl+C) or app crashes BEFORE tool #2/#3 results are pushed
-///   4. On session reload, chat_history.jsonl has the assistant (3 calls) + only 1 result
-///
-/// `ChatState::new` now repairs dangling tool calls eagerly at initialization,
-/// so the actor's in-memory conversation is clean from the start — not just the
-/// clone produced by `build_request`.
+/// Reload after cancel/crash mid-parallel-tools: history has the assistant plus only some results.
+/// `ChatState::new` repairs dangling calls eagerly so in-memory state is clean from the start.
 #[tokio::test]
 async fn dangling_tool_calls_after_crash_are_repaired_on_load() {
     use xai_grok_sampling_types::ToolCall;
@@ -2469,16 +2449,8 @@ async fn all_tool_calls_dangling_after_crash() {
 // Live-session cancellation: user cancels mid-tool-execution (no restart)
 // ============================================================================
 
-/// Simulates an in-session abort where:
-///   1. Model emits 3 parallel tool calls → assistant pushed to conversation
-///   2. User immediately cancels (Ctrl+C) → tokio task aborted
-///   3. Zero tool results pushed (abort happened before execute_tool_calls)
-///   4. TUI stays alive, user types a new prompt
-///
-/// This is different from the reload scenario: `ChatState::new` doesn't run
-/// again because the actor is still alive. The fix is that `push_user_message`
-/// now calls `repair_dangling_tool_calls` before appending the new user
-/// message, so the conversation is cleaned up in-place.
+/// In-session abort: cancel before any tool results, then a new prompt, actor still alive.
+/// `push_user_message` must repair dangling calls in place; `ChatState::new` does not run again.
 #[tokio::test]
 async fn live_cancel_before_any_tool_execution_repairs_on_next_user_message() {
     use xai_grok_sampling_types::ToolCall;
@@ -2999,10 +2971,8 @@ async fn turn_capture_survives_integrity_repair_prefix_shrink() {
     use xai_grok_sampling_types::ToolCall;
     let h = TestHarness::new();
 
-    // Build a prefix (before the capture starts) holding three removable
-    // duplicate ToolResults — one per tool call. `dedup_duplicate_tool_results`
-    // keeps the last result per id and drops the earlier one, shrinking the
-    // prefix by three items when integrity repair later runs.
+    // Prefix holds three removable duplicate ToolResults, one per tool call.
+    // Dedup keeps the last result per id, shrinking the prefix by three when repair runs.
     let call = |id: &'static str| ToolCall {
         id: id.into(),
         name: "t".into(),
@@ -3034,10 +3004,8 @@ async fn turn_capture_survives_integrity_repair_prefix_shrink() {
     h.handle
         .push_assistant_response(ConversationItem::assistant("turn-1"));
 
-    // Integrity repair removes the three prefix duplicates, shrinking the
-    // conversation to len 5 while the un-rebased offset stays at 7 (offset 7 >
-    // len 5). Without the fix the later take_turn_messages slice is out of range,
-    // panics the actor, and the query comes back as None.
+    // Integrity repair shrinks the conversation below the un-rebased capture offset.
+    // Without the fix the later slice is out of range, panics the actor, and the query returns None.
     h.handle.repair_dangling_after_harness_halt("test-halt");
 
     // Second turn item lands after the rebase — it must still be captured.
@@ -3908,13 +3876,8 @@ async fn get_system_message_returns_first_system() {
     assert!(matches!(sys, ConversationItem::System(s) if s.content.as_ref() == "You are helpful."));
 }
 
-// ============================================================================
-// Subagent bootstrap regression tests
-//
-// These verify that `replace_conversation` correctly syncs the system prompt
-// into a ChatStateActor that was spawned before the prompt was built — the
-// exact sequence used by `spawn_session_actor` for subagents.
-// ============================================================================
+// Subagent bootstrap: `replace_conversation` must sync the system prompt into an actor
+// spawned before the prompt was built — the `spawn_session_actor` sequence.
 
 #[tokio::test]
 async fn fresh_subagent_bootstrap_has_system_message_after_replace() {
@@ -4262,15 +4225,8 @@ async fn prune_retained_rewind_still_correct() {
     rx.drain();
 }
 
-/// Regression test: synthetic `User` items injected mid-turn (e.g. system
-/// warnings) must NOT cause old tool results to be cleared earlier than
-/// `hard_clear_age_turns` real turns.
-///
-/// Scenario: 3 real turns with tool results, then 2 synthetic User items
-/// injected without incrementing `prompt_index`, then a 4th real turn.
-/// With `hard_clear_age_turns = 5`, none of the 4 tool results should be
-/// cleared yet (the oldest is only 4 real turns old after the 4th real turn
-/// starts, since prompt_index is 4 at prune time).
+/// Synthetic mid-turn `User` items must not clear old tool results before `hard_clear_age_turns` real turns.
+/// Age is measured in real turns (`prompt_index`), not every `User` item.
 #[tokio::test]
 async fn prune_retained_synthetic_user_does_not_advance_age() {
     use crate::actor::ChatStateActor;
@@ -4317,10 +4273,8 @@ async fn prune_retained_synthetic_user_does_not_advance_age() {
     // Sync
     let conv = handle.get_conversation().await;
 
-    // None of the 3 original tool results should be cleared:
-    // oldest real age = 3 turns (turn 0 is 3 real turns ago), threshold = 5.
-    // Without the synthetic-count compensation, the 2 synthetic User items
-    // would make turn 0's TR appear age 5, causing premature clearing.
+    // None of the original tool results should be cleared: oldest real age is under the threshold.
+    // Without synthetic-count compensation the extra User items would cause a premature clear.
     for item in &conv {
         if let ConversationItem::ToolResult(tr) = item {
             assert_ne!(
@@ -4362,22 +4316,24 @@ async fn get_last_model_metadata_returns_default_when_no_assistant() {
     assert!(meta.model_fingerprint.is_none());
 }
 
-/// Reproduce: after compaction replaces the conversation, `get_sampling_config`
-/// must still return the original model/context_window/api_backend. The
-/// `SamplingConfig` lives in a separate field — `replace_conversation` must
-/// not touch it.
+/// After compaction replaces the conversation, `get_sampling_config` must still return the original config.
+/// `SamplingConfig` is a separate field — `replace_conversation` must not touch it.
 #[tokio::test]
 async fn sampling_config_survives_compaction_replacement() {
     use xai_grok_sampling_types::ApiBackend;
 
     let config = SamplingConfig {
         base_url: "https://api.example.com".to_string(),
+        mtls_cert_dir: None,
         model: "grok-build".to_string(),
         max_completion_tokens: None,
         temperature: Some(0.7),
         top_p: Some(0.95),
+        max_retries: None,
+        rate_limit_retry_threshold: None,
         api_backend: ApiBackend::Responses,
         extra_headers: Default::default(),
+        conversation_group_id: Some("conversation-group".into()),
         query_params: Default::default(),
         env_http_headers: Default::default(),
         context_window: NonZeroU64::new(500_000).unwrap(),
@@ -4433,6 +4389,11 @@ async fn sampling_config_survives_compaction_replacement() {
         ApiBackend::Responses,
         "BUG: api_backend switched to ChatCompletions after compaction"
     );
+    assert_eq!(
+        post.conversation_group_id.as_ref().map(|id| id.as_ref()),
+        Some("conversation-group"),
+        "conversation group changed after compaction"
+    );
 
     // Post-compaction: model metadata is LOST (no AssistantItem in compacted history).
     // This is the visible symptom -- fingerprint/hash disappears from /session-info.
@@ -4447,22 +4408,22 @@ async fn sampling_config_survives_compaction_replacement() {
     );
 }
 
-/// After compaction, the `build_session_info` display path uses
-/// `get_sampling_config().model` as the source-of-truth model slug.
-/// If that model slug is e.g. "grok-build" and not in the ModelState
-/// catalog with a display name, the pager shows the raw slug. This
-/// test verifies the pager's `current_model_name()` behavior when the
-/// model ID doesn't match any catalog entry.
+/// After compaction, session-info display uses `get_sampling_config().model` as the slug.
+/// If that slug is not in the catalog, the pager shows the raw slug — this locks that behavior.
 #[tokio::test]
 async fn model_metadata_lost_after_compaction_then_recovered_on_next_turn() {
     let config = SamplingConfig {
         base_url: "https://api.example.com".to_string(),
+        mtls_cert_dir: None,
         model: "grok-build".to_string(),
         max_completion_tokens: None,
         temperature: Some(0.7),
         top_p: Some(0.95),
+        max_retries: None,
+        rate_limit_retry_threshold: None,
         api_backend: Default::default(),
         extra_headers: Default::default(),
+        conversation_group_id: None,
         query_params: Default::default(),
         env_http_headers: Default::default(),
         context_window: NonZeroU64::new(500_000).unwrap(),
@@ -4527,19 +4488,8 @@ async fn model_metadata_lost_after_compaction_then_recovered_on_next_turn() {
     );
 }
 
-/// Verify that a context_window downgrade via `update_sampling_config`
-/// causes `check_auto_compact_needed` to fire when token usage already
-/// exceeds the new (smaller) window.
-///
-/// This exercises the actor's arithmetic: if anything (model switch,
-/// session resume, etc.) shrinks the context window below accumulated
-/// token usage, auto-compact must trigger.
-///
-/// Note: `handle_model_metadata_update` in acp_session.rs now blocks
-/// response-header downgrades (only upgrades accepted), so this path
-/// is mainly reachable via model switches. The actor itself still
-/// accepts any value via `update_sampling_config` — the guard lives
-/// in the session layer.
+/// A context_window downgrade via `update_sampling_config` must fire auto-compact when usage already exceeds the new window.
+/// The actor accepts any value; the session layer blocks response-header downgrades, so this is mainly model switches.
 #[tokio::test]
 async fn context_window_downgrade_triggers_auto_compact() {
     use xai_grok_sampling_types::ApiBackend;
@@ -4547,12 +4497,16 @@ async fn context_window_downgrade_triggers_auto_compact() {
     // Initial config: 500k context, Responses backend (matches grok-4.5)
     let config = SamplingConfig {
         base_url: "https://api.x.ai/v1".to_string(),
+        mtls_cert_dir: None,
         model: "grok-4.5".to_string(),
         max_completion_tokens: None,
         temperature: Some(0.7),
         top_p: Some(0.95),
+        max_retries: None,
+        rate_limit_retry_threshold: None,
         api_backend: ApiBackend::Responses,
         extra_headers: Default::default(),
+        conversation_group_id: None,
         query_params: Default::default(),
         env_http_headers: Default::default(),
         context_window: NonZeroU64::new(500_000).unwrap(),
@@ -4612,31 +4566,12 @@ async fn context_window_downgrade_triggers_auto_compact() {
     );
 }
 
-// ============================================================================
-// KV Cache Prefix Stability Tests
-//
-// These test `build_conversation_request()` output prefix stability through
-// the full pipeline -- pruning, memory injection, image pruning, snapshot
-// restore. Prefix stability within a compaction epoch is the invariant that
-// keeps the inference engine's prefix / KV cache hitting. The sibling-Reasoning refactor
-// deleted the placeholder/splice machinery these tests previously had to work
-// around.
-//
-// These target the refactored sibling-Reasoning shape:
-//   - No `__RAW_OUTPUT_PLACEHOLDER__` sentinels
-//   - No `extract_raw_input_items()` / `splice_raw_input_items()`
-//   - Reasoning lives as `ConversationItem::Reasoning(rs::ReasoningItem)`
-//     siblings; the From<&ConversationRequest> for rs::CreateResponse impl
-//     emits them inline in `input` order.
-// ============================================================================
+// KV-cache prefix stability through `build_conversation_request` (prune, memory, images, restore).
+// Prefix stability within a compaction epoch is what keeps the inference prefix cache hitting.
+// Targets the sibling-Reasoning shape: no placeholder/splice machinery.
 
-/// Serialize a ConversationRequest using only the public
-/// `From<&ConversationRequest> for rs::CreateResponse` trait impl.
-///
-/// After the sibling-Reasoning refactor there is no placeholder/splice dance: the `Vec<rs::InputItem>`
-/// produced by the From impl is directly the wire shape (modulo
-/// `patch_reasoning_text_types` which only stamps a `type` field on nested
-/// reasoning content blocks and does not reorder items).
+/// Serialize a ConversationRequest via the public `From` impl only.
+/// After the sibling-Reasoning refactor the From output is the wire shape; type-stamping does not reorder items.
 fn serialize_via_public_api(
     req: &xai_grok_sampling_types::ConversationRequest,
 ) -> serde_json::Value {
@@ -4792,12 +4727,8 @@ async fn prefix_stable_with_consistent_memory_injection() {
     assert_prefix_stable_pair(&req1, &req2, "memory-injected turn 1 -> turn 2");
 }
 
-/// Prefix stability with Reasoning siblings (encrypted reasoning) through
-/// the full build_request pipeline. This is the structural equivalent of the
-/// earlier `prefix_stable_with_raw_output_through_build_request` test --
-/// it exercises the exact code path that caused a prefix-instability incident,
-/// but on the post-refactor data model where reasoning rides as a typed sibling
-/// rather than an `AssistantItem.raw_output` blob.
+/// Prefix stability with Reasoning siblings through the full build_request pipeline.
+/// Structural equivalent of the earlier raw_output test on the post-refactor data model.
 #[tokio::test]
 async fn prefix_stable_with_reasoning_siblings_through_build_request() {
     let h = TestHarness::with_conversation(vec![
@@ -4967,11 +4898,8 @@ async fn prefix_stable_with_synthetic_user_messages() {
     assert_prefix_stable_pair(&req1, &req2, "with synthetic user messages");
 }
 
-/// Prefix stability after size-gated image eviction. Once the serialized body
-/// nears the 50 MB ceiling, old user turns' images are replaced with text
-/// placeholders on the request clone -- text items before the evicted region
-/// must stay prefix-stable in their relative ordering. The image here is sized
-/// past `IMAGE_COMPACT_TRIGGER_BYTES` so the eviction actually fires.
+/// Prefix stability after size-gated image eviction near the 50 MB ceiling.
+/// Text items before the evicted region must stay prefix-stable in relative order.
 #[tokio::test]
 async fn prefix_stable_after_image_pruning() {
     use xai_grok_sampling_types::ContentPart;
@@ -5028,11 +4956,8 @@ async fn prefix_stable_after_image_pruning() {
         .await
         .unwrap();
 
-    // Image stripping mutates the old user turn's content, so full
-    // byte-level prefix stability cannot hold at that item. We verify:
-    //   1. System prompt preserved
-    //   2. Items grew
-    //   3. Text items appear in the same relative order
+    // Image stripping mutates the old user turn, so full byte-level prefix stability cannot hold there.
+    // Verify system prompt preserved, items grew, and text items keep relative order.
     let body1 = serialize_via_public_api(&req1);
     let body2 = serialize_via_public_api(&req2);
 
@@ -5073,11 +4998,8 @@ async fn prefix_stable_after_image_pruning() {
     }
 }
 
-/// Regression for the image cache-miss bug: with normal small images (well
-/// under the 50 MB ceiling), an old user turn's image is preserved across
-/// turns instead of being rewritten to a placeholder. Rewriting old images on
-/// every turn busted the KV-cache prefix (the over-aggressive earlier
-/// behavior this size-gate replaces).
+/// Regression: small images under the 50 MB ceiling must be preserved across turns.
+/// Rewriting old images every turn busted the KV-cache prefix (the behavior this size-gate replaces).
 #[tokio::test]
 async fn build_request_preserves_small_old_images() {
     use xai_grok_sampling_types::{ContentPart, UserItem};
@@ -5187,10 +5109,8 @@ async fn build_request_budgets_tool_images_on_request_copy_only() {
     assert_eq!(canonical_result.content.as_ref(), "tool text");
 }
 
-/// Prefix stability after tool result pruning. When context utilization
-/// exceeds 50%, old tool results are soft-trimmed or hard-cleared, but
-/// this happens on a clone -- items outside the pruned region must
-/// remain identical.
+/// Prefix stability after tool result pruning above 50% utilization.
+/// Pruning happens on a clone — items outside the pruned region must remain identical.
 #[tokio::test]
 async fn prefix_stable_after_tool_result_pruning() {
     let h = TestHarness::with_context_window(10_000);

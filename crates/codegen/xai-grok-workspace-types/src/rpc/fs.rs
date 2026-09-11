@@ -21,25 +21,14 @@ pub struct PutFileEntry {
     /// If true, create parent directories as needed (default: true).
     #[serde(default = "default_true")]
     pub create_dirs: bool,
-    /// If true, append to the file instead of overwriting it.
-    ///
-    /// **Chunked writes:** a large file can be streamed without holding it entirely in memory.
-    /// Split the content into chunks and send multiple `PutFileEntry` items (or multiple `put_files` calls) for the same path:
-    ///   - First chunk: `append: false` (creates/truncates the file)
-    ///   - Subsequent chunks: `append: true`
-    ///
-    /// Default: `false` (overwrite).
+    /// If true, append instead of overwrite. Default false.
+    /// Chunked writes: first chunk `append: false` (create/truncate), later chunks `append: true`, so a large file need not be held entirely in memory.
     #[serde(default)]
     pub append: bool,
 }
 
-/// Request to write one or more files to the workspace filesystem.
-///
-/// Service-level write: NOT tracked in hunk tracker, NOT visible to model.
-///
-/// **Non-transactional:** Files are written sequentially.
-/// If file N fails, files 1..N-1 are already written to disk and will NOT be rolled back.
-/// Callers must inspect per-file results in `PutFilesRes` to detect partial failures.
+/// Write one or more files. Service-level: not hunk-tracked and not visible to the model.
+/// Non-transactional: a failure leaves earlier files written. Callers must inspect per-file results.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PutFilesReq {
     pub files: Vec<PutFileEntry>,
@@ -73,12 +62,7 @@ pub struct PutFilesRes {
 }
 
 /// A single file to read, with optional cache validation and byte-range support.
-///
-/// # Byte-range and UTF-8 alignment
-///
-/// `offset` and `length` specify byte ranges, but the response `content` is returned as a UTF-8 `String`.
-/// If a byte range splits a multi-byte UTF-8 codepoint, the implementation returns an error for that file entry rather than producing invalid text.
-/// Callers that need arbitrary byte-level chunking should align offsets to codepoint boundaries.
+/// Ranges are bytes but `content` is a UTF-8 `String`; a split codepoint errors rather than emitting invalid text.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetFileEntry {
     /// Path relative to the client-fs base (see [`PutFileEntry::path`]).
@@ -247,10 +231,8 @@ pub struct FsReadFileReq {
     /// When all are absent the whole file is read.
     #[serde(default)]
     pub offset: Option<u64>,
-    /// Bytes to read (absent means "to EOF").
-    /// Only consulted for ranged reads, and always capped at `max_bytes` and the server's hard limit.
-    /// An unset `length` still returns at most `max_bytes`.
-    /// Detect "more data" by comparing the returned bytes (from `offset`) against `size`.
+    /// Bytes to read (absent means to EOF). Only for ranged reads, always capped at `max_bytes` and the server hard limit.
+    /// Detect more data by comparing returned bytes from `offset` against `size`.
     #[serde(default)]
     pub length: Option<u64>,
     /// Per-chunk byte budget applied on top of `length` (default 1 MiB).
@@ -298,18 +280,8 @@ impl WorkspaceRpc for FsDeleteFileReq {
     type Response = ();
 }
 
-// =========================================================================
-// Client-facing read-only fs ops (`workspace.client_fs_*`)
-// =========================================================================
-//
-// Distinct from the shell-facing `workspace.fs_*` ops above: every `path` is workspace-root-relative (not absolute)
-// Timestamps are `mtimeMs` epoch milliseconds (not RFC 3339 strings)
-// `client_fs_list` paginates with a post-sort `offset`, and reads are binary-safe (base64 chunks)
-// The wire format is camelCase with fixed-width integers only
-// Both the workspace server (`xai-grok-workspace`) and the grok.com backend compile against the same structs; a field rename breaks both sides
-//
-// The method names use a `client_fs` segment (not `fs`)
-// The `workspace.fs_*` ops above already serve the shell's `x.ai/fs/*` methods with incompatible schemas
+// Client-facing `workspace.client_fs_*`: root-relative paths, `mtimeMs`, post-sort pagination, binary-safe base64. Not the shell `workspace.fs_*` schema.
+// camelCase, fixed-width integers only. Server and grok.com backend share these structs; a field rename breaks both.
 
 /// Wire method name for [`ClientFsListReq`].
 pub const CLIENT_FS_LIST_METHOD: &str = "workspace.client_fs_list";

@@ -22,34 +22,7 @@ pub struct ConfigLayers {
     pub user: toml::Value,
     /// `GROK_CONFIG` / `GROK_CONFIG_PATH` overlay, above user but below requirements.
     /// Soft settings only; this doc is the canonical source of truth for what the overlay can and cannot reach.
-    ///
-    /// Values are confined at [`crate::env_overlay`]'s `finalize_overlay` choke point.
-    /// Both producers return confined overlays.
-    /// `load_env_overlay` feeds the merge path via [`Self::load`].
-    /// `resolved_env_overlay` serves hints (which constructs this field directly) and `grok inspect`.
-    /// Construct this field only from one of those producers.
-    /// Tests that assign an unconfined value do so deliberately, to exercise a gate independent of the allowlist.
-    ///
-    /// The overlay is confined to an allowlist of soft paths ([`crate::config_override::OVERLAY_ALLOW_PATHS`]).
-    /// The allowlist holds the `models` and `features` tables, a narrowed `toolset`, and a filtered `shell_environment_policy`.
-    /// `toolset` keeps only `[toolset.bash] login_shell_capture` and the `[toolset.web_search]` domain lists.
-    /// `shell_environment_policy` keeps only its filter fields (`inherit`, `exclude`, `include_only`, `ignore_default_excludes`).
-    /// Every other table, plus the shell-env `set` field, is dropped at the choke point.
     /// This is fail-closed: every code-exec, auth, egress, trust, or discovery table is absent from the allowlist and dropped by default.
-    /// A newly added dangerous table stays out until it is explicitly allowlisted.
-    /// The overlay therefore cannot spawn a new command sink, set auth policy, redirect egress, elevate trust, or add a discovery source.
-    /// `shell_environment_policy` cannot inject an env value (`set` is dropped).
-    /// Its remaining fields only select among env names the launcher already controls.
-    /// Relative to a lower layer they may loosen or tighten what a subprocess inherits but never introduce a value.
-    /// A launcher that must add an env var sets it on the process directly.
-    /// `sandbox` and `telemetry` are likewise not allowlisted (set them via `GROK_SANDBOX` / `OTEL_*`).
-    /// `[features] telemetry` is the master switch and is allowlisted.
-    ///
-    /// Even on the allowlisted tables, security gates read overlay-free; requirements/MDM clamp on top.
-    /// They read the raw disk layers via [`Self::effective_config_base_without_overlay`], explicit per-layer values, or the raw config files.
-    /// Those gates cover permission mode, plan approval, auto permission mode plus its classifier, and remember tool approvals.
-    /// They also cover `remote_fetch`, managed-config fetch, marketplace `require_sha`, ZDR access, and folder trust.
-    /// `[permission]` allow/deny rules and the `[cli]` version bounds are read overlay-free as well.
     pub env_overlay: Option<toml::Value>,
     pub user_requirements: Option<toml::Value>,
     pub system_requirements: Option<toml::Value>,
@@ -140,7 +113,6 @@ impl ConfigLayers {
     }
 
     /// Layer merge (no campaigns), including the `GROK_CONFIG` overlay.
-    ///
     /// Overlay-inclusive: security gates must not read this.
     /// Use [`Self::effective_config_base_without_overlay`] for any gate (the overlay-free set is enumerated on [`Self::env_overlay`]).
     pub fn effective_config_base(&self) -> toml::Value {
@@ -284,6 +256,14 @@ pub fn campaigns_application_disabled(base_effective: &toml::Value) -> bool {
         == Some(false)
 }
 
+/// Process-global `GROK_CAMPAIGNS` lock. A mutex local to the setter is not
+/// enough because `effective_config_with_campaigns` also reads the var.
+#[cfg(test)]
+pub(crate) fn lock_grok_campaigns_env() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 /// Disk layers only (no remote, no env override).
 /// Prefer `xai_grok_shell::util::config::load_effective_config` when remote campaigns or `GROK_CAMPAIGNS_OVERRIDE` must be honored.
 /// The name mirrors [`ConfigLayers::effective_config_disk_only`] so the divergence from the remote-aware loader is explicit at every call site.
@@ -340,17 +320,14 @@ mod tests {
     }
 
     /// `GROK_CAMPAIGNS=0` disables campaign application regardless of config.
-    /// `GROK_CAMPAIGNS` is process-global, so this test serializes itself with a module-local mutex and save/restores the prior value.
-    /// (This crate has no `serial_test` dev-dep and no other test reads this var, so a local guard is sufficient.)
     #[test]
     fn kill_switch_env_var_disables() {
-        static ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _g = ENV_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = lock_grok_campaigns_env();
         let prior = std::env::var_os("GROK_CAMPAIGNS");
         let empty = toml::Value::Table(Default::default());
 
-        // SAFETY: ENV_GUARD serializes this against itself; no other test in the
-        // crate mutates or reads GROK_CAMPAIGNS concurrently.
+        // SAFETY: `lock_grok_campaigns_env` serializes this against every test that
+        // mutates or reads GROK_CAMPAIGNS.
         unsafe { std::env::set_var("GROK_CAMPAIGNS", "0") };
         assert!(campaigns_application_disabled(&empty));
 
@@ -365,6 +342,7 @@ mod tests {
 
     #[test]
     fn env_overlay_precedence_and_overlay_free_merge() {
+        let _env = lock_grok_campaigns_env();
         let mut layers = ConfigLayers {
             user: toml::from_str("[models]\ndefault = \"user\"\n[telemetry]\nmode = \"on\"\n")
                 .unwrap(),

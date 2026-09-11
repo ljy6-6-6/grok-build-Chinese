@@ -139,7 +139,7 @@ impl SessionActor {
             return;
         };
         result.results = demote_ignored_blocks(result.results);
-        self.send_hook_execution("stop", None, None, &result.results)
+        self.send_hook_execution(&HookBatch::from_envelope(&envelope), &result.results)
             .await;
         self.emit_hook_executed_telemetry("stop", None, &result.results)
             .await;
@@ -244,16 +244,9 @@ impl SessionActor {
         }
     }
 
-    async fn emit_stop_results(
-        &self,
-        event: event::HookEventName,
-        prompt_id: &str,
-        results: &[result::HookRunResult],
-    ) {
-        let name = event.to_string();
-        self.send_hook_execution(&name, None, Some(prompt_id), results)
-            .await;
-        self.emit_hook_executed_telemetry(&name, None, results)
+    async fn emit_stop_results(&self, batch: &HookBatch, results: &[result::HookRunResult]) {
+        self.send_hook_execution(batch, results).await;
+        self.emit_hook_executed_telemetry(&batch.event_name, None, results)
             .await;
     }
 
@@ -303,16 +296,19 @@ impl SessionActor {
         let mut result = dispatcher::StopDispatchResult::default();
         // Clone out of the RefCell before the awaits so no `Ref` is held across them
         let registry = self.hook_registry.borrow().clone();
-        if let Some(registry) = registry {
+        let batch = if let Some(registry) = registry {
             let ctx = self.hook_run_ctx();
+            let batch = self.announce_hook_run(&registry, &envelope, &ctx);
             result = dispatcher::dispatch_stop(&registry, event, &envelope, &ctx).await;
-        }
+            batch
+        } else {
+            HookBatch::from_envelope(&envelope)
+        };
 
         if let Some(prevent) = result.prevent_continuation.take() {
             // Force-stop: skip the client gate, its signals would be discarded
             // Still send the observe notification so client callbacks see the turn end
-            self.emit_stop_results(event, prompt_id, &result.results)
-                .await;
+            self.emit_stop_results(&batch, &result.results).await;
             self.notify_client_hooks(&envelope);
             commit_stop_report(claim, prompt_id);
             self.announce_force_stop(&prevent).await;
@@ -324,7 +320,7 @@ impl SessionActor {
         let mut all_results = std::mem::take(&mut result.results);
         all_results.extend(client.results);
         if !all_results.is_empty() {
-            self.emit_stop_results(event, prompt_id, &all_results).await;
+            self.emit_stop_results(&batch, &all_results).await;
         }
 
         result.blocks.extend(client.blocks);

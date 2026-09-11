@@ -44,21 +44,12 @@ type MemoryArchiveResult = Result<std::sync::Arc<Vec<u8>>, String>;
 /// Receiver side of an in-flight build: `None` until the build publishes.
 type MemoryArchiveBuild = tokio::sync::watch::Receiver<Option<MemoryArchiveResult>>;
 
-/// In-flight memory-archive builds keyed by cwd. Same-cwd turn ends join the
-/// in-flight build instead of stacking duplicate tar+gzip work, and each
-/// joiner uploads the shared bytes under its own turn prefix — every
-/// restorable turn gets a `memory.tar.gz` blob. Keyed by cwd (known before
-/// the expensive workspace discovery); worktrees sharing a memory dir may
-/// build it concurrently, bounded by live sessions.
+/// In-flight memory-archive builds keyed by cwd. Same-cwd turn ends join the in-flight build instead of stacking duplicate tar+gzip work, and each joiner uploads the shared bytes under its own turn prefix — every restorable turn gets a `memory.tar.gz` blob. Keyed by cwd (known before the expensive workspace discovery); worktrees sharing a memory dir may build it concurrently, bounded by live sessions.
 static MEMORY_ARCHIVE_BUILDS: std::sync::LazyLock<
     parking_lot::Mutex<std::collections::HashMap<String, MemoryArchiveBuild>>,
 > = std::sync::LazyLock::new(Default::default);
 
-/// Join the in-flight build for `cwd` or start one. The builder task owns
-/// publishing and map cleanup, so it completes even if every waiter is
-/// dropped (e.g. all turns hit their flush deadline). `MemoryStorage::new`
-/// runs git2 workspace discovery and the build tars+gzips the whole memory
-/// dir — seconds on large workspaces — so both stay on the blocking pool.
+/// Join the in-flight build for `cwd` or start one. The builder task owns publishing and map cleanup, so it completes even if every waiter is dropped (e.g. all turns hit their flush deadline). `MemoryStorage::new` runs git2 workspace discovery and the build tars+gzips the whole memory dir — seconds on large workspaces — so both stay on the blocking pool.
 /// `memory_root` overrides the default `~/.grok/memory` root for tests.
 fn join_or_start_memory_archive_build(
     cwd: String,
@@ -107,10 +98,7 @@ async fn await_memory_archive(build: &mut MemoryArchiveBuild) -> MemoryArchiveRe
 
 /// Upload memory .md files as `memory.tar.gz` alongside the per-turn trace.
 /// Only runs when session registry is enabled via remote settings or config.toml.
-///
-/// With [`UploadWait::Defer`] the build wait is bounded by the flush deadline
-/// (the `UploadWait` contract): past it the turn records a miss while the
-/// build finishes detached and uploads best-effort.
+/// With [`UploadWait::Defer`] the build wait is bounded by the flush deadline (the `UploadWait` contract): past it the turn records a miss while the build finishes detached and uploads best-effort.
 pub(crate) async fn upload_memory_state(ctx: &PromptTraceContext, wait: UploadWait) {
     if !ctx.session_registry_enabled {
         tracing::debug!("memory upload skipped: session_registry_enabled=false");
@@ -118,6 +106,18 @@ pub(crate) async fn upload_memory_state(ctx: &PromptTraceContext, wait: UploadWa
             &ctx.artifact_tracker,
             "memory.tar.gz",
             "session_registry_disabled",
+        );
+        return;
+    }
+    if ctx.memory_mode == Some(crate::config::MemoryMode::V2) {
+        // The current replay archive contract understands the legacy layout
+        // only. Uploading a partial v2 snapshot (just its generated manifests)
+        // would silently produce an unrestorable memory state.
+        tracing::debug!("memory upload skipped: v2 archive format is not supported");
+        super::manifest::skip_artifact(
+            &ctx.artifact_tracker,
+            "memory.tar.gz",
+            "memory_v2_archive_unsupported",
         );
         return;
     }
@@ -186,10 +186,7 @@ pub(crate) async fn upload_memory_state(ctx: &PromptTraceContext, wait: UploadWa
     }
 }
 
-/// Record or upload a finished memory-archive build. The upload honors the
-/// same [`UploadWait`] contract as the sibling turn artifacts: durable queue
-/// accept (or a deadline-bounded direct attempt) on `Defer`, an awaited
-/// direct upload on `Confirm`.
+/// Record or upload a finished memory-archive build. The upload honors the same [`UploadWait`] contract as the sibling turn artifacts: durable queue accept (or a deadline-bounded direct attempt) on `Defer`, an awaited direct upload on `Confirm`.
 async fn upload_built_memory_archive(
     ctx: &PromptTraceContext,
     result: MemoryArchiveResult,

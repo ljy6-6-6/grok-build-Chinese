@@ -4,11 +4,36 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Persistent-memory implementation selected for a session.
+///
+/// The mode is resolved once with the rest of [`MemoryConfig`] and is not
+/// changed for an already-running session.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryMode {
+    /// Existing summary, search, and Dream pipeline rooted at `memory/`.
+    #[default]
+    Legacy,
+    /// Isolated topic and observation pipeline rooted at `memory-v2/`.
+    V2,
+}
+
+impl MemoryMode {
+    pub fn is_legacy(self) -> bool {
+        self == Self::Legacy
+    }
+
+    pub fn is_v2(self) -> bool {
+        self == Self::V2
+    }
+}
+
 /// Raw `[memory]` settings. Absence is preserved for per-field fallback.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MemorySettings {
     pub enabled: Option<bool>,
+    pub mode: Option<MemoryMode>,
     pub index: Option<MemoryIndexSettings>,
     pub embedding: Option<MemoryEmbeddingSettings>,
     pub search: Option<MemorySearchSettings>,
@@ -175,10 +200,7 @@ pub struct MemorySearchConfig {
     /// Weight for BM25 text similarity in hybrid scoring.
     pub text_weight: f32,
     /// **Deprecated**: use `temporal_decay` instead.
-    ///
-    /// Per-day decay factor for recency boosting (0.0 to 1.0).
     /// When `temporal_decay.enabled` is true, this field is ignored.
-    /// When `temporal_decay.enabled` is false and this is set, it is converted to an approximate half-life for backward compatibility.
     /// The conversion is `half_life ≈ -1 / log₂(recency_decay)`.
     pub recency_decay: f32,
     /// Temporal decay configuration for time-aware scoring.
@@ -210,15 +232,7 @@ impl Default for MemorySearchConfig {
 }
 
 /// Temporal decay configuration for time-aware search scoring.
-///
-/// Controls how memory chunk scores decay over time.
-/// Chunks from "evergreen" sources (`global`, `workspace`) are exempt from decay since they contain curated long-term knowledge.
 /// Only `session` chunks decay, using an exponential half-life formula:
-///
-/// ```text
-/// decayed_score = base_score × e^(-λ × age_days)
-/// where λ = ln(2) / half_life_days
-/// ```
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct TemporalDecayConfig {
@@ -238,14 +252,8 @@ impl Default for TemporalDecayConfig {
 }
 
 /// MMR (Maximal Marginal Relevance) diversity re-ranking configuration.
-///
 /// When enabled, re-ranks search results to penalize redundancy.
 /// It uses Jaccard similarity on tokenized snippets to measure how alike two results are.
-/// It then greedily selects results that balance relevance with diversity:
-///
-/// ```text
-/// MMR(d) = λ × relevance(d) - (1-λ) × max_similarity(d, selected)
-/// ```
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct MmrConfig {
@@ -268,7 +276,6 @@ impl Default for MmrConfig {
 }
 
 /// Deserialize an `f64` clamped to [0.0, 1.0].
-///
 /// Used for fields where values outside the unit interval are meaningless
 /// (e.g. cosine similarity thresholds, trade-off lambdas).
 fn deserialize_clamped_unit<'de, D>(deserializer: D) -> Result<f64, D::Error>
@@ -293,12 +300,7 @@ pub const DEFAULT_RECENCY_DECAY: f32 = 0.95;
 
 impl MemorySearchConfig {
     /// Resolve the effective half-life for temporal decay.
-    ///
-    /// Priority order:
-    /// 1. `temporal_decay.enabled = true`: use `temporal_decay.half_life_days`.
-    /// 2. Otherwise, when `recency_decay` differs from the default (0.95): convert the legacy per-day factor to an approximate half-life.
-    ///    The conversion `half_life ≈ -1.0 / log₂(recency_decay)` preserves behavior for users who only set `recency_decay`.
-    /// 3. Otherwise `None` (decay fully disabled).
+    /// `temporal_decay.enabled = true`: use `temporal_decay.half_life_days`; Otherwise, when `recency_decay` differs from the default (0.95): convert the legacy per-day factor to an approximate half-life. The conversion `half_life ≈ -1.0 / log₂(recency_decay)` preserves behavior for users who only set `recency_decay`; Otherwise `None` (decay fully disabled).
     pub fn effective_half_life_days(&self) -> Option<f64> {
         if self.temporal_decay.enabled {
             if self.temporal_decay.half_life_days <= 0.0 {
@@ -395,13 +397,6 @@ impl Default for MemoryDreamConfig {
 }
 
 /// File watcher configuration for detecting external memory edits (`[memory.watcher]`).
-///
-/// When enabled, watches `~/.grok/memory/` for `.md` file changes (create,
-/// modify, delete) and syncs the index on the next `memory_search` call:
-/// - Created/modified files are reindexed.
-/// - Deleted files have their stale chunks removed from the index.
-///
-/// Events are coalesced in a lock-free `ArcSwap` set.
 /// Sync runs at most once per search call, when dirty files are present and the claim is acquired.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
@@ -423,11 +418,7 @@ impl Default for MemoryWatcherConfig {
 }
 
 /// Garbage collection for orphaned workspace memory directories (`[memory.gc]`).
-///
-/// On session init, directories under `~/.grok/memory/` are scanned:
-/// - `tmp*` dirs: empty ones removed unconditionally, non-empty ones removed after 7 days.
-/// - Other workspaces with no session files: removed after `max_age_days`.
-/// - Non-empty non-tmp workspaces: never touched.
+/// `tmp*` dirs: empty ones removed unconditionally, non-empty ones removed after 7 days; Other workspaces with no session files: removed after `max_age_days`; Non-empty non-tmp workspaces: never touched.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct MemoryGcConfig {
@@ -512,6 +503,7 @@ impl Default for PruningConfig {
 #[serde(default)]
 pub struct MemoryConfig {
     pub enabled: bool,
+    pub mode: MemoryMode,
     pub index: MemoryIndexConfig,
     pub embedding: MemoryEmbeddingConfig,
     pub search: MemorySearchConfig,
@@ -600,6 +592,7 @@ impl MemoryConfig {
                 .default(false)
                 .resolve()
                 .value,
+            mode: memory.mode.unwrap_or(defaults.mode),
             index: MemoryIndexConfig {
                 max_chunk_chars: index
                     .and_then(|settings| settings.max_chunk_chars)
@@ -827,6 +820,30 @@ mod tests {
         assert_eq!(f.semantic_dedup_threshold, Some(1.0));
         let f: MemoryFlushConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(f.semantic_dedup_threshold, None);
+    }
+
+    #[test]
+    fn memory_mode_defaults_to_legacy_and_parses_v2() {
+        let defaults: MemorySettings = toml::from_str("").unwrap();
+        assert_eq!(defaults.mode, None);
+
+        let v2: MemorySettings = toml::from_str("mode = \"v2\"").unwrap();
+        assert_eq!(v2.mode, Some(MemoryMode::V2));
+
+        let resolved = MemoryConfig::resolve_settings(
+            None,
+            &v2,
+            &Default::default(),
+            &Default::default(),
+            None,
+        );
+        assert_eq!(resolved.mode, MemoryMode::V2);
+        assert_eq!(MemoryConfig::default().mode, MemoryMode::Legacy);
+    }
+
+    #[test]
+    fn memory_mode_rejects_unknown_values() {
+        assert!(toml::from_str::<MemorySettings>("mode = \"future\"").is_err());
     }
 
     #[test]

@@ -41,7 +41,6 @@ impl AgentView {
     /// Drop the picker when another overlay owns the input slot ([`Self::jump_slot_taken`]), so it can't eat wheel/keys while hidden.
     /// Returns whether it dropped one, so an `Esc` caller can spend that key here.
     /// Otherwise `Esc` would also dismiss the overlay shadowing the picker (e.g. the `/btw` panel).
-    /// Called at the input and scroll entry points.
     pub(super) fn dismiss_jump_picker_if_suppressed(&mut self) -> bool {
         if self.jump_state.is_some() && self.jump_slot_taken() {
             self.dismiss_jump_picker();

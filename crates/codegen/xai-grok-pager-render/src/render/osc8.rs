@@ -223,13 +223,7 @@ fn relative_file_path_regex() -> &'static regex::Regex {
 fn file_path_regex() -> &'static regex::Regex {
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        // Absolute (`/Users/me/x.md`) or home-relative (`~/Desktop/x.md`) paths.
-        // Leading `~` is expanded to $HOME when building the `file://` URL.
-        //
-        // The *final* segment may include internal spaces when it looks like a filename with an extension
-        // A tutor report had `…/Demo App.app` linkified only up to the space
-        // Intermediate segments stay space-free so `…/bar here.` does not eat the word `here`
-        // Alternation prefers the spaced form first so it wins over the shorter no-space prefix at the same start position
+        // Leading `~` expands to $HOME. Only the final segment may contain spaces, and that form is preferred so `Demo App.app` is not cut at the space.
         let pat = format!(
             r"~?/(?:{seg}/)+(?:{spaced}|{seg})",
             seg = PATH_SEGMENT,
@@ -335,18 +329,8 @@ fn file_link_presentation_with_home(
     file_link_presentation_for_resolved(painted, target, cwd, resolved.as_deref())
 }
 
-/// Resolve a markdown link destination that names a local file into a semantic filesystem target.
-/// This lets model paths (`[videos/1.mp4](videos/1.mp4)`) open on click.
-///
-/// Web/scheme URLs, `mailto:`/`tel:`, and anchors return `None`.
-///
-/// - **Absolute / `~`** paths resolve directly (must be an existing file).
-/// - **Relative** paths (`images/1.jpg`, `src/main.rs`) resolve in two steps:
-///   1. Against `media_paths` (absolute paths of media generated in this transcript): a unique entry whose path ends with those components wins.
-///      This binds each short path to the exact file its message produced (stable across forks and resumes).
-///      An ambiguous match is left unlinked rather than guessed.
-///   2. Failing that, against the session `cwd`: the path joins to `cwd` and must stay inside it (no `..` escape) and name an existing file.
-///      `cwd = None` disables this fallback (media only).
+/// Web, mailto, tel, and anchors are `None`. Relative paths prefer a unique `media_paths` suffix (stable across forks); ambiguous matches stay unlinked.
+/// Else join to `cwd` and stay inside it. `cwd = None` disables that fallback.
 pub fn local_link_to_file_target(
     dest: &str,
     media_paths: &[PathBuf],
@@ -373,11 +357,7 @@ pub fn local_link_to_file_target(
     Some(LinkTarget::File(Arc::from(resolved)))
 }
 
-/// Resolve a *relative* markdown link destination to an absolute path.
-///
-/// Prefers a unique generated-media match (stable across forks/resumes); an ambiguous media match resolves to neither.
-/// When the path is not generated media, falls back to `cwd`-relative resolution that must stay inside `cwd`.
-/// The caller still checks that the result names a real file.
+/// Unique generated-media match, else a `cwd` path that stays inside `cwd`. Ambiguous media matches resolve to neither.
 fn relative_link_target(
     path: &Path,
     media_paths: &[PathBuf],
@@ -412,24 +392,8 @@ struct RowSegment {
     end: usize,
 }
 
-/// Scan ratatui [`Line`]s for plain-text URLs and file paths, appending corresponding [`OverlayLink`] entries to the overlay.
-///
-/// Runs on all blocks.
-/// For markdown blocks, existing hyperlinks are already in the overlay; detected links that overlap are skipped.
-///
-/// Each item is `(screen_row, line, joiner)` where `joiner` is the soft-wrap joiner to the *previous* row (see `BlockLine::joiner`).
-/// `None` is a hard break, `Some("")` a mid-word wrap, and `Some(" ")` a word wrap. Consecutive
-/// rows connected by `Some(..)` joiners are re-joined into one logical line
-/// before matching, so a long path or URL soft-wrapped across rows (imagine
-/// media lives at `~/.grok/sessions/%2F…/images/1.jpg`, which wraps in
-/// narrow panes) is detected whole and each row's fragment gets its own
-/// clickable overlay region.
-/// Spans within a row are likewise concatenated so styling boundaries never truncate a match.
-///
-/// Detects three kinds of links:
-/// 1. **URLs** via the `linkify` crate (http, https, mailto).
-/// 2. **Absolute and `~`-relative file paths** via regex, emitted as `file://` URLs (a leading `~/` is expanded to the home directory).
-/// 3. **Relative file paths** (`images/1.png`) that uniquely match a generated media file in `media_paths`, so prose like "and/or" is not linkified.
+/// Soft-wrapped rows (`Some` joiner) are re-joined before matching so a wrapped path is detected whole; styling boundaries must not truncate a match.
+/// Overlaps with existing markdown links are skipped. Relative paths link only on a unique `media_paths` match.
 pub fn scan_lines_for_url_overlays<'a>(
     lines: impl Iterator<Item = (u16, &'a Line<'static>, Option<&'a str>)>,
     content_x: u16,
@@ -466,11 +430,7 @@ pub fn scan_lines_for_url_overlays<'a>(
     scan_logical_line(&group_text, &group_rows, content_x, media_paths, overlay);
 }
 
-/// Push one [`OverlayLink`] per visual row that `match_range` (a byte range in the joined logical `text`) overlaps.
-///
-/// Returns `true` if at least one overlay region was pushed.
-/// Rows that already have an overlay (a markdown hyperlink on the first fragment) are skipped individually so a continuation row is still linked.
-/// Returns `false` when every row was skipped or a column exceeds `u16`.
+/// Skip rows that already have an overlay individually so a continuation row is still linked. `false` if every row was skipped or a column exceeds `u16`.
 fn push_link_segments(
     text: &str,
     rows: &[RowSegment],

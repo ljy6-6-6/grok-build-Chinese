@@ -63,11 +63,7 @@ pub struct IndexAuthor {
     pub name: String,
 }
 
-/// Accepts multiple formats:
-/// - Object: `{ "type": "local", "path": "./plugins/foo" }`
-/// - Object: `{ "source": "url", "url": "https://github.com/...", "ref": "main" }`
-/// - Object: `{ "source": "url", "url": "https://...", "sha": "61f1903b..." }` (recommended for vendor pins)
-/// - String: `"./plugins/foo"` (shorthand used by some marketplaces)
+/// Object: `{ "type": "local", "path": "./plugins/foo" }`; Object: `{ "source": "url", "url": "https://github.com/...", "ref": "main" }`; Object: `{ "source": "url", "url": "https://...", "sha": "61f1903b..." }` (recommended for vendor pins); String: `"./plugins/foo"` (shorthand used by some marketplaces).
 #[derive(Debug, Clone)]
 pub struct IndexSource {
     pub r#type: Option<String>,
@@ -191,14 +187,7 @@ impl IndexEntry {
 }
 
 /// Attempt to load the marketplace index from the given root directory.
-///
-/// Checks (in order):
-/// 1. `.grok-plugin/marketplace.json` (preferred xAI convention)
-/// 2. `.grok-plugin/plugin.json`
-/// 3. `.claude-plugin/marketplace.json` (alternate layout compatibility)
-/// 4. `.claude-plugin/plugin.json`
-///
-/// Returns `None` if no file exists.
+/// `.grok-plugin/marketplace.json` (preferred xAI convention); `.grok-plugin/plugin.json`; `.claude-plugin/marketplace.json` (alternate layout compatibility); `.claude-plugin/plugin.json`.
 /// Returns `Err` if a file exists but can't be parsed.
 pub fn load_index(marketplace_root: &Path) -> Result<Option<MarketplaceIndex>, String> {
     let grok_dir = marketplace_root.join(".grok-plugin");

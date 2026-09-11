@@ -31,12 +31,9 @@ impl ParsedPrompt {
             self.is_cursor,
         )
     }
-    /// Layout:
-    /// - **Grok mode:** `<user_query>`, then `<skill_information>`, then context
-    /// - **Query-last mode:** context, then `<user_query>`, then `<skill_information>`
-    ///
+    /// Grok mode: `<user_query>`, then `<skill_information>`, then context.
+    /// Query-last mode: context, then `<user_query>`, then `<skill_information>`.
     /// The `<skill_information>` block always follows `<user_query>` immediately.
-    /// This way the model sees the user's request and skill instructions together.
     pub fn assemble_parts_with_skills(
         context: &str,
         query: &str,
@@ -55,13 +52,9 @@ impl ParsedPrompt {
         format!("{query_block}\n\n{context}")
     }
 }
-/// When `is_cursor` is true, produces query-last format output:
-/// - `<attached_files>` (bare), resource links, then `<user_query>` last
-/// - File references use `<code_selection>` tags
-///
-/// When `is_cursor` is false, produces original Grok-format output:
-/// - `<user_query>` first, then `<system-reminder>` wrapped `<attached_files>` and resource links
-/// - File references use `<file_contents>` tags
+/// When `is_cursor` is true, produces query-last format output.
+/// `<attached_files>` (bare), resource links, then `<user_query>` last.
+/// `<user_query>` first, then `<system-reminder>` wrapped `<attached_files>` and resource links.
 pub async fn parse_prompt(
     prompt: &[acp::ContentBlock],
     working_directory: PathBuf,
@@ -90,6 +83,8 @@ pub(crate) async fn parse_prompt_with_skills(
     is_cursor: bool,
     skill_information: String,
 ) -> Result<ParsedPrompt, acp::Error> {
+    let parse_span =
+        xai_grok_telemetry::region::Region::from_span(tracing::info_span!("prompt.parse"));
     let allows_file_expansion = authority != super::InputAuthority::ModelAuthoredUntrusted;
     let mut message_parts: Vec<String> = Vec::new();
     let mut image_parts = Vec::new();
@@ -120,6 +115,15 @@ pub(crate) async fn parse_prompt_with_skills(
         Vec::new()
     };
     let mut file_ref_contents = Vec::new();
+    let mut at_mention_bytes: usize = 0;
+    let at_mention_span = (!file_ref_tokens.is_empty()).then(|| {
+        xai_grok_telemetry::region::Region::from_span(tracing::info_span!(
+            parent: parse_span.span(),
+            "prompt.at_mention_resolve",
+            file_count = tracing::field::Empty,
+            bytes = tracing::field::Empty,
+        ))
+    });
     for token in file_ref_tokens {
         let Some(mut file_ref) = FileReference::parse(&token) else {
             continue;
@@ -127,10 +131,20 @@ pub(crate) async fn parse_prompt_with_skills(
         file_ref.path = working_directory.join(&file_ref.path);
         let rendered_file = render_file_reference(file_ref, is_cursor).await;
         let success = rendered_file.is_some();
-        tracing::info_span!("at_mention", mention_type = "file", success).in_scope(|| {});
+        xai_grok_telemetry::event_span!("prompt.at_mention", mention_type = "file", success);
         if let Some(rendered_file) = rendered_file {
+            at_mention_bytes += rendered_file.len();
             file_ref_contents.push(rendered_file);
         }
+    }
+    if let Some(at_mention_span) = at_mention_span {
+        at_mention_span
+            .span()
+            .record("file_count", file_ref_contents.len() as i64);
+        at_mention_span
+            .span()
+            .record("bytes", at_mention_bytes as i64);
+        at_mention_span.close();
     }
     let mut embedded_contents = Vec::new();
     for resource in &embedded_resources {

@@ -18,18 +18,12 @@ struct CachedOutput {
     rendered: RenderedBlockOutput,
 }
 
-/// Cached truncated-mode height: `(width, raw, theme, cwd, height)`.
-///
-/// Computing the truncated-mode height requires calling `block.output()` with the display mode forced to `Truncated`.
-/// For Edit blocks that triggers full syntect syntax highlighting; for Markdown blocks, a full word-wrap.
-/// During heavy streaming on a busy subagent, the layout cache is invalidated every time a new block is pushed.
-/// Without a per-entry cache the height would be recomputed for every entry on every redraw.
-/// We only need the line count, so this caches just the resulting `u16` height.
-/// `cwd` is keyed because Expanded/Truncated Edit/Read header wrap can change between absolute and relative paths.
+/// Caches truncated-mode line count so layout need not call `block.output()` (syntect or full wrap) on every redraw.
+/// Streaming invalidates the layout cache on each push; without this, every entry height is recomputed.
+/// `cwd` is keyed because Edit/Read header wrap can change between absolute and relative paths.
 type CachedTruncatedHeight = (u16, bool, ThemeKind, Option<PathBuf>, u16);
 
 /// Unique identifier for a scrollback entry.
-///
 /// EntryIds are stable across mutations: they won't become invalid if other entries are added or removed.
 /// Use this for external handles to entries (e.g., streaming tasks that need to push chunks to a specific block).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -37,7 +31,6 @@ pub struct EntryId(u64);
 
 impl EntryId {
     /// Create a new EntryId with a specific value.
-    ///
     /// For production use, prefer getting EntryId from `ScrollbackState::push()` which assigns IDs automatically.
     /// This is mainly for placeholders/testing.
     pub fn new(id: u64) -> Self {
@@ -75,7 +68,6 @@ pub struct ScrollbackEntry {
 
     /// Whether this entry is currently waiting on user input (permission prompt, ask-user-question, etc.).
     /// When true, the renderer replaces the wave "loading" animation with a pulsing-circle bullet to draw attention without implying active work.
-    ///
     /// Maintained by `AgentView` from `permission_queue` and `question_view` state via `ScrollbackState::set_pending_user_input`.
     pub is_pending_user_input: bool,
 
@@ -86,20 +78,14 @@ pub struct ScrollbackEntry {
     /// Raw mode: if true and block has_raw_mode(), render markdown as raw.
     pub raw: bool,
 
-    /// Hook data attached to this entry (only meaningful for ToolCall blocks).
-    pub hook_data: Option<super::blocks::tool::ToolCallHookData>,
-
     pub created_at: Option<DateTime<Local>>,
 
     /// When this entry finished running (monotonic). Used by the renderer to flash the accent briefly after completion.
     pub finished_at: Option<std::time::Instant>,
 
-    /// Cached output and its render key.
-    /// Interior-mutable so EntryRenderer (which holds `&self`) can populate and read the cache without &mut self.
-    ///
-    /// The `is_selected` key is only meaningful for blocks whose output varies by selection state (currently only `UserPrompt`).
-    /// For all other blocks the stored value is always `false` regardless of actual selection, preventing cache misses on selection changes.
-    /// `cwd` is keyed so Expanded tool path paint (relative vs absolute) invalidates.
+    /// Interior-mutable so EntryRenderer (which holds `&self`) can populate and read the cache without &mut self. The
+    /// `is_selected` key is only meaningful for blocks whose output varies by selection state (currently only
+    /// `UserPrompt`). `cwd` is keyed so Expanded tool path paint (relative vs absolute) invalidates.
     cached_output: RefCell<Option<CachedOutput>>,
 
     /// Display locale used when constructing [`BlockContext`]. The owning
@@ -158,7 +144,6 @@ impl EffectiveOutput<'_> {
 
 impl ScrollbackEntry {
     /// Create a new entry with expanded display mode.
-    ///
     /// For production use, prefer `ScrollbackState::push()` which assigns the EntryId automatically.
     /// This constructor is mainly for testing.
     pub fn new(block: RenderBlock) -> Self {
@@ -178,7 +163,6 @@ impl ScrollbackEntry {
             display_mode,
             display_mode_pinned: false,
             raw: false,
-            hook_data: None,
             created_at: Some(Local::now()),
             finished_at: None,
             cached_output: RefCell::new(None),
@@ -190,7 +174,6 @@ impl ScrollbackEntry {
     }
 
     /// Create a new entry that is currently running.
-    ///
     /// For production use, prefer `ScrollbackState::push()` which assigns the EntryId automatically.
     /// This constructor is mainly for testing.
     pub fn running(block: RenderBlock) -> Self {
@@ -210,7 +193,6 @@ impl ScrollbackEntry {
             display_mode,
             display_mode_pinned: false,
             raw: false,
-            hook_data: None,
             created_at: Some(Local::now()),
             finished_at: None,
             cached_output: RefCell::new(None),
@@ -237,22 +219,13 @@ impl ScrollbackEntry {
     }
 
     /// Toggle between display modes.
-    ///
     /// Most blocks toggle between Collapsed and Expanded.
     /// Some blocks (like thinking) cycle through 3 modes.
     pub fn toggle_fold(&mut self) {
         if self.is_foldable() {
-            if self.block.is_foldable() {
-                self.display_mode = self
-                    .block
-                    .next_fold_mode(self.display_mode, self.is_running);
-            } else {
-                // Block itself isn't foldable but hooks make it foldable: toggle between Collapsed and Expanded
-                self.display_mode = match self.display_mode {
-                    DisplayMode::Collapsed => DisplayMode::Expanded,
-                    _ => DisplayMode::Collapsed,
-                };
-            }
+            self.display_mode = self
+                .block
+                .next_fold_mode(self.display_mode, self.is_running);
             self.invalidate_cache();
         }
     }
@@ -307,7 +280,6 @@ impl ScrollbackEntry {
 
     /// Drop the heavyweight cached render output (and the block's internal rebuildable caches) while KEEPING the cheap height caches.
     /// Layout (entry heights, scroll position) is untouched; re-rendering happens transparently if the entry scrolls back into view.
-    ///
     /// Returns `true` when something was actually dropped (for sweep stats).
     pub(crate) fn evict_render_cache(&self) -> bool {
         let had_output = self.cached_output.borrow().is_some();
@@ -332,7 +304,6 @@ impl ScrollbackEntry {
     }
 
     /// Cheap wrapped-line estimate for the block's source text at `content_width`.
-    ///
     /// An APPROXIMATION: it ignores word boundaries, and for a markdown block it reflects the last rendered view.
     /// On-screen entries are always measured exactly, so nothing depends on it being right.
     pub fn estimate_source_lines(&self, content_width: u16) -> u16 {
@@ -363,7 +334,6 @@ impl ScrollbackEntry {
     }
 
     /// Ensure the cache is populated for the given width/appearance/selection.
-    ///
     /// This works with `&self` (via RefCell) so `EntryRenderer` can call it without needing `&mut self`.
     /// After calling this, use `cached_output_ref()` to borrow the output.
     pub fn ensure_cached(
@@ -409,7 +379,7 @@ impl ScrollbackEntry {
             cwd: cwd_key.clone(),
             locale: self.locale.clone(),
         };
-        let rendered = self.rendered_output_with_hooks(&ctx);
+        let rendered = self.block.rendered_output(&ctx);
         *self.cached_output.borrow_mut() = Some(CachedOutput {
             width,
             raw: self.raw,
@@ -440,18 +410,8 @@ impl ScrollbackEntry {
         })
     }
 
-    /// Ensure the truncated-mode height cache is populated, returning the height.
-    ///
-    /// Returns the line count (including vpad) the entry would occupy if rendered in `DisplayMode::Truncated`.
-    /// Used by the layout cache to precompute sticky header heights for every entry.
-    ///
-    /// Without this cache, `block.output(&ctx)` runs uncached on every layout rebuild.
-    /// For Edit blocks that triggers full syntect highlighting; for Markdown blocks, a full word-wrap.
-    /// During heavy subagent streaming the layout cache is invalidated on every new block (see `ScrollbackState::push`).
-    /// That would otherwise re-highlight every entry on every redraw.
-    ///
-    /// The cache key is `(content_width, raw, theme, cwd)`.
-    /// `is_selected` is intentionally excluded because line count never depends on selection styling.
+    /// Without this cache, `block.output` runs uncached on every layout rebuild and re-highlights every entry on each streaming push.
+    /// Key is `(content_width, raw, theme, cwd)`; `is_selected` is excluded because line count never depends on selection.
     /// Cleared together with `cached_output` by `invalidate_cache`.
     pub fn ensure_truncated_height_cached(
         &self,
@@ -544,9 +504,8 @@ impl ScrollbackEntry {
         }
     }
 
-    /// Whether this entry is foldable: considers both the block and attached hooks.
     pub fn is_foldable(&self) -> bool {
-        self.block.is_foldable() || self.hook_data.as_ref().is_some_and(|hd| hd.has_content())
+        self.block.is_foldable()
     }
 
     /// True for a thinking block hidden by the Appearance toggle. Takes the flag as a param so hot layout loops can hoist the cache read.
@@ -554,75 +513,9 @@ impl ScrollbackEntry {
         self.block.is_thinking() && !show_thinking
     }
 
-    fn rendered_output_with_hooks(&self, ctx: &BlockContext) -> RenderedBlockOutput {
-        let mut rendered = self.block.rendered_output(ctx);
-        let output = &mut rendered.output;
-        if let Some(ref hd) = self.hook_data {
-            use super::blocks::tool::ToolCallBlock;
-            use super::blocks::tool::hook::{
-                render_hook_separator, render_hooks_detail_with_locale,
-                render_hooks_for_mode_with_locale, render_hooks_inline_suffix_with_locale,
-            };
-            let is_lifecycle = matches!(
-                self.block,
-                super::block::RenderBlock::ToolCall(ToolCallBlock::Lifecycle(_))
-            );
-            match ctx.mode {
-                super::types::DisplayMode::Collapsed => {
-                    // Append [hooks: N/M] to the first (header) line for all events
-                    if let Some(suffix_spans) =
-                        render_hooks_inline_suffix_with_locale(hd, Some(&ctx.locale))
-                        && let Some(first_line) = output.lines.first_mut()
-                    {
-                        first_line.content.spans.extend(suffix_spans);
-                    }
-                }
-                _ => {
-                    // Expanded: separator + separate sections
-                    let pre = render_hooks_for_mode_with_locale(
-                        "pre_tool_use",
-                        &hd.pre_hooks,
-                        ctx.mode,
-                        Some(&ctx.locale),
-                    );
-                    let post = render_hooks_for_mode_with_locale(
-                        "post_tool_use",
-                        &hd.post_hooks,
-                        ctx.mode,
-                        Some(&ctx.locale),
-                    );
-                    let has_any = !pre.is_empty() || !post.is_empty() || !hd.lifecycle.is_empty();
-                    // Lifecycle blocks already use the event name as their header, so a separator before their detail is redundant
-                    if has_any && !is_lifecycle {
-                        output.lines.push(render_hook_separator());
-                    }
-                    output.lines.extend(pre);
-                    output.lines.extend(post);
-                    for (event_name, runs) in &hd.lifecycle {
-                        if is_lifecycle {
-                            output.lines.extend(render_hooks_detail_with_locale(
-                                runs,
-                                ctx.mode,
-                                Some(&ctx.locale),
-                            ));
-                        } else {
-                            output.lines.extend(render_hooks_for_mode_with_locale(
-                                event_name,
-                                runs,
-                                ctx.mode,
-                                Some(&ctx.locale),
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-        rendered
-    }
-
-    /// Produce block output with hook lines injected (tool first, then hooks).
-    pub fn output_with_hooks(&self, ctx: &BlockContext) -> BlockOutput {
-        self.rendered_output_with_hooks(ctx).output
+    /// Render without touching the entry's cache (dashboard peek renders at a foreign width).
+    pub fn output_uncached(&self, ctx: &BlockContext) -> BlockOutput {
+        self.block.rendered_output(ctx).output
     }
 
     pub fn context_with_budget(
@@ -666,11 +559,8 @@ impl ScrollbackEntry {
         }
     }
 
-    /// This is used for rendering sticky headers where we want:
-    /// - Expanded content (not collapsed summary)
-    /// - But truncated to a specific number of lines
-    ///
-    /// This avoids mutating the entry's display_mode during render.
+    /// This is used for rendering sticky headers where we want. Expanded content (not collapsed summary). But truncated
+    /// to a specific number of lines. This avoids mutating the entry's display_mode during render.
     pub fn context_with_mode_and_budget(
         &self,
         width: u16,

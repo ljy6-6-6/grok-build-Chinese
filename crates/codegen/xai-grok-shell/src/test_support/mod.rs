@@ -26,7 +26,6 @@ fn redirect_unified_log_for_tests() {
 
 /// Prepend the hermetic git binary (via `GIT_BIN_PATH`) to `PATH`.
 /// `Command::new("git")` in test helpers then resolves to the Bazel-provided static binary instead of system-installed git.
-///
 /// Safe to call multiple times; only the first call mutates `PATH`.
 pub(crate) fn ensure_hermetic_git_on_path() {
     use std::path::PathBuf;
@@ -44,9 +43,7 @@ pub(crate) fn ensure_hermetic_git_on_path() {
                 let cur = std::env::var("PATH").unwrap_or_default();
                 unsafe {
                     std::env::set_var("PATH", format!("{}:{}", dir.display(), cur));
-                    // git-minimal spawns subcommands (`git stash` invokes `git update-index`) through its exec path
-                    // That path is baked to a build-machine prefix
-                    // Helpers live next to the binary, so point the exec path there
+                    // git-minimal spawns subcommands (`git stash` invokes `git update-index`) through its exec path That path is baked to a build-machine prefix Helpers live next to the binary, so point the exec path there
                     // Skip the host-fallback wrapper: host git must keep its own exec path
                     if p.file_name().is_some_and(|name| name == "git") {
                         std::env::set_var("GIT_EXEC_PATH", dir);

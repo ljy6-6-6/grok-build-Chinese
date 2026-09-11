@@ -67,12 +67,9 @@ pub fn progress_bar_spans(width: u16, value: f32, fg: Color, bg: Color) -> Vec<S
         .collect()
 }
 
-/// Render a progress bar into the buffer at the given position.
-///
-/// - `width`: number of character cells for the bar
-/// - `value`: fill fraction in `0.0..=1.0` (clamped)
-/// - `fg`: color for the filled portion
-/// - `bg`: background color for the track (filled + empty cells)
+/// Render a progress bar into the buffer at the given position. `width`: number of character cells
+/// for the bar. `value`: fill fraction in `0.0..=1.0` (clamped). `fg`: color for the filled
+/// portion. `bg`: background color for the track (filled + empty cells).
 pub fn render_progress_bar(
     buf: &mut Buffer,
     x: u16,

@@ -131,11 +131,9 @@ async fn check_status_npm_403_serializes_to_user_visible_json() {
 #[tokio::test]
 #[serial]
 async fn check_status_returns_no_update_when_registry_has_older_version() {
-    // The public registry returns 0.1.4 (much older than installed 0.1.181).
-    // `needs_update("0.1.181", "0.1.4", "stable")` returns Some(false), so `updateAvailable` is false and `error` is null
-    // From the user's perspective: silent no-op, even though their preferred registry (the corporate mirror) was unreachable
-    // There's nothing the auto-update code can do here without knowing about scoped registries
-    // We lock in this exact shape so a future change doesn't accidentally present a downgrade as an upgrade
+    // `needs_update("0.1.181", "0.1.4", "stable")` returns Some(false), so `updateAvailable` is false and `error` is null.
+    // From the user's perspective: silent no-op, even though their preferred registry (the corporate mirror) was
+    // unreachable. There's nothing the auto-update code can do here without knowing about scoped registries.
     let g = setup();
     g.set_stdout("\"0.1.4\"");
 
@@ -170,10 +168,8 @@ async fn check_status_stale_version_serializes_to_user_visible_json() {
     assert!(json["error"].is_null());
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Sanity: when npm returns a NEWER version, we DO report an update.
-// (Anti-regression: the silent-skip paths must only fire on actual no-op
-//  conditions, not collapse into "always returns no update".)
+// ─────────────────────────────────────────────────────────────────────────────. (Anti-regression: the silent-skip paths
+// must only fire on actual no-op conditions, not collapse into "always returns no update".)
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]

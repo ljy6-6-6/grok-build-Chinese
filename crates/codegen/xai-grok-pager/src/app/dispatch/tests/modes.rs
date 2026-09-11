@@ -285,31 +285,9 @@ fn set_plan_mode_mutates_only_active_agent_not_others() {
     );
 }
 
-// ----------------------------------------------------------------
-// `set_yolo_mode` dispatcher unit tests (security-relevant)
-//
-// SHELL-owned, but with rollback
-// A disk-write failure routes through `apply_setting_rollback("permission_mode", _)`, which calls `set_yolo_mode_inner(app, prev)` to revert
 // The outer setter never re-emits `Effect::PersistPermissionMode` on rollback, so a persistent disk failure does not loop
-//
-// Security invariants the test suite pins:
-//   - On YOLO ON: the per-agent permission_queue is drained with `AllowOnce` responses (auto-approve, NOT cancelled)
-//   - The drain ALSO runs on a duplicate YOLO=ON dispatch (any permission queued between dispatches must be drained on the second)
-//     Only telemetry and the "setting changed" tracing log are gated on transitions
-//   - When a request offers no `AllowOnce` option, the drain falls back to `Cancelled`, NOT `AllowAlways`
-//     That preserves the safety contract: YOLO never picks a more-permissive option than `AllowOnce`
-//   - `app.current_ui.permission_mode` stays in lock-step with `agent.session.yolo_mode` so the modal snapshot is fresh
-//   - `Effect::PersistPermissionMode { persist: PermissionModePersist::WithRollback(prev) }` is emitted exactly once per typed-setter dispatch
-//     (see `app::actions::PermissionModePersist`)
-//   - `apply_setting_rollback("permission_mode", SettingValue::Enum(_))` reverts the in-memory state via `set_yolo_mode_inner` (no re-emit)
-//     It refreshes any open settings modal (`rollback_permission_mode_refreshes_open_modal_snapshots`)
-//   - Toast format:
-//     - ON:  "⚠ Always-approve ON: all tool actions auto-run" (destructive-action variant)
-//       Enabling YOLO is the single most security-relevant user action in the pager, so it gets a differentiated visual and body
-//     - OFF: "✓ Always-approve: off" (standard success format, restoring the safe default)
-//   - Failure toast: "✗ Could not save permission_mode: {error}"
-//     `rollback_permission_mode_reverts_state_no_effect` pins the exact format via `assert_eq!`
-// ----------------------------------------------------------------
+// The drain ALSO runs on a duplicate YOLO=ON dispatch (any permission queued between dispatches must be drained on the second)
+// Only telemetry and the "setting changed" tracing log are gated on transitions
 
 /// Slash gate sync: both toggles stay offered while modes change; only the auto feature gate suppresses `/auto`.
 #[test]
@@ -552,16 +530,8 @@ fn yolo_on_drain_clears_double_click_tracker() {
 }
 
 /// When the user picks the "enable-always-approve" option:
-///
-/// 1. The shell receives a `Selected{option_id: ENABLE_ALWAYS_APPROVE_OPTION_ID}` response.
-///    The shell's `map_selected_outcome` resolves this to `PromptOutcome::AllowOnce`.
-///    The tool call that asked is allowed exactly once (no per-tool whitelisting).
-/// 2. The dispatcher returns a `PersistPermissionMode` effect with canonical `"always-approve"`.
-///    That is what flips `[ui] permission_mode` on disk AND fires the `x.ai/yolo_mode_changed` ACP notification back to the shell.
-/// 3. The agent's per-session `yolo_mode` flag is flipped to true.
-///    Subsequent permission requests are then auto-approved by `handle_permission_request`.
-///
-/// A regression in any of these three legs would break the "one click to enable always-approve mode" contract.
+/// The tool call that asked is allowed exactly once (no per-tool whitelisting).
+/// The dispatcher returns a `PersistPermissionMode` effect with canonical `"always-approve"`.
 #[test]
 fn enable_always_approve_sends_response_and_flips_yolo_and_persists() {
     use std::sync::Arc;
@@ -605,7 +575,7 @@ fn enable_always_approve_sends_response_and_flips_yolo_and_persists() {
         }
     }
 
-    // (2) The dispatcher returns a PersistPermissionMode effect with
+    // (2) The dispatcher returns a PersistPermissionMode effect with canonical "always-approve". This is the bridge that writes
     //     canonical "always-approve". This is the bridge that writes
     //     ~/.grok/config.toml AND fires x.ai/yolo_mode_changed.
     let persist = effects
@@ -638,7 +608,6 @@ fn enable_always_approve_sends_response_and_flips_yolo_and_persists() {
 /// If the user picks "enable-always-approve" while YOLO is ALREADY on, the dispatcher must NOT re-emit `PersistPermissionMode`.
 /// That would queue a redundant disk write and ACP notification.
 /// In practice YOLO-on suppresses the permission panel (`handle_permission_request` auto-approves), so this state is only reachable in tests.
-/// The idempotency guard still matters for future code paths that might pre-seed YOLO state.
 #[test]
 fn enable_always_approve_is_idempotent_when_yolo_already_on() {
     use std::sync::Arc;
@@ -678,12 +647,9 @@ fn enable_always_approve_is_idempotent_when_yolo_already_on() {
     );
 }
 
-/// **Security-critical fallback:**
-/// when a queued permission has NO `AllowOnce` option (only `AllowAlways` / `RejectAlways`), the drain MUST send `Cancelled`.
+/// **Security-critical fallback:** when a queued permission has NO `AllowOnce` option (only `AllowAlways` / `RejectAlways`), the drain MUST send `Cancelled`.
 /// Falling through to `AllowAlways` silently would whitelist the operation indefinitely.
-///
 /// This pins the safety contract: YOLO never auto-picks a more-permissive option than `AllowOnce`.
-/// A regression that added an `else if find(AllowAlways)` fallback would let a single YOLO toggle whitelist operations forever.
 #[test]
 fn set_yolo_mode_on_with_no_allow_once_option_sends_cancelled() {
     use crate::views::permission_view::{PermissionFocus, PermissionViewState};
@@ -915,16 +881,9 @@ fn set_yolo_mode_on_duplicate_dispatch_still_drains_queue() {
     }
 }
 
-/// Idempotent re-dispatch: re-dispatching the same value still emits a `PersistPermissionMode` and re-fires the toast.
 /// PAGER setters short-circuit instead.
 /// The SHARED setter contract is "always toast, always persist on save".
-/// A duplicate dispatch is therefore a no-op on state but still confirms via toast and disk write.
-///
-/// **Contract:** `persist` is `WithRollback(new)` even on a no-op dispatch (prev == new).
 /// The disk write that follows is idempotent on disk, so the only observable side effects of a duplicate are the toast and the (no-op) drain.
-///
-/// Pin EVERY state field after the redispatch, AND prove the toast was actually re-fired.
-/// Clearing it between dispatches proves the second toast isn't the first one lingering.
 #[test]
 fn set_yolo_mode_redispatch_same_value_still_emits_effect_and_toast() {
     let mut app = test_app_with_agent();
@@ -981,11 +940,8 @@ fn set_yolo_mode_redispatch_same_value_still_emits_effect_and_toast() {
 }
 
 /// Toast string format: exact-equality pin.
-///
-/// **Destructive-action toast.**
 /// The ON case uses `⚠ Always-approve ON: all tool actions auto-run` (a warning glyph and a body spelling out the consequence).
 /// Enabling YOLO is the single most security-relevant user action in the pager.
-/// The OFF case uses the standard `✓` success glyph and "Label: value" format (restoring the safe default).
 #[test]
 fn set_yolo_mode_toast_format() {
     let mut app = test_app_with_agent();
@@ -1224,6 +1180,158 @@ fn cycle_mode_plan_plus_auto_keeps_auto_not_reset() {
     );
 }
 
+#[test]
+fn cycle_mode_plan_plus_always_approve_exits_plan_keeps_yolo() {
+    let mut app = test_app_with_agent();
+    app.default_yolo = true;
+    app.current_ui.permission_mode = Some("always-approve".into());
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.yolo_mode = true;
+        agent.plan_mode_pending = Some(true);
+    }
+
+    let effects = dispatch(Action::CycleMode, &mut app);
+
+    let agent = &app.agents[&AgentId(0)];
+    assert_eq!(agent.plan_mode_pending, Some(false));
+    assert!(
+        agent.session.is_yolo(),
+        "Plan+Always-Approve must keep yolo"
+    );
+    assert!(app.default_yolo);
+    assert_eq!(
+        app.current_ui.permission_mode.as_deref(),
+        Some("always-approve")
+    );
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::SetSessionMode { mode_id, .. }] if mode_id.0.as_ref() == "default"
+        ),
+        "expected exactly the plan exit, got {effects:?}"
+    );
+}
+
+#[test]
+fn cycle_mode_plan_plus_always_approve_under_pin_still_resets() {
+    let mut app = test_app_with_agent();
+    app.yolo_policy_block = Some(POLICY_WARNING);
+    app.default_yolo = true;
+    app.current_ui.permission_mode = Some("always-approve".into());
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.yolo_mode = true;
+        agent.plan_mode_pending = Some(true);
+    }
+
+    let effects = dispatch(Action::CycleMode, &mut app);
+
+    let agent = &app.agents[&AgentId(0)];
+    assert_eq!(agent.plan_mode_pending, Some(false));
+    assert!(
+        !agent.session.is_yolo(),
+        "the pin must clear the stale yolo"
+    );
+    assert_eq!(app.current_ui.permission_mode.as_deref(), Some("ask"));
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::SetSessionMode { .. })),
+        "expected plan exit SetSessionMode, got {effects:?}"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::PersistPermissionMode {
+                canonical: "ask",
+                ..
+            }
+        )),
+        "expected PersistPermissionMode(ask) under pin, got {effects:?}"
+    );
+}
+
+#[test]
+fn cycle_mode_pre_session_plan_plus_yolo_unstages_plan_keeps_yolo() {
+    let mut app = test_app_with_agent();
+    app.default_yolo = true;
+    app.current_ui.permission_mode = Some("always-approve".into());
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.session_id = None;
+        agent.session.yolo_mode = true;
+        agent.plan_mode_pending = Some(true);
+        agent.deferred_session_mode = Some(xai_grok_tools::types::SessionMode::Plan);
+        // Left behind by an earlier ring pass that landed on Normal before Ctrl+O re-enabled yolo
+        agent.deferred_permission_mode = Some("ask");
+    }
+
+    let effects = dispatch(Action::CycleMode, &mut app);
+
+    let agent = &app.agents[&AgentId(0)];
+    assert_eq!(agent.plan_mode_pending, Some(false));
+    assert_eq!(agent.deferred_session_mode, None);
+    assert_eq!(
+        agent.deferred_permission_mode, None,
+        "SessionCreated must not replay a stale ask over the seeded yolo"
+    );
+    assert!(agent.session.is_yolo());
+    assert!(
+        app.default_yolo,
+        "CreateSession must still seed yoloMode=true"
+    );
+    assert_eq!(
+        app.current_ui.permission_mode.as_deref(),
+        Some("always-approve")
+    );
+    assert!(
+        effects.is_empty(),
+        "nothing to persist or push before a session exists, got {effects:?}"
+    );
+}
+
+#[test]
+fn permission_setters_never_touch_plan_state() {
+    use crate::app::actions::PermissionModeKind;
+    for action in [
+        Action::SetYoloMode(true),
+        Action::SetYoloMode(false),
+        Action::SetPermissionMode(PermissionModeKind::Auto),
+        Action::SetPermissionMode(PermissionModeKind::AlwaysApprove),
+        Action::SetPermissionMode(PermissionModeKind::Ask),
+        Action::SetPermissionMode(PermissionModeKind::Default),
+    ] {
+        let mut app = test_app_with_agent();
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.plan_mode_active = true;
+            agent.plan_mode_pending = Some(true);
+        }
+        let label = format!("{action:?}");
+
+        let effects = dispatch(action, &mut app);
+
+        let agent = &app.agents[&AgentId(0)];
+        assert!(
+            agent.plan_mode_active,
+            "{label}: plan_mode_active must survive"
+        );
+        assert_eq!(
+            agent.plan_mode_pending,
+            Some(true),
+            "{label}: plan_mode_pending must survive"
+        );
+        assert!(
+            !effects.iter().any(|e| matches!(
+                e,
+                Effect::SetSessionMode { .. } | Effect::SetModeThenPrompt { .. }
+            )),
+            "{label}: a permission change must not touch the session mode, got {effects:?}"
+        );
+    }
+}
+
 /// Security regression (0.2.89).
 /// Launch with `permission_mode = "always-approve"`, Shift+Tab on the welcome screen (no session yet) to Normal, then start the session.
 /// The cycle must persist "ask" to disk or the stale config re-enables yolo on the next launch while the footer shows Normal.
@@ -1282,14 +1390,9 @@ fn cycle_mode_pre_session_normal_to_plan_does_not_persist_permission_mode() {
     );
 }
 
-/// No active agent: a no-op (no panic, no effect, no mutation).
-///
-/// **Telemetry-no-op contract.**
 /// The `set_yolo_mode_inner` early-return at the `app.active_view` guard MUST precede the `xai_grok_telemetry::log_event` call.
 /// Otherwise a no-agent dispatch would leak a `YoloToggled` telemetry event for an action that never happened.
 /// We can't easily intercept the telemetry library from a unit test, but we DO pin that no side effects escape via the SHARED-state checks below.
-/// Effect emission, default_yolo, and current_ui mutation sit behind the same guard as the telemetry call.
-/// A refactor that hoists telemetry above the guard would therefore change these testable side effects, so this test catches the regression class.
 #[test]
 fn set_yolo_mode_no_op_when_no_active_agent() {
     let mut app = test_app(); // no agent; active_view is Welcome
@@ -1353,24 +1456,9 @@ fn set_yolo_mode_refreshes_open_modal_snapshots() {
     );
 }
 
-// ----------------------------------------------------------------
-// Dispatch-layer integration tests for `Action::SetPermissionMode(kind)`
-//
-// The kind enum, the picker outcome layer (which Action gets dispatched), and the effect-routing layer (route fn) are covered elsewhere
-// These tests cover the middle layer: `dispatch(Action::SetPermissionMode(kind))` calls `set_permission_mode`, which mutates state and emits effects
-// They also cover the `apply_setting_rollback` arm for the "default" canonical
-//
-// The headline contract pinned here:
-//   - `app.current_ui.permission_mode == kind.as_canonical()` after dispatch
-//     That includes the post-inner override for `Default`, which the inner's bool projection would otherwise collapse onto "ask"
-//   - `Effect::PersistPermissionMode { canonical, persist: WithRollback(prev_canonical), .. }` captures the PRIOR canonical.
-//     The LIVE-precedence `capture_prev_permission_canonical` helper does the capture
-//     Headline case: `Default` to `AlwaysApprove` must produce `WithRollback("default")` so a disk failure rolls back to "default", not "ask"
-//   - `permission_mode_toast(kind)` is the dispatched toast for each kind
-//     `Default` toasts "✓ Permission mode: Default", `Ask` toasts "✓ Permission mode: Ask", and `AlwaysApprove` reuses the ⚠ `yolo_toast(true)`
-//   - `apply_setting_rollback("permission_mode", Enum("default"))` restores `current_ui.permission_mode = Some("default")`
-//     It preserves the canonical and doesn't re-emit any Effect
-// ----------------------------------------------------------------
+// That includes the post-inner override for `Default`, which the inner's bool projection would otherwise collapse onto "ask"
+// Headline case: `Default` to `AlwaysApprove` must produce `WithRollback("default")` so a disk failure rolls back to "default", not "ask"
+// `Default` toasts "✓ Permission mode: Default", `Ask` toasts "✓ Permission mode: Ask", and `AlwaysApprove` reuses the ⚠ `yolo_toast(true)`
 
 #[test]
 fn set_permission_mode_default_overrides_canonical_to_default() {
@@ -1499,11 +1587,7 @@ fn set_yolo_mode_with_live_yolo_and_default_ui_mirror_rolls_back_to_default() {
     app.default_yolo = true;
     app.current_ui.permission_mode = Some("default".into());
 
-    // Ctrl+O (SetYoloMode(false)): exit YOLO
     // Without the LIVE branch fix, the rollback canonical would derive from the bool `prev` as "always-approve", losing the "default" preference
-    // With the LIVE branch, `prev_yolo=true` returns "always-approve", which IS what the rollback should restore
-    // The user was effectively in YOLO at dispatch time, regardless of what the mirror said
-    //
     // The key invariant: the rollback target matches what the modal would have shown via `current_value_for` at dispatch time
     // Since LIVE yolo wins in `current_value_for`, it must also win here
     let effects = dispatch(Action::SetYoloMode(false), &mut app);
@@ -2009,13 +2093,9 @@ fn set_theme_auto_enables_auto_mode_and_persists_auto() {
     });
 }
 
-// ────────────────────────────────────────────────────────────────────
 // set_plan_mode dispatch-level coverage.
-//
 // Mirrors the `coding_data_sharing` and `yolo` test patterns
-// These exercise the dispatch path directly (not the modal Enter path or the slash-command parser path)
 // They therefore cover the same code every entry point ultimately funnels through
-// ────────────────────────────────────────────────────────────────────
 
 /// Idempotent ON: dispatcher sees `prev == new`, toasts but emits NO Effect (saves a wasted ACP round-trip).
 /// State stays unchanged. Mirrors `set_coding_data_sharing_idempotent_opt_in`.
@@ -2137,7 +2217,6 @@ fn plan_mode_toast_format() {
 /// Pending-wins precedence test.
 /// The dispatcher reads the EFFECTIVE state as `pending.unwrap_or(active)`.
 /// Verify that an idempotent guard keyed off `pending` correctly short-circuits even when `active` disagrees.
-/// This locks the "prefer optimistic pending" contract against a future refactor that accidentally swaps the precedence.
 #[test]
 fn set_plan_mode_idempotency_uses_pending_over_active() {
     let mut app = test_app_with_agent();

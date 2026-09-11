@@ -79,19 +79,8 @@ pub const G2_NOTCH_TRAIN_EPT3: [WheelStep; 15] = notch_train::<15>(3, 50, SGR_SC
 pub const G2_NOTCH_TRAIN_EPT1: [WheelStep; 5] = burst::<5>(50, SGR_SCROLL_UP);
 /// G3 flood: 60 back-to-back reports (cap/pacing exercise).
 pub const G3_FLOOD: [WheelStep; 60] = burst::<60>(0, SGR_SCROLL_UP);
-/// G4 jerk repro: a 3-event anti-promotion head at 8ms, 57 dense reports, then a decelerating 6-event tail (gaps 40ms to 70ms).
-/// Every gap stays under the 80ms stream gap, so the whole gesture is one stream.
-///
-/// Two shape details make the repro real under a PTY (verified against the live recorder):
-/// - **The head.** Back-to-back writes arrive batched, so a fully dense burst completes its first ept=3 tick inside the 12ms window.
-///   That promotes to WHEEL pricing, which never re-prices at finalize and never jerks.
-///   The 8ms head lands the first tick past the window, so the stream stays Unknown (priced ~1 line/event, accel window seeded in the fast band).
-/// - **The 40ms+ tail gaps.** They open cadence slots with no new events while the dense backlog is still draining.
-///   The backlog then drains as capped `events_since_flush == 0` coast flushes, the I-SMOOTH-COAST signature.
-///   Tighter gaps ride every slot and mask the coast.
-///
-/// At the gap finalize, the Unknown-to-Trackpad re-price (accel-weighted, ~2.5× the mid-stream pricing) bursts one more capped flush.
-/// It drops the rest: the I-NO-DROP half of the jerk (the cell was xfail until the finalize-decel fix).
+/// 8ms head stays Unknown (a dense burst would promote to wheel and never jerk). 40ms+ tail gaps open coast slots; tighter gaps mask them.
+/// Gap finalize used to re-price accel-weighted and burst after input stopped.
 pub const G4_JERK: [WheelStep; 66] = {
     let mut steps = burst::<66>(0, SGR_SCROLL_UP);
     steps[1].pre_delay_ms = 8;

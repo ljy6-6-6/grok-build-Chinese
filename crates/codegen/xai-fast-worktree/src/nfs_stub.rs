@@ -119,8 +119,37 @@ pub(crate) fn is_safe_worktree_id(id: &str) -> bool {
         && !id.contains('\\')
         && !id.contains('\0')
 }
-pub(crate) fn try_grove_worktree(_plan: &WorktreePlan) -> Result<Option<CreateWorktreeResult>> {
+/// Same names and signature as the unix module, off one shared definition, so
+/// the two `crate::nfs` implementations cannot drift apart.
+pub(crate) use crate::worktree::{GroveSkip, GroveTry};
+pub(crate) fn try_grove_worktree(_plan: &WorktreePlan) -> Result<Option<GroveTry>> {
     Ok(None)
+}
+pub const CAP_CANCEL_WORKTREE_CREATE: &str = "cancel_worktree_create";
+#[must_use]
+pub fn daemon_capability_class(capabilities: Option<&[String]>) -> &'static str {
+    match capabilities {
+        Some(caps) if caps.iter().any(|c| c == CAP_CANCEL_WORKTREE_CREATE) => "current",
+        Some(_) => "old",
+        None => "unknown",
+    }
+}
+#[must_use]
+pub(crate) fn probe_daemon_capability_class(
+    _opts: Option<&crate::NfsWorktreeOpts>,
+) -> Option<&'static str> {
+    None
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GroveHardFail {
+    InFlight,
+    StorageFull,
+    IdentityConflict,
+    DestStillMounted,
+}
+#[must_use]
+pub fn grove_hard_fail(_err: &anyhow::Error) -> Option<GroveHardFail> {
+    None
 }
 pub(crate) fn nfs_error_blocks_fallback(_err: &anyhow::Error) -> bool {
     false

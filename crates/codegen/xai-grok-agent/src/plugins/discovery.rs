@@ -59,9 +59,7 @@ impl std::fmt::Display for PluginScope {
 }
 
 /// The concrete discovery source a plugin came from.
-///
-/// Finer-grained than [`PluginScope`]: recorded at scan time so consumers (e.g. the pager's plugins list) don't have to re-derive it from paths.
-/// Not part of [`PluginId`], which stays scope-based.
+/// Recorded at scan time so consumers do not re-derive it from paths. Not part of [`PluginId`], which stays scope-based.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PluginOrigin {
     /// CLI `--plugin-dir`.
@@ -96,11 +94,7 @@ pub enum PluginOrigin {
 }
 
 /// Stable internal identity for a plugin.
-///
-/// Format: `<scope>/<hex8>/<name>`
-/// - `<scope>`: lowercase scope string (cli, project, user, config)
-/// - `<hex8>`: first 8 hex chars of SHA-256 of the canonical plugin root path
-/// - `<name>`: the plugin_name
+/// Format: `<scope>/<hex8>/<name>`, where hex8 is the first 8 hex chars of SHA-256 of the canonical plugin root.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PluginId(pub String);
 
@@ -179,9 +173,7 @@ pub struct DiscoveryConfig {
 
 impl DiscoveryConfig {
     /// Ensure every discovered plugin appears in either `enabled` or `disabled`.
-    ///
-    /// Plugins from auto-enabled scopes (`CliOverride`, `ConfigPath`) are added to `enabled`.
-    /// All others (`User`, `Project`) are added to `disabled`.
+    /// Auto-enabled scopes (`CliOverride`, `ConfigPath`) go to `enabled`; `User` and `Project` go to `disabled`.
     /// Plugins already present in either list are left untouched.
     pub fn populate_plugin_lists(&mut self, discovered: &[DiscoveredPlugin]) {
         for dp in discovered {
@@ -235,11 +227,9 @@ fn project_plugins_dir_origin(plugins_dir: &Path) -> PluginOrigin {
     }
 }
 
-/// Project plugin parent dirs (`.grok/plugins`, `.claude/plugins`) existing along the walk from `cwd` to the git worktree root, plus that root.
-/// Outside a git repo only `cwd` itself is checked.
-/// This is the exact set [`discover_plugins`] scans for `PluginScope::Project`.
-/// The folder-trust gate reuses the same chain via [`project_plugin_dirs_in`] so detection and discovery can never drift.
-/// The returned root lets `discover_plugins` reuse it for the marketplace `resolve(root)` branch instead of resolving the repo a second time.
+/// Project plugin parent dirs along the walk from `cwd` to the git worktree root, plus that root.
+/// Outside a git repo only `cwd` is checked. The folder-trust gate reuses this chain so detection cannot drift from discovery.
+/// The returned root lets marketplace resolve reuse it instead of resolving the repo a second time.
 pub fn project_plugin_dirs(cwd: Option<&Path>) -> (Vec<PathBuf>, Option<PathBuf>) {
     let Some(cwd) = cwd else {
         return (Vec::new(), None);
@@ -787,11 +777,8 @@ struct ClaudeInstalledEntry {
 }
 
 /// Whether a compat install entry is visible for this session's `cwd`.
-///
-/// The `local` and `project` scopes are project-tied, as is any entry with a non-empty `projectPath`.
-/// Those entries are only visible when `cwd` is under `project_path` (path-component prefix).
-/// A missing or empty project path or cwd cannot prove the session is in the project, so those entries stay hidden.
-/// User-scoped and unscoped entries with no project path are always visible.
+/// Project-tied entries are visible only when `cwd` is under `project_path`.
+/// A missing project path cannot prove the session is in the project, so those entries stay hidden.
 fn claude_install_visible(
     scope: Option<&str>,
     project_path: Option<&Path>,
@@ -814,11 +801,8 @@ fn claude_install_visible(
 }
 
 /// Read plugin names and install paths from compat `installed_plugins.json`.
-///
-/// Keys are `"plugin-name@marketplace"`: the plugin name comes from before the `@`, the marketplace name from after it (when present).
-/// Returns `(name, marketplace, path)` tuples, or an empty vec on any error.
-///
-/// Project-tied entries are filtered by `cwd` vs `projectPath` (see [`claude_install_visible`]).
+/// Keys are `"plugin-name@marketplace"`. Returns empty on any error.
+/// Project-tied entries are filtered by `cwd` vs `projectPath`.
 fn read_claude_installed_plugins(
     json_path: &Path,
     cwd: Option<&Path>,

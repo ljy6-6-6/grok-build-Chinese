@@ -19,7 +19,23 @@ impl ScrollbackState {
     }
 
     pub(crate) fn set_view_mode(&mut self, mode: ViewMode) {
+        if self.view_mode == mode {
+            return;
+        }
         self.view_mode = mode;
+        self.release_pin_reserve_outside_view();
+        if self.pin_reserve_active {
+            self.reset_pin_reserve_target();
+            self.compute_total_height_from_cache();
+            if self.follow_mode
+                && self.follow_preserve_scroll
+                && let Some(target) = self.pin_reserve_target
+            {
+                self.scroll_offset = target;
+            } else {
+                self.scroll_offset = self.scroll_offset.min(self.max_scroll_offset());
+            }
+        }
     }
 
     /// Get the range of entry indices visible in the current view mode.
@@ -203,7 +219,6 @@ impl ScrollbackState {
     }
 
     /// Collapse selected entry (no-op if already at minimum fold mode or not foldable).
-    ///
     /// Uses the block's `collapse_mode` to determine the target mode.
     /// The target may be `Truncated` for running blocks (e.g., execute) instead of `Collapsed`.
     pub fn collapse_selected(&mut self) {
@@ -278,10 +293,9 @@ impl ScrollbackState {
         self.bump_generation();
     }
 
-    /// A display-mode flip on entry `i` can move the verb run's anchor.
-    /// Opening the head entry drops it to transparent, so the run re-anchors on the next member; closing it takes the anchor back.
-    /// Migrate a manual expansion keyed on the flipped entry or a former anchor onto the run's CURRENT first entry.
-    /// The group then stays expanded across member open/close instead of snapping into a fresh collapsed fold.
+    /// Opening the head entry drops it to transparent, so the run re-anchors on the next member. Migrate a manual
+    /// expansion keyed on the flipped entry or a former anchor onto the run's CURRENT first entry. The group then stays
+    /// expanded across member open/close instead of snapping into a fresh collapsed fold.
     pub(super) fn rekey_verb_group_expansion(&mut self, i: usize) {
         if !crate::appearance::cache::load_group_tool_verbs() {
             return;
@@ -474,12 +488,8 @@ impl ScrollbackState {
         }
     }
 
-    /// Toggle expand/collapse for all thinking blocks only.
-    ///
-    /// If ANY thinking block is collapsed, expand all thinking blocks.
-    /// Otherwise collapse all thinking blocks.
-    ///
-    /// Also sets `thinking_display_mode` so that future thinking blocks adopt the chosen mode when they finish running.
+    /// Toggle expand/collapse for all thinking blocks only. Otherwise collapse all thinking blocks. Also sets
+    /// `thinking_display_mode` so that future thinking blocks adopt the chosen mode when they finish running.
     pub fn expand_all_thinking(&mut self) {
         let any_collapsed = self.entries.values().any(|entry| {
             matches!(entry.block, RenderBlock::Thinking(_))
@@ -527,8 +537,45 @@ impl ScrollbackState {
         self.bump_generation();
     }
 
+    /// Minimal mode's print-once commit pass stamps thinking entries `Expanded` directly into the shared state
+    /// (`minimal_commit_display_mode` in `xai-grok-pager-minimal`), so a fullscreen → minimal → fullscreen round trip
+    /// would otherwise come back with every previously-folded thought sprung open.
+    pub fn reapply_thinking_fold_policy(&mut self) {
+        let target_mode = self.thinking_display_mode;
+        let respect_manual_folds = self.appearance.scrollback.scroll.respect_manual_folds;
+        let mut changed_ids = Vec::new();
+        for (id, entry) in &mut self.entries {
+            if !matches!(entry.block, RenderBlock::Thinking(_))
+                || !entry.block.is_foldable()
+                || entry.is_running
+                || (respect_manual_folds && entry.display_mode_pinned)
+                || entry.display_mode == target_mode
+            {
+                continue;
+            }
+            entry.display_mode = target_mode;
+            entry.invalidate_cache();
+            changed_ids.push(*id);
+        }
+        if changed_ids.is_empty() {
+            return;
+        }
+        for &id in &changed_ids {
+            self.dirty_heights.insert(id);
+        }
+        // Do not clear `expanded_groups`: those keys are user-expanded tool-call
+        // groups and were never stamped by minimal.
+        for id in &changed_ids {
+            if let Some(idx) = self.entries.get_index_of(id) {
+                self.rekey_verb_group_expansion(idx);
+            }
+        }
+        self.gaps_may_be_dirty = true;
+        self.bump_generation();
+    }
+
     /// Expand all truncated groups (add every group-start ID to expanded_groups).
-    /// Runs are walked with the shared `joins_dense_run` predicate, so the inserted ids agree with the truncation pass's breaks on claimed entries.
+    /// Runs are walked with the shared `joins_dense_run` predicate, so the inserted ids agree with the truncation pass's breaks on claimed entries and turn-terminal markers.
     /// Leading hidden thinking can still skew the keyed id off the truncation header, the same pre-existing divergence as `group_range_of`.
     fn expand_all_groups(&mut self) {
         let max_visible = self.appearance.scrollback.display.group_max_visible as usize;
@@ -567,7 +614,6 @@ impl ScrollbackState {
     }
 
     /// Returns "expand thinking" or "collapse thinking" based on current state.
-    ///
     /// Uses the same logic as `expand_all_thinking`.
     /// If ANY thinking block is collapsed the next toggle will expand, so the label is "expand thinking".
     pub fn thinking_fold_label(&self) -> &'static str {
@@ -583,11 +629,8 @@ impl ScrollbackState {
         }
     }
 
-    /// Whether the selected entry is any kind of group header.
-    ///
-    /// Returns true for both expand headers ("N more", content replaced) and collapse headers ("▾ N tool calls", standalone header entry).
-    /// An EXPANDED verb-group header is deliberately excluded: its slot also hosts member 0's own row, so the selected entry acts as that member.
-    /// Fold/Enter/raw operate on the block; group re-collapse stays on Left or the header-row mouse path.
+    /// Whether the selected entry is any kind of group header. An EXPANDED verb-group header is deliberately excluded:
+    /// its slot also hosts member 0's own row, so the selected entry acts as that member.
     pub fn is_selected_group_header(&self) -> bool {
         let Some(sel) = self.selected else {
             return false;
@@ -616,12 +659,9 @@ impl ScrollbackState {
         }
     }
 
-    /// Toggle expansion of the group whose header is the currently selected entry.
-    ///
-    /// If the selected entry is a group header (`is_group_header`), toggles its EntryId in `expanded_groups` (adds if absent, removes if present).
+    /// Toggle expansion of the group whose header is the currently selected entry. If the selected entry is a group
+    /// header (`is_group_header`), toggles its EntryId in `expanded_groups` (adds if absent, removes if present).
     /// Triggers a layout rebuild so truncation is recomputed.
-    ///
-    /// Returns `true` if a group was toggled (caller should skip normal expand).
     pub fn toggle_group_expansion(&mut self) -> bool {
         let Some(sel) = self.selected else {
             return false;
@@ -650,10 +690,8 @@ impl ScrollbackState {
         }
         // Rebuild so truncation is recomputed, keeping the header's screen row put (same anchoring as entry-level folds)
         self.rebuild_with_fold_anchor(sel, expanding, anchor);
-        // When expanding an N-more group, clear selection so the first entry doesn't appear "active" with the collapse header
-        // The user can navigate into the group with j/k
-        // A verb-group header stays selected: it remains one synthetic header row while expanded
-        // Keeping it selected lets an immediate Collapse re-fold the group
+        // When expanding an N-more group, clear selection so the first entry doesn't appear "active" with the collapse
+        // header.
         if expanding && !is_verb_header {
             self.selected = None;
         }
@@ -668,12 +706,9 @@ impl ScrollbackState {
         self.expanded_groups.clear();
     }
 
-    /// Collapse a group back if the selected entry is inside an expanded group.
-    ///
-    /// Finds the group range containing the selected entry, then checks if the group's first entry's ID is in `expanded_groups`.
-    /// If so, removes it and triggers a layout rebuild to re-apply truncation.
-    ///
-    /// Returns `true` if a group was collapsed (caller should skip normal collapse).
+    /// Collapse a group back if the selected entry is inside an expanded group. Finds the group range containing the
+    /// selected entry, then checks if the group's first entry's ID is in `expanded_groups`. If so, removes it and
+    /// triggers a layout rebuild to re-apply truncation.
     pub fn collapse_group_if_expanded(&mut self) -> bool {
         let Some(sel) = self.selected else {
             return false;

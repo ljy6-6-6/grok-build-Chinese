@@ -1,8 +1,8 @@
 //! Picks the URL and auth used to fetch the model list.
 use crate::agent::config::EndpointsConfig;
-use crate::agent::models::ModelFetchAuth;
-use crate::auth::GrokAuth;
+use crate::agent::remote_config::ModelFetchAuth;
 use crate::remote::client::{BackendError, FetchModelsResult};
+use xai_grok_login::GrokAuth;
 mod oai;
 pub(crate) trait ModelSource {
     /// Identifies this source in the models disk cache, so entries fetched from one URL never load for another.

@@ -21,20 +21,17 @@ pub struct EventTracker {
     turn_ended_emitted: Cell<bool>,
     active_tool: RefCell<Option<ActiveTool>>,
     turn_tool_count: Cell<u32>,
-    /// Why a user interrupt cancelled the most recent turn, set by the cancel paths.
-    /// The next real user prompt consumes it once, via `take_prior_interrupt_category`, to tag `UserItem::prior_turn_interrupt`.
-    /// `begin_turn` must not clear it: it has to survive into that next turn.
-    /// An interjection does not cancel the turn, so it is never recorded here (see `Event::Interjected`).
+    /// The next real user prompt consumes it once, via `take_prior_interrupt_category`, to tag
+    /// `UserItem::prior_turn_interrupt`. `begin_turn` must not clear it: it has to survive into that next turn. An
+    /// interjection does not cancel the turn, so it is never recorded here (see `Event::Interjected`).
     prior_interrupt_category: Cell<Option<CancellationCategory>>,
-    /// The `RedirectKind` for the turn that follows a mid-turn abort.
     /// `CancelThenSend` means nothing was queued; `QueuedAfterCancel` means a prompt sat queued behind the aborted turn.
     /// `cancel_running_task` sets it, and the next user `turn_started` consumes it into `Event::TurnStarted::redirect_kind`.
     /// Like `prior_interrupt_category` it survives `begin_turn` so it reaches that next turn.
     prior_redirect_kind: Cell<Option<RedirectKind>>,
-    /// Set by the cancel path only when a turn was aborted mid-stream with no tool in flight.
-    /// Nothing else then tells the model it was interrupted: no dangling tool call gets repaired and no permission tool result is written.
-    /// The next real user prompt consumes it and frames that query with the interrupt envelope.
-    /// Like the markers above it survives `begin_turn` so it reaches that next turn.
+    /// Set by the cancel path only when a turn was aborted mid-stream with no tool in flight. Nothing else then tells the
+    /// model it was interrupted: no dangling tool call gets repaired and no permission tool result is written. The next real
+    /// user prompt consumes it and frames that query with the interrupt envelope.
     pending_interrupt_reminder: Cell<bool>,
 }
 

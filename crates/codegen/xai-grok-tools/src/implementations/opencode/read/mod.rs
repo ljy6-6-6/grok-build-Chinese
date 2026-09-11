@@ -171,6 +171,12 @@ impl xai_tool_runtime::Tool for ReadTool {
             (display_cwd, fs)
         };
         let resolved = resolve_model_path(&cwd, display_cwd.as_deref(), &input.file_path);
+        if let Err(error) =
+            crate::types::memory_v2::validate_memory_v2_read(&resources, &resolved).await
+        {
+            return Ok(ReadFileOutput::FileReadError(error));
+        }
+        let policy_path = resolved.clone();
         let path = crate::util::fs::canonicalize_with_timeout(resolved).await;
 
         // ── Stat the path ───────────────────────────────────────────
@@ -214,6 +220,12 @@ impl xai_tool_runtime::Tool for ReadTool {
                 )));
             }
         };
+        if let Err(error) =
+            crate::types::memory_v2::record_memory_v2_read(&resources, &policy_path, &file_bytes)
+                .await
+        {
+            return Ok(ReadFileOutput::FileReadError(error));
+        }
 
         // Check for images via magic-byte detection. Route through
         // compression — raw bytes (truncated or non-endpoint formats)

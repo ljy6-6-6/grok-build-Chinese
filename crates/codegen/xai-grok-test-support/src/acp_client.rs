@@ -105,10 +105,8 @@ impl acp::Client for TestAcpClient {
     }
 }
 
-/// Drives `grok agent stdio` via the ACP protocol over pipes.
-///
-/// Handles the full lifecycle: spawn, initialize, authenticate, session, prompt.
-/// Child process is killed on drop.
+/// Drives `grok agent stdio` via the ACP protocol over pipes. Handles the full lifecycle: spawn, initialize,
+/// authenticate, session, prompt. Child process is killed on drop.
 pub struct GrokStdioClient {
     conn: acp::ClientSideConnection,
     process: TestProcess,
@@ -420,11 +418,9 @@ impl GrokStdioClient {
     }
 }
 
-/// Drives `grok agent stdio` with verbatim newline-delimited JSON-RPC lines.
-///
-/// Exists for wire shapes the typed [`GrokStdioClient`] (`ClientSideConnection`, integer ids) can never produce.
-/// Example: Xcode's Swift/Foundation `JSONEncoder` output, with escaped-slash methods (`"session\/prompt"`) and string UUID request ids.
-/// Child process is killed on drop.
+/// Drives `grok agent stdio` with verbatim newline-delimited JSON-RPC lines. Exists for wire shapes the typed
+/// [`GrokStdioClient`] (`ClientSideConnection`, integer ids) can never produce. Example: Xcode's Swift/Foundation
+/// `JSONEncoder` output, with escaped-slash methods (`"session\/prompt"`) and string UUID request ids.
 pub struct RawStdioClient {
     stdin: tokio::process::ChildStdin,
     stdout: tokio::io::BufReader<crate::process::TestProcessStdout>,
@@ -484,12 +480,9 @@ impl RawStdioClient {
         self.stdin.flush().await.expect("flush agent stdin");
     }
 
-    /// Read stdout lines until the response to `id` arrives: a message with no `method` key and an exact string-id match.
-    /// Returning is itself the id-echo assertion: an id echoed with different bytes or as a different JSON type never matches.
-    /// Notifications are skipped.
-    /// Any agent-to-client request is refused with a JSON-RPC error so a turn can never hang on this client, which advertises no capabilities.
-    /// On timeout the panic reports how much non-matching traffic was seen and the last few lines.
-    /// Zero traffic means true silence, the acp-0.6 escaped-method symptom.
+    /// Returning is itself the id-echo assertion: an id echoed with different bytes or as a different JSON type never
+    /// matches. Any agent-to-client request is refused with a JSON-RPC error so a turn can never hang on this client, which
+    /// advertises no capabilities. Zero traffic means true silence, the acp-0.6 escaped-method symptom.
     pub async fn response_for_id(
         &mut self,
         id: &str,

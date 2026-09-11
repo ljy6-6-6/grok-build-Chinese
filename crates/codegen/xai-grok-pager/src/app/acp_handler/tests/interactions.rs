@@ -321,7 +321,6 @@
     }
 
     /// The reverse layering of the test below: the elicitation opened FIRST, so it holds the true session draft.
-    /// A question arrived on top, and then a peer resolves the elicitation while the question still owns the composer.
     /// The draft must be handed to the question's stash.
     /// If written through the live composer, the question's own close would restore its empty stash over it.
     #[test]
@@ -1060,4 +1059,3 @@
             "session draft must retain its own image payload"
         );
     }
-

@@ -46,22 +46,16 @@ pub async fn run_voice_pipeline(
         match cmd {
             VoiceCommand::Shutdown => break,
             VoiceCommand::PttPress => {
-                // Supersede any prior session (including one still draining its trailing final after a `PttRelease`) rather than ignoring the press
-                // A rapid stop-then-start would otherwise be dropped here while the pager already flipped to "listening"
-                // That leaves a dead mic behind a recording UI and lets the old session's final land on the new target
-                // Aborting drops the old reader's capture and STT session, releasing the mic and socket at once
-                // (The pager always sends a `PttRelease` between presses, so an `active` session is one that's stopping, never a live duplicate.)
-                // We don't join the old reader, so its stream may still be releasing as the new one opens; cpal handles that brief overlap
+                // Aborting drops the old reader's capture and STT session, releasing the mic and socket at once (The pager always sends
+                // a `PttRelease` between presses, so an `active` session is one that's stopping, never a live duplicate.). We don't join
+                // the old reader, so its stream may still be releasing as the new one opens; cpal handles that brief overlap
                 if let Some(prev) = active.take() {
                     prev.reader.abort();
                 }
 
-                // Connect and device-open take hundreds of ms
-                // Race them against the next command so a release/stop (or shutdown) arriving mid-connect cancels the start
                 // Otherwise a quick tap-and-release would open a hot mic and append a spurious final after the user already let go
-                // `biased` polls the start first so a just-completed session is always kept (dropping it would leak its reader)
-                // Dropping an unfinished start cancels the connect
-                // The concurrent mic-open still completes, but its handle is then dropped, releasing the device right away
+                // `biased` polls the start first so a just-completed session is always kept (dropping it would leak its reader). The
+                // concurrent mic-open still completes, but its handle is then dropped, releasing the device right away
                 tokio::select! {
                     biased;
                     session = open_session(&config, &auth, &event_tx) => {
@@ -132,12 +126,9 @@ async fn start_capture_session(
 #[cfg(feature = "audio")]
 const BACKLOG_MAX_CHUNKS: usize = 1024;
 
-/// Bridge mic PCM into the STT socket across the connect handshake.
-///
-/// Until `audio_tx_rx` yields the live STT sender, captured chunks accumulate in a bounded backlog, so the mic never backpressures during connect.
-/// Once the sender arrives the backlog is flushed in order and capture streams live.
+/// Until `audio_tx_rx` yields the live STT sender, captured chunks accumulate in a bounded backlog, so the mic never
+/// backpressures during connect. Once the sender arrives the backlog is flushed in order and capture streams live.
 /// Holding the sender also defers the writer's `audio.done` until the backlog is drained on teardown.
-/// Returns when the mic stops (`mic_rx` closed), the socket goes away (`audio_tx` closed), or connect fails (`audio_tx_rx` dropped).
 #[cfg(feature = "audio")]
 async fn forward_pcm(
     mut mic_rx: mpsc::Receiver<Vec<u8>>,
@@ -248,11 +239,9 @@ async fn start_capture_session(
         // Tear down when no transcript arrives within the timeout; the first transcript disarms this
         let no_speech_deadline = tokio::time::Instant::now() + NO_SPEECH_TIMEOUT;
         let mut awaiting_speech = true;
-        // Chunk-final (`is_final && !speech_final`) text is locked: the server sends it as a delta of the turn
-        // Stitch those deltas into the live preview so a long pauseless utterance keeps accumulating instead of resetting to the latest ~3s chunk
-        // The committed prompt text only ever comes from `speech_final`
-        // The server produces that as a clean one-pass re-transcription of the whole turn, better than stitched deltas
-        // The prefix resets on each `speech_final`
+        // Stitch those deltas into the live preview so a long pauseless utterance keeps accumulating instead of resetting to the
+        // latest ~3s chunk. The committed prompt text only ever comes from `speech_final`. The server produces that as a clean
+        // one-pass re-transcription of the whole turn, better than stitched deltas. The prefix resets on each `speech_final`
         let mut locked_prefix = String::new();
         loop {
             tokio::select! {

@@ -53,13 +53,14 @@ use super::transcript::{
 };
 use super::turn::handle_bg_task_killed;
 use crate::app::actions::{
-    ClipboardPasteCompletion, ClipboardPasteContext, ClipboardPasteFailure, ClipboardPasteTarget,
-    DoctorFixTarget, DoctorPlanningOutcome, Effect, ProbedAttachment, SubagentKillOutcome,
-    TaskResult,
+    Action, ClipboardPasteCompletion, ClipboardPasteContext, ClipboardPasteFailure,
+    ClipboardPasteTarget, DoctorFixTarget, DoctorPlanningOutcome, Effect, ProbedAttachment,
+    SubagentKillOutcome, TaskResult,
 };
 use crate::app::agent::AgentId;
 use crate::app::agent_view::AgentDeferredSend;
 use crate::app::app_view::{ActiveView, AppView, AuthState};
+use crate::app::command_catalog::CommandCatalogSource;
 use crate::scrollback::block::RenderBlock;
 use agent_client_protocol as acp;
 
@@ -95,10 +96,179 @@ pub(super) fn unregister_all_active_sessions(app: &AppView) -> Vec<Effect> {
         })
         .collect()
 }
+fn displaced_draft_feedback_notice(
+    outcome: xai_grok_shell::session::FeedbackOutcome,
+) -> &'static str {
+    match outcome {
+        xai_grok_shell::session::FeedbackOutcome::Submitted => super::notes::FEEDBACK_THANKS_NOTICE,
+        xai_grok_shell::session::FeedbackOutcome::SubmittedCleanupFailed => {
+            "Feedback was sent, but the stored draft could not be deleted. Delete it manually; do not resend."
+        }
+        xai_grok_shell::session::FeedbackOutcome::LocalOnly => {
+            "Feedback was saved locally but was not sent. The draft was kept."
+        }
+        xai_grok_shell::session::FeedbackOutcome::OutcomeUnknown => {
+            "The remote outcome is unknown. The draft was kept; do not resend it yet."
+        }
+        _ => "The remote outcome is unknown. The draft was kept; do not resend it yet.",
+    }
+}
 pub(super) const X11_PRIMARY_PASTE_HINT: &str = "Try Shift+Insert to paste selected text";
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LiveSessionKind {
+    Missing,
+    ConversationOnly,
+    IncludesBuild,
+}
+pub(super) fn live_session_kind(app: &AppView, session_id: &str) -> LiveSessionKind {
+    let mut found = false;
+    for agent in app.agents.values().filter(|agent| {
+        agent
+            .session
+            .session_id
+            .as_ref()
+            .is_some_and(|id| id.0.as_ref() == session_id)
+    }) {
+        found = true;
+        if !agent.conversation_entry {
+            return LiveSessionKind::IncludesBuild;
+        }
+    }
+    if found {
+        LiveSessionKind::ConversationOnly
+    } else {
+        LiveSessionKind::Missing
+    }
+}
+fn apply_workspace_transition(
+    app: &mut AppView,
+    transition: crate::app::workspace_membership::WorkspaceTransition,
+) -> Vec<Effect> {
+    use crate::app::workspace_membership::WorkspaceNotice;
+    for notice in transition.notices {
+        match notice {
+            WorkspaceNotice::ArchiveRejectedReadOnly => {
+                app.show_toast("Could not archive session: dashboard workspace is read-only");
+            }
+            WorkspaceNotice::LoadFailed { error } => {
+                tracing::warn!(error = %error, "dashboard workspace load failed");
+                app.show_toast(&format!("Could not load dashboard workspace: {error}"));
+            }
+            WorkspaceNotice::Refreshing { error } => {
+                tracing::warn!(error = %error, "workspace snapshot after write failed");
+                app.show_toast("Dashboard workspace changed; refreshing");
+            }
+            WorkspaceNotice::SyncFailed {
+                count,
+                session_id,
+                error,
+            } => {
+                tracing::warn!(
+                    failed = count,
+                    session_id,
+                    error,
+                    "dashboard workspace sync partially failed"
+                );
+                app.show_toast(&format!(
+                    "Could not sync {count} dashboard session{}",
+                    if count == 1 { "" } else { "s" }
+                ));
+            }
+            WorkspaceNotice::ArchiveFailed {
+                count,
+                session_id,
+                error,
+            } => {
+                tracing::warn!(
+                    failed = count,
+                    session_id,
+                    error,
+                    "dashboard workspace archive partially failed"
+                );
+                app.show_toast(&format!(
+                    "Could not archive {count} dashboard session{}",
+                    if count == 1 { "" } else { "s" }
+                ));
+            }
+            WorkspaceNotice::ReadOnly => {
+                app.show_toast("Dashboard workspace is read-only in this Grok version");
+            }
+            WorkspaceNotice::WriterFailed { error } => {
+                tracing::error!(error = %error, "dashboard workspace writer failed");
+                app.show_toast("Dashboard workspace writer failed; reopening");
+            }
+            WorkspaceNotice::LayoutFailed { error } => {
+                tracing::warn!(error = %error, "dashboard workspace layout write failed");
+                app.show_toast("Could not save dashboard layout");
+            }
+            WorkspaceNotice::RefreshFailed { error } => {
+                tracing::warn!(error = %error, "dashboard workspace refresh failed");
+            }
+        }
+    }
+    transition.effects
+}
+struct WorkspaceCompletionContext {
+    before: Vec<crate::views::dashboard::Focusable>,
+    old_resolver: crate::views::dashboard::SessionIdResolver,
+    live_ids: std::collections::HashSet<xai_grok_dashboard_store::SessionId>,
+}
+impl WorkspaceCompletionContext {
+    fn capture(app: &AppView) -> Self {
+        let workspace = app.workspace_membership.view();
+        Self {
+            before: super::dashboard::dashboard_focusables(app),
+            old_resolver: crate::views::dashboard::SessionIdResolver::from_agents_and_workspace(
+                &app.agents,
+                workspace.as_ref(),
+            ),
+            live_ids: crate::app::workspace_sync::live_session_ids(app),
+        }
+    }
+}
+fn finish_workspace_result(
+    app: &mut AppView,
+    context: WorkspaceCompletionContext,
+    transition: crate::app::workspace_membership::WorkspaceTransition,
+) -> Vec<Effect> {
+    use crate::views::dashboard::Focusable;
+    let workspace = app.workspace_membership.view();
+    let new_resolver = crate::views::dashboard::SessionIdResolver::from_agents_and_workspace(
+        &app.agents,
+        workspace.as_ref(),
+    );
+    let before = context
+        .before
+        .into_iter()
+        .map(|focusable| match focusable {
+            Focusable::Row(row) => {
+                let rebound = context
+                    .old_resolver
+                    .to_persisted(&row)
+                    .and_then(|persisted| new_resolver.resolve(&persisted))
+                    .unwrap_or(row);
+                Focusable::Row(rebound)
+            }
+            other => other,
+        })
+        .collect::<Vec<_>>();
+    if let Some(dashboard) = app.dashboard.as_mut() {
+        dashboard.rebind_workspace_identities(
+            &context.old_resolver,
+            &new_resolver,
+            &mut app.agents,
+        );
+    }
+    let after = super::dashboard::dashboard_focusables(app);
+    if let Some(dashboard) = app.dashboard.as_mut() {
+        dashboard.reconcile_visible_rows(&before, &after, &mut app.agents);
+    }
+    apply_workspace_transition(app, transition)
+}
 fn show_clipboard_toast(target: &ClipboardPasteTarget, message: &str, app: &mut AppView) {
     match target {
-        ClipboardPasteTarget::AgentPrompt { agent_id, .. } => {
+        ClipboardPasteTarget::AgentPrompt { agent_id, .. }
+        | ClipboardPasteTarget::FeedbackModal { agent_id, .. } => {
             if let Some(agent) = app.agents.get_mut(agent_id) {
                 agent.show_toast(message);
             }
@@ -125,12 +295,9 @@ pub(super) fn maybe_show_x11_primary_paste_hint(
         .into_owned();
     show_clipboard_toast(target, &message, app);
 }
-/// Whether a completed clipboard probe should fall through to the `grok wrap` host-image request.
 /// A clean `FullMiss` always qualifies; a remote read *error* (`AttachmentRead`) qualifies too.
 /// Inside `grok wrap` the authoritative pasteboard is the local host's, not the (absent) remote one.
-/// That error is therefore recoverable over the wrap OSC path.
 /// Every other failure (`TextRead`, `TargetInsertion`, `AlreadyReported`) is a real dead end and must keep toasting.
-/// The request itself still self-gates on `osc52_sink_active()`, so this is inert outside `grok wrap`.
 pub(super) fn wrap_host_image_request_eligible(completion: ClipboardPasteCompletion) -> bool {
     matches!(
         completion,
@@ -168,11 +335,17 @@ fn apply_clipboard_paste_result(
     app: &mut AppView,
 ) -> ClipboardPasteCompletion {
     match ctx.target.clone() {
-        ClipboardPasteTarget::AgentPrompt { agent_id, .. } => app
+        ClipboardPasteTarget::AgentPrompt { agent_id, .. } => {
+            let Some(agent) = app.agents.get_mut(&agent_id) else {
+                return ClipboardPasteCompletion::Dropped;
+            };
+            agent.complete_clipboard_attachment_paste(ctx, image, file_urls)
+        }
+        ClipboardPasteTarget::FeedbackModal { agent_id, .. } => app
             .agents
             .get_mut(&agent_id)
             .map_or(ClipboardPasteCompletion::Dropped, |agent| {
-                agent.complete_clipboard_attachment_paste(ctx, image, file_urls)
+                agent.complete_feedback_modal_attachment_paste(ctx, image)
             }),
         ClipboardPasteTarget::DashboardDispatch | ClipboardPasteTarget::DashboardPeek { .. } => app
             .dashboard
@@ -182,7 +355,11 @@ fn apply_clipboard_paste_result(
             }),
     }
 }
-fn drain_clipboard_target(target: &ClipboardPasteTarget, app: &mut AppView) -> Vec<Effect> {
+fn drain_clipboard_target(
+    target: &ClipboardPasteTarget,
+    hold_feedback_submit: bool,
+    app: &mut AppView,
+) -> Vec<Effect> {
     match target {
         ClipboardPasteTarget::AgentPrompt { agent_id, .. } => {
             let is_active = app.active_view == ActiveView::Agent(*agent_id);
@@ -196,6 +373,43 @@ fn drain_clipboard_target(target: &ClipboardPasteTarget, app: &mut AppView) -> V
             let mut effects = std::mem::take(&mut agent.pending_effects);
             if let Some(action) = action {
                 effects.extend(dispatch(action, app));
+            }
+            effects
+        }
+        ClipboardPasteTarget::FeedbackModal {
+            agent_id,
+            modal_id,
+            composition_id,
+        } => {
+            let is_active = app.active_view == ActiveView::Agent(*agent_id);
+            let Some(agent) = app.agents.get_mut(agent_id) else {
+                return vec![];
+            };
+            let resume = !hold_feedback_submit
+                && is_active
+                && agent
+                    .feedback_modal
+                    .as_mut()
+                    .filter(|modal| {
+                        modal.matches_id(*modal_id) && modal.matches_composition(*composition_id)
+                    })
+                    .is_some_and(|modal| modal.take_deferred_submit());
+            if hold_feedback_submit
+                && let Some(modal) = agent
+                    .feedback_modal
+                    .as_mut()
+                    .filter(|modal| modal.matches_id(*modal_id))
+            {
+                modal.cancel_deferred_submit();
+            }
+            let mut effects = std::mem::take(&mut agent.pending_effects);
+            if resume {
+                effects.extend(dispatch(
+                    Action::SubmitFeedbackModal {
+                        modal_id: *modal_id,
+                    },
+                    app,
+                ));
             }
             effects
         }
@@ -267,29 +481,41 @@ pub(crate) fn deliver_doctor_message(app: &mut AppView, preferred: AgentId, mess
 }
 pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec<Effect> {
     let locale = app.locale.clone();
+    let result = match result {
+        TaskResult::WithPinnedMemoryMode {
+            agent_id,
+            memory_mode,
+            result,
+        } => {
+            if let Some(agent) = app.agents.get_mut(&agent_id) {
+                agent.memory_mode = memory_mode;
+            }
+            *result
+        }
+        result => result,
+    };
     if result.ends_startup() {
         app.finish_startup(xai_grok_telemetry::startup::StartupOutcome::Ok);
     }
     if !matches!(
         &result,
-        TaskResult::WorkspaceMembersUpserted { .. }
-            | TaskResult::WorkspaceMembersUpsertTaskFailed { .. }
+        TaskResult::WorkspaceSnapshotLoaded { .. }
+            | TaskResult::WorkspaceWriteCompleted { .. }
+            | TaskResult::WorkspaceWriteTaskFailed { .. }
+            | TaskResult::WorkspaceRefreshed { .. }
+            | TaskResult::WorkspaceRefreshTaskFailed { .. }
     ) {
         crate::app::workspace_sync::request(app);
     }
     match result {
+        TaskResult::WithPinnedMemoryMode { .. } => {
+            unreachable!("pinned memory mode wrapper is removed before task-result dispatch")
+        }
         TaskResult::SessionCreated {
             agent_id,
             session_id,
             models: new_models,
-            scheduler_background_loops,
-        } => handle_session_created(
-            app,
-            agent_id,
-            session_id,
-            new_models,
-            scheduler_background_loops,
-        ),
+        } => handle_session_created(app, agent_id, session_id, new_models),
         TaskResult::SessionFailed { agent_id, error } => {
             handle_session_failed(app, agent_id, error)
         }
@@ -299,7 +525,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             worktree_path,
             session_cwd,
             models: new_models,
-            scheduler_background_loops,
+            strategy_summary,
         } => handle_worktree_session_created(
             app,
             agent_id,
@@ -307,7 +533,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             worktree_path,
             session_cwd,
             new_models,
-            scheduler_background_loops,
+            strategy_summary,
         ),
         TaskResult::WorktreeForked {
             agent_id,
@@ -318,6 +544,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             restore_summary,
             restore_degree,
             resume_session_id,
+            strategy_summary,
         } => handle_worktree_forked(
             app,
             agent_id,
@@ -328,6 +555,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             restore_summary,
             restore_degree,
             resume_session_id,
+            strategy_summary,
         ),
         TaskResult::WorktreeSessionFailed { agent_id, error } => {
             handle_worktree_session_failed(app, agent_id, error)
@@ -384,9 +612,28 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
-        TaskResult::AppBillingFetched { balance, autotopup } => {
+        TaskResult::AppBillingFetched {
+            balance,
+            autotopup,
+            nonce,
+        } => {
             app.credit_balance = balance;
             apply_auto_topup(&mut app.auto_topup, &autotopup);
+            if let Some(state) = app.dashboard.as_mut().and_then(|d| d.usage_modal.as_mut())
+                && state.fetch_nonce == nonce
+            {
+                state.billing_loading = false;
+                state.billing_error = None;
+            }
+            vec![]
+        }
+        TaskResult::AppBillingError { error, nonce } => {
+            if let Some(state) = app.dashboard.as_mut().and_then(|d| d.usage_modal.as_mut())
+                && state.fetch_nonce == nonce
+            {
+                state.billing_loading = false;
+                state.billing_error = Some(error);
+            }
             vec![]
         }
         TaskResult::GateRefreshed { settings } => handle_gate_refreshed(app, settings),
@@ -398,7 +645,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             restore_summary,
             restore_degree,
             running_prompt_id,
-            scheduler_background_loops,
         } => handle_session_loaded(
             app,
             agent_id,
@@ -408,7 +654,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             restore_summary,
             restore_degree,
             running_prompt_id,
-            scheduler_background_loops,
         ),
         TaskResult::SessionMetaFromDisk {
             agent_id,
@@ -537,148 +782,54 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             vec![]
         }
         TaskResult::WorkspaceSnapshotLoaded { store, snapshot } => {
-            app.workspace_writes_disabled = !matches!(
-                store.schema_state(),
-                xai_grok_dashboard_store::SchemaState::Current
-            );
-            app.workspace_store = Some(store);
-            app.workspace_snapshot = Some(snapshot);
-            app.workspace_store_loading = false;
-            app.workspace_write_in_flight = false;
-            app.workspace_retry_metadata.clear();
-            app.workspace_failed_metadata.clear();
+            let context = WorkspaceCompletionContext::capture(app);
             app.dashboard_sessions_loading = false;
-            vec![]
+            let transition =
+                app.workspace_membership
+                    .on_store_opened(store, snapshot, &context.live_ids);
+            finish_workspace_result(app, context, transition)
         }
-        TaskResult::WorkspaceSnapshotFailed { error } => {
-            tracing::warn!(error = %error, "dashboard workspace load failed");
-            app.workspace_store_loading = false;
-            app.workspace_write_in_flight = false;
-            app.dashboard_sessions_loading = false;
-            let message = localized_template(
-                app.locale.as_ref(),
-                "dashboard.toast.workspace_load_failed",
-                "Could not load dashboard workspace: {error}",
-                &[("{error}", &error)],
-            );
-            app.show_toast(&message);
-            vec![]
-        }
-        TaskResult::WorkspaceMembersUpserted {
-            store,
-            snapshot,
-            failures,
-            attempted,
-        } => {
-            app.workspace_writes_disabled = !matches!(
-                store.schema_state(),
-                xai_grok_dashboard_store::SchemaState::Current
-            );
-            app.workspace_write_in_flight = false;
-            let snapshot = match snapshot {
-                Ok(snapshot) => snapshot,
-                Err(error) => {
-                    let db_path = store.path().to_path_buf();
-                    tracing::warn!(error = %error, "workspace snapshot after write failed");
-                    app.workspace_store = None;
-                    app.workspace_store_loading = true;
-                    app.workspace_sync_requested = true;
-                    let message = localized_template(
-                        app.locale.as_ref(),
-                        "dashboard.toast.workspace_changed_refreshing",
-                        "Dashboard workspace changed; refreshing",
-                        &[],
-                    );
-                    app.show_toast(&message);
-                    return vec![Effect::LoadWorkspaceSnapshot { db_path }];
-                }
-            };
-            app.workspace_store = Some(store);
-            app.workspace_snapshot = Some(snapshot);
-            let failed_ids: std::collections::HashSet<_> = failures
+        TaskResult::WorkspaceSnapshotFailed { error, retryable } => {
+            let transition = app
+                .workspace_membership
+                .on_store_open_failed(error, retryable);
+            app.dashboard_sessions_loading = transition
+                .effects
                 .iter()
-                .map(|failure| failure.session_id.clone())
-                .collect();
-            for member in &attempted {
-                if !failed_ids.contains(member.key.session_id.as_ref()) {
-                    app.workspace_retry_metadata.remove(&member.key.session_id);
-                    app.workspace_failed_metadata.remove(&member.key.session_id);
-                }
-            }
-            if !failures.is_empty() {
-                let failure = &failures[0];
-                tracing::warn!(
-                    failed = failures.len(),
-                    session_id = failure.session_id,
-                    error = failure.error,
-                    "dashboard workspace sync partially failed"
-                );
-                let count = failures.len().to_string();
-                let session_word = if failures.len() == 1 {
-                    "session"
-                } else {
-                    "sessions"
-                };
-                let message = localized_template(
-                    app.locale.as_ref(),
-                    "dashboard.toast.workspace_sync_failed",
-                    "Could not sync {count} dashboard {session_word}",
-                    &[("{count}", &count), ("{session_word}", session_word)],
-                );
-                app.show_toast(&message);
-            }
-            if app.workspace_writes_disabled {
-                app.workspace_sync_requested = false;
-                let message = localized_template(
-                    app.locale.as_ref(),
-                    "dashboard.toast.workspace_read_only",
-                    "Dashboard workspace is read-only in this Grok version",
-                    &[],
-                );
-                app.show_toast(&message);
-            } else {
-                let mut request_retry = false;
-                for member in attempted {
-                    let Some(failure) = failures
-                        .iter()
-                        .find(|failure| failure.session_id == member.key.session_id.as_ref())
-                    else {
-                        continue;
-                    };
-                    let already_retried = app
-                        .workspace_retry_metadata
-                        .get(&member.key.session_id)
-                        .is_some_and(|metadata| metadata == &member.metadata);
-                    if failure.retryable && !already_retried {
-                        app.workspace_retry_metadata
-                            .insert(member.key.session_id.clone(), member.metadata.clone());
-                        app.workspace_failed_metadata.remove(&member.key.session_id);
-                        request_retry = true;
-                    } else {
-                        app.workspace_retry_metadata.remove(&member.key.session_id);
-                        app.workspace_failed_metadata
-                            .insert(member.key.session_id, member.metadata);
-                    }
-                }
-                if request_retry {
-                    app.workspace_sync_requested = true;
-                }
-            }
-            vec![]
+                .any(|effect| matches!(effect, Effect::LoadWorkspaceSnapshot { .. }));
+            apply_workspace_transition(app, transition)
         }
-        TaskResult::WorkspaceMembersUpsertTaskFailed { db_path, error } => {
-            tracing::error!(error = %error, "dashboard workspace writer failed");
-            app.workspace_store = None;
-            app.workspace_write_in_flight = false;
-            app.workspace_store_loading = true;
-            let message = localized_template(
-                app.locale.as_ref(),
-                "dashboard.toast.workspace_writer_failed",
-                "Dashboard workspace writer failed; reopening",
-                &[],
-            );
-            app.show_toast(&message);
-            vec![Effect::LoadWorkspaceSnapshot { db_path }]
+        TaskResult::WorkspaceWriteCompleted { store, completion } => {
+            let context = WorkspaceCompletionContext::capture(app);
+            let transition =
+                app.workspace_membership
+                    .on_write_completed(store, completion, &context.live_ids);
+            finish_workspace_result(app, context, transition)
+        }
+        TaskResult::WorkspaceWriteTaskFailed { db_path, error } => {
+            let transition = app.workspace_membership.on_write_task_lost(db_path, error);
+            apply_workspace_transition(app, transition)
+        }
+        TaskResult::WorkspaceRefreshed { store, snapshot } => {
+            if !matches!(snapshot, Ok(Some(_))) {
+                let transition = app.workspace_membership.on_refresh_completed(
+                    store,
+                    snapshot,
+                    &std::collections::HashSet::new(),
+                );
+                return apply_workspace_transition(app, transition);
+            }
+            let context = WorkspaceCompletionContext::capture(app);
+            let transition =
+                app.workspace_membership
+                    .on_refresh_completed(store, snapshot, &context.live_ids);
+            finish_workspace_result(app, context, transition)
+        }
+        TaskResult::WorkspaceRefreshTaskFailed { db_path, error } => {
+            let transition = app
+                .workspace_membership
+                .on_refresh_task_lost(db_path, error);
+            apply_workspace_transition(app, transition)
         }
         TaskResult::CardDetailLoaded {
             host,
@@ -819,6 +970,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         TaskResult::KillSubagentComplete {
             session_id,
             subagent_id,
+            attempt_id,
             outcome,
         } => {
             if let SubagentKillOutcome::NothingLive { status } = outcome {
@@ -827,6 +979,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                     app,
                     &session_id,
                     &subagent_id,
+                    attempt_id.as_deref(),
                     status,
                 );
             }
@@ -890,7 +1043,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                     wrap_text.as_deref(),
                     None,
                 );
-            let effects = drain_clipboard_target(&target, app);
+            let effects = drain_clipboard_target(&target, wrap_request_emitted, app);
             maybe_show_x11_primary_paste_hint(
                 primary_hint_eligible && !wrap_request_emitted,
                 completion,
@@ -903,6 +1056,28 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 show_clipboard_failure(&target, failure, app);
             }
             effects
+        }
+        TaskResult::FeedbackImageRehydrated {
+            agent_id,
+            modal_id,
+            image_identity,
+            result,
+        } => {
+            let is_active = app.active_view == ActiveView::Agent(agent_id);
+            let resume = app
+                .agents
+                .get_mut(&agent_id)
+                .and_then(|agent| agent.feedback_modal.as_mut())
+                .filter(|modal| modal.matches_id(modal_id))
+                .is_some_and(|modal| {
+                    modal.apply_rehydrated_image(image_identity, result);
+                    is_active && modal.take_deferred_submit()
+                });
+            if resume {
+                dispatch(Action::SubmitFeedbackModal { modal_id }, app)
+            } else {
+                vec![]
+            }
         }
         TaskResult::PromptImagePreviewPrepared => vec![],
         TaskResult::DoctorFixPlanned { target, result } => {
@@ -1369,12 +1544,35 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 &session_id,
                 after != AfterSessionDelete::Stay,
             );
+            let live_kind = live_session_kind(app, &session_id);
+            let deleted_build =
+                source != "current" || live_kind != LiveSessionKind::ConversationOnly;
+            let removal_cause =
+                if after == AfterSessionDelete::Stay && live_kind != LiveSessionKind::Missing {
+                    crate::app::workspace_membership::RemovalCause::HistoryDeletedWithRetainedView
+                } else {
+                    crate::app::workspace_membership::RemovalCause::Archive
+                };
+            let membership_removal_failed = deleted_build
+                && !crate::app::workspace_sync::request_removal(app, &session_id, removal_cause);
+            let delete_notice = if membership_removal_failed {
+                "Session deleted, but dashboard membership could not be removed"
+            } else {
+                "Session deleted"
+            };
             if after == AfterSessionDelete::Stay {
                 app.dashboard_local_sessions
                     .retain(|entry| entry.session_id != session_id);
                 app.leader_roster
                     .retain(|entry| entry.session_id != session_id);
-                app.show_toast(&deleted_toast);
+                app.show_toast(delete_notice);
+                return vec![];
+            }
+            if after == AfterSessionDelete::UnusedHusk {
+                app.dashboard_local_sessions
+                    .retain(|entry| entry.session_id != session_id);
+                app.leader_roster
+                    .retain(|entry| entry.session_id != session_id);
                 return vec![];
             }
             let sid = acp::SessionId::new(session_id.clone());
@@ -1439,7 +1637,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             } else if foreground && after == AfterSessionDelete::Welcome {
                 effects.extend(dispatch_exit_session(app));
             }
-            app.show_toast(&deleted_toast);
+            app.show_toast(delete_notice);
             effects
         }
         TaskResult::DeleteSessionFailed {
@@ -1448,13 +1646,15 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             error,
         } => {
             tracing::warn!(source, session_id = %session_id, error = %error, "session delete failed");
-            let message = localized_template(
-                locale.as_ref(),
-                "session.delete.failed",
-                "Couldn't delete session: {error}",
-                &[("{error}", &error)],
-            );
-            app.show_toast(&message);
+            if source != "unused-home" {
+                let message = localized_template(
+                    locale.as_ref(),
+                    "session.delete.failed",
+                    "Couldn't delete session: {error}",
+                    &[("{error}", &error)],
+                );
+                app.show_toast(&message);
+            }
             vec![]
         }
         TaskResult::ContextInfoComplete {
@@ -1526,25 +1726,282 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 .replace("{error}", &error),
             nonce,
         ),
-        TaskResult::FeedbackComplete { .. } => vec![],
-        TaskResult::FeedbackFailed { agent_id, error } => {
-            let message = localized_template(
-                locale.as_ref(),
-                "feedback.send_failed",
-                "Couldn't send feedback: {error}",
-                &[("{error}", &error)],
-            );
-            if let Some(agent) = app.agents.get_mut(&agent_id) {
+        TaskResult::FeedbackComplete {
+            agent_id,
+            origin,
+            outcome,
+            trace_upload_token,
+        } => {
+            if matches!(origin, crate::app::actions::FeedbackSendOrigin::Immediate)
+                && matches!(
+                    outcome,
+                    xai_grok_shell::session::FeedbackOutcome::OutcomeUnknown
+                )
+                && let Some(agent) = app.agents.get_mut(&agent_id)
+            {
                 agent
                     .scrollback
-                    .push_block(crate::scrollback::block::RenderBlock::system(message));
+                    .push_block(
+                        crate::scrollback::block::RenderBlock::system(
+                            locale.named_text("feedback.outcome_unknown", "Feedback was enqueued, but the response did not arrive in time. The send may still complete; do not resend it yet.").into_owned(),
+                        ),
+                    );
+            }
+            if let crate::app::actions::FeedbackSendOrigin::Modal {
+                submission_id,
+                modal_id,
+                is_draft,
+            } = origin
+                && let Some(agent) = app.agents.get_mut(&agent_id)
+            {
+                let mut unknown_copy = None;
+                let mut unknown_draft_request = None;
+                if is_draft {
+                    let has_matching_modal = agent
+                        .feedback_modal
+                        .as_ref()
+                        .is_some_and(|modal| modal.matches_id(modal_id));
+                    if has_matching_modal {
+                        match outcome {
+                            xai_grok_shell::session::FeedbackOutcome::Submitted => {
+                                agent.feedback_modal = None;
+                                agent.scrollback.push_block(
+                                    crate::scrollback::block::RenderBlock::system(
+                                        locale
+                                            .named_text(
+                                                "feedback.thanks",
+                                                super::notes::FEEDBACK_THANKS_NOTICE,
+                                            )
+                                            .into_owned(),
+                                    ),
+                                );
+                            }
+                            xai_grok_shell::session::FeedbackOutcome::SubmittedCleanupFailed => {
+                                if let Some(modal) = agent.feedback_modal.as_mut() {
+                                    modal.mark_draft_cleanup_failed();
+                                }
+                            }
+                            xai_grok_shell::session::FeedbackOutcome::LocalOnly => {
+                                if let Some(modal) = agent.feedback_modal.as_mut() {
+                                    modal
+                                        .mark_draft_send_error(
+                                            "Feedback was saved locally but was not sent. The draft was kept."
+                                                .to_owned(),
+                                        );
+                                }
+                            }
+                            xai_grok_shell::session::FeedbackOutcome::OutcomeUnknown
+                            | xai_grok_shell::session::FeedbackOutcome::Other => {
+                                if let Some(modal) = agent.feedback_modal.as_mut() {
+                                    unknown_copy = modal.mark_draft_submit_unknown();
+                                    unknown_draft_request = modal.take_pending_request();
+                                }
+                            }
+                            _ => {
+                                if let Some(modal) = agent.feedback_modal.as_mut() {
+                                    unknown_copy = modal.mark_draft_submit_unknown();
+                                    unknown_draft_request = modal.take_pending_request();
+                                }
+                            }
+                        }
+                    } else {
+                        agent
+                            .scrollback
+                            .push_block(crate::scrollback::block::RenderBlock::system(
+                                displaced_draft_feedback_notice(outcome).to_owned(),
+                            ));
+                    }
+                } else if matches!(
+                    outcome,
+                    xai_grok_shell::session::FeedbackOutcome::OutcomeUnknown
+                ) {
+                    agent
+                        .scrollback
+                        .push_block(
+                            crate::scrollback::block::RenderBlock::system(
+                                locale.named_text("feedback.outcome_unknown", "Feedback was enqueued, but the response did not arrive in time. The send may still complete; do not resend it yet.").into_owned(),
+                            ),
+                        );
+                }
+                if let Some(text) = unknown_copy.as_deref() {
+                    agent.copy_to_clipboard(text);
+                }
+                let mut effects = Vec::new();
+                if let Some(request) = unknown_draft_request
+                    && let Some(session_id) = agent.session.session_id.clone()
+                {
+                    effects.push(Effect::FeedbackDraftRequest {
+                        agent_id,
+                        session_id,
+                        request,
+                    });
+                }
+                let posted = matches!(
+                    outcome,
+                    xai_grok_shell::session::FeedbackOutcome::Submitted
+                        | xai_grok_shell::session::FeedbackOutcome::SubmittedCleanupFailed
+                );
+                if posted {
+                    if let Some(trace_upload_token) = trace_upload_token
+                        && let Some(consent) =
+                            agent.take_parked_feedback_trace_consent(submission_id)
+                    {
+                        agent.register_pending_trace_upload(submission_id);
+                        effects.push(Effect::UploadFeedbackTrace {
+                            agent_id,
+                            session_id: agent_client_protocol::SessionId::new(consent.session_id),
+                            submission_id: Some(submission_id),
+                            intent: Some(consent.intent),
+                            trace_upload_token: Some(trace_upload_token),
+                        });
+                    }
+                } else {
+                    let _ = agent.take_parked_feedback_trace_consent(submission_id);
+                }
+                return effects;
             }
             vec![]
         }
-        TaskResult::FeedbackTraceUploaded { agent_id, error } => {
-            if let Some(error) = error
-                && let Some(agent) = app.agents.get_mut(&agent_id)
+        TaskResult::FeedbackFailed {
+            agent_id,
+            origin,
+            error,
+        } => {
+            let Some(agent) = app.agents.get_mut(&agent_id) else {
+                return vec![];
+            };
+            if let crate::app::actions::FeedbackSendOrigin::Modal {
+                submission_id,
+                modal_id,
+                is_draft,
+            } = origin
             {
+                let _ = agent.take_parked_feedback_trace_consent(submission_id);
+                if is_draft
+                    && let Some(modal) = agent
+                        .feedback_modal
+                        .as_mut()
+                        .filter(|modal| modal.matches_id(modal_id))
+                {
+                    modal.mark_draft_send_error(format!(
+                        "Couldn't send feedback: {error}. The draft was kept."
+                    ));
+                    return vec![];
+                }
+            }
+            agent
+                .scrollback
+                .push_block(crate::scrollback::block::RenderBlock::system(format!(
+                    "Couldn't send feedback: {error}"
+                )));
+            vec![]
+        }
+        TaskResult::FeedbackDraftListComplete {
+            agent_id,
+            modal_id,
+            generation,
+            result,
+        } => {
+            if let Some(modal) = app
+                .agents
+                .get_mut(&agent_id)
+                .and_then(|agent| agent.feedback_modal.as_mut())
+            {
+                match result {
+                    Ok(rows) => modal.apply_draft_list(modal_id, generation, rows),
+                    Err(error) => modal.fail_draft_list(modal_id, generation, error),
+                }
+            }
+            vec![]
+        }
+        TaskResult::FeedbackDraftLoadComplete {
+            agent_id,
+            load,
+            result,
+        } => {
+            let agent = app.agents.get(&agent_id);
+            let session_id = agent.and_then(|agent| agent.session.session_id.clone());
+            let session_dir = agent.and_then(|agent| agent.session.local_session_dir());
+            let request = app
+                .agents
+                .get_mut(&agent_id)
+                .and_then(|agent| agent.feedback_modal.as_mut())
+                .and_then(|modal| {
+                    match result {
+                        Ok(draft) => {
+                            let draft_id = draft.id.clone();
+                            let applied = modal.apply_draft_load(&load, draft);
+                            if applied {
+                                if let Some(session_dir) = session_dir.as_deref() {
+                                    super::inline_feedback::attach_saved_draft_images(
+                                        modal,
+                                        session_dir,
+                                        &draft_id,
+                                    );
+                                }
+                                modal.recapture_write_baseline();
+                            }
+                        }
+                        Err(error) => modal.fail_draft_load(&load, error),
+                    }
+                    modal.take_pending_request()
+                });
+            match (session_id, request) {
+                (Some(session_id), Some(request)) => {
+                    vec![Effect::FeedbackDraftRequest {
+                        agent_id,
+                        session_id,
+                        request,
+                    }]
+                }
+                _ => vec![],
+            }
+        }
+        TaskResult::FeedbackDraftUpdateComplete {
+            agent_id,
+            update,
+            result,
+        } => {
+            if let Some(modal) = app
+                .agents
+                .get_mut(&agent_id)
+                .and_then(|agent| agent.feedback_modal.as_mut())
+            {
+                modal.apply_draft_update_complete(&update, result.err().as_deref());
+            }
+            vec![]
+        }
+        TaskResult::FeedbackDraftDeleteComplete {
+            agent_id,
+            delete,
+            result,
+        } => {
+            if let Some(modal) = app
+                .agents
+                .get_mut(&agent_id)
+                .and_then(|agent| agent.feedback_modal.as_mut())
+            {
+                match result {
+                    Ok(()) => modal.apply_draft_delete(&delete),
+                    Err(error) => modal.fail_draft_delete(&delete, error),
+                }
+            }
+            vec![]
+        }
+        TaskResult::FeedbackTraceUploaded {
+            agent_id,
+            submission_id,
+            error,
+        } => {
+            let Some(agent) = app.agents.get_mut(&agent_id) else {
+                return vec![];
+            };
+            if let Some(submission_id) = submission_id
+                && !agent.take_pending_trace_upload(submission_id)
+            {
+                return vec![];
+            }
+            if let Some(error) = error {
                 agent
                     .scrollback
                     .push_block(crate::scrollback::block::RenderBlock::system(format!(
@@ -1609,7 +2066,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 && let Some(agent) = app.agents.get_mut(&id)
             {
                 let title = format!("{kind}: {name}");
-                agent.block_viewer = Some(
+                agent.show_block_viewer(
                     crate::views::block_viewer::BlockViewerPane::for_plain_text(&title, &content),
                 );
             }
@@ -1683,8 +2140,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                         wire_blocks: blocks,
                         images: Vec::new(),
                         display_as_skill: false,
-                        task_id: None,
-                        human_schedule: None,
                         chip_elements: Vec::new(),
                         skill_token_ranges: Vec::new(),
                         combined_texts: Vec::new(),
@@ -1697,8 +2152,9 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             if !commands.is_empty()
                 && let Some(agent) = app.agents.get_mut(&agent_id)
             {
-                agent.session.available_commands = commands;
-                agent.session.available_commands_generation += 1;
+                agent
+                    .session
+                    .replace_available_commands(commands, CommandCatalogSource::CommandsList);
                 super::super::acp_handler::refresh_workflow_run_capabilities(agent);
             }
             vec![]

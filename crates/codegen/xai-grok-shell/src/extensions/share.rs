@@ -117,14 +117,13 @@ async fn handle_share_session(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
 }
 
 /// Upload session messages to cloud storage via signed URL (best-effort).
-///
 /// Serialises the messages to JSON and uploads them under `share/{session_id}_{timestamp}_data.json`.
 /// On failure the error is logged as a warning; the caller is expected to fall back to the backend API.
 async fn upload_share_data_to_gcs(
     session_id: &str,
     messages: &[ExportedMessage],
     gcs_config: &crate::session::repo_changes::TraceExportConfig,
-    auth_manager: Option<std::sync::Arc<crate::auth::AuthManager>>,
+    auth_manager: Option<std::sync::Arc<xai_grok_login::AuthManager>>,
 ) {
     let data_json = match serde_json::to_vec(messages) {
         Ok(json) => json,
@@ -160,8 +159,8 @@ async fn upload_share_data_to_gcs(
 }
 
 fn require_xai_auth_for_share(
-    auth_manager: &crate::auth::AuthManager,
-) -> Result<crate::auth::GrokAuth, acp::Error> {
+    auth_manager: &xai_grok_login::AuthManager,
+) -> Result<xai_grok_login::GrokAuth, acp::Error> {
     super::auth_gate::require_xai_auth(
         auth_manager,
         "Authentication required to share session",
@@ -172,17 +171,17 @@ fn require_xai_auth_for_share(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::GrokComConfig;
-    use crate::auth::{AuthMode, GrokAuth};
     use chrono::{Duration, Utc};
     use std::sync::Arc;
     use tempfile::tempdir;
+    use xai_grok_login::GrokComConfig;
+    use xai_grok_login::{AuthMode, GrokAuth};
 
     fn make_auth_manager_with_token_expiring_in(
         ttl: Duration,
-    ) -> (Arc<crate::auth::AuthManager>, tempfile::TempDir) {
+    ) -> (Arc<xai_grok_login::AuthManager>, tempfile::TempDir) {
         let dir = tempdir().expect("tempdir for share auth test");
-        let mgr = Arc::new(crate::auth::AuthManager::new(
+        let mgr = Arc::new(xai_grok_login::AuthManager::new(
             dir.path(),
             GrokComConfig::default(),
         ));
@@ -232,7 +231,7 @@ mod tests {
     #[test]
     fn share_fails_with_no_auth_at_all() {
         let dir = tempdir().expect("tempdir");
-        let mgr = Arc::new(crate::auth::AuthManager::new(
+        let mgr = Arc::new(xai_grok_login::AuthManager::new(
             dir.path(),
             GrokComConfig::default(),
         ));
@@ -242,7 +241,7 @@ mod tests {
     #[test]
     fn share_rejects_non_xai_auth_with_actionable_grok_login_message() {
         let dir = tempdir().expect("tempdir");
-        let mgr = Arc::new(crate::auth::AuthManager::new(
+        let mgr = Arc::new(xai_grok_login::AuthManager::new(
             dir.path(),
             GrokComConfig::default(),
         ));

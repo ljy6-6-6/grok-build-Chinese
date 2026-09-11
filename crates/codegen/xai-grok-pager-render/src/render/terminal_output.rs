@@ -23,10 +23,7 @@ pub struct RenderedLine {
     pub plain: String,
 }
 
-/// Parse a raw terminal stream (ANSI SGR, cursor/erase, carriage return) into styled lines.
-/// `base` is the default style for text without an SGR override.
-///
-/// Deterministic and idempotent: a fresh emulator per call, safe to invoke from both the render path and the height-cache path.
+/// Fresh emulator per call, so render and height-cache paths stay deterministic and idempotent.
 pub fn render_terminal_lines(raw: &str, base: Style) -> Vec<RenderedLine> {
     if raw.is_empty() {
         return Vec::new();
@@ -448,11 +445,8 @@ mod tests {
         assert_eq!(parse_ext(&[2, 1]), None);
     }
 
-    // Cross-platform robustness
-    // Bash/terminal output is captured via pipes (non-TTY) on macOS, Linux, and Windows alike
-    // The input is plain text plus line endings plus optionally forced SGR, never a ConPTY screen stream
-    // Windows uses CRLF, and unsupported control sequences must be ignored without corrupting surrounding text
-    // Those include DEC private modes, OSC, cursor save/restore, and absolute positioning
+    // Pipe capture is plain text plus line endings, never a ConPTY screen stream.
+    // CRLF and unsupported controls (DEC modes, OSC, cursor save) must be ignored without corrupting text.
 
     #[test]
     fn windows_crlf_line_endings() {

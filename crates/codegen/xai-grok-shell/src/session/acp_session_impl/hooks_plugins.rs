@@ -1,39 +1,56 @@
 use super::*;
 
+/// Path written (or the session key on auto-trust), never the raw git root.
+fn hooks_trust_key(
+    outcome: &xai_grok_workspace::folder_trust::GrantOutcome,
+    cwd: &std::path::Path,
+) -> std::path::PathBuf {
+    match outcome {
+        xai_grok_workspace::folder_trust::GrantOutcome::Granted { key, .. }
+        | xai_grok_workspace::folder_trust::GrantOutcome::AlreadyDurable { key } => key.clone(),
+        xai_grok_workspace::folder_trust::GrantOutcome::Refused { .. } => {
+            xai_grok_workspace::trust::workspace_key(cwd)
+        }
+    }
+}
+
 impl SessionActor {
     // ── Shared hook/plugin operation functions ────────────────────────
 
-    /// Trust the current project via the unified folder-trust store.
     /// Same as `--trust`: also allows repo-local MCP/LSP for this folder.
+    /// Still requires a git worktree, but grants `workspace_key(cwd)` (the session key `decide` uses), not the raw git root.
+    /// When `$HOME` is a checkout that root is UnsafeRoot and would look trusted without a record.
     pub(super) fn do_hooks_trust_project(cwd: &str) -> Result<std::path::PathBuf, String> {
-        let root =
-            xai_grok_workspace::session::git::find_git_root_from_path(std::path::Path::new(cwd))
-                .map_err(|_| {
-                    "Not in a git repository. Project hooks require a git worktree root."
-                        .to_string()
-                })?;
-        xai_grok_workspace::folder_trust::grant_folder_trust(&root);
-        Ok(root)
+        let cwd_path = std::path::Path::new(cwd);
+        xai_grok_workspace::session::git::find_git_root_from_path(cwd_path).map_err(|_| {
+            "Not in a git repository. Project hooks require a git worktree root.".to_string()
+        })?;
+        let outcome = xai_grok_workspace::folder_trust::grant_folder_trust(cwd_path);
+        // Success only for this session key: durable / already-durable, or
+        // auto-trust when cwd itself is unrecordable (cwd is $HOME / inert).
+        if outcome.dismisses_gate() {
+            return Ok(hooks_trust_key(&outcome, cwd_path));
+        }
+        Err(outcome.to_string())
     }
 
     /// Untrust the current project in the unified folder-trust store.
-    /// Returns (git_root, was_trusted).
+    /// Returns (session workspace key, was_trusted).
     pub(super) fn do_hooks_untrust_project(
         cwd: &str,
     ) -> Result<(std::path::PathBuf, bool), String> {
-        let root =
-            xai_grok_workspace::session::git::find_git_root_from_path(std::path::Path::new(cwd))
-                .map_err(|_| "Not in a git repository.".to_string())?;
-        // revoke_folder_trust persists set_untrusted and downgrades the decision cache so the untrust applies at the next reload, not just restart
-        let was_trusted = crate::agent::folder_trust::revoke_folder_trust(&root);
-        Ok((root, was_trusted))
+        let cwd_path = std::path::Path::new(cwd);
+        xai_grok_workspace::session::git::find_git_root_from_path(cwd_path)
+            .map_err(|_| "Not in a git repository.".to_string())?;
+        // Same key as grant: revoke_folder_trust runs workspace_key(cwd).
+        let key = xai_grok_workspace::trust::workspace_key(cwd_path);
+        let was_trusted = crate::agent::folder_trust::revoke_folder_trust(cwd_path);
+        Ok((key, was_trusted))
     }
 
     /// Re-resolve the repo `[mcp] max_output_bytes` cap for this session's cwd and update the toolset's `TruncationCfg` resource to match.
     /// Only that field changes, so any other `TruncationCfg` fields a host seeded are preserved.
-    /// Clears the cap (restoring the process-global fallback) when the project tier no longer wins: the key was removed, or folder trust was revoked.
     /// `resolve_max_mcp_output_bytes_for_cwd` is trust-gated, so calling this after a trust change keeps the seeded cap matching the gate.
-    /// Called from the `UpdateMcpServers` handler (project-config hot reload) and from the hooks-modal Trust/Untrust actions.
     pub(super) async fn reseed_mcp_output_cap(&self) {
         let resolved = crate::util::config::resolve_max_mcp_output_bytes_for_cwd(
             std::path::Path::new(&self.session_info.cwd),
@@ -225,12 +242,15 @@ impl SessionActor {
                     };
                 }
                 match xai_grok_hooks::trust::disable_hook(&hook_name) {
-                    Ok(()) => ActionOutcome {
-                        status: OutcomeStatus::Success,
-                        message: "Hook disabled.".to_owned(),
-                        requires_reload: false,
-                        requires_restart: false,
-                    },
+                    Ok(()) => {
+                        self.refresh_hook_disabled();
+                        ActionOutcome {
+                            status: OutcomeStatus::Success,
+                            message: "Hook disabled.".to_owned(),
+                            requires_reload: false,
+                            requires_restart: false,
+                        }
+                    }
                     Err(e) => ActionOutcome {
                         status: OutcomeStatus::InternalError,
                         message: format!("Failed to disable hook: {e}"),
@@ -241,12 +261,15 @@ impl SessionActor {
             }
             HooksAction::Enable { hook_name } => {
                 match xai_grok_hooks::trust::enable_hook(&hook_name) {
-                    Ok(true) => ActionOutcome {
-                        status: OutcomeStatus::Success,
-                        message: "Hook enabled.".to_owned(),
-                        requires_reload: false,
-                        requires_restart: false,
-                    },
+                    Ok(true) => {
+                        self.refresh_hook_disabled();
+                        ActionOutcome {
+                            status: OutcomeStatus::Success,
+                            message: "Hook enabled.".to_owned(),
+                            requires_reload: false,
+                            requires_restart: false,
+                        }
+                    }
                     Ok(false) => ActionOutcome {
                         status: OutcomeStatus::NotFound,
                         message: "Hook was not disabled.".to_owned(),
@@ -282,6 +305,9 @@ impl SessionActor {
                     if ok {
                         toggled += 1;
                     }
+                }
+                if toggled > 0 {
+                    self.refresh_hook_disabled();
                 }
                 let action = if disable { "Disabled" } else { "Enabled" };
                 let mut message = format!("{action} {toggled}/{} hooks", hook_names.len());
@@ -335,33 +361,22 @@ impl SessionActor {
                         requires_restart: false,
                     };
                 }
-                let cwd = std::path::Path::new(&self.session_info.cwd);
-                let install_source =
-                    xai_grok_agent::plugins::git_install::parse_install_source(&source, cwd);
-                let registry = xai_grok_agent::plugins::InstallRegistry::load();
-                match xai_grok_agent::plugins::git_install::install_from_source(
-                    &install_source,
-                    &registry,
-                    crate::plugin::marketplace_require_sha(),
-                ) {
-                    Ok(result) => {
-                        let repo = xai_grok_agent::plugins::git_install::build_installed_repo(
-                            &result,
-                            &install_source,
-                        );
-                        let mut registry = registry;
-                        registry.insert(result.repo_key.clone(), repo);
-                        if let Err(e) = registry.save() {
-                            tracing::warn!("Failed to save install registry: {e}");
-                        }
-                        let (names, post_warnings) =
-                            crate::config::post_install_plugin(&result.repo_key);
-                        let count = names.len();
+                // Shared gated pipeline (parse → registry flock → gate → save → auto-enable): this arm can't
+                // bypass the lockdown; blocking work runs off the LocalSet (invariant: plugin/acquire.rs).
+                let cwd = self.session_info.cwd.clone();
+                let cloned_source = source.clone();
+                let installed = tokio::task::spawn_blocking(move || {
+                    crate::plugin::install_plugin(&cloned_source, std::path::Path::new(&cwd))
+                })
+                .await;
+                match installed {
+                    Ok(Ok(outcome)) => {
+                        let count = outcome.plugin_names.len();
                         let mut msg = format!(
                             "Installed {count} plugin(s) from {source}: {}",
-                            names.join(", ")
+                            outcome.plugin_names.join(", ")
                         );
-                        for w in &post_warnings {
+                        for w in &outcome.warnings {
                             msg.push_str(&format!(" (warning: {w})"));
                         }
                         ActionOutcome {
@@ -371,9 +386,25 @@ impl SessionActor {
                             requires_restart: false,
                         }
                     }
-                    Err(e) => ActionOutcome {
+                    // The policy refusal is a complete, validation-shaped message — match the marketplace-modal
+                    // sibling instead of wrapping it as an internal error.
+                    Ok(Err(crate::plugin::PluginInstallError::Blocked { reason })) => {
+                        ActionOutcome {
+                            status: OutcomeStatus::ValidationError,
+                            message: reason,
+                            requires_reload: false,
+                            requires_restart: false,
+                        }
+                    }
+                    Ok(Err(e)) => ActionOutcome {
                         status: OutcomeStatus::InternalError,
                         message: format!("Failed to install plugin: {e}"),
+                        requires_reload: false,
+                        requires_restart: false,
+                    },
+                    Err(e) => ActionOutcome {
+                        status: OutcomeStatus::InternalError,
+                        message: format!("Install task failed: {e}"),
                         requires_reload: false,
                         requires_restart: false,
                     },
@@ -391,132 +422,147 @@ impl SessionActor {
                         requires_restart: false,
                     };
                 }
-                // Extract plugin name from ID (last segment of "scope/hex8/name").
-                let plugin_name = plugin_id.rsplit('/').next().unwrap_or(&plugin_id);
-                let mut registry = xai_grok_agent::plugins::InstallRegistry::load();
-                match registry.find_plugin(plugin_name) {
-                    None => ActionOutcome {
-                        status: OutcomeStatus::NotFound,
-                        message: format!("Plugin \"{plugin_name}\" not found in install registry."),
+                // Shared uninstall keeps this arm aligned with the CLI path; registry + fs work runs on the
+                // blocking pool (invariant: plugin/acquire.rs).
+                let task = tokio::task::spawn_blocking(move || {
+                    // Extract plugin name from ID (last segment of "scope/hex8/name").
+                    let plugin_name = plugin_id.rsplit('/').next().unwrap_or(&plugin_id);
+                    crate::plugin::uninstall_plugin(plugin_name, confirmed, false)
+                })
+                .await;
+                use crate::plugin::UninstallError;
+                match task {
+                    Ok(Ok(outcome)) => ActionOutcome {
+                        status: OutcomeStatus::Success,
+                        message: format!(
+                            "Uninstalled repo \"{}\" ({} plugin(s): {})",
+                            outcome.repo_key,
+                            outcome.removed_plugins.len(),
+                            outcome.removed_plugins.join(", ")
+                        ),
+                        requires_reload: true,
+                        requires_restart: false,
+                    },
+                    Ok(Err(UninstallError::NeedsConfirm {
+                        name,
+                        repo_key,
+                        other_plugins,
+                        total,
+                    })) => ActionOutcome {
+                        status: OutcomeStatus::ConfirmationRequired,
+                        message: format!(
+                            "Repo \"{repo_key}\" contains {total} plugin(s): {}. Uninstalling will remove all of them.",
+                            std::iter::once(name)
+                                .chain(other_plugins)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
                         requires_reload: false,
                         requires_restart: false,
                     },
-                    Some((repo_key, repo, _plugin)) => {
-                        let repo_key = repo_key.to_string();
-                        let repo_path = repo.path.clone();
-                        let plugin_names: Vec<String> = repo.plugins.keys().cloned().collect();
-                        let count = plugin_names.len();
-
-                        // A multi-plugin repo needs confirmation before removal
-                        if count > 1 && !confirmed {
-                            return ActionOutcome {
-                                status: OutcomeStatus::ConfirmationRequired,
-                                message: format!(
-                                    "Repo \"{repo_key}\" contains {count} plugin(s): {}. Uninstalling will remove all of them.",
-                                    plugin_names.join(", ")
-                                ),
-                                requires_reload: false,
-                                requires_restart: false,
-                            };
-                        }
-
-                        // Proceed with removal.
-                        if let Err(e) =
-                            xai_grok_agent::plugins::git_install::remove_repo_path(&repo_path)
-                        {
-                            tracing::warn!("Failed to remove repo path: {e}");
-                        }
-                        registry.remove(&repo_key);
-                        if let Err(e) = registry.save() {
-                            tracing::warn!("Failed to save install registry: {e}");
-                        }
-                        ActionOutcome {
-                            status: OutcomeStatus::Success,
-                            message: format!(
-                                "Uninstalled repo \"{repo_key}\" ({count} plugin(s): {})",
-                                plugin_names.join(", ")
-                            ),
-                            requires_reload: true,
-                            requires_restart: false,
-                        }
-                    }
+                    Ok(Err(UninstallError::NotFound { name })) => ActionOutcome {
+                        status: OutcomeStatus::NotFound,
+                        message: format!("Plugin \"{name}\" not found in install registry."),
+                        requires_reload: false,
+                        requires_restart: false,
+                    },
+                    Ok(Err(UninstallError::RegistryLock { detail })) => ActionOutcome {
+                        status: OutcomeStatus::InternalError,
+                        message: format!("Another plugin operation is in progress: {detail}"),
+                        requires_reload: false,
+                        requires_restart: false,
+                    },
+                    Ok(Err(e @ UninstallError::RegistrySave { .. })) => ActionOutcome {
+                        status: OutcomeStatus::InternalError,
+                        message: e.to_string(),
+                        // Files are gone even though the registry is stale.
+                        requires_reload: true,
+                        requires_restart: false,
+                    },
+                    Err(e) => ActionOutcome {
+                        status: OutcomeStatus::InternalError,
+                        message: format!("Uninstall task failed: {e}"),
+                        requires_reload: false,
+                        requires_restart: false,
+                    },
                 }
             }
             PluginsAction::Update { plugin_id } => {
-                let registry = xai_grok_agent::plugins::InstallRegistry::load();
-                let all_repos = registry.list();
-                if all_repos.is_empty() {
-                    return ActionOutcome {
+                use crate::plugin::{RepoUpdateOutcome, UpdateError};
+
+                // Shared gated update pipeline: this arm can't force-sync a blocked source; sync fetches
+                // run off the LocalSet (invariant: plugin/acquire.rs).
+                let name = plugin_id
+                    .as_deref()
+                    .map(|id| id.rsplit('/').next().unwrap_or(id).to_string());
+                let task = tokio::task::spawn_blocking(move || {
+                    crate::plugin::update_plugins(name.as_deref())
+                })
+                .await;
+                match task {
+                    Ok(Ok(outcomes)) if outcomes.is_empty() => ActionOutcome {
                         status: OutcomeStatus::NotFound,
                         message: "No installed plugins to update.".into(),
                         requires_reload: false,
                         requires_restart: false,
-                    };
-                }
-
-                let repos_to_update: Vec<(
-                    String,
-                    xai_grok_agent::plugins::install_registry::InstalledRepo,
-                )> = if let Some(ref id) = plugin_id {
-                    let name = id.rsplit('/').next().unwrap_or(id);
-                    match registry.find_plugin(name) {
-                        Some((key, repo, _plugin)) => vec![(key.to_string(), repo.clone())],
-                        None => {
-                            return ActionOutcome {
-                                status: OutcomeStatus::NotFound,
-                                message: format!("Plugin \"{name}\" not found."),
-                                requires_reload: false,
-                                requires_restart: false,
-                            };
+                    },
+                    Ok(Ok(outcomes)) => {
+                        let any_updated = outcomes
+                            .iter()
+                            .any(crate::plugin::repo_update_requires_reload);
+                        let messages: Vec<String> = outcomes
+                            .iter()
+                            .map(|o| match o {
+                                RepoUpdateOutcome::Updated { repo_key, .. } => {
+                                    format!("{repo_key}: updated")
+                                }
+                                RepoUpdateOutcome::AlreadyUpToDate { repo_key } => {
+                                    format!("{repo_key}: already up to date")
+                                }
+                                RepoUpdateOutcome::Pinned { repo_key, ref_name } => {
+                                    format!("{repo_key}: pinned to {ref_name}")
+                                }
+                                RepoUpdateOutcome::LiveLocal { repo_key } => {
+                                    format!("{repo_key}: local symlink (already live)")
+                                }
+                                RepoUpdateOutcome::Failed { repo_key, error } => {
+                                    format!("{repo_key}: update failed: {error}")
+                                }
+                            })
+                            .collect();
+                        ActionOutcome {
+                            status: OutcomeStatus::Success,
+                            message: messages.join("\n"),
+                            requires_reload: any_updated,
+                            requires_restart: false,
                         }
                     }
-                } else {
-                    all_repos
-                        .into_iter()
-                        .map(|(k, v)| (k.to_string(), v.clone()))
-                        .collect()
-                };
-
-                let mut messages = Vec::new();
-                let mut any_updated = false;
-                for (key, repo) in &repos_to_update {
-                    match xai_grok_agent::plugins::git_install::update_repo(
-                        key,
-                        repo,
-                        crate::plugin::marketplace_require_sha(),
-                    ) {
-                        Ok(status) => {
-                            use xai_grok_agent::plugins::git_install::UpdateStatus;
-                            match status {
-                                UpdateStatus::Updated(result) => {
-                                    if result.changed {
-                                        any_updated = true;
-                                        messages.push(format!("{key}: updated"));
-                                    } else {
-                                        messages.push(format!("{key}: already up to date"));
-                                    }
-                                }
-                                UpdateStatus::Pinned { ref_name } => {
-                                    messages.push(format!("{key}: pinned to {ref_name}"));
-                                }
-                                UpdateStatus::LiveLocal => {
-                                    messages.push(format!("{key}: local symlink (already live)"));
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            messages.push(format!("{key}: update failed: {e}"));
-                        }
-                    }
-                }
-                if let Err(e) = registry.save() {
-                    tracing::warn!("Failed to save install registry after update: {e}");
-                }
-                ActionOutcome {
-                    status: OutcomeStatus::Success,
-                    message: messages.join("\n"),
-                    requires_reload: any_updated,
-                    requires_restart: false,
+                    Ok(Err(UpdateError::NotFound { name })) => ActionOutcome {
+                        status: OutcomeStatus::NotFound,
+                        message: format!("Plugin \"{name}\" not found."),
+                        requires_reload: false,
+                        requires_restart: false,
+                    },
+                    Ok(Err(UpdateError::RegistryLock { detail })) => ActionOutcome {
+                        status: OutcomeStatus::InternalError,
+                        message: format!("Another plugin operation is in progress: {detail}"),
+                        requires_reload: false,
+                        requires_restart: false,
+                    },
+                    Ok(Err(e @ UpdateError::RegistrySave { .. })) => ActionOutcome {
+                        status: OutcomeStatus::InternalError,
+                        message: e.to_string(),
+                        // Fetched updates may be live on disk despite the
+                        // stale registry.
+                        requires_reload: true,
+                        requires_restart: false,
+                    },
+                    Err(e) => ActionOutcome {
+                        status: OutcomeStatus::InternalError,
+                        message: format!("Update task failed: {e}"),
+                        requires_reload: false,
+                        requires_restart: false,
+                    },
                 }
             }
             PluginsAction::Add { path } => {
@@ -530,7 +576,7 @@ impl SessionActor {
                 }
                 let resolved = Self::resolve_path(&self.session_info.cwd, &path);
                 let path_str = resolved.display().to_string();
-                match crate::config::add_plugin_path(&path_str) {
+                match crate::config::run_add_plugin_path(path_str.clone()).await {
                     Ok(()) => {
                         let mut msg = format!("Added plugin path: {path_str}");
                         if let Some(ref handle) = self.plugin_registry_handle {
@@ -554,10 +600,7 @@ impl SessionActor {
                 }
             }
             PluginsAction::Enable { plugin_id } => {
-                // Add to enabled list (for project plugins) and remove from disabled list.
-                let r1 = crate::config::add_enabled_plugin(&plugin_id);
-                let r2 = crate::config::remove_disabled_plugin(&plugin_id);
-                match r1.and(r2) {
+                match crate::config::run_set_plugin_enabled(plugin_id.clone(), true).await {
                     Ok(()) => {
                         if let Some(ref handle) = self.plugin_registry_handle {
                             let reload_msg = self.reload_plugins_impl(handle, false).await;
@@ -585,10 +628,7 @@ impl SessionActor {
                 }
             }
             PluginsAction::Disable { plugin_id } => {
-                // Add to disabled list and remove from enabled list.
-                let r1 = crate::config::add_disabled_plugin(&plugin_id);
-                let r2 = crate::config::remove_enabled_plugin(&plugin_id);
-                match r1.and(r2) {
+                match crate::config::run_set_plugin_enabled(plugin_id.clone(), false).await {
                     Ok(()) => {
                         if let Some(ref handle) = self.plugin_registry_handle {
                             let reload_msg = self.reload_plugins_impl(handle, false).await;
@@ -626,7 +666,7 @@ impl SessionActor {
                 }
                 let resolved = Self::resolve_path(&self.session_info.cwd, &path);
                 let path_str = resolved.display().to_string();
-                match crate::config::remove_plugin_path(&path_str) {
+                match crate::config::run_remove_plugin_path(path_str.clone()).await {
                     Ok(()) => {
                         let mut msg = format!("Removed plugin path: {path_str}");
                         if let Some(ref handle) = self.plugin_registry_handle {
@@ -714,6 +754,7 @@ impl SessionActor {
                 *reg = Some(std::sync::Arc::new(registry));
             }
         }
+        self.refresh_hook_disabled();
         tracing::info!(hook_count, "hooks reloaded mid-session");
 
         // Notify pager about hooks change.
@@ -735,7 +776,6 @@ impl SessionActor {
     }
 
     /// Shared plugin reload logic used by enable/disable/add/remove and the explicit `/plugins reload` command.
-    /// Re-reads plugin config from disk, rebuilds the registry, reloads hooks, and returns a human-readable status message.
     /// `force` is `true` only for the explicit `/plugins reload`, which forces a full re-copy of local installs.
     /// Incidental toggles pass `false` for the cheap skip-unchanged path.
     pub(super) async fn reload_plugins_impl(
@@ -748,10 +788,9 @@ impl SessionActor {
         let sid = self.session_info.id.0.as_ref();
         xai_grok_telemetry::unified_log::info("reload_plugins_impl: start", Some(sid), None);
 
-        // Folder-trust gates repo-local project plugins (hooks/MCP)
-        // Resolve and record the verdict for this cwd before the plugins-config read below, whose project-paths merge reads the gate
-        // commands/list and the fan-out order these the same way, so no gate read ever precedes the site's own resolve
-        // The session-start hook load already printed the folder-untrusted notice, so this resolve stays quiet
+        // Folder-trust gates repo-local project plugins (hooks/MCP).
+        // Resolve and record the verdict for this cwd before the plugins-config read below, whose project-paths merge reads the gate.
+        // commands/list and the fan-out order these the same way, so no gate read ever precedes the site's own resolve.
         let project_trusted =
             crate::agent::folder_trust::resolve_and_record(session_cwd, None, false);
 
@@ -777,7 +816,7 @@ impl SessionActor {
             })),
         );
 
-        // Adopt the freshly-rebuilt snapshot into this session (hooks, MCP, skills, client slash-command catalog)
+        // Adopt plugin hooks, MCP, and plugin-contributed skills into this session.
         // Sessions with `_meta.pluginDirs` rebuild their own view instead; the shared snapshot never carries them
         let session_dirs = self.session_plugin_dirs();
         let new_registry_snapshot = if session_dirs.is_empty() {
@@ -835,7 +874,6 @@ impl SessionActor {
     }
 
     /// Apply a pre-built plugin registry snapshot to this session.
-    /// Swaps the per-session registry, reloads plugin hooks, re-merges plugin MCP servers, re-scans skills, and notifies the client.
     /// Called by `reload_plugins_impl` in the originating session and by the `ReloadPlugins` command when plugins change in another session.
     /// Returns `(hooks_reloaded, mcp_changed, skill_count)`.
     pub(super) async fn apply_plugin_registry_snapshot(
@@ -916,12 +954,9 @@ impl SessionActor {
             })),
         );
 
-        // Always re-merge plugin-contributed MCP servers and apply them via an order-insensitive diff
-        // Unchanged servers stay connected; only added, changed, or removed ones are re-initialized
-        // Merging unconditionally (no "plugins have MCP" guard) lets a removed plugin's server tear down cleanly
-        // The diff keeps it a no-op when the effective set is unchanged
-        // The order-sensitive `update_configs` would tear everything down instead, because merge order is non-deterministic
-        // This mirrors the `UpdateMcpServers` command handler
+        // Always re-merge plugin-contributed MCP servers and apply them via an order-insensitive diff.
+        // Unchanged servers stay connected; only added, changed, or removed ones are re-initialized.
+        // The order-sensitive `update_configs` would tear everything down instead, because merge order is non-deterministic.
         let t_mcp = std::time::Instant::now();
         let new_mcp_servers = crate::session::managed_mcp::merge_managed_mcp_servers(
             self.initial_client_mcp_servers.clone(),
@@ -929,39 +964,15 @@ impl SessionActor {
             new_registry_snapshot.as_deref(),
             &self.rebuild_spec.compat,
         );
-        let (mcp_diff, dispatch_event_tx) = {
+        let (mcp_change, dispatch_event_tx) = {
             let mut mcp_state = self.mcp_state.lock().await;
-            let diff = mcp_state.update_configs_diff(new_mcp_servers);
+            let change = self.update_mcp_configs(&mut mcp_state, new_mcp_servers);
             let tx = mcp_state.client_event_tx();
-            (diff, tx)
+            (change, tx)
         };
-        let mcp_changed = if let Some(diff) = mcp_diff {
-            if (!diff.added.is_empty() || !diff.removed.is_empty())
-                && let Some(tx) = &dispatch_event_tx
-            {
-                let _ = tx.send(xai_grok_mcp::servers::McpClientEvent::ConfigDiff {
-                    added: diff.added.clone(),
-                    removed: diff.removed.clone(),
-                });
-            }
-            for name in &diff.removed {
-                let prefix = format!(
-                    "{}{}",
-                    name,
-                    crate::session::mcp_servers::MCP_TOOL_NAME_DELIMITER
-                );
-                let removed_count = self
-                    .agent
-                    .borrow()
-                    .tool_bridge()
-                    .unregister_tools_by_prefix(&prefix);
-                tracing::info!(
-                    server = name.as_str(),
-                    tools_removed = removed_count,
-                    "Unregistered tools for removed MCP server (plugin reload)"
-                );
-            }
-            self.ensure_mcp_tools_initialized().await;
+        let mcp_changed = if let Some(change) = mcp_change {
+            self.apply_mcp_config_diff(&change.diff, dispatch_event_tx);
+            self.start_mcp_servers_after_config_change(change).await;
             true
         } else {
             false
@@ -976,9 +987,25 @@ impl SessionActor {
             })),
         );
 
-        // Refresh skills: re-scan from disk using the (already-updated) plugin registry.
         let t_skills = std::time::Instant::now();
-        let skill_count = self.reload_skills_from_disk().await;
+        let bridge = self.agent.borrow().tool_bridge().clone();
+        let mut plugin_skills =
+            xai_grok_agent::prompt::skills::collect_plugin_skills(new_registry_snapshot.as_deref());
+        let disabled = crate::util::config::load_config().await.skills.disabled;
+        for skill in &mut plugin_skills {
+            if disabled.iter().any(|name| name == &skill.name) {
+                skill.enabled = false;
+            }
+        }
+        let skill_count = plugin_skills.len();
+        bridge.update_plugin_skills(plugin_skills).await;
+        match bridge.apply_pending_skill_update().await {
+            Some(effects) => self.apply_skill_update_effects(effects).await,
+            None => {
+                self.send_available_commands_update(AdvertiseTrigger::SkillsReload)
+                    .await
+            }
+        }
         xai_grok_telemetry::unified_log::info(
             "reload_plugins_impl: skills done",
             Some(sid),

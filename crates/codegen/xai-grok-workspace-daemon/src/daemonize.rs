@@ -8,7 +8,7 @@
 //! Forking a multi-threaded process leaves every lock held by a non-forking thread permanently locked in the child, which can deadlock it.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Seek, SeekFrom, Write};
 #[cfg(target_os = "linux")]
 use std::os::fd::{FromRawFd as _, OwnedFd};
 use std::path::Path;
@@ -44,11 +44,8 @@ pub const DEFAULT_PIDFILE_PATH: &str = "/tmp/workspace-server.pid";
 #[cfg(windows)]
 pub const DEFAULT_PIDFILE_PATH: &str = "C:\\Windows\\Temp\\workspace-server.pid";
 
-/// How long a takeover waits for the gracefully-terminated predecessor to release the pidfile lock before escalating to a forceful kill.
-///
-/// This is far below the server's own SIGTERM drain budget (`GROK_WORKSPACE_TERMINATION_GRACE_MS`, default 45s) on purpose.
-/// A takeover only happens when the orchestrator has already declared the predecessor stale.
-/// Getting the replacement ready within a bound matters more than letting the predecessor finish draining.
+/// How long a takeover waits for the predecessor to release the pidfile lock before a forceful kill.
+/// Far below the server's SIGTERM drain budget on purpose: the predecessor is already stale, so a bounded replacement matters more than a full drain.
 pub const TAKEOVER_GRACE: Duration = Duration::from_secs(2);
 
 /// How long a takeover waits for the lock after the forceful kill (process death releases the flock) before declining.
@@ -97,12 +94,9 @@ pub fn set_oom_score_adj(_adj: i32) -> io::Result<()> {
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) static TEST_OOM_SCORE_ADJ_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Lower the workspace-server's `oom_score_adj` to [`WORKSPACE_SERVER_OOM_SCORE_ADJ`] and record `workspace_oom_protect_applied{outcome}`.
-///
-/// When `--oom-protect` is set, call this after daemonize (the double-fork) and before the runtime starts.
-/// It complements the always-on `protect_from_oom_kill`: the unshare parent may already have lowered the score *before* `--map-root-user`.
-/// A nested userns lacks the init-ns `CAP_SYS_RESOURCE` to write the score again, so a score already at the target counts as success.
-/// On a true failure this logs to stderr and returns `false`; callers still force `RESET_CHILD_OOM_ENV` so a partial lower cannot shield user work.
+/// Lower the workspace-server's `oom_score_adj` and record `workspace_oom_protect_applied{outcome}`. Call after daemonize, before the runtime, when `--oom-protect` is set.
+/// A nested userns cannot rewrite a score the unshare parent already lowered, so target-already-set counts as success.
+/// On true failure return `false`; callers still force `RESET_CHILD_OOM_ENV` so a partial lower cannot shield user work.
 pub fn apply_workspace_oom_protect() -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -166,10 +160,8 @@ pub fn daemonize(log_path: &Path) -> io::Result<()> {
     redirect_stdio(log_path)
 }
 
-/// Windows daemonization only redirects stdout and stderr to the log file.
-/// There is no fork/setsid; the launcher already backgrounds the server.
-/// This must run before anything touches stdout/stderr (Rust caches the std handles on first access).
-/// The single-instance lock is taken separately via [`PidFile`].
+/// Windows daemonization only redirects stdout and stderr to the log file; the launcher already backgrounds the server.
+/// Must run before anything touches stdio (Rust caches those handles). The single-instance lock is a separate [`PidFile`].
 #[cfg(windows)]
 pub fn daemonize(log_path: &Path) -> io::Result<()> {
     use std::os::windows::io::AsRawHandle;
@@ -271,15 +263,12 @@ fn redirect_stdio(log_path: &Path) -> io::Result<()> {
 /// Dropping it closes the file and releases the lock; the pidfile itself is left on disk for diagnostics.
 #[derive(Debug)]
 pub struct PidFile {
-    _file: File,
+    file: File,
 }
 
 impl PidFile {
     /// Take the exclusive lock and record the current PID.
-    ///
-    /// - `Ok(Some(_))`: lock acquired; hold the returned guard.
-    /// - `Ok(None)`: another live process holds the lock, so the caller should do nothing and exit cleanly.
-    /// - `Err(_)`: an I/O error opening or locking the file.
+    /// `Ok(Some)` holds the guard; `Ok(None)` means another live process holds it (exit cleanly); `Err` is an I/O failure.
     pub fn acquire(path: &Path) -> io::Result<Option<Self>> {
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
@@ -303,15 +292,21 @@ impl PidFile {
         file.write_all(process::id().to_string().as_bytes())?;
         file.flush()?;
 
-        Ok(Some(Self { _file: file }))
+        Ok(Some(Self { file }))
     }
 
-    /// Acquire the lock, taking over from a live predecessor workspace-server if one holds it.
-    /// The takeover asks the predecessor to terminate gracefully (its normal drain runs), waits `grace` for the lock, then kills it forcefully.
-    /// Process death releases the flock; the lock is never bypassed, so a guard is returned only with the flock held.
-    ///
-    /// `Ok(None)` means the caller should exit quietly.
-    /// Either the holder is not an identifiable workspace-server, or the escalation did not win the lock (a concurrent newer spawn may hold it).
+    /// Re-record the current PID. A launcher that takes the lock before detaching keeps it across the
+    /// fork (the flock travels with the open file description), but the PID [`Self::acquire`] wrote is
+    /// then the launcher's; the detached child calls this so the file names the process that holds it.
+    pub fn record_current_pid(&mut self) -> io::Result<()> {
+        self.file.set_len(0)?;
+        self.file.seek(SeekFrom::Start(0))?;
+        self.file.write_all(process::id().to_string().as_bytes())?;
+        self.file.flush()
+    }
+
+    /// Acquire the lock, taking over from a live predecessor: graceful terminate, wait `grace`, then forceful kill. The flock is never bypassed.
+    /// `Ok(None)` means exit quietly: the holder is not an identifiable workspace-server, or a concurrent newer spawn won the lock.
     pub fn acquire_or_take_over(path: &Path, grace: Duration) -> io::Result<Option<Self>> {
         Self::acquire_or_take_over_matching(path, grace, WORKSPACE_SERVER_NAME_FRAGMENT)
     }
@@ -406,11 +401,8 @@ fn process_name_matches(pid: u32, fragment: &str) -> bool {
     }
 }
 
-/// A pinned, verified handle to the predecessor process: `pidfd_open(2)` on Linux, an `OpenProcess` handle on Windows.
-///
-/// Pinning happens **before** verification, and every signal is delivered through the pin.
-/// That closes the pid-reuse race between checking a process and killing it.
-/// A recycled pid is unreachable; at worst a signal lands on the already-dead pinned instance and does nothing.
+/// Pinned, verified handle to the predecessor (`pidfd_open` / `OpenProcess`).
+/// Pin before verify and signal only through the pin, closing the pid-reuse race; a recycled pid is unreachable.
 #[cfg(target_os = "linux")]
 struct PredecessorTarget {
     pid: u32,
@@ -595,10 +587,8 @@ mod tests {
 
         drop(first);
 
-        // Dropping the guard closes the fd and releases the flock
-        // Under the parallel test runner a concurrent `fork` or `Command::spawn` can briefly duplicate this flock'd fd
-        // The duplicate holds the lock until the child `execve`s (the fd is `O_CLOEXEC`), a window of microseconds
-        // A short bounded retry therefore makes the release deterministic without weakening the contended-acquire assertion above
+        // Dropping the guard releases the flock, but a concurrent fork can briefly duplicate the `O_CLOEXEC` fd until the child execs
+        // A short bounded retry makes the release deterministic without weakening the contended-acquire assertion
         let deadline = Instant::now() + Duration::from_secs(2);
         let third = loop {
             match PidFile::acquire(&path).unwrap() {
@@ -834,10 +824,8 @@ mod tests {
         assert!(taken.is_none());
     }
 
-    /// Fixture child killed on drop ([`xai_tty_utils::KillOnDrop`]): an
-    /// assertion failure between spawn and the explicit kill must not leak
-    /// the predecessor (the SIGTERM-immune bash loop would otherwise run
-    /// forever). `kill` is SIGKILL, so it also ends the trap-armed fixture.
+    /// Fixture child killed on drop: an assertion failure must not leak the SIGTERM-immune predecessor.
+    /// `kill` is SIGKILL, so it also ends the trap-armed fixture.
     #[cfg(target_os = "linux")]
     use xai_tty_utils::KillOnDrop as FixtureChild;
 
@@ -867,6 +855,31 @@ mod tests {
         false
     }
 
+    /// `/proc/<pid>/cmdline` can lag after spawn; wait until argv0 basename is
+    /// readable (busybox-as-sleep is `"busybox"`, not `"sleep"`).
+    #[cfg(target_os = "linux")]
+    fn wait_for_predecessor_fragment(child: &Child) -> String {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Ok(cmdline) = fs::read(format!("/proc/{}/cmdline", child.id())) {
+                let argv0 = cmdline.split(|&b| b == 0).next().unwrap_or_default();
+                let basename = String::from_utf8_lossy(argv0)
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or("")
+                    .to_owned();
+                if !basename.is_empty() {
+                    return basename;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "child cmdline never became readable"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn take_over_declines_non_matching_holder() {
@@ -875,6 +888,8 @@ mod tests {
 
         let _holder = PidFile::acquire(&path).unwrap().unwrap();
         let mut child = spawn_predecessor();
+        // Wait until cmdline is readable so a late match cannot kill the child.
+        let _ = wait_for_predecessor_fragment(&child);
         fs::write(&path, child.id().to_string()).unwrap();
 
         let taken = PidFile::acquire_or_take_over_matching(
@@ -905,10 +920,11 @@ mod tests {
         let _holder = PidFile::acquire(&path).unwrap().unwrap();
         let mut child = spawn_predecessor();
         let child_pid = child.id();
+        let fragment = wait_for_predecessor_fragment(&child);
         fs::write(&path, child_pid.to_string()).unwrap();
 
         let taken =
-            PidFile::acquire_or_take_over_matching(&path, Duration::from_millis(300), "sleep")
+            PidFile::acquire_or_take_over_matching(&path, Duration::from_millis(300), &fragment)
                 .unwrap();
 
         assert!(
@@ -989,6 +1005,7 @@ mod tests {
 
         let holder = PidFile::acquire(&path).unwrap().unwrap();
         let mut child = spawn_predecessor();
+        let fragment = wait_for_predecessor_fragment(&child);
         fs::write(&path, child.id().to_string()).unwrap();
 
         // Release the lock shortly after the takeover starts waiting, simulating the predecessor finishing its drain within grace
@@ -998,7 +1015,8 @@ mod tests {
         });
 
         let taken =
-            PidFile::acquire_or_take_over_matching(&path, Duration::from_secs(5), "sleep").unwrap();
+            PidFile::acquire_or_take_over_matching(&path, Duration::from_secs(5), &fragment)
+                .unwrap();
         release.join().expect("release thread");
 
         assert!(
@@ -1041,28 +1059,7 @@ mod tests {
             "a non-matching name must not produce a target"
         );
 
-        // /proc/<pid>/cmdline can lag briefly after spawn under remote CI executors
-        // Derive the fragment from the live cmdline (which handles busybox providing `sleep`) and retry the pin open instead of expecting it once
-        let fragment = {
-            let deadline = Instant::now() + Duration::from_secs(2);
-            loop {
-                if let Ok(cmdline) = fs::read(format!("/proc/{}/cmdline", child.id())) {
-                    let argv0 = cmdline.split(|&b| b == 0).next().unwrap_or_default();
-                    let basename = String::from_utf8_lossy(argv0)
-                        .rsplit(['/', '\\'])
-                        .next()
-                        .unwrap_or("")
-                        .to_owned();
-                    if !basename.is_empty() {
-                        break basename;
-                    }
-                }
-                if Instant::now() >= deadline {
-                    panic!("child cmdline never became readable");
-                }
-                thread::sleep(Duration::from_millis(10));
-            }
-        };
+        let fragment = wait_for_predecessor_fragment(&child);
 
         let target = {
             let deadline = Instant::now() + Duration::from_secs(2);

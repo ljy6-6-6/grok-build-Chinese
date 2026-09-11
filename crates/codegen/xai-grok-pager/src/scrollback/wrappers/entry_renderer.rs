@@ -28,7 +28,6 @@ pub struct EntryRenderer<'a> {
     appearance: OnceCell<Cow<'a, AppearanceConfig>>,
     tick: u64,
     /// Number of rows to skip from the top of the entry.
-    ///
     /// When non-zero, the renderer acts as if the entry starts `skip_rows` rows lower, omitting that many top rows (vpad, then content lines).
     /// The remainder renders into `area`; this eliminates scratch-buffer rendering of partially-visible entries.
     skip_rows: u16,
@@ -46,11 +45,8 @@ pub struct EntryRenderer<'a> {
     /// Aggregated group-header label; when set, group-header rows render it instead of the plain "N more" / "N tool calls" text.
     /// The variant picks the chrome: verb-run headers wear running/error accents from the run state, truncation headers keep the dimmed fold chrome.
     group_header_label: Option<&'a crate::scrollback::state::verb_group::GroupHeaderLabel>,
-    /// When true, suppress the block's background band (force `BlockBackground::None`) so the entry blends with the terminal's own background.
-    /// Per-line "panel" bands ([`BlockLine::background_is_panel`], tool result preview boxes) are suppressed too.
-    /// Used by minimal mode, which prints into native scrollback.
-    /// There a fixed-color band (the user-message `bg_light`, a tool preview's `bg_dark`) clashes with the user's real terminal background.
-    /// Semantic per-line backgrounds (code-block syntax shading, diff insert/delete rows) and the accent column are unaffected.
+    /// When true, suppress the block's background band (force `BlockBackground::None`) so the entry blends with the
+    /// terminal's own background.
     flat_background: bool,
     /// When true, reclaim the accent column for content (chrome width drops by [`HorizontalLayout::ACCENT`]).
     /// Minimal mode pairs this with zeroed `block_pad_{left,right}`, so content starts at column 0, aligned with the welcome card.
@@ -168,7 +164,6 @@ impl<'a> EntryRenderer<'a> {
     }
 
     /// Skip the first `n` rows of the entry when rendering.
-    ///
     /// The skipped rows consume vpad first, then content lines.
     /// This allows partially-visible entries to be rendered directly into the output buffer without a scratch buffer intermediate.
     pub fn with_skip_rows(mut self, n: u16) -> Self {
@@ -214,7 +209,6 @@ impl<'a> EntryRenderer<'a> {
     }
 
     /// Render a compact "╶╶ N more" group header line.
-    ///
     /// Uses the collapsed accent char for the accent column, and renders the header text with dimmed styling to separate it from real entries.
     /// Avoids the full `self.accent()` path (which allocates a `BlockContext`) by reading the accent color directly from the theme.
     fn render_group_header(&self, area: Rect, buf: &mut Buffer) {
@@ -243,8 +237,6 @@ impl<'a> EntryRenderer<'a> {
         // Verb-group header: an aggregated "Verb N noun" label whose diamond takes the run-state color
         // An active group's glyph animates with the same wave as a running tool row's bullet
         if let Some(GroupHeaderLabel::VerbRun(vg)) = self.group_header_label {
-            use unicode_width::UnicodeWidthStr;
-
             let glyph_color = if vg.failed {
                 self.theme.accent_error
             } else if vg.running {
@@ -265,28 +257,10 @@ impl<'a> EntryRenderer<'a> {
             // It flips `›`/`⌄` with the group's fold state
             let prefix = group_header_chrome_prefix();
             let mut spans = vec![ratatui::text::Span::styled(
-                prefix.clone(),
+                prefix,
                 Style::default().fg(glyph_color),
             )];
-            let hook_start = vg
-                .line
-                .spans
-                .iter()
-                .position(|span| span.content.starts_with("  [hooks: "));
-            if let Some(hook_start) = hook_start {
-                let suffix_width: usize = vg.line.spans[hook_start..]
-                    .iter()
-                    .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
-                    .sum();
-                let label_budget = usize::from(content_area.width)
-                    .saturating_sub(UnicodeWidthStr::width(prefix.as_str()))
-                    .saturating_sub(suffix_width);
-                let label = ratatui::text::Line::from(vg.line.spans[..hook_start].to_vec());
-                spans.extend(crate::render::line_utils::truncate_line(label, label_budget).spans);
-                spans.extend(vg.line.spans[hook_start..].iter().cloned());
-            } else {
-                spans.extend(vg.line.spans.iter().cloned());
-            }
+            spans.extend(vg.line.spans.iter().cloned());
             let line = ratatui::text::Line::from(spans);
             // Group-header content is registered selectable (GROUP_HEADER_RANGE_ID)
             // Its selection maps visual columns, so it must paint visual too
@@ -355,7 +329,6 @@ impl<'a> EntryRenderer<'a> {
     pub const CHROME_WIDTH: u16 = 1 + 2 + 1; // accent + left_pad + right_pad (legacy)
 
     /// Whether this entry should display a timestamp on the first content line.
-    ///
     /// Timestamps are shown for user and agent messages (including /btw responses and mid-turn interjections).
     /// Thinking traces, tool calls, and system messages get none.
     fn should_show_timestamp(&self) -> bool {
@@ -382,13 +355,8 @@ impl<'a> EntryRenderer<'a> {
             .is_hidden_thinking(crate::appearance::cache::load_show_thinking_blocks())
     }
 
-    /// Compute height as if displayed in Truncated mode.
-    ///
-    /// This avoids cloning the entry just to compute truncated height.
-    /// Used by layout cache to precompute sticky header heights.
-    ///
-    /// Goes through the entry's truncated-height cache so repeated layout rebuilds don't re-run `block.output()`.
-    /// That call is expensive: full syntect highlighting for Edit blocks, full word-wrap for Markdown.
+    /// Compute height as if displayed in Truncated mode. Goes through the entry's truncated-height cache so repeated
+    /// layout rebuilds don't re-run `block.output()`.
     pub fn compute_truncated_height(&self, width: u16) -> u16 {
         if self.thinking_hidden() {
             return 0;
@@ -417,11 +385,9 @@ impl<'a> EntryRenderer<'a> {
         total_rows
     }
 
-    /// Cheap height ESTIMATE that avoids a markdown render / word-wrap.
-    ///
-    /// Mirrors `desired_height` but derives the content line count from the block's raw source text (`searchable_text`) instead of laying it out.
-    /// Lets the layout cache size off-screen entries on a bulk load (`grok -r`) without word-wrapping or markdown-rendering every entry (O(history)).
-    /// On-screen entries get their EXACT `desired_height`, so visible content is never estimated.
+    /// Mirrors `desired_height` but derives the content line count from the block's raw source text (`searchable_text`)
+    /// instead of laying it out. On-screen entries get their EXACT `desired_height`, so visible content is never
+    /// estimated.
     pub fn estimate_height(&self, width: u16) -> u16 {
         if self.thinking_hidden() {
             return 0;
@@ -438,7 +404,6 @@ impl<'a> EntryRenderer<'a> {
     }
 
     /// Estimate the rendered content-line count without laying the block out.
-    ///
     /// Memoized per content width on the entry, cleared by `invalidate_cache`.
     /// A full layout rebuild at the same width (e.g. after a fold or group-expand) then doesn't re-clone every entry's source text.
     fn estimate_content_lines(&self, content_width: u16) -> u16 {
@@ -446,8 +411,7 @@ impl<'a> EntryRenderer<'a> {
             return lines;
         }
         // Collapsed / Truncated foldable entries render a compact ~1-line header, NOT their (often huge) hidden body
-        // Use the ENTRY-level foldability (`block.is_foldable()` OR attached hooks), matching the fold path
-        // A collapsed entry foldable only through hooks would otherwise be over-counted
+        // Use the ENTRY-level foldability, matching the fold path
         let lines = if self.entry.display_mode != DisplayMode::Expanded && self.entry.is_foldable()
         {
             1
@@ -472,20 +436,8 @@ impl<'a> EntryRenderer<'a> {
             .saturating_add(self.inline_media_rows(content_width))
     }
 
-    /// The rendered-row offset (from the entry top, including any top vpad row) of each logical (newline-delimited) line's start, at `width`.
-    /// Also returns the entry's final rendered content row.
-    ///
-    /// The SINGLE source of truth for the mapping between logical lines and rendered rows.
-    /// The forward ([`rendered_row_of_logical_line`]) and inverse ([`logical_line_of_rendered_row`]) derive from one predicate and can't drift.
-    /// A logical-line start is a SELECTABLE hard-break row, matching the search index's `plain_text_from_output`.
-    /// `Selectable::None` decoration rows (e.g. the Thinking header/blank) and soft-wrap continuations (`joiner.is_some()`) are not starts.
-    /// They still occupy rows, so the full-enumeration index is used.
-    /// The returned starts are strictly ascending.
-    /// Inline-media rows are not accounted for.
-    ///
-    /// Returns `(starts, last_content_row)`.
-    /// `last_content_row` is the entry's final rendered row.
-    /// It bounds the last logical line (which has no following start) and clamps out-of-range lookups.
+    /// The forward ([`rendered_row_of_logical_line`]) and inverse ([`logical_line_of_rendered_row`]) derive from one
+    /// predicate and can't drift. They still occupy rows, so the full-enumeration index is used.
     pub(crate) fn logical_line_start_rows(&self, width: u16) -> (Vec<u16>, u16) {
         let content_width = width
             .saturating_sub(self.chrome_width())
@@ -518,11 +470,8 @@ impl<'a> EntryRenderer<'a> {
         (starts, last_content_row)
     }
 
-    /// The rendered-row offset (from the entry's top, including any top vpad row) where the search index's `logical_line`-th line begins at `width`.
-    ///
-    /// EXACT for blocks whose searchable text mirrors their selectable rendered lines (plain source blocks, markdown/thinking bodies).
-    /// It is a best-effort estimate for field-joined source (Subagent/BgTask), kept on screen by the caller's entry-height clamp.
-    /// Past the last logical line, clamps to the final content row.
+    /// The rendered-row offset (from the entry's top, including any top vpad row) where the search index's
+    /// `logical_line`-th line begins at `width`. Past the last logical line, clamps to the final content row.
     pub fn rendered_row_of_logical_line(&self, width: u16, logical_line: usize) -> u16 {
         let (starts, last_content_row) = self.logical_line_start_rows(width);
         starts
@@ -531,12 +480,8 @@ impl<'a> EntryRenderer<'a> {
             .unwrap_or(last_content_row)
     }
 
-    /// Inverse of [`rendered_row_of_logical_line`].
-    /// The logical line index whose start lies at or before rendered-row offset `row` (from the entry top, including vpad), at viewport `width`.
-    ///
-    /// A display-row offset into a word-wrapped entry is not stable across a width change, but the logical line it sits on is.
-    /// Resize re-anchoring captures the logical line with this, then re-resolves its row at the new width via `rendered_row_of_logical_line`.
-    /// Shares `logical_line_start_rows` with that method so the two provably round-trip.
+    /// Inverse of [`rendered_row_of_logical_line`]. Shares `logical_line_start_rows` with that method so the two
+    /// provably round-trip.
     pub fn logical_line_of_rendered_row(&self, width: u16, row: u16) -> usize {
         let (starts, _) = self.logical_line_start_rows(width);
         // `starts` is ascending: the count of starts at or before `row`, minus 1, is the 0-based index of the logical line containing `row`
@@ -867,15 +812,8 @@ impl Renderable for EntryRenderer<'_> {
             }
         }
 
-        // Post-pass: adjust bullet color based on block state.
-        //
-        // Three cases (in priority order):
-        // 1. Pending user input (permission / question): keep the bullet glyph but force a static accent color.
-        //    The running wave is skipped so the entry reads as "paused on you", not "loading"
-        // 2. Running block with animated bullet: wave animation on the bullet char.
-        // 3. Collapsed groupable block with colored bullet: dim the bullet color.
-        //
-        // The bullet is the first character on the first content row.
+        // Post-pass: adjust bullet color based on block state. The running wave is skipped so the entry reads as "paused
+        // on you", not "loading".
         if skip_rows == 0 && self.entry.block.has_bullet(&ctx) {
             let bullet_style = self.entry.block.bullet(&ctx);
             let bullet_y = content_area.y + if has_vpad { 1 } else { 0 };
@@ -883,11 +821,9 @@ impl Renderable for EntryRenderer<'_> {
             if bullet_y >= max_row {
                 // bullet not visible; skip post-pass
             } else if self.entry.is_pending_user_input {
-                // Pending user input: leave the bullet glyph alone, just freeze its color at the block's bullet color
-                // Blocks that supply no bullet style (e.g. Collapsed tool calls) fall back to `accent_user`.
-                // They would otherwise render in default gray and lose the cue entirely
-                // The fallback intentionally matches the turn-status diamond and the drain-blocked diamond
-                // Every "your turn" cue then reads in the same hue across the scrollback and status line
+                // Pending user input: leave the bullet glyph alone, just freeze its color at the block's bullet color. They would
+                // otherwise render in default gray and lose the cue entirely. The fallback intentionally matches the turn-status
+                // diamond and the drain-blocked diamond.
                 let color = bullet_style
                     .map(|s| s.color)
                     .unwrap_or(self.theme.accent_user);
@@ -1401,12 +1337,10 @@ mod tests {
     #[test]
     fn background_block_gutter_uses_block_background_fill() {
         // Background blocks own the gutter via the existing full-area fill, so the no-bg clear must not run for them
-        // Concrete theme so bg_light != bg_base (Theme::current() quantizes both to Reset in the test env)
-        let theme = Theme::groknight();
-        assert_ne!(
-            theme.bg_light, theme.bg_base,
-            "test premise: block bg must differ from base bg"
-        );
+        // Pinned so the band color (read from the process-global theme in user.rs build_lines) is GrokNight, not the developer's config
+        // Asserted relationally (gutter == content cell from the same render) so the test doesn't encode the pinned palette's exact quantized value
+        let _guard = pin_theme();
+        let theme = Theme::current();
         let entry = ScrollbackEntry::new(RenderBlock::user_prompt("hello"));
         let renderer = EntryRenderer::new(&entry, &theme);
 
@@ -1416,34 +1350,36 @@ mod tests {
         let mut buf = Buffer::empty(area);
         renderer.render(area, &mut buf);
 
-        // Gutter cell carries the block background, proving the block fill (not the bg_base clear) owns it
-        // UserPrompt has vpad, so content is on row 1
-        let gutter_x = gutter_band(&renderer, width).start + 2;
-        let gutter_cell = buf.cell((gutter_x, 1)).unwrap();
+        // The band bg as this render actually painted it: a content cell on the text row (row 1: UserPrompt has vpad), left of the rightmost timestamp gutter
+        let band = gutter_band(&renderer, width);
+        let content_cell = buf.cell((band.start.saturating_sub(8), 1)).unwrap();
+        assert_ne!(
+            content_cell.bg,
+            Color::Reset,
+            "test premise: the user block paints a concrete band"
+        );
+
+        // Gutter cell carries the same block background, proving the block fill (not the bg_base clear) owns it
+        let gutter_cell = buf.cell((band.start + 2, 1)).unwrap();
         assert_eq!(
-            gutter_cell.bg, theme.bg_light,
+            gutter_cell.bg, content_cell.bg,
             "background block gutter must use the block bg fill"
         );
     }
 
     #[test]
     fn gutter_keeps_code_block_background_on_no_background_block() {
-        // A code block's per-line bg is painted across the full width (gutter included)
-        // The per-row clear must reuse that bg, not bg_base, or the code rectangle gets a notch
-        // Concrete theme so the two bgs differ
-        //
-        // Requires color support: under `NO_COLOR` the global markdown style has no code background while this test's `groknight()` theme has RGB
-        // That mismatch is impossible in production
-        // (Historically this passed under NO_COLOR only because the md_style Reset-to-silver fallback bug painted a concrete bg despite the opt-out.)
+        // The per-row clear must reuse that bg, not bg_base, or the code rectangle gets a notch. Concrete theme so the two
+        // bgs differ. (Historically this passed under NO_COLOR only because the md_style Reset-to-silver fallback bug
+        // painted a concrete bg despite the opt-out.).
         if !crate::theme::color_support::detect().has_color() {
             return;
         }
         let theme = Theme::groknight();
         let mut entry = ScrollbackEntry::new(RenderBlock::agent_message("```\nZZZZ\n```\n"));
-        // The code block's only content row is the first content row, which is also where the timestamp overlay lands
-        // Drop `created_at` so the overlay is skipped
-        // It would otherwise paint the right-aligned clock into the gutter band and clobber the ghost-clear assertion at the current wall-clock time
-        // `timestamp_reserved()` ignores `created_at`, so the per-row gutter-ownership path under test still runs
+        // The code block's only content row is the first content row, which is also where the timestamp overlay lands.
+        // Drop `created_at` so the overlay is skipped. It would otherwise paint the right-aligned clock into the gutter
+        // band and clobber the ghost-clear assertion at the current wall-clock time.
         entry.created_at = None;
         let renderer = EntryRenderer::new(&entry, &theme);
 
@@ -1559,52 +1495,6 @@ mod tests {
             h_with,
             EntryRenderer::new(&with_nl, &theme).desired_height(80),
             "estimate with trailing newline still equals exact"
-        );
-    }
-
-    #[test]
-    fn estimate_uses_entry_level_foldability_for_collapsed_shortcut() {
-        let _theme = pin_theme();
-        // An AgentMessage block is NOT block-foldable, but attaching hooks makes the ENTRY foldable (matching the fold path)
-        // A Collapsed foldable entry takes the compact ~1-line shortcut; a non-foldable one estimates its body
-        use crate::scrollback::blocks::tool::hook::{
-            HookRunEntry, HookRunStatus, ToolCallHookData,
-        };
-        let theme = Theme::current();
-        // AgentMessage renders as markdown (single newlines collapse to spaces), so force a multi-row body with length, not line count
-        let body = "word ".repeat(60);
-
-        // With no hooks the entry is not foldable, so a Collapsed entry estimates its body, not the 1-line fold shortcut
-        let mut plain = ScrollbackEntry::new(RenderBlock::agent_message(body.as_str()));
-        plain.set_display_mode(DisplayMode::Collapsed);
-        let plain_est = EntryRenderer::new(&plain, &theme).estimate_height(80);
-        assert!(
-            plain_est > 1,
-            "non-foldable collapsed entry estimates its body, not the shortcut (got {plain_est})"
-        );
-
-        // With hooks the entry is foldable, so the compact shortcut applies (1 line, no vpad)
-        let mut hooked = ScrollbackEntry::new(RenderBlock::agent_message(body.as_str()));
-        hooked.set_display_mode(DisplayMode::Collapsed);
-        hooked.hook_data = Some(ToolCallHookData {
-            pre_hooks: vec![HookRunEntry {
-                name: "fmt".into(),
-                status: HookRunStatus::Success {
-                    elapsed: std::time::Duration::from_millis(1),
-                },
-                output: None,
-            }],
-            ..Default::default()
-        });
-        let hooked_est = EntryRenderer::new(&hooked, &theme).estimate_height(80);
-        assert_eq!(
-            hooked_est, 1,
-            "hook-foldable collapsed entry uses the compact shortcut"
-        );
-        assert!(
-            plain_est > hooked_est,
-            "entry-level foldability must change the collapsed estimate \
-             (plain {plain_est} vs hooked {hooked_est})"
         );
     }
 
@@ -1761,10 +1651,9 @@ mod tests {
 
     #[test]
     fn flat_background_suppresses_panel_line_bg() {
-        // Read/Search/etc. tool previews paint a decorative per-line panel band (marked `background_is_panel`).
-        // In minimal mode (flat_background) that fixed-color band clashes with the terminal's own background, so it must be dropped
-        // The block-level suppression alone doesn't cover it because those blocks declare `BlockBackground::None` and shade per line
-        // (That Read/Search mark their previews as panel is pinned by block-side tests.)
+        // In minimal mode (flat_background) that fixed-color band clashes with the terminal's own background, so it must
+        // be dropped. The block-level suppression alone doesn't cover it because those blocks declare
+        // `BlockBackground::None` and shade per line.
         use crate::scrollback::block::StubBlock;
 
         let theme = Theme::groknight();

@@ -28,10 +28,8 @@ pub fn error_code(err: &WorkspaceError) -> &'static str {
         WorkspaceError::ToolsetExternallyOwned(_) => "toolset_externally_owned",
     }
 }
-/// Known codes map back to their variants.
-/// Unknown codes become `WorkspaceError::HubError`, so an older shell survives codes a newer workspace sends.
-/// `CapabilityWidening`, `Unauthorized`, and `MaxDepthExceeded` lose their struct fields in the wire `message`, so they also map to `HubError`.
-/// The `HubError` message keeps the original code as a prefix (e.g. `"capability_widening: ..."`).
+/// Known codes map back to their variants. Unknown codes become `HubError` so an older shell survives newer workspace codes.
+/// `CapabilityWidening`, `Unauthorized`, and `MaxDepthExceeded` lose struct fields on the wire, so they also become `HubError` with the original code prefixed.
 pub fn rpc_error_to_workspace(err: RpcError) -> WorkspaceError {
     if let Some(kind) =
         xai_grok_workspace_types::rpc::export_github::ExportGithubError::from_wire_code(&err.code)

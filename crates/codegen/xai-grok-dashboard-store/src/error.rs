@@ -20,6 +20,9 @@ pub enum StoreError {
     #[error("no workspace member {session_id} ({kind})")]
     MemberNotFound { session_id: String, kind: String },
 
+    #[error("invalid workspace layout patch: {reason}")]
+    InvalidLayoutPatch { reason: &'static str },
+
     /// Rejection from [`crate::SessionId::new`].
     #[error("invalid session id: {reason}")]
     InvalidSessionId { reason: &'static str },

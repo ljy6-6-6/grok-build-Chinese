@@ -17,10 +17,9 @@ use super::state::FileSearchState;
 /// Maximum number of visible rows in the dropdown (excluding separator).
 pub const MAX_DROPDOWN_ROWS: u16 = 8;
 
-/// Render the file search dropdown items into the given area.
-///
-/// This renders only the result rows; the caller (AgentView) clears the panel and draws the borders, separator, and count hint.
-/// The `area` covers just the item rows.
+/// Render the file search dropdown items into the given area. This renders only the result rows;
+/// the caller (AgentView) clears the panel and draws the borders, separator, and count hint. The
+/// `area` covers just the item rows.
 pub fn render_dropdown(buf: &mut Buffer, area: Rect, file_search: &FileSearchState, theme: &Theme) {
     if area.height == 0 || area.width < 4 || !file_search.is_visible() {
         return;
@@ -227,5 +226,20 @@ fn render_fuzzy_item(
     {
         cell.set_char('/');
         cell.set_style(normal_style);
+    }
+
+    // Terminal theme (Reset bands): reverse video; no-op on RGB themes.
+    if embed.is_none() {
+        let row_rect = Rect {
+            x,
+            y,
+            width,
+            height: 1,
+        };
+        if is_selected {
+            buf.set_style(row_rect, theme.selection_overlay());
+        } else if is_hovered {
+            buf.set_style(row_rect, theme.hover_overlay());
+        }
     }
 }

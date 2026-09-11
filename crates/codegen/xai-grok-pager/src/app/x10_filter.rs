@@ -8,27 +8,9 @@ use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEvent};
 
 use super::event_loop::TimedInputEvent;
 
-/// Reassembles X10 mouse reports whose column byte a UTF-8-converting relay (ConPTY forwarding to a WSL/SSH session) expanded into two bytes.
-///
-/// An X10 report is `ESC [ M CB Cx Cy`, where each field is one raw byte holding `32 + value`.
-/// At columns >= 95 the column byte exceeds `0x7F`, and the relay re-encodes it as a UTF-8 pair (`0xC2`/`0xC3` lead, `0x80..=0xBF` continuation).
-/// Crossterm's parser consumes a fixed 6-byte window, so the pager receives a deterministic, invertible two-event pattern instead of the real report:
-///
-/// 1. a mouse event with column 161/162 (the lead byte minus 33) and row 95..=158 (the continuation byte minus 33).
-///    Kind and modifiers are correct because the button byte parsed fine.
-///    These coordinates are fixed by the encoding and never reflect the true position.
-///    Terminal bounds therefore cannot distinguish a mangled report from a genuine event on a large terminal.
-/// 2. the displaced row byte as a key event: an ASCII `Char` press for rows below 96, or `Backspace` for row byte `0x7F`.
-///    When the row byte was also UTF-8-expanded, it arrives as a Latin-1 `Char` (`U+0080..=U+00FF`).
-///
-/// The filter holds event 1 until its completion arrives, so a pair the reader thread split into two batches still reassembles.
-/// It emits the reconstructed mouse event, so right-margin hover/click keeps working in downgraded sessions and nothing is typed into the composer.
-///
-/// The guard against consuming real typing is how close together the two events arrive.
+/// These coordinates are fixed by the encoding and never reflect the true position.
+/// Terminal bounds therefore cannot distinguish a mangled report from a genuine event on a large terminal.
 /// The pair decodes from contiguous bytes in a single terminal read, so the completion must arrive within [`MAX_COMPLETION_GAP`] of the candidate.
-/// A genuine mouse event can only match the magic shape on a >=163x96 terminal.
-/// Even then, an unrelated keystroke seconds later releases it unchanged instead of eating the key.
-/// A held candidate followed by anything other than its completion is likewise released unchanged.
 pub(super) struct X10ReassemblyFilter {
     /// Candidate mangled report held awaiting its displaced row byte.
     held: Option<HeldReport>,

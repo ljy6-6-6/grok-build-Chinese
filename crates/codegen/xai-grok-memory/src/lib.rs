@@ -32,22 +32,30 @@ pub mod query_expansion;
 pub mod schema;
 pub mod search;
 pub mod storage;
+mod storage_v2;
 pub mod text_utils;
+pub mod v2;
+mod v2_access;
+pub mod v2_capture;
 pub mod watcher;
 
 pub use backend::{EndpointScopedCredentials, MemoryBackendImpl, MemoryBackendParams};
 pub use index::{MemoryIndex, init_sqlite_vec};
 pub use observation::*;
-pub use storage::{MemoryScope, MemoryStorage};
+pub use storage::{MemoryScope, MemoryStorage, SaveRememberNoteError};
+pub use v2::{
+    MAX_MANUAL_OBSERVATION_BYTES, V2Manifest, V2ManifestBudget, V2MemoryScope, V2StorageError,
+    ensure_scope_initialized, regenerate_scope_manifest, render_scope_manifest,
+};
+pub use v2_access::{V2AccessError, V2MemoryAccessPolicy, V2PathClass};
+pub use v2_capture::{
+    CaptureCursors, CaptureJob, CaptureLease, CaptureOutcomeDraft, CaptureRange, ClaimRequest,
+    CommitResult, ObservationDraft, ObservationType, V2CaptureError, V2CaptureStore,
+};
 
 pub(crate) const MEMORY_LOG_TARGET: &str = "xai_memory";
 
 /// Embed all chunks that don't have embeddings yet.
-///
-/// Queries the index for unembedded chunks, batches them through the embedding provider, and upserts the results.
-/// Logs progress.
-///
-/// This is the async glue between the sync `MemoryIndex` and the async `EmbeddingProvider`.
 /// Call after reindex, flush writes, or session-end writes.
 pub async fn embed_missing_chunks(
     index: &MemoryIndex,

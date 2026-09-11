@@ -18,10 +18,8 @@ const DEFAULT_NOTIFICATION_INTERVAL_MS: u64 = 100;
 const READ_BUFFER_SIZE: usize = 8192;
 
 /// Upper bound on how long terminal teardown waits for a SIGKILL'd child to be reaped.
-///
 /// `child.wait()` after `start_kill()` normally resolves in milliseconds, but a process stuck in an uninterruptible kernel syscall may never exit.
-/// Teardown runs on the session actor's cancel path, and on the leader every session shares one `LocalSet` thread, so the wait must be bounded.
-/// The child is already SIGKILL'd with `KillOnDrop` set, so the OS still tears it down after we stop waiting.
+/// Teardown runs on the session actor's cancel path, and on the leader every session shares one `LocalSet` thread, so the wait must be bounded. The child is already SIGKILL'd with `KillOnDrop` set, so the OS still tears it down after we stop waiting.
 const KILL_REAP_TIMEOUT: Duration = Duration::from_secs(2);
 
 fn notification_interval() -> Duration {
@@ -51,11 +49,8 @@ pub enum KillOutcome {
     AlreadyExited,
 }
 
-/// Sends ACP session notifications to the connected client.
-///
-/// Implementations must not block for extended periods.
-/// The terminal streaming loop calls [`SessionNotificationSender::session_notification`] inside a `tokio::select!` branch.
-/// If the call blocks, the loop stalls and the command timeout cannot fire until the next iteration.
+/// Sends ACP session notifications to the connected client. Implementations must not block for extended periods.
+/// The terminal streaming loop calls [`SessionNotificationSender::session_notification`] inside a `tokio::select!` branch. If the call blocks, the loop stalls and the command timeout cannot fire until the next iteration.
 /// The default Blackbox implementation (`AcpAgentGatewaySender`) uses fire-and-forget delivery to satisfy this contract; see `gateway.rs`.
 #[async_trait::async_trait]
 pub trait SessionNotificationSender: Send + Sync {
@@ -208,13 +203,9 @@ pub async fn kill_and_release_all_for_session(session_id: &str) {
         }
     }
 
-    // Phase 4: Reap the killed children OFF this task.
-    //
-    // This function is awaited inline in the session actor's cancel path (`cancel_running_task`)
-    // On the leader every session shares one `LocalSet` thread, so waiting here would park the session until each child is reaped
+    // Phase 4: Reap the killed children OFF this task. On the leader every session shares one `LocalSet` thread, so waiting here would park the session until each child is reaped
     // Worse, `Shutdown` / `IsBusy` queue behind the in-flight cancel, so the leader cannot evict a session stuck on a slow-dying child
-    // The children are already SIGKILL'd with `KillOnDrop` set, so they are torn down even if this reaper is cancelled
-    // The bounded waits (`KILL_REAP_TIMEOUT`) run concurrently, so one wedged child can't delay the others
+    // The children are already SIGKILL'd with `KillOnDrop` set, so they are torn down even if this reaper is cancelled The bounded waits (`KILL_REAP_TIMEOUT`) run concurrently, so one wedged child can't delay the others
     if !to_reap.is_empty() {
         tokio::task::spawn_local(async move {
             future::join_all(to_reap.into_iter().map(|entry| async move {

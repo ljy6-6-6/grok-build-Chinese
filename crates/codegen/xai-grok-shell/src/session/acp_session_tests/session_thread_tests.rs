@@ -52,14 +52,8 @@ fn session_thread_not_finished_while_running() {
 }
 
 /// Regression test: per-session threads run independently.
-///
-/// Spawns two session threads, each with their own tokio runtime and LocalSet.
-/// Thread A blocks for 3 seconds (simulating a long tool call).
-/// Thread B completes a quick task.
 /// Asserts that B finishes within 1 second, proving A's blocking work does not stall B.
-///
 /// On the old single-LocalSet architecture, both tasks would share one thread and B would be blocked until A's sleep yields.
-/// With per-session threads, they run on separate OS threads with true parallelism.
 #[test]
 fn sessions_on_separate_threads_do_not_block_each_other() {
     let (result_tx, result_rx) = std::sync::mpsc::channel::<&str>();

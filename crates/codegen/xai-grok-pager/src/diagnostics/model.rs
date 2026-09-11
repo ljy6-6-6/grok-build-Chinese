@@ -116,7 +116,6 @@ pub struct TmuxFacts {
 }
 
 /// Whether the attached tmux client forwards 24-bit color to the terminal.
-///
 /// tmux resolves a client's features once, at attach time, so this describes the live client and not the config on disk.
 /// A config change applies only after that client reattaches.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

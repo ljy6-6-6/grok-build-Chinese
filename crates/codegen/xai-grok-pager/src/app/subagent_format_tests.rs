@@ -84,7 +84,7 @@ fn context_badge_shown_only_for_resumed_and_forked() {
     ];
     for (source, expected) in cases {
         let mut info = make_info();
-        info.context_source = source.map(Into::into);
+        info.attempt.context_source = source.map(Into::into);
         assert_eq!(format_context_badge(&info), expected, "source={source:?}");
     }
 }
@@ -199,8 +199,8 @@ fn subagent_label_prefers_persona_then_role_then_type_then_tag() {
     ];
     for c in cases {
         let mut info = make_info();
-        info.persona = c.persona.map(Into::into);
-        info.role = c.role.map(Into::into);
+        info.attempt.persona = c.persona.map(Into::into);
+        info.attempt.role = c.role.map(Into::into);
         info.subagent_type = c.subagent_type.into();
         info.description = c.description.into();
         let (got_label, got_desc) = format_subagent_label(&info);

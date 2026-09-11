@@ -15,7 +15,6 @@ use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
 use crate::extensions::notification::{SessionNotification, SessionUpdate as XaiSessionUpdate};
 
 /// Shared per-session map of open reverse-requests, keyed by `tool_call_id`.
-///
 /// Mirrors the `current_prompt_id` signal on [`crate::session::handle::SessionHandle`].
 /// The same `Arc` is shared between the session actor (which mutates it) and the handle (which the roster reads synchronously).
 pub(crate) type PendingInteractions = Arc<Mutex<HashMap<String, PendingKind>>>;

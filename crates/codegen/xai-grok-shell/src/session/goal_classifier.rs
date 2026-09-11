@@ -51,7 +51,6 @@ pub(crate) const GOAL_VERIFIER_PANEL_MAX_BYTES: usize = 512 * 1024;
 /// Template for the per-attempt details FILE NAME, rooted under the owner-only (0700) per-goal scratch root by `format_details_path`.
 /// Classifier artifacts never live in bare `/tmp`: their names are predictable from the prompt/log-visible `verifier_id`.
 /// A world-writable directory would let a local attacker pre-plant a symlink and redirect the harness's writes.
-/// See [`super::goal_tracker::ensure_goal_scratch_root`].
 pub(crate) const GOAL_CLASSIFIER_DETAILS_PATH_TEMPLATE: &str =
     "goal-classifier-{verifier_id}-{attempt}.md";
 
@@ -64,9 +63,8 @@ pub(crate) const GOAL_CLASSIFIER_CHANGES_PATH_TEMPLATE: &str =
 const GIT_BASELINE_CAPTURE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Subagent type used for each verifier-skeptic spawn.
-/// `general-purpose` gives the subagent the full read/grep/file tool inventory needed to corroborate diff hunks against the workspace;
+/// `general-purpose` gives the subagent the full read/grep/file tool inventory needed to corroborate diff hunks against the workspace;.
 /// the verifier prompt explicitly forbids workspace mutation.
-/// The configured `agent_type` selects the HARNESS, not this subagent type.
 const GOAL_CLASSIFIER_SUBAGENT_TYPE: &str = GOAL_ROLE_SUBAGENT_TYPE;
 
 /// Description shown in the pager subagent strip.
@@ -75,9 +73,7 @@ const GOAL_CLASSIFIER_SUBAGENT_DESCRIPTION: &str = "goal achievement skeptic";
 
 const GOAL_VERIFIER_PROMPT_TEMPLATE: &str = include_str!("templates/goal_verifier_prompt.md");
 
-/// Default number of adversarial skeptics spawned per verification attempt.
 /// Override via `GROK_GOAL_VERIFIER_N` (clamped 1..=5) or the remote `goal_verifier_count` setting.
-/// Default 3 yields a genuine majority vote: 2 not-refuted votes to pass.
 /// A lone outlier in either direction (one rubber-stamp or one false refute) cannot decide the outcome.
 /// At N=2 a 1-1 tie survives, so a single lenient skeptic passes what a single strict one refutes.
 pub(crate) const GOAL_VERIFIER_SKEPTIC_COUNT: u32 = 3;
@@ -87,11 +83,8 @@ pub(crate) const GOAL_VERIFIER_SKEPTIC_COUNT: u32 = 3;
 pub(crate) const GOAL_VERIFIER_SKEPTIC_MIN: u32 = 1;
 pub(crate) const GOAL_VERIFIER_SKEPTIC_MAX: u32 = 5;
 
-/// Expand a skeptic `pool` to a per-index assignment of length `n` via round-robin (index `i` gets `pool[i % pool.len()]`).
-///
 /// Committed indices are never rewritten, so skeptic 0 always keeps `pool[0]` across resume AND cold-fallback.
 /// A later `n` bump only appends new indices (continuing the round-robin, clamped by the caller).
-/// An empty `pool` keeps `existing` unchanged, so a frozen assignment survives a remote-cleared pool.
 /// `n` is the CLAMPED skeptic count, identical to the value used at the fan-out site, so the assignment never desyncs from the spawned indices.
 pub(crate) fn expand_skeptic_assignment(
     existing: &[crate::util::config::GoalRoleModel],
@@ -121,12 +114,9 @@ pub(crate) const GOAL_VERIFIER_DETAILS_PATH_TEMPLATE: &str =
 
 // Outcome and spawner abstraction
 
-/// Result of one classifier attempt.
 /// `Achieved` / `NotAchieved` are PARSE-class outcomes: the subagent produced a usable verdict.
 /// `FailOpenAchieved` is INFRA-class: the harness could not extract a verdict and treats the goal as achieved.
-/// That way an internal failure never blocks user progress.
 /// PARSE-class fail-closed outcomes (malformed terminal token, missing details file) map onto `NotAchieved`.
-/// Telemetry distinguishes them via `Event::GoalClassifierFailClosed`.
 #[derive(Debug, Clone)]
 pub(crate) enum GoalClassifierOutcome {
     Achieved {
@@ -146,7 +136,6 @@ pub(crate) enum GoalClassifierOutcome {
     /// Every refuter classified its gap as a contradiction or environment-unverifiable blocker.
     /// No model-fixable gap remains, so iterating cannot help.
     /// The goal pauses for a user decision rather than receiving another retry nudge.
-    /// No stall fingerprint is carried; the drain resets the streak when routing here.
     Blocked {
         details_path: String,
         /// Grouped blocker bullets (all non-model-fixable) used as the user-facing pause message.
@@ -267,7 +256,6 @@ impl std::fmt::Display for PathValidationError {
 /// Validate the resolved classifier details-file path against the platform temp dir.
 /// The temp dir is the goal scratch root's parent, where `format_*_path` roots every artifact.
 /// No bare-`/tmp` allowance: every production caller validates a freshly `format_*_path`-built path.
-/// See [`validate_details_path_in_root`] for the rules.
 pub(crate) fn validate_details_path(path: &Path) -> Result<(), PathValidationError> {
     validate_details_path_in_root(path, &std::env::temp_dir())
 }
@@ -306,8 +294,6 @@ pub(crate) fn validate_details_path_in_root(
 // Terminal-token parse
 
 /// Parse an adversarial skeptic's terminal response: `Refuted` yields `Some(true)`, `Not Refuted` yields `Some(false)`.
-/// The JSON verdict file is authoritative when present; the terminal token stands in for the skeptic's vote when JSON parsing fails.
-///
 /// Tolerates code fences/backticks and a trailing `.`/`!` around the token.
 /// The response must contain ONLY the token; any other prose stays `None`.
 pub(crate) fn parse_skeptic_terminal_response(text: &str) -> Option<bool> {
@@ -329,10 +315,8 @@ pub(crate) fn parse_skeptic_terminal_response(text: &str) -> Option<bool> {
 // Git baseline capture (called from `setup_goal`)
 
 /// Best-effort `git rev-parse HEAD` capture for goal creation.
-///
 /// Returns the commit SHA on success; `None` for any failure (workspace is not a git repo, `git` is not installed, HEAD has no commits, timeout).
 /// NEVER blocks goal creation: the wall-clock budget is bounded by `GIT_BASELINE_CAPTURE_TIMEOUT`.
-/// The caller treats `None` as "no baseline": each skeptic renders `CHANGES_FILE: (unavailable)` and the verifier prompt's rule 5 takes over.
 pub(crate) async fn capture_git_baseline(workspace_root: &Path) -> Option<String> {
     let mut cmd = tokio::process::Command::new(crate::util::subprocess::git_bin());
     cmd.arg("rev-parse").arg("HEAD").current_dir(workspace_root);
@@ -367,11 +351,8 @@ pub(crate) async fn capture_git_baseline(workspace_root: &Path) -> Option<String
 
 // Trace-only recording for harness-spawned subagents
 
-/// Build the synthetic `task` tool_call and tool_result pair for a harness-spawned subagent, shaped like a model-issued `task` spawn.
-///
 /// The tool_result MUST carry the real task tool's `<subagent_result>` footer (via [`xai_tool_types::format_resume_footer`]).
-/// Trace tooling discovers subagents by scanning tool_result bodies for that `subagent_id:` block;
-/// without it the harness subagent never shows in the session tree.
+/// Trace tooling discovers subagents by scanning tool_result bodies for that `subagent_id:` block; without it the harness subagent never shows in the session tree.
 /// The footer id equals the child session id, so the viewer can fetch its uploaded trace.
 pub(crate) fn build_subagent_trace_items(
     task_tool_name: &str,
@@ -398,11 +379,9 @@ pub(crate) fn build_subagent_trace_items(
     vec![call, result]
 }
 
-/// Record a harness-spawned subagent into the in-progress harness trace phase as a synthetic `task` call (see [`build_subagent_trace_items`]).
+/// Record a harness-spawned subagent into the in-progress harness trace phase as a synthetic `task` call.
 /// The items accumulate in a side buffer, never the live model context.
 /// The caller seals the phase via [`xai_chat_state::ChatStateHandle::flush_harness_trace_turn`] so it uploads as its own sibling `turn_{N}` artifact.
-/// No-op when tracing is off (`sink` absent) or no prompt was captured.
-/// `sink` carries the chat-state handle and the resolved `task` tool name.
 pub(crate) fn record_subagent_trace(
     sink: Option<&(xai_chat_state::ChatStateHandle, String)>,
     subagent_id: &str,
@@ -425,10 +404,7 @@ pub(crate) fn record_subagent_trace(
 
 // Production spawner, wraps the subagent coordinator channel
 
-/// Production spawner. Sends a `SubagentEvent::Spawn` to the session's coordinator and awaits the result on a fresh oneshot.
-/// The parent model never sees the spawn live: it is direct, with no `task` tool call.
-/// When a `trace_sink` is wired, each skeptic is recorded as a synthetic `task` call (see [`record_subagent_trace`]) into the harness trace phase;
-/// the caller seals the panel into its own sibling trace turn so the subagents are discoverable in data collection.
+/// Production spawner, wraps the subagent coordinator channel.
 pub(crate) struct ChannelSpawner {
     pub(crate) event_tx: tokio::sync::mpsc::UnboundedSender<
         xai_grok_tools::implementations::grok_build::task::types::SubagentEvent,
@@ -502,8 +478,7 @@ impl GoalClassifierSpawner for ChannelSpawner {
 impl ChannelSpawner {
     /// Send one skeptic spawn (model and harness override resolved by the caller) and await its terminal result.
     /// The fail-open wrapper calls this once or twice (the retry uses the current model and session harness).
-    /// The subagent_type is always [`GOAL_CLASSIFIER_SUBAGENT_TYPE`];
-    /// `harness_agent_type` selects the harness flavor (`None` means the session harness).
+    /// The subagent_type is always [`GOAL_CLASSIFIER_SUBAGENT_TYPE`]; `harness_agent_type` selects the harness flavor (`None` means the session harness).
     async fn send_one(
         &self,
         id: &str,
@@ -533,6 +508,7 @@ impl ChannelSpawner {
             fork_context: false,
             owner: SubagentOwner::Task,
             cancel_token: tokio_util::sync::CancellationToken::new(),
+            spawn_root: Default::default(),
         };
         let backend = ChannelBackend::new(self.event_tx.clone());
         let result = backend
@@ -606,9 +582,7 @@ async fn write_patch_file_atomic(path: &Path, body: &str) -> std::io::Result<()>
 }
 
 /// Write a placeholder file at `path` unless a non-empty file is already there.
-/// `headline` becomes the Markdown `# <headline>` header; `body` is appended verbatim. Best-effort.
-///
-/// Returns `true` when a non-empty details file exists at `path` afterward (it already did, or the write succeeded).
+/// `headline` becomes the Markdown `# <headline>` header; `body` is appended verbatim.
 /// Returns `false` when the write was attempted and failed, so the caller never surfaces a path to a file that isn't there.
 async fn maybe_write_classifier_placeholder(path: &Path, headline: &str, body: &str) -> bool {
     if let Ok(meta) = tokio::fs::metadata(path).await
@@ -692,11 +666,8 @@ impl SkepticConfidence {
     }
 }
 
-/// Classification of a refutation's blocker.
 /// `None` is an ordinary model-fixable gap and the default.
 /// Absent or unrecognised wire values normalise to `None`, keeping the JSON contract back-compatible.
-/// `Contradiction` flags an internal conflict between the objective and the plan.
-/// `Unverifiable` flags evidence that is infeasible to capture in the current environment.
 /// A rejection whose refuters are *all* non-`None` cannot progress by iterating and routes to the blocked outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum SkepticBlocking {
@@ -722,7 +693,6 @@ impl SkepticBlocking {
 /// Parsed skeptic verdict; the JSON shape mirrors the verifier prompt's contract.
 /// `evidence` and `details_md` are kept for the aggregated details file; the harness operates on `refuted`, `confidence`, and `blocking`.
 /// One concise verifier finding (the implementer-facing gap list).
-/// Fields default to empty for weak-model robustness; an all-empty finding is dropped at parse time.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub(crate) struct Finding {
     /// `bug` | `gap` | `todo` (rendered verbatim after trim).
@@ -771,14 +741,9 @@ struct SkepticVerdictRaw {
     findings: Option<Vec<Finding>>,
 }
 
-/// Parse the JSON body the skeptic wrote to its `{VERDICT_FILE}`.
-///
 /// Matches the verdict schema `required: ["refuted", "evidence", "confidence"]`: all three are mandatory.
 /// A missing or empty `evidence` field rejects (`None`); without evidence a skeptic could rubber-stamp, which this contract exists to prevent.
-/// `details_md` is optional: it is a harness-side extension to the schema.
 /// The aggregator prefers the on-disk per-skeptic report and uses this JSON field only when that file is missing/empty.
-/// Extra fields are tolerated.
-/// The skeptic-level fallback (`run_one_skeptic`) maps any `None` here to a synthetic `refuted: true` vote.
 pub(crate) fn parse_verdict_json(body: &str) -> Option<SkepticVerdict> {
     let raw: SkepticVerdictRaw = serde_json::from_str(body.trim()).ok()?;
     let refuted = raw.refuted?;
@@ -856,20 +821,9 @@ pub(crate) fn format_verifier_details_path(
     )
 }
 
-/// Aggregate the panel into a quorum result.
-///
 /// For a fan-out panel (`total > 1`), skeptic 0's not-refuted vote does NOT count.
-/// Approval needs a STRICT MAJORITY of the COLD panel (`skeptic_idx >= 1`): `needed = cold_count / 2 + 1`.
 /// Skeptic 0 is the resumed reject-gatekeeper, so its not-refuted vote must not tip a borderline panel toward approval.
-/// Its REFUTE still counts: in `refuted_count`, the pause/gaps summaries, and the upstream high-confidence decisive-refute short-circuit.
 /// `total <= 1` (the N==1 sole judge, or the short-circuit case where `results` holds only skeptic 0) keeps the simple all-votes rule (`needed = 1`).
-///
-/// A strict majority of the FULL panel was rejected: it would force cold unanimity on even N (N=4 needs 3/3), brittle to a single bad skeptic.
-/// The bar derives from the cold-panel size, not `total`, so it stays a true majority even when skeptic 0 is absent from `results`.
-///
-/// The adversarial bias to FAIL is enforced per skeptic, not at the aggregator.
-/// Transport, cancelled, runtime, and malformed outputs all degrade to a synthetic `refuted: true` vote in [`run_one_skeptic`].
-/// Returns `(refuted_count, total, quorum_achieved)`; the caller (`run_verification_stage`) also requires `!decisive_refute` for the final outcome.
 pub(crate) fn aggregate_skeptic_verdicts(results: &[SkepticResult]) -> (u32, u32, bool) {
     let total = results.len() as u32;
     // Defensive empty-case: `run_verification_stage` clamps N >= 1 before fan-out, but the function is `pub(crate)` and tests call it with `&[]`
@@ -1032,11 +986,9 @@ fn build_pause_summary(results: &[SkepticResult]) -> String {
     .join("\n")
 }
 
-/// Normalized fingerprint of a rejection's *raw* gaps, used to detect a stuck loop (identical fingerprint across attempts).
 /// Operates on the undecorated evidence, never the rendered `- [skeptic N, conf]` bullets.
 /// Identical gaps thus map to one fingerprint regardless of skeptic ordering/confidence.
 /// Uses the deduplicated, sorted, lowercased `path:line` citations; with none present, falls back to the sorted trimmed non-empty lines.
-/// Empty input yields `""`, which the stall guard treats as "no stable fingerprint".
 pub(crate) fn gap_fingerprint(raw_evidence: &[&str]) -> String {
     let normalized: Vec<Cow<'_, str>> = raw_evidence
         .iter()
@@ -1060,7 +1012,6 @@ pub(crate) fn gap_fingerprint(raw_evidence: &[&str]) -> String {
 
 /// Replace scratch/temp-path tokens with `<scratch>`: they embed per-attempt ids.
 /// Leaving them in makes an identical gap fingerprint different every attempt, so the stall guard never fires.
-/// Borrowed when no scratch token is present (the common case).
 /// Spacing collapses on the owned path, which is fine for a comparison-only fingerprint.
 fn normalize_scratch_paths(text: &str) -> Cow<'_, str> {
     const SCRATCH_MARKERS: &[&str] = &["/tmp/", "/var/folders/", "/private/tmp/"];
@@ -1094,7 +1045,6 @@ fn refuter_fingerprint_source(r: &SkepticResult) -> &str {
 /// Pull `path:line` citations out of free text, lowercasing the path.
 /// A token qualifies when the prefix before the FIRST colon looks like a path (contains `/` or `.`).
 /// The first colon-segment after the path must be all digits.
-/// This tolerates the `path:line:col` and trailing-colon forms common in compiler and test-runner output (e.g. `src/foo.rs:12:5: error`).
 fn extract_path_line_tokens(text: &str) -> Vec<String> {
     text.split(|c: char| c.is_whitespace())
         .filter_map(|raw| {
@@ -1186,7 +1136,6 @@ const GOAL_VERIFIER_RESUME_PROMPT_TEMPLATE: &str =
 
 /// Wrap the evidence packet (OBJECTIVE / CHANGES_FILE / PLAN_FILE / FINAL_RESPONSE) in `template`.
 /// Substitutes the kind-specific review lens into `{KIND_LENS}` and the runner-allocated output paths into `{DETAILS_FILE}` / `{VERDICT_FILE}`.
-/// The per-runner scratch dirs fill `{SKEPTIC_SCRATCH}` (this skeptic's own) and `{IMPLEMENTER_SCRATCH}` (the goal-wide implementer dir).
 /// Shared by the cold and resume skeptic prompts; only the template differs.
 #[allow(clippy::too_many_arguments)]
 fn render_verifier_prompt(
@@ -1396,10 +1345,7 @@ async fn read_skeptic_verdict(
 
 /// Spawn one skeptic under `spawn_id`, wait for its terminal response, and read the JSON verdict file.
 /// Emits no telemetry, so the orchestrator owns event emission for both the happy and failure paths uniformly.
-///
 /// `resume_from` (skeptic 0 on attempt > 1) renders the resume prompt and resumes the prior child session.
-/// If that spawn fails (e.g. the prior session no longer exists after a restart), it falls back to a cold spawn under the same `spawn_id`.
-/// Verification still runs either way.
 async fn run_one_skeptic(
     spawner: &Arc<dyn GoalClassifierSpawner>,
     skeptic_idx: u32,
@@ -1589,7 +1535,6 @@ pub(crate) struct VerificationStageInputs<'a> {
     pub max_runs: u32,
     /// Child session id of skeptic 0 from the goal's previous attempt, if any.
     /// When present and N > 1 the stage resumes it to re-check the prior gaps.
-    /// That includes the first attempt after a user pause/resume, which resets the attempt counter but preserves the gatekeeper.
     /// `None` before the first panel, after a snapshot restore that lost the session, or whenever N == 1 (the sole judge never resumes).
     pub prior_skeptic0_session_id: Option<&'a str>,
     /// Previous round's gaps summary (`last_classifier_gaps`), threaded into every skeptic prompt as `{PRIOR_GAPS}`.
@@ -1627,22 +1572,9 @@ impl From<GoalClassifierOutcome> for VerificationStageResult {
     }
 }
 
-/// Run the verification stage: the adversarial skeptic panel of `skeptic_count` spawns.
-/// Skeptic 0 runs first (and is resumed across attempts when N > 1); approval needs the cold-panel quorum (see [`aggregate_skeptic_verdicts`]).
-///
 /// Always emits a `GoalClassifierFired` for dashboard symmetry with the legacy single classifier.
-/// Then come a `GoalVerifierSkepticVerdict` per skeptic, an aggregate `GoalVerifierAggregateVerdict`, and a final `GoalClassifierVerdict`.
-/// The terminal outcome is one of `Achieved`, `NotAchieved`, `Blocked`, `FailOpenAchieved`, the same enum the drain path already consumes.
-///
-/// ## Cancellation
-///
 /// Verification runs inside the turn's `handle_prompt` (the abortable running task), so a turn-cancel (`Cmd+C`) drops this future.
 /// Merely dropping it does NOT notify the coordinator (it does not poll `result_tx.is_closed()`).
-/// The spawned skeptics are instead reaped via the parent-prompt-id match.
-/// The `ChannelSpawner` tags each skeptic `SubagentRequest` with the live `current_prompt_id`.
-/// On a turn-cancel, `cancel_running_turn_subagents` calls `cancel_by_parent_prompt_id`, which fires each child's cancel token.
-/// The cancel handler also pauses the goal (`UserPaused`).
-/// A cancelled verification thus leaves no partial verdict, and the user resumes with `/goal resume`.
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn run_verification_stage(
     spawner: Arc<dyn GoalClassifierSpawner>,
@@ -1812,14 +1744,9 @@ pub(crate) async fn run_verification_stage(
         prior_gaps: inputs.prior_gaps,
     };
 
-    // Escalating panel: when N > 1, run skeptic 0 alone first
-    // A skeptic 0 that refutes with high confidence is DECISIVE: it can never yield Achieved
-    // An ordinary (NON-blocking) decisive refute short-circuits, skipping the remaining N-1 spawns
-    // A blocking (contradiction/unverifiable) decisive refute instead fans out the full panel
-    // The panel then corroborates whether it is truly all-blocking (`Blocked`, needs the user) or there is also a fixable gap (`NotAchieved`)
-    // Any other skeptic-0 outcome (not-refuted, or refuted with medium/low confidence) also fans out
-    // Approval then requires the full-panel quorum in `aggregate_skeptic_verdicts`
-    // N == 1 keeps skeptic 0 cold each attempt (a resumed sole judge would be the biased approver we avoid), so it never resumes and returns `None`
+    // When N > 1, run skeptic 0 first: a high-confidence refute is decisive and can never yield Achieved.
+    // A non-blocking decisive refute skips the rest of the panel; a blocking refute fans out so the panel can distinguish Blocked from NotAchieved.
+    // N == 1 never resumes skeptic 0 (a resumed sole judge would be the biased approver), so it stays cold and returns None.
     let (results, decisive_refute, skeptic0_session_id): (
         Vec<SkepticResult>,
         bool,
@@ -1928,10 +1855,8 @@ pub(crate) async fn run_verification_stage(
         };
     }
 
-    // Route to Blocked only when EVERY refuter is a non-model-fixable blocker (contradiction/unverifiable)
-    // A lone blocking refuter (peers not refuting) is enough to route here by design
-    // `decisive_refute` already forced not-achieved above, so the only question is nudge-and-retry vs ask-the-user
-    // Over-pausing is cheaply undone by a resume, whereas nudging a model against an unfixable blocker is not
+    // Blocked only when EVERY refuter is a non-model-fixable blocker (contradiction/unverifiable) A lone blocking refuter (peers not refuting) is enough to route here by design `decisive_refute` already forced not-achieved.
+    // Over-pausing is cheaply undone by a resume, whereas nudging a model against an unfixable blocker is not.
     let all_blocking = results.iter().any(|r| r.refuted)
         && results
             .iter()
@@ -1965,7 +1890,6 @@ pub(crate) async fn run_verification_stage(
 }
 
 /// Render the aggregated details file the rejection directive points the model at.
-/// It holds the headline, the concise `## Gaps to fix` checklist, and a reference line listing the per-skeptic report paths.
 /// The skeptics' full reasoning stays in those files, not embedded here.
 /// Capped at [`GOAL_VERIFIER_PANEL_MAX_BYTES`].
 fn render_skeptic_panel_details(

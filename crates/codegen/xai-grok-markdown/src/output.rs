@@ -7,9 +7,6 @@ use ratatui::text::Line;
 use crate::buffers::{CodeBlockMeta, TableCopyMeta};
 
 /// A hyperlink target extracted from rendered markdown.
-///
-/// Each instance maps a contiguous cell range on one rendered line to a URL.
-/// When a link wraps across lines, multiple `HyperlinkTarget`s share the same `id` and `url`.
 /// The shared `id` enables OSC 8 hover-grouping across wrapped lines.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HyperlinkTarget {
@@ -24,38 +21,24 @@ pub struct HyperlinkTarget {
 }
 
 /// A fenced code block discovered while rendering markdown.
-///
-/// One `CodeBlockSpan` is produced per **closed** fenced code block, in document order.
-/// An unterminated (still-open) fence at the end of the input produces no span.
 /// `pulldown-cmark` synthesizes a block end at end-of-input, so closure requires a closing fence after the body rather than the end event alone.
-///
-/// The span describes any fenced block, whatever its info string (e.g. `mermaid`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodeBlockSpan {
     /// The fence info string, e.g. `"mermaid"` or `"rust"`.
-    ///
     /// Empty for a fence opened with no info (just ` ``` `).
     /// Reported verbatim as `pulldown-cmark` yields it (the full info string, not just the first word).
     pub info: String,
 
     /// The fence body content: the clean, container-stripped code/diagram source.
-    ///
-    /// This is `pulldown-cmark`'s merged body text, so container markers are removed (a blockquote `>` / list indentation does **not** leak in).
-    /// CRLF line endings are normalized to `\n`.
-    /// It ends with the body's trailing newline and is empty for an empty-body fence.
-    /// Prefer this over slicing [`source_byte_range`](Self::source_byte_range) for the logical body (e.g. a Mermaid diagram in a blockquote).
+    /// Prefer this over slicing [`source_byte_range`](Self::source_byte_range) for the logical body.
     pub body: String,
 
     /// Range of **pre-wrap** rendered body lines for this block, as indices into [`MarkdownRenderOutput::lines`] / [`MarkdownRenderView::lines`].
-    ///
     /// Covers only the body, with the delimiter ` ``` ` lines excluded, so hiding those delimiters in pretty mode does not affect it.
     /// Empty (`start == end`) for a fence with an empty body.
     pub output_line_range: Range<usize>,
 
     /// Byte range of the fence body in the **raw** source text.
-    ///
-    /// Spans from the first body byte to the last, with the delimiter fence lines excluded; empty (`start == end`) for an empty body.
-    /// Unlike [`body`](Self::body) this is a raw slice of the source.
     /// For a fence nested in a blockquote or list, continuation lines may keep container markers/indentation (and `\r` for CRLF).
     /// Use [`body`](Self::body) for the clean content.
     pub source_byte_range: Range<usize>,
@@ -138,15 +121,7 @@ impl<'a> MarkdownRenderView<'a> {
 }
 
 /// Map parse-time code-block metadata onto the rendered output.
-///
-/// Runs after `render_ratatui` has produced `line_source_map`, turning each captured [`CodeBlockMeta`] into a public [`CodeBlockSpan`].
-/// The pre-wrap body line range is derived from `line_source_map`: a fence body occupies source lines `[src_first, src_last]`.
 /// The renderer emits exactly one output line per body source line and never maps a non-body line into that range.
-/// The matching output lines therefore form one contiguous run.
-/// `line_source_map` is non-decreasing, so the run is located with two `partition_point`s.
-///
-/// Cost is O(text_len + lines·log) per render.
-/// The metas are in ascending body order, so newline counts come from a single monotonic forward cursor over `text`.
 /// Rescanning from byte 0 for every meta would be O(metas·text_len), quadratic in the number of fences on the streaming hot path.
 pub(crate) fn build_code_block_spans(
     text: &str,

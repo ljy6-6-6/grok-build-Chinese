@@ -209,11 +209,8 @@ fn bench_full_scroll(c: &mut Criterion) {
     });
 }
 
-/// Scroll through a large scrollback the way production does.
-/// Per step, locate the paint window via `ScrollbackState::paint_window` (partition point over the cached virtual-y prefix sum).
-/// Render only that slice with `content_y0`/`entry_index_base`, mirroring `ScrollbackPane::render_content`.
-/// `full_scroll` above measures the renderer's full-list walk.
-/// This measures the shipped windowed path, so regressions in the window computation show up here.
+/// Scroll through a large scrollback the way production does. Render only that slice with
+/// `content_y0`/`entry_index_base`, mirroring `ScrollbackPane::render_content`.
 fn bench_windowed_scroll(c: &mut Criterion) {
     let (state, _think_id) = build_reveal_state();
     let viewport = Rect::new(0, 0, VIEWPORT_WIDTH, VIEWPORT_HEIGHT);

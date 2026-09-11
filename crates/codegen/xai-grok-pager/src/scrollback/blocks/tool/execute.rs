@@ -35,11 +35,7 @@ pub struct ExecuteToolCallBlock {
     pub header_display: Option<String>,
 }
 impl ExecuteToolCallBlock {
-    /// Create a new execute block.
-    ///
-    /// `started_at` defaults to `None`.
-    /// For streaming blocks, timing begins when the block enters running UI state (via `start_timing()`).
-    /// Pre-completed blocks never get timing; they show `"-"`.
+    /// Create a new execute block. Pre-completed blocks never get timing; they show `"-"`.
     pub fn new(command: impl Into<String>) -> Self {
         Self {
             command: command.into(),
@@ -127,7 +123,6 @@ impl ExecuteToolCallBlock {
     }
 
     /// Display form of the command for the header (may peel `cd &&` prefix).
-    ///
     /// Preserves physical newlines so soft-wrap / copy can keep line structure.
     /// Callers that need a single ratatui line must flatten themselves.
     fn command_display(&self) -> &str {
@@ -135,7 +130,6 @@ impl ExecuteToolCallBlock {
     }
 
     /// Non-empty description for the header title, if the model supplied one.
-    ///
     /// When `strip_run_prefix` is true (Label style already has a bold `Run ` prefix), a leading `Run` / `Running` on the description is dropped.
     /// This keeps `Run Run the tests` from ever rendering.
     fn description_display(&self, strip_run_prefix: bool) -> Option<String> {
@@ -156,11 +150,9 @@ impl ExecuteToolCallBlock {
         })
     }
 
-    /// `$ command` line (shell prompt style).
-    /// Sole header when there is no description; secondary line when there is one.
-    ///
-    /// Flattens newlines for single-line layouts (collapsed truncate).
-    /// Expanded rendering uses soft-wrap via [`Self::push_shell_command_soft_wrap`].
+    /// `$ command` line (shell prompt style). Sole header when there is no description. secondary line when there is
+    /// one. Flattens newlines for single-line layouts (collapsed truncate). Expanded rendering uses soft-wrap via
+    /// [`Self::push_shell_command_soft_wrap`].
     fn shell_command_line(&self, theme: &Theme, muted_command: bool) -> Line<'static> {
         let command = self.command_display().replace('\n', " ");
         let command = if command.trim().is_empty() {
@@ -344,23 +336,8 @@ impl ExecuteToolCallBlock {
         Line::from(spans)
     }
 
-    /// Header lines for the execute block (description-first when a description exists).
-    ///
-    /// Without description:
-    /// - Shell: `$ command`
-    /// - Label: `Run [(user) ]command`
-    ///
-    /// With description:
-    /// - Shell: description title; optionally `$ command` on the next line
-    /// - Label: `Run [(user) ]description`; optionally `$ command` on the next line
-    ///
-    /// Collapsed mode passes `include_command = false` so only the description title is shown, for density.
-    /// Expanded/truncated include the command line.
-    ///
-    /// When `muted` is true, command/description body uses muted gray (collapsed).
-    /// Uses precomputed `header_display` when set; `self.command` stays full.
-    ///
-    /// Returns `(line, prefix_span_count)`; prefix spans (`"Run "` / `"(user) "` / `"$ "`) are not selectable.
+    /// Description-first when a description exists; collapsed mode omits the command line for density.
+    /// When `muted`, command/description body uses muted gray. Prefix spans (`Run `, `(user) `, `$ `) are not selectable.
     fn header_lines(
         &self,
         theme: &Theme,
@@ -444,15 +421,9 @@ impl ExecuteToolCallBlock {
         }
     }
 
-    /// Push header `BlockLine`s, selecting non-prefix spans.
-    ///
-    /// When `truncate_to_width` is true (collapsed one-line budget), each logical header line is hard-truncated.
-    /// Otherwise it soft-wraps: description titles use hanging word-wrap, command lines use permission-panel bash soft-wrap.
-    /// Command lines are Shell `$ …`, Label `Run …` when the command is the title, and the secondary `$ command` under a description.
     /// `include_command` is false in collapsed mode so a description title alone is shown without the command line.
-    ///
-    /// `width` must already be the block content width (bullet accounted for).
-    /// Do not also pass bullet width as `extra_indent`; hang is only for the `$` / `Run` prefix.
+    /// `width` must already be the block content width (bullet accounted for). Do not also pass bullet width as
+    /// `extra_indent`. hang is only for the `$` / `Run` prefix.
     #[allow(clippy::too_many_arguments)]
     fn push_header_lines(
         &self,
@@ -575,7 +546,6 @@ impl ExecuteToolCallBlock {
     }
 
     /// Render with optional truncation.
-    ///
     /// If `truncate` is Some((first, last)), shows first N lines, ellipsis, last M lines.
     /// If `truncate` is None, shows all output lines.
     fn render_with_truncation(
@@ -586,6 +556,7 @@ impl ExecuteToolCallBlock {
         header_style: ExecuteHeaderStyle,
         extra_indent: usize,
         locale: &crate::locale::LocaleContext,
+        result_pad: usize,
     ) -> BlockOutput {
         let mut lines: Vec<BlockLine> = Vec::new();
         self.push_header_lines_with_locale(
@@ -606,9 +577,10 @@ impl ExecuteToolCallBlock {
         {
             lines.push(BlockLine::separator(Line::from("")));
             let error_style = ratatui::style::Style::default().fg(theme.accent_error);
+            let err_pad = " ".repeat(result_pad);
             for line in error.lines() {
                 lines.push(BlockLine::separator(Line::from(Span::styled(
-                    line.to_string(),
+                    format!("{err_pad}{line}"),
                     error_style,
                 ))));
             }
@@ -628,8 +600,19 @@ impl ExecuteToolCallBlock {
                     .map(|rl| rl.line)
                     .collect();
 
-            let (wrapped, joiners) =
-                word_wrap_lines_with_joiners(styled_lines, width.saturating_sub(2).max(20));
+            let (wrapped, joiners) = word_wrap_lines_with_joiners(
+                styled_lines,
+                width.saturating_sub(2 + result_pad).max(20),
+            );
+            let pad = " ".repeat(result_pad);
+            let apply_pad = |mut line: BlockLine| -> BlockLine {
+                if result_pad == 0 {
+                    return line;
+                }
+                line.content.spans.insert(0, Span::raw(pad.clone()));
+                crate::scrollback::types::shift_selection_metadata_for_prefix(&mut line, 1);
+                line
+            };
             let total = wrapped.len();
 
             // Apply truncation if specified and content exceeds limits
@@ -638,12 +621,12 @@ impl ExecuteToolCallBlock {
                 if total > threshold {
                     // First N lines: stdout range base
                     for (wrapped_line, joiner) in wrapped.iter().zip(joiners.iter()).take(first) {
-                        lines.push(
+                        lines.push(apply_pad(
                             BlockLine::styled(wrapped_line.clone())
                                 .with_panel_background(theme.bg_dark)
                                 .with_selection_range(Some(EXECUTE_STDOUT_RANGE_BASE))
                                 .with_joiner(joiner.clone()),
-                        );
+                        ));
                     }
                     let hidden = total - threshold;
                     let hidden_label = if locale.locale() == crate::locale::UiLocale::ZhCn {
@@ -651,41 +634,41 @@ impl ExecuteToolCallBlock {
                     } else {
                         format!("\u{2026} +{hidden} lines")
                     };
-                    lines.push(
+                    lines.push(apply_pad(
                         BlockLine::separator(Line::from(Span::styled(hidden_label, theme.muted())))
                             .with_panel_background(theme.bg_dark),
-                    );
+                    ));
                     // Last M lines: range base + 1 (distinct from first chunk)
                     for (wrapped_line, joiner) in
                         wrapped.iter().zip(joiners.iter()).skip(total - last)
                     {
-                        lines.push(
+                        lines.push(apply_pad(
                             BlockLine::styled(wrapped_line.clone())
                                 .with_panel_background(theme.bg_dark)
                                 .with_selection_range(Some(EXECUTE_STDOUT_RANGE_BASE + 1))
                                 .with_joiner(joiner.clone()),
-                        );
+                        ));
                     }
                 } else {
                     // Content fits, show all with same range
                     for (wrapped_line, joiner) in wrapped.into_iter().zip(joiners) {
-                        lines.push(
+                        lines.push(apply_pad(
                             BlockLine::styled(wrapped_line)
                                 .with_panel_background(theme.bg_dark)
                                 .with_selection_range(Some(EXECUTE_STDOUT_RANGE_BASE))
                                 .with_joiner(joiner),
-                        );
+                        ));
                     }
                 }
             } else {
                 // No truncation, show all with same range
                 for (wrapped_line, joiner) in wrapped.into_iter().zip(joiners) {
-                    lines.push(
+                    lines.push(apply_pad(
                         BlockLine::styled(wrapped_line)
                             .with_panel_background(theme.bg_dark)
                             .with_selection_range(Some(EXECUTE_STDOUT_RANGE_BASE))
                             .with_joiner(joiner),
-                    );
+                    ));
                 }
             }
         }
@@ -724,6 +707,12 @@ impl BlockContent for ExecuteToolCallBlock {
 
         // Content width already nets out the bullet; hang indent is only for `$` / `Run` prefix (adding the bullet again would double-count it)
         let content_width = ctx.content_width();
+        // Minimal drops the accent gutter; pad results by `$ ` so they line up with the command.
+        let result_pad = if ctx.appearance.scrollback.blocks.thinking.rail_under_bullet {
+            2
+        } else {
+            0
+        };
 
         match ctx.mode {
             DisplayMode::Collapsed => {
@@ -751,6 +740,7 @@ impl BlockContent for ExecuteToolCallBlock {
                 header_style,
                 0,
                 &ctx.locale,
+                result_pad,
             ),
             DisplayMode::Expanded => self.render_with_truncation(
                 &theme,
@@ -759,6 +749,7 @@ impl BlockContent for ExecuteToolCallBlock {
                 header_style,
                 0,
                 &ctx.locale,
+                result_pad,
             ),
         }
     }
@@ -798,11 +789,8 @@ impl BlockContent for ExecuteToolCallBlock {
         self.description_display(true).is_some() || self.output.is_some() || self.error.is_some()
     }
 
-    /// Minimum fold mode used by collapse and the running expand chevron.
-    ///
-    /// Agent tools default to Collapsed (title only), no auto-expand.
-    /// User `!` bash while running uses Truncated so interactive output streams and the chevron treats that as min-fold.
-    /// When finished, Collapsed is always the true minimum (user can fold to title-only).
+    /// Minimum fold mode used by collapse and the running expand chevron. Agent tools default to Collapsed (title
+    /// only), no auto-expand. When finished, Collapsed is always the true minimum (user can fold to title-only).
     fn collapse_mode(&self, is_running: bool) -> DisplayMode {
         if self.bash_mode && is_running {
             DisplayMode::Truncated
@@ -811,10 +799,9 @@ impl BlockContent for ExecuteToolCallBlock {
         }
     }
 
-    /// Agent tools start **Collapsed** (no auto-expand of stdout).
-    /// User `!` bash defaults to Truncated so a kind-upgrade or first materialize lands Truncated.
-    /// `finish_running` then expands because the mode is not Collapsed.
-    /// Same-kind completion preserves Truncated rather than resetting.
+    /// Agent tools start Collapsed (no auto-expand of stdout). User `!` bash defaults to Truncated so a kind-upgrade or
+    /// first materialize lands Truncated. `finish_running` then expands because the mode is not Collapsed. Same-kind
+    /// completion preserves Truncated rather than resetting.
     fn default_display_mode(&self) -> DisplayMode {
         if self.bash_mode {
             DisplayMode::Truncated
@@ -839,11 +826,22 @@ impl BlockContent for ExecuteToolCallBlock {
         let theme = Theme::current();
         let header_style = ctx.appearance.scrollback.blocks.execute.header_style;
 
-        let mut lines: Vec<Line<'static>> = self
-            .header_lines_with_locale(&theme, header_style, false, true, &ctx.locale)
-            .into_iter()
-            .map(|(line, _)| line)
-            .collect();
+        // `header_lines` flattens `\n` to spaces, which smashes multi-line commands into one run-on row in the block viewer
+        // The viewer draws no bullet, so `ctx.width` (not `content_width()`) is the row width
+        let mut header_rows = Vec::new();
+        self.push_header_lines_with_locale(
+            &mut header_rows,
+            &theme,
+            header_style,
+            /*muted_command*/ false,
+            ctx.width as usize,
+            /*extra_indent*/ 0,
+            /*truncate_to_width*/ false,
+            /*include_command*/ true,
+            &ctx.locale,
+        );
+        let mut lines: Vec<Line<'static>> =
+            header_rows.into_iter().map(|row| row.content).collect();
 
         if self.output.is_none()
             && let Some(error) = &self.error
@@ -1108,5 +1106,34 @@ mod tests {
     fn test_with_output() {
         let block = ExecuteToolCallBlock::new("echo test").with_output("plain text output");
         assert_eq!(block.output, Some("plain text output".to_string()));
+    }
+
+    #[test]
+    fn preamble_multiline_command_keeps_separate_lines() {
+        // Regression: the block viewer preamble flattened `\n` to spaces, smashing multi-line commands into one row
+        let block = ExecuteToolCallBlock::new("export XAI_ROOT=/tmp\ncd /tmp\necho start");
+        let mut appearance = AppearanceConfig::default();
+        appearance.scrollback.blocks.execute.header_style = ExecuteHeaderStyle::Shell;
+        let ctx = BlockContext {
+            mode: DisplayMode::Expanded,
+            is_running: false,
+            width: 120,
+            raw: false,
+            max_lines: None,
+            appearance,
+            is_selected: false,
+            cwd: None,
+        };
+        let plain: Vec<String> = block
+            .preamble(&ctx)
+            .expect("execute preamble is always present")
+            .lines
+            .iter()
+            .map(line_text)
+            .collect();
+        assert_eq!(
+            plain,
+            vec!["$ export XAI_ROOT=/tmp", "  cd /tmp", "  echo start"]
+        );
     }
 }

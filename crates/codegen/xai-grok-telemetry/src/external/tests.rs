@@ -167,7 +167,7 @@ fn external_allowed_keys_are_pinned() {
         "tip",
         "action",
     ];
-    let actual: Vec<&str> = schema::ALL_KEYS.iter().map(|k| k.as_str()).collect();
+    let actual: Vec<&str> = schema::ALL_KEYS.iter().map(|k| k.as_ref()).collect();
     assert_eq!(
         actual, expected,
         "EXTERNAL_ALLOWED_KEYS changed: a new key is a wire-schema change — confirm it carries \
@@ -244,7 +244,7 @@ fn event_names_are_pinned() {
     ];
     assert_eq!(expected.len(), <E as strum::EnumCount>::COUNT);
     for (variant, name) in expected {
-        assert_eq!(variant.as_str(), *name, "event name is a wire commitment");
+        assert_eq!(variant.as_ref(), *name, "event name is a wire commitment");
     }
 }
 
@@ -426,6 +426,35 @@ fn agent_connect_timeout_emits_phase_histogram_and_timeout_counter() {
 }
 
 #[test]
+fn startup_sub_timers_carry_outcome_and_auth_mode() {
+    let ev = events::StartupSubTimers {
+        timings: vec![("acp_initialize.handler".into(), 6)],
+        outcome: crate::startup::StartupOutcome::Timeout,
+        auth_mode: crate::startup::AuthMode::Team,
+    };
+    let rec = schema::map_startup_sub_timers(&ev).expect("subtimer record");
+    assert_eq!(
+        rec.metrics,
+        vec![MetricIncrement::StartupSubTimerDuration {
+            phase: "acp_initialize.handler".into(),
+            duration_ms: 6,
+            outcome: crate::startup::StartupOutcome::Timeout.label().to_string(),
+            auth_mode: crate::startup::AuthMode::Team.label().to_string(),
+        }]
+    );
+
+    // Pin the wire literals so a label rename or serialization change is caught here.
+    let MetricIncrement::StartupSubTimerDuration {
+        outcome, auth_mode, ..
+    } = &rec.metrics[0]
+    else {
+        panic!("expected a startup sub-timer metric: {:?}", rec.metrics);
+    };
+    assert_eq!(outcome, "timeout");
+    assert_eq!(auth_mode, "team");
+}
+
+#[test]
 fn startup_completed_records_the_total_histogram_only() {
     let stream = build(gates_off());
     emit_event_into(
@@ -440,6 +469,12 @@ fn startup_completed_records_the_total_histogram_only() {
             session_replay_ms: None,
             session_git_scan_ms: Some(40),
             session_spawn_ms: Some(300),
+            init_process_ms: Some(15),
+            resolve_config_ms: Some(22),
+            remote_settings_ms: Some(80),
+            models_manager_ms: Some(40),
+            managed_policy_auth_wait_ms: None,
+            managed_policy_config_sync_ms: None,
             time_to_first_frame_ms: Some(650),
         },
     );
@@ -447,6 +482,100 @@ fn startup_completed_records_the_total_histogram_only() {
     assert_eq!(
         exported_metric_names(&stream),
         vec!["grok_code.startup.total".to_owned()]
+    );
+}
+
+fn prompt_latency(ttft_ms: Option<u64>, ttfm_ms: Option<u64>) -> events::PromptLatency {
+    events::PromptLatency {
+        turn_index: 0,
+        total_ms: 0,
+        mcp_wait_ms: 0,
+        tool_collection_ms: 0,
+        repo_status_wait_ms: None,
+        model_call_ms: 0,
+        pre_model_ms: 0,
+        mcp_server_count: 0,
+        mcp_tools_registered: 0,
+        mcp_strategy: events::McpStrategy::Blocking,
+        model_id: "sk-supersecretmodeltoken000".into(),
+        ttft_ms,
+        ttlb_ms: 0,
+        attempts: 1,
+        output_tokens: None,
+        before_first_model_ms: 0,
+        sampling_ms: 0,
+        tool_blocking_ms: 0,
+        compaction_ms: 0,
+        between_sampling_overhead_ms: 0,
+        after_last_sampling_ms: 0,
+        turn_total_ms: 0,
+        sampling_request_count: 0,
+        sampling_retry_count: 0,
+        ttfm_ms,
+    }
+}
+
+/// The `model` attribute on the first `grok_code.turn.ttft` histogram datapoint, if present.
+fn turn_ttft_metric_model(stream: &TestStream) -> Option<String> {
+    use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+    for rm in &stream.metrics.get_finished_metrics().unwrap() {
+        for sm in rm.scope_metrics() {
+            for m in sm.metrics().filter(|m| m.name() == "grok_code.turn.ttft") {
+                if let AggregatedMetrics::U64(MetricData::Histogram(hist)) = m.data() {
+                    for dp in hist.data_points() {
+                        for kv in dp.attributes() {
+                            if kv.key.as_str() == "model" {
+                                return Some(kv.value.as_str().into_owned());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+#[test]
+fn prompt_latency_records_ttft_ttfm_histograms_only() {
+    let both = build(gates_off());
+    emit_event_into(&both, &prompt_latency(Some(120), Some(450)));
+    assert!(exported_events(&both).is_empty(), "metric-only mapping");
+    let mut names = exported_metric_names(&both);
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            "grok_code.turn.ttfm".to_owned(),
+            "grok_code.turn.ttft".to_owned()
+        ]
+    );
+    assert_eq!(
+        turn_ttft_metric_model(&both).as_deref(),
+        Some("[REDACTED_SECRET]"),
+        "model rides the metric datapoint scrubbed"
+    );
+
+    let ttft_only = build(gates_off());
+    emit_event_into(&ttft_only, &prompt_latency(Some(120), None));
+    assert_eq!(
+        exported_metric_names(&ttft_only),
+        vec!["grok_code.turn.ttft".to_owned()]
+    );
+
+    let ttfm_only = build(gates_off());
+    emit_event_into(&ttfm_only, &prompt_latency(None, Some(450)));
+    assert_eq!(
+        exported_metric_names(&ttfm_only),
+        vec!["grok_code.turn.ttfm".to_owned()]
+    );
+
+    let neither = build(gates_off());
+    emit_event_into(&neither, &prompt_latency(None, None));
+    assert!(exported_events(&neither).is_empty());
+    assert!(
+        exported_metric_names(&neither).is_empty(),
+        "None gate records nothing"
     );
 }
 
@@ -511,10 +640,9 @@ fn api_request_cost_and_cache_creation_export_attrs_and_metrics() {
     );
 }
 
-/// One failed turn increments `error.count` exactly once.
-/// The failure emits `ApiError` (and possibly `RateLimitHit`) alongside `TurnCompleted{Error}`.
-/// `TurnCompleted{Error}` is the single increment source; the api_error log events carry no metric.
-/// A regression here once double-counted errors at customer collectors.
+/// One failed turn increments `error.count` exactly once. The failure emits `ApiError` (and possibly `RateLimitHit`)
+/// alongside `TurnCompleted{Error}`. `TurnCompleted{Error}` is the single increment source; the api_error log events
+/// carry no metric. A regression here once double-counted errors at customer collectors.
 #[test]
 fn one_failed_turn_increments_error_count_exactly_once() {
     let stream = build(gates_off());
@@ -542,8 +670,11 @@ fn one_failed_turn_increments_error_count_exactly_once() {
             duration_ms: 10,
             tool_call_count: 0,
             model_id: "grok-4".into(),
+            session_id: None,
             cancellation_category: None,
             error_category: Some("rate_limit".into()),
+            error_code: None,
+            error_detail: None,
         },
     );
     // Both api_error events are exported as log records
@@ -584,13 +715,47 @@ fn turn_error_increments_error_count() {
             duration_ms: 10,
             tool_call_count: 0,
             model_id: "grok-4".into(),
+            session_id: None,
             cancellation_category: None,
             error_category: Some("server_error".into()),
+            error_code: None,
+            error_detail: None,
         },
     );
     let mut names = exported_metric_names(&stream);
     names.sort();
     assert_eq!(names, vec!["grok_code.error.count", "grok_code.turn.count"]);
+}
+
+#[test]
+fn turn_completed_carries_event_session_id_without_ctx() {
+    // No ambient ctx here (as on the abort path), so `session.id` must come from the event field.
+    let stream = build(gates_off());
+    emit_event_into(
+        &stream,
+        &events::TurnCompleted {
+            outcome: events::Outcome::Cancelled,
+            duration_ms: 7,
+            tool_call_count: 2,
+            model_id: "grok-4".into(),
+            session_id: Some("sess-abort".into()),
+            cancellation_category: Some("task_aborted".into()),
+            error_category: None,
+            error_code: None,
+            error_detail: None,
+        },
+    );
+    let events = exported_events(&stream);
+    let event = events
+        .iter()
+        .find(|(name, _)| name == "grok_code.turn_completed")
+        .expect("turn_completed exported");
+    assert_eq!(attr(event, "session.id").as_deref(), Some("sess-abort"));
+    assert_eq!(attr(event, "outcome").as_deref(), Some("cancelled"));
+    assert_eq!(
+        attr(event, "cancellation_category").as_deref(),
+        Some("task_aborted")
+    );
 }
 
 #[test]
@@ -606,6 +771,7 @@ fn tool_result_hook_rewrote_is_content_free() {
                 hook_rewrote,
                 duration_ms: 5,
                 tool_result_size_bytes: None,
+                model_id: "grok".into(),
                 file_path: None,
                 parameters: None,
                 tool_use_id: None,
@@ -616,6 +782,27 @@ fn tool_result_hook_rewrote_is_content_free() {
         let events = exported_events(&stream);
         assert_eq!(attr(&events[0], "hook_rewrote").as_deref(), Some(want));
     }
+}
+
+/// The `model` attribute on the first `grok_code.tool.usage` datapoint, if present.
+fn tool_usage_metric_model(stream: &TestStream) -> Option<String> {
+    use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+    for rm in &stream.metrics.get_finished_metrics().unwrap() {
+        for sm in rm.scope_metrics() {
+            for m in sm.metrics().filter(|m| m.name() == "grok_code.tool.usage") {
+                if let AggregatedMetrics::U64(MetricData::Sum(sum)) = m.data() {
+                    for dp in sum.data_points() {
+                        for kv in dp.attributes() {
+                            if kv.key.as_str() == "model" {
+                                return Some(kv.value.as_str().into_owned());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 #[test]
@@ -629,6 +816,7 @@ fn tool_result_gates_off_collapses_and_reduces() {
             hook_rewrote: false,
             duration_ms: 42,
             tool_result_size_bytes: None,
+            model_id: "grok".into(),
             file_path: Some("/Users/alice/secret-project/main.rs".into()),
             parameters: Some(serde_json::json!({"text": "CANARY_TOOL_ARGS"})),
             tool_use_id: None,
@@ -640,6 +828,12 @@ fn tool_result_gates_off_collapses_and_reduces() {
     let ev = &events[0];
     assert_eq!(ev.0, "grok_code.tool_result");
     assert_eq!(attr(ev, "tool_name").as_deref(), Some("mcp_tool"));
+    assert_eq!(attr(ev, "model").as_deref(), Some("grok"));
+    assert_eq!(
+        tool_usage_metric_model(&stream).as_deref(),
+        Some("grok"),
+        "tool.usage metric datapoint must carry model"
+    );
     assert_eq!(attr(ev, "mcp_tool.name").as_deref(), Some("mcp_tool"));
     assert_eq!(attr(ev, "mcp_server.name").as_deref(), Some("mcp_server"));
     assert_eq!(attr(ev, "file_extension").as_deref(), Some("rs"));
@@ -676,6 +870,7 @@ fn tool_result_details_gate_exposes_verbatim_scrubbed() {
             hook_rewrote: false,
             duration_ms: 42,
             tool_result_size_bytes: None,
+            model_id: "grok".into(),
             file_path: Some(path.clone()),
             parameters: Some(serde_json::json!({"key": "sk-CANARYabcdefghij1234567890"})),
             tool_use_id: None,
@@ -996,10 +1191,9 @@ fn unmapped_events_produce_nothing() {
     assert!(ev.external_record().is_none());
 }
 
-/// Events emitted exclusively via `EmitterOrigin::Workspace` (`log_session_event_with_origin`) must not carry an external mapping.
-/// The fan-out hook deliberately lives only in the Shell-origin wrappers.
-/// The workspace-only events today are the xai-grok-workspace sampler events.
-/// Those live outside this crate with no `telemetry_event!` binding here; this pin guards the in-crate set.
+/// Events emitted exclusively via `EmitterOrigin::Workspace` (`log_session_event_with_origin`) must not carry an external
+/// mapping. The fan-out hook deliberately lives only in the Shell-origin wrappers. The workspace-only events today are
+/// the xai-grok-workspace sampler events.
 #[test]
 fn workspace_only_events_have_no_external_mapping() {
     use crate::events::TelemetryEvent as _;
@@ -1195,6 +1389,7 @@ fn lock_content_gates_drops_prompt_and_response_not_email() {
             hook_rewrote: false,
             duration_ms: 1,
             tool_result_size_bytes: None,
+            model_id: "grok".into(),
             file_path: None,
             parameters: Some(serde_json::json!({"command": "echo hi"})),
             tool_use_id: Some("call-lock".into()),
@@ -1284,6 +1479,7 @@ fn details_without_content_exports_preview_not_bodies() {
         hook_rewrote: false,
         duration_ms: 1,
         tool_result_size_bytes: None,
+        model_id: "grok".into(),
         file_path: Some("/tmp/x.rs".into()),
         parameters: Some(serde_json::json!({"command": "ls -la /tmp"})),
         tool_use_id: Some("call-d".into()),
@@ -1314,6 +1510,7 @@ fn content_without_details_exports_bodies_not_preview() {
         hook_rewrote: false,
         duration_ms: 1,
         tool_result_size_bytes: None,
+        model_id: "grok".into(),
         file_path: Some("/tmp/secret.rs".into()),
         parameters: Some(serde_json::json!({"command": "echo hi", "body": "full"})),
         tool_use_id: Some("call-c".into()),
@@ -1430,6 +1627,7 @@ fn full_command_skips_512_collapse() {
         hook_rewrote: false,
         duration_ms: 1,
         tool_result_size_bytes: None,
+        model_id: "grok".into(),
         file_path: None,
         parameters: Some(serde_json::json!({"command": long})),
         tool_use_id: Some("call-1".into()),
@@ -1482,10 +1680,8 @@ fn assistant_response_gate_exports_text() {
 
 #[test]
 fn assistant_response_with_url_does_not_drop_at_validator() {
-    // A2 laptop canary: gated `response` often contains https://… after the
-    // model replies. Emit scrubs; the validator must not treat the already-
-    // scrubbed origin as still-dirty (`redact_secrets` returns Owned whenever
-    // MATCH_ANY hits).
+    // A2 laptop canary: gated `response` often contains https://… after the model replies. Emit scrubs; the validator must
+    // not treat the already- scrubbed origin as still-dirty (`redact_secrets` returns Owned whenever MATCH_ANY hits).
     let stream = build(gates_all_on());
     let text = "listed files; see https://example.com/docs?token=CANARY for help";
     emit_event_into(

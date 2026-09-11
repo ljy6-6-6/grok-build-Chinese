@@ -20,6 +20,7 @@ pub const BOT_RELAY_CAPABILITIES: &[&str] = &[
     Method::BotRoster.as_wire_str(),
     Method::BotStatus.as_wire_str(),
     Method::BotTranscriptOffbox.as_wire_str(),
+    Method::BotUsage.as_wire_str(),
     Method::BotSubscribe.as_wire_str(),
     Method::BotUnsubscribe.as_wire_str(),
     Method::BotBindConversation.as_wire_str(),
@@ -71,6 +72,12 @@ pub const COMMAND_REJECTED_ATTACHMENT_TOO_LARGE: &str = "attachment_too_large";
 /// `reason` on `command_rejected` when the BotChat upload is not PostProcessDone.
 pub const COMMAND_REJECTED_ATTACHMENT_NOT_READY: &str = "attachment_not_ready";
 
+/// `reason` on `command_rejected` when the live box gateway refused a well-formed command with its own sentence.
+/// The refusal is an HTTP 4xx carrying a JSON `error` body: `detail.upstream_message`
+/// carries that sentence, and a `failureCode` lands in `detail.upstream` as
+/// `code=<failureCode>`. Nothing was accepted.
+pub const COMMAND_REJECTED_BOX_REFUSED: &str = "box_refused";
+
 /// `reason` on `command_rejected` when the box refused a well-formed
 /// catalog method (capability skew, not a client catalog bug).
 pub const COMMAND_REJECTED_GATEWAY_UNKNOWN_METHOD: &str = "gateway/unknown-method";
@@ -88,6 +95,7 @@ pub const COMMAND_REJECTED_REASONS: &[&str] = &[
     COMMAND_REJECTED_ATTACHMENT_NOT_READY,
     COMMAND_REJECTED_ATTACHMENT_TOO_LARGE,
     COMMAND_REJECTED_ATTACHMENT_WRONG_SOURCE,
+    COMMAND_REJECTED_BOX_REFUSED,
     COMMAND_REJECTED_GATEWAY_UNKNOWN_METHOD,
     COMMAND_REJECTED_HARNESS_REFUSED,
     COMMAND_REJECTED_NOT_SUPPORTED_IN_LIVE,
@@ -158,26 +166,34 @@ pub struct BotVncDescriptorResult {
 
 // ── bot.roster ───────────────────────────────────────────────────────────
 
-/// `bot.roster` params. Cold — never wakes the box.
+/// `bot.roster` params. A live read from the box that may wake a
+/// hibernated box. The hub bounds the wait and answers a retryable
+/// `box_unavailable` (`box_waking` / `box_hibernated` / `wake_failed`) or
+/// `box_migrating` while the box is coming up; an empty `agents` list is
+/// only ever a real answer from a live box, never the result of a failure.
 #[typeshare]
 pub type BotRosterParams = BotEmptyParams;
 
-/// One cached roster row.
+/// One roster row, read live from the box.
 #[typeshare]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BotRosterEntry {
     pub agent_id: String,
     pub name: String,
-    /// One of `running`, `idle` or `unknown`. A row read off-box is always
-    /// `unknown`: the durable registry holds identities, not activity. A later
-    /// read against a live box replaces it.
+    /// One of `running`, `idle` or `unknown`.
     pub status: String,
-    /// Unix time in milliseconds of the agent's last turn. Absent on a cold
-    /// row: the durable registry records no turn time.
+    /// Unix time in milliseconds of the agent's last turn, when the box
+    /// reports one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[typeshare(serialized_as = "Option<I54>")]
     pub last_turn_at: Option<i64>,
+    /// Box `avatarColor`. A short palette id, never an image payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_color: Option<String>,
+    /// Box `avatarShape`. A short glyph name, never an image payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_shape: Option<String>,
 }
 
 /// `bot.roster` result.
@@ -273,6 +289,52 @@ pub struct BotTranscriptOffboxResult {
     pub entries: serde_json::Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
+}
+
+// ── bot.usage ────────────────────────────────────────────────────────────
+
+/// `bot.usage` params. Cold — never wakes the box.
+#[typeshare]
+pub type BotUsageParams = BotEmptyParams;
+
+/// `bot.usage` result: the caller's weekly Grok Bot allowance. Percent-only
+/// by contract — no currency amounts cross the wire — so clients render a
+/// meter, not a balance.
+///
+/// `usage_percent` is absent when the account has no personal meter (a
+/// pooled team allowance, or a zero denominator with no grants). It is not
+/// clamped: on-demand overage reads above 100.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BotUsageResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_percent: Option<f64>,
+    /// Unix time in milliseconds of the current period start.
+    #[typeshare(serialized_as = "I54")]
+    pub current_period_start_ms: i64,
+    /// Unix time in milliseconds of the next reset, or of the trial expiry
+    /// when `trial` is set. Absent until the user's first metered turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub next_reset_at_ms: Option<i64>,
+    pub has_available_usage: bool,
+    pub has_non_zero_included_limit: bool,
+    pub included_limit_zero: bool,
+    /// The allowance is a live trial grant rather than a weekly bucket.
+    pub trial: bool,
+    pub is_team_seat: bool,
+    /// `supergrok-plus` / `supergrok-heavy` when the SuperGrok tier is the
+    /// population funding the meter; absent when another plan funds it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub funding_plan: Option<String>,
+    /// Server-owned meter label (e.g. `SuperGrok Heavy`, `Grok Bot Plan`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_label: Option<String>,
+    /// Where the caller manages on-demand usage for this meter.
+    pub manage_url: String,
+    pub on_demand_eligible: bool,
+    pub on_demand_enabled: bool,
 }
 
 // ── bot.subscribe / bot.unsubscribe ──────────────────────────────────────
@@ -524,6 +586,34 @@ impl From<LinkStateCode> for BotRelayErrorCode {
     }
 }
 
+/// The reverse of the `From` above: `Err` carries the non-link-state code back.
+impl TryFrom<BotRelayErrorCode> for LinkStateCode {
+    type Error = BotRelayErrorCode;
+
+    fn try_from(code: BotRelayErrorCode) -> Result<Self, Self::Error> {
+        match code {
+            BotRelayErrorCode::LinkRequired => Ok(Self::LinkRequired),
+            BotRelayErrorCode::LinkRemoved => Ok(Self::LinkRemoved),
+            BotRelayErrorCode::ConsentRequired => Ok(Self::ConsentRequired),
+            BotRelayErrorCode::EnterpriseUnsupported => Ok(Self::EnterpriseUnsupported),
+            BotRelayErrorCode::LegacyPricingUnsupported => Ok(Self::LegacyPricingUnsupported),
+            BotRelayErrorCode::EmailUnverified => Ok(Self::EmailUnverified),
+            BotRelayErrorCode::LinkConflict => Ok(Self::LinkConflict),
+            BotRelayErrorCode::CursorAccountUnavailable => Ok(Self::CursorAccountUnavailable),
+            BotRelayErrorCode::LinkUnsupported => Ok(Self::LinkUnsupported),
+            BotRelayErrorCode::IdentityUnavailable
+            | BotRelayErrorCode::NoPlan
+            | BotRelayErrorCode::UsageExhausted
+            | BotRelayErrorCode::BoxMigrating
+            | BotRelayErrorCode::BoxRecreating
+            | BotRelayErrorCode::BoxUnavailable
+            | BotRelayErrorCode::CommandRejected
+            | BotRelayErrorCode::ComputerUnavailable
+            | BotRelayErrorCode::UpstreamError => Err(code),
+        }
+    }
+}
+
 impl fmt::Display for BotRelayErrorCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
@@ -537,13 +627,113 @@ impl<'de> Deserialize<'de> for BotRelayErrorCode {
     }
 }
 
-/// Opaque upstream diagnostic. Present for debugging only; clients must
-/// not parse `upstream`.
+/// How one of the caller's Grok accounts signs in. Senders emit only the
+/// named variants. Receivers treat any unknown wire string as
+/// [`Self::Other`].
+#[typeshare]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BotRelaySignIn {
+    X,
+    Google,
+    Apple,
+    Password,
+    Github,
+    Sso,
+    Other,
+}
+
+impl BotRelaySignIn {
+    pub const ALL: &'static [Self] = &[
+        Self::X,
+        Self::Google,
+        Self::Apple,
+        Self::Password,
+        Self::Github,
+        Self::Sso,
+        Self::Other,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::X => "x",
+            Self::Google => "google",
+            Self::Apple => "apple",
+            Self::Password => "password",
+            Self::Github => "github",
+            Self::Sso => "sso",
+            Self::Other => "other",
+        }
+    }
+
+    pub fn from_wire(s: &str) -> Self {
+        match s {
+            "x" => Self::X,
+            "google" => Self::Google,
+            "apple" => Self::Apple,
+            "password" => Self::Password,
+            "github" => Self::Github,
+            "sso" => Self::Sso,
+            _ => Self::Other,
+        }
+    }
+}
+
+impl fmt::Display for BotRelaySignIn {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for BotRelaySignIn {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Ok(Self::from_wire(&s))
+    }
+}
+
+/// One of the caller's other Grok accounts on the same verified email.
+///
+/// `signIn` is a string on the wire. Generated clients see `string` and
+/// compare against [`BotRelaySignIn`]. Unknown values degrade to `other`.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BotRelaySiblingAccount {
+    #[typeshare(serialized_as = "String")]
+    pub sign_in: BotRelaySignIn,
+    /// X username without `@`, Google or password email, GitHub username.
+    /// Absent for Apple / SSO / other.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handle: Option<String>,
+    /// Unix time in milliseconds the account was created.
+    #[typeshare(serialized_as = "I54")]
+    pub created_at_ms: i64,
+    /// This sibling holds a live relay session in the hub, so it is the
+    /// account Cursor is linked to. At most one account in a list is `true`.
+    pub linked: bool,
+}
+
+/// Cap on [`BotRelayErrorDetail::upstream_message`], in chars.
+pub const UPSTREAM_MESSAGE_MAX_CHARS: usize = 240;
+
+/// Structured context on a bot-relay error. `upstream` is an opaque
+/// diagnostic present for debugging only; clients must not parse it.
 #[typeshare]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BotRelayErrorDetail {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream: Option<String>,
+    /// The upstream's own user-facing sentence for a refusal, trimmed and
+    /// capped at [`UPSTREAM_MESSAGE_MAX_CHARS`] chars. Never the raw body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_message: Option<String>,
+    /// Set only on `link_conflict` with reason `jit_link_declined` when the
+    /// sibling lookup succeeded and found at least one account. Ordered by
+    /// `createdAtMs`. Absent when the lookup failed or found nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sibling_accounts: Option<Vec<BotRelaySiblingAccount>>,
 }
 
 /// Hub-owned bot-relay error object.
@@ -832,6 +1022,7 @@ mod tests {
             "bot.roster",
             "bot.status",
             "bot.transcript.offbox",
+            "bot.usage",
             "bot.subscribe",
             "bot.unsubscribe",
             "bot.bindConversation",
@@ -951,6 +1142,7 @@ mod tests {
                 name: "Watcher".to_owned(),
                 status: "idle".to_owned(),
                 last_turn_at: Some(1_700_000_123_000_i64),
+                ..Default::default()
             }],
         };
         let wire = json!({
@@ -988,6 +1180,7 @@ mod tests {
             name: "New".to_owned(),
             status: "unknown".to_owned(),
             last_turn_at: None,
+            ..Default::default()
         };
         assert!(
             !roundtrip(&no_turn)
@@ -1010,6 +1203,48 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(explicit_null.last_turn_at, None);
+    }
+
+    #[test]
+    fn roster_avatar_marks_round_trip_and_omit_when_absent() {
+        let marked = BotRosterEntry {
+            agent_id: "agt_3".to_owned(),
+            name: "Painter".to_owned(),
+            status: "idle".to_owned(),
+            last_turn_at: None,
+            avatar_color: Some("red".to_owned()),
+            avatar_shape: Some("hex".to_owned()),
+        };
+        let wire = json!({
+            "agentId": "agt_3",
+            "name": "Painter",
+            "status": "idle",
+            "avatarColor": "red",
+            "avatarShape": "hex",
+        });
+        assert_eq!(roundtrip(&marked), wire);
+        let parsed: BotRosterEntry = serde_json::from_value(wire).unwrap();
+        assert_eq!(parsed, marked);
+        let omitted: BotRosterEntry = serde_json::from_value(json!({
+            "agentId": "agt_3",
+            "name": "Painter",
+            "status": "idle",
+        }))
+        .unwrap();
+        assert_eq!(omitted.avatar_color, None);
+        assert_eq!(omitted.avatar_shape, None);
+        assert!(
+            !roundtrip(&omitted)
+                .as_object()
+                .unwrap()
+                .contains_key("avatarColor")
+        );
+        assert!(
+            !roundtrip(&omitted)
+                .as_object()
+                .unwrap()
+                .contains_key("avatarShape")
+        );
     }
 
     #[test]
@@ -1076,6 +1311,60 @@ mod tests {
             "agent_id": "agt_...",
             "cursor": "c_1",
         }));
+    }
+
+    #[test]
+    fn usage_result_omits_absent_optionals_and_keeps_overage_unclamped() {
+        let metered = BotUsageResult {
+            usage_percent: Some(137.5),
+            current_period_start_ms: 1_756_000_000_000,
+            next_reset_at_ms: Some(1_756_604_800_000),
+            has_available_usage: true,
+            has_non_zero_included_limit: true,
+            included_limit_zero: false,
+            trial: false,
+            is_team_seat: false,
+            funding_plan: Some("supergrok-heavy".to_owned()),
+            plan_label: Some("SuperGrok Heavy".to_owned()),
+            manage_url: "https://example.com/usage".to_owned(),
+            on_demand_eligible: true,
+            on_demand_enabled: false,
+        };
+        assert_eq!(
+            roundtrip(&metered),
+            json!({
+                "usagePercent": 137.5,
+                "currentPeriodStartMs": 1_756_000_000_000_i64,
+                "nextResetAtMs": 1_756_604_800_000_i64,
+                "hasAvailableUsage": true,
+                "hasNonZeroIncludedLimit": true,
+                "includedLimitZero": false,
+                "trial": false,
+                "isTeamSeat": false,
+                "fundingPlan": "supergrok-heavy",
+                "planLabel": "SuperGrok Heavy",
+                "manageUrl": "https://example.com/usage",
+                "onDemandEligible": true,
+                "onDemandEnabled": false,
+            })
+        );
+
+        let unmetered = BotUsageResult {
+            usage_percent: None,
+            next_reset_at_ms: None,
+            funding_plan: None,
+            plan_label: None,
+            has_available_usage: false,
+            has_non_zero_included_limit: false,
+            included_limit_zero: true,
+            ..metered
+        };
+        let wire = roundtrip(&unmetered);
+        for absent in ["usagePercent", "nextResetAtMs", "fundingPlan", "planLabel"] {
+            assert!(wire.get(absent).is_none(), "{absent} must be omitted");
+        }
+        let parsed: BotUsageResult = serde_json::from_value(wire).unwrap();
+        assert_eq!(unmetered, parsed);
     }
 
     #[test]
@@ -1174,6 +1463,7 @@ mod tests {
             retryable: false,
             detail: BotRelayErrorDetail {
                 upstream: Some("...".to_owned()),
+                ..Default::default()
             },
             reason: None,
         };
@@ -1569,5 +1859,16 @@ mod tests {
             })
         );
         assert!(!wire.as_object().unwrap().contains_key("eventId"));
+    }
+
+    #[test]
+    fn link_state_try_from_agrees_with_is_link_state() {
+        for &code in BotRelayErrorCode::ALL {
+            let converted = LinkStateCode::try_from(code);
+            assert_eq!(code.is_link_state(), converted.is_ok(), "{code}");
+            if let Ok(link) = converted {
+                assert_eq!(code, BotRelayErrorCode::from(link));
+            }
+        }
     }
 }

@@ -38,34 +38,9 @@ use crossterm::terminal::BeginSynchronizedUpdate;
 use xai_grok_pager::app::PagerTerminal;
 use xai_grok_pager::app::app_view::AppView;
 
-/// Per-frame entry point for minimal mode, called from [`AppView::draw`].
-///
-/// Order matters:
-/// 0. Open a synchronized update and adopt the current terminal size (see below).
-///    Every write this frame (commits and the live region) then presents atomically at the right dimensions.
-/// 1. Commit the pending welcome card (fresh session / `/new`) so it lands above the first conversation block.
-///    Push any ready plan into scrollback (`plan::maybe_commit_plan`) so it commits like a normal block this frame.
-///    The live region then holds only the plan's decision controls.
-/// 2. Size the viewport to its **post-commit** height (see [`overlay::sync_viewport`] / [`live::tail_height`]).
-///    This runs before the commit so step 3's `insert_before` can reposition the correctly-sized viewport directly after each printed block.
-///    The prompt follows the content, and once the screen is full that position is the bottom.
-///    Sizing after the commit left the viewport at its tall streaming height, and the shrink stranded the prompt at the top of the screen.
-/// 3. Commit finalized blocks into native scrollback; each `insert_before` scrolls committed rows up above the pinned viewport.
-///    Then print any `Ctrl+E` / `/expand` re-prints fully expanded below.
-/// 4. Redraw the live region (tail · status · overlay · prompt) into the viewport's final position.
-///
-/// ## Why step 0 exists (resize and flicker)
-///
-/// **Resize:** `draw_frame` runs `terminal.autoresize()` last, while the commit passes read `viewport_area().width` first.
-/// On the frame that processes a terminal resize, a block finalizing in that same frame would be laid out and printed at the stale width.
-/// A shrink then hard-wraps every over-wide row on the real terminal, permanently garbling the print-once committed copy.
-/// Adopting the new size up front closes that window (a no-op on non-resize frames).
-///
-/// **Flicker:** the commit `insert_before`s scroll, repaint, and flush per chunk.
-/// Without a synchronized update around them, a multi-block commit presents as several visible scroll/paint bursts before the live region repaints.
-/// Opening the synchronized update before the commits batches the whole frame (commits, viewport reposition, live redraw) into one atomic present.
-/// The matching `EndSynchronizedUpdate` is emitted by `draw_frame` (step 4), which every path through this function reaches.
-/// Its own inner `BeginSynchronizedUpdate` is redundant but harmless: DEC 2026 is a mode, not a counter, so the first End closes it.
+/// Adopt terminal size and open a synchronized update first, or a same-frame resize prints committed blocks at the stale width and hard-wraps them permanently.
+/// Size the viewport to post-commit height before `insert_before`; sizing after stranded the prompt at the top of a tall streaming viewport.
+/// The synchronized update batches commit scroll/paint with the live redraw; without it a multi-block commit flickers as separate presents.
 pub fn draw(app: &mut AppView, terminal: &mut PagerTerminal) {
     let _ = terminal.backend_mut().queue(BeginSynchronizedUpdate);
     let _ = terminal.autoresize();
@@ -82,11 +57,8 @@ pub fn draw(app: &mut AppView, terminal: &mut PagerTerminal) {
     live::draw_live(app, terminal);
 }
 
-/// Register the minimal-mode render hooks with `xai-grok-pager`.
-///
-/// Call this exactly once, early in the binary's `main`, before any frame is drawn.
-/// It installs the function-pointer hooks so the pager's `ScreenMode::Minimal` branches dispatch into this crate.
-/// Idempotent: subsequent calls are ignored (see [`xai_grok_pager::minimal_hook`]).
+/// Register the minimal-mode render hooks with `xai-grok-pager`. It installs the function-pointer hooks so the
+/// pager's `ScreenMode::Minimal` branches dispatch into this crate.
 pub fn install() {
     xai_grok_pager::minimal_hook::install(xai_grok_pager::minimal_hook::MinimalHooks { draw });
 }

@@ -16,6 +16,14 @@ use crate::theme::{Theme, ThemeKind, cache as theme_cache};
 
 pub struct ThemeCommand;
 
+/// Canonical name plus every alias, so `/theme transparent` still ranks the `terminal` row.
+fn picker_match_text(kind: ThemeKind) -> String {
+    std::iter::once(kind.display_name())
+        .chain(kind.aliases().iter().copied())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 impl SlashCommand for ThemeCommand {
     slash_meta! {
         name: "theme",
@@ -65,7 +73,7 @@ impl SlashCommand for ThemeCommand {
         let auto_active = if is_auto { " (active)" } else { "" };
         let mut items = vec![ArgItem {
             display: "auto".to_string(),
-            match_text: "auto".to_string(),
+            match_text: picker_match_text(ThemeKind::Auto),
             insert_text: "auto".to_string(),
             description: format!("auto (follow system){auto_active}"),
             presentation: None,
@@ -80,7 +88,7 @@ impl SlashCommand for ThemeCommand {
             };
             ArgItem {
                 display: kind.display_name().to_string(),
-                match_text: kind.display_name().to_string(),
+                match_text: picker_match_text(*kind),
                 insert_text: kind.display_name().to_string(),
                 description: format!("{}{active}", kind.display_name()),
                 presentation: None,
@@ -111,8 +119,10 @@ impl SlashCommand for ThemeCommand {
                 CommandResult::Action(Action::SetTheme(kind.display_name().to_string()))
             }
             None => {
-                let all_names: Vec<&str> =
-                    ThemeKind::ALL.iter().map(|k| k.display_name()).collect();
+                let all_names: Vec<&str> = ThemeKind::selectable()
+                    .iter()
+                    .map(|k| k.display_name())
+                    .collect();
                 CommandResult::Error(format!(
                     "Unknown theme: {}. Available: auto, {}",
                     trimmed,
@@ -288,6 +298,40 @@ mod tests {
         });
     }
 
+    /// Typing an alias ranks its canonical row first; the row still inserts the canonical name.
+    #[test]
+    fn suggest_args_alias_ranks_canonical_row() {
+        with_test_env(|| {
+            let cmd = ThemeCommand;
+            let models = crate::acp::model_state::ModelState::default();
+            let ctx = AppCtx {
+                models: &models,
+                cwd: std::path::Path::new("."),
+                has_session_announcements: false,
+                billing_surface_visible: true,
+                usage_command_visible: true,
+                workflows_available: true,
+                saved_workflows: &[],
+                workflow_runs: &[],
+                screen_mode: crate::app::ScreenMode::Fullscreen,
+                current_title: None,
+            };
+            let items = cmd.suggest_args(&ctx, "").expect("should return items");
+            let mut matcher = crate::slash::matcher::FuzzyMatcher::new();
+            for (alias, canonical) in [
+                ("transparent", "terminal"),
+                ("dark", "groknight"),
+                ("system", "auto"),
+            ] {
+                let hits = matcher.rank(&items, alias, items.len(), |item| &item.match_text);
+                let (top, _) = hits
+                    .first()
+                    .unwrap_or_else(|| panic!("{alias} matched nothing"));
+                assert_eq!(items[*top].insert_text, canonical, "top hit for {alias}");
+            }
+        });
+    }
+
     // -- run (dispatches Action::SetTheme) ------------------------------------
 
     /// `/theme <name>` returns `Action::SetTheme(<canonical>)`; the dispatcher handles the in-memory state, the disk write, and the toast.
@@ -316,6 +360,63 @@ mod tests {
                     assert_eq!(name, "groknight");
                 }
                 other => panic!("expected Action::SetTheme(\"groknight\"), got {other:?}"),
+            }
+        });
+    }
+
+    /// While the terminal-theme rollout gate is off, a typed `/theme terminal` (or alias) is an unknown name whose error listing omits it, and it drops out of the suggestions.
+    #[test]
+    fn run_terminal_rejected_and_unlisted_while_gated_off() {
+        with_test_env(|| {
+            theme_cache::set_terminal_theme_enabled(false);
+            let cmd = ThemeCommand;
+            let models = crate::acp::model_state::ModelState::default();
+            let bundle = crate::app::bundle::BundleState::default();
+            let mut ctx = CommandExecCtx {
+                models: &models,
+                session_id: None,
+                bundle_state: &bundle,
+                screen_mode: crate::app::ScreenMode::Inline,
+                billing_surface_visible: true,
+                usage_command_visible: true,
+                pager_state: crate::settings::PagerLocalSnapshot {
+                    multiline_mode: false,
+                    yolo_mode: false,
+                    ..crate::settings::PagerLocalSnapshot::default()
+                },
+            };
+            for name in ["terminal", "transparent"] {
+                match cmd.run(&mut ctx, name) {
+                    CommandResult::Error(msg) => {
+                        assert!(msg.contains("Unknown theme"), "got: {msg}");
+                        let listing = msg.split("Available:").nth(1).expect("listing");
+                        assert!(!listing.contains("terminal"), "gated name listed: {msg}");
+                    }
+                    other => panic!("expected CommandResult::Error, got {other:?}"),
+                }
+            }
+            let app_ctx = AppCtx {
+                models: &models,
+                cwd: std::path::Path::new("."),
+                has_session_announcements: false,
+                billing_surface_visible: true,
+                usage_command_visible: true,
+                workflows_available: true,
+                saved_workflows: &[],
+                workflow_runs: &[],
+                screen_mode: crate::app::ScreenMode::Fullscreen,
+                current_title: None,
+            };
+            let items = cmd.suggest_args(&app_ctx, "").expect("should return items");
+            assert!(
+                items.iter().all(|i| i.insert_text != "terminal"),
+                "gated theme must not be suggested"
+            );
+
+            theme_cache::set_terminal_theme_enabled(true);
+            match cmd.run(&mut ctx, "terminal") {
+                CommandResult::Action(Action::SetTheme(name)) => assert_eq!(name, "terminal"),
+                other => panic!("expected Action::SetTheme(\"terminal\"), got {other:?}"),
             }
         });
     }

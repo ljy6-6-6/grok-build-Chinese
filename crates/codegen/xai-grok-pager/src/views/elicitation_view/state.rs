@@ -484,10 +484,8 @@ impl ElicitationViewState {
         }
     }
 
-    /// Shared focus movement for the walk keys.
-    /// `wrap` separates Tab/Shift+Tab (wrap at both ends between the field list and the action rows) from Down/Up/j/k (clamp at the edges).
-    /// At the clamped edges, Down stops on Decline and Up stops on the first field.
-    /// Editing focus never moves from here; the key handler exits edit mode before dispatching a walk.
+    /// Shared focus movement for the walk keys. Editing focus never moves from here; the key handler
+    /// exits edit mode before dispatching a walk.
     pub fn move_focus(&mut self, forward: bool, wrap: bool) {
         let n = self.field_count();
         match self.focus {

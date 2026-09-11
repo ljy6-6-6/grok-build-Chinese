@@ -26,25 +26,18 @@ pub struct NotificationMeta {
     pub prompt_id: Option<String>,
     /// Whether this notification is historical replay from `session/load`.
     pub is_replay: bool,
-    /// Raw `eventId` string (`"{sessionId}-{counter}"`).
-    /// Tracked per session as the reconnect cursor (`_meta.cursor` on `session/load`).
-    /// The agent resolves it by exact string match against persisted lines, so the full id is kept.
-    /// The numeric suffix alone is ambiguous across the non-monotonic counter runs of a multi-resume history.
+    /// Raw `eventId` string (`"{sessionId}-{counter}"`). The agent resolves it by exact string match against persisted
+    /// lines, so the full id is kept.
     pub event_id: Option<String>,
-    /// Monotonic per-process sequence parsed from `eventId` (`"{sessionId}-{counter}"`, see `xai-grok-shell util::event_id`).
-    /// The agent stamps the SAME `eventId` on the live emission and on the persisted line that is later replayed.
-    /// A client can therefore dedup an event it receives twice (replay/live overlap, a re-emit after the reconnect gate, or duplicate routing).
-    /// Per-session events arrive in increasing order, so the pager keeps a highwater and drops anything at or below it.
-    /// `None` when the agent didn't stamp an `eventId` (older shell); such updates always apply.
+    /// Monotonic per-process sequence parsed from `eventId` (`"{sessionId}-{counter}"`, see `xai-grok-shell
+    /// util::event_id`). Per-session events arrive in increasing order, so the pager keeps a highwater and drops
+    /// anything at or below it. such updates always apply.
     pub event_seq: Option<u64>,
 }
 
 /// Serializable counterpart of the replay stamp the agent injects on replayed notifications.
-/// The stamp is `_meta.isReplay`, set by xai-grok-shell's `forward_raw_replay_line` during `session/load`.
-///
-/// [`NotificationMeta::from_json`] is the parse side; this is the build side.
-/// Code that constructs a replay-stamped `_meta` (test fixtures, playgrounds) shares the wire key with the parser.
-/// That spares those sites from hand-writing `json!` literals.
+/// [`NotificationMeta::from_json`] is the parse side. this is the build side. That spares those sites from
+/// hand-writing `json!` literals.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReplayMetaStamp {
@@ -58,10 +51,9 @@ impl ReplayMetaStamp {
     }
 }
 
-/// User-prompt content-block `_meta` keys (`TextContent.meta`).
-/// Shared by the producers (`dispatch/queue.rs` drain, `effects.rs` prompt send) and the replay consumer (`acp/tracker.rs` `handle_user_message`).
-/// Sharing the constants keeps the wire keys from drifting.
-/// Tests keep raw literals; they pin the wire values.
+/// User-prompt content-block `_meta` keys (`TextContent.meta`). Shared by the producers (`dispatch/queue.rs` drain,
+/// `effects.rs` prompt send) and the replay consumer (`acp/tracker.rs` `handle_user_message`). Sharing the
+/// constants keeps the wire keys from drifting. Tests keep raw literals; they pin the wire values.
 pub mod user_prompt_meta {
     /// Clean display text shown in scrollback instead of the wire text.
     pub const DISPLAY_TEXT: &str = "displayText";
@@ -84,6 +76,8 @@ pub mod user_message_chunk_meta {
     /// When true, the chunk must not become a scrollback user prompt.
     /// See [`xai_grok_shell::session::PromptOrigin::hide_user_echo_from_scrollback`].
     pub const HIDE_FROM_SCROLLBACK: &str = "hideFromScrollback";
+    /// When true, the chunk is a persisted mid-turn interjection; replay renders its `displayText` as an interjection block.
+    pub const INTERJECTION: &str = xai_grok_shell::session::storage::INTERJECTION_META_KEY;
 }
 
 /// Extract the numeric counter from an `eventId` (`"{sessionId}-{counter}"`).

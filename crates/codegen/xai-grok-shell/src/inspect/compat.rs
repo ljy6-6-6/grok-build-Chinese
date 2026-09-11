@@ -166,8 +166,8 @@ fn resolve_compat_entry(
     };
 
     ExternalCompatEntry {
-        vendor: cell.vendor().as_str().to_owned(),
-        surface: cell.surface().as_str().to_owned(),
+        vendor: cell.vendor().as_ref().to_owned(),
+        surface: cell.surface().as_ref().to_owned(),
         enabled: resolved.value,
         source,
     }

@@ -56,10 +56,9 @@ impl InferenceLatencyStats {
         }
     }
 
-    /// # Arguments
-    /// * `stream_start` - `Instant::now()` captured before initiating the stream.
-    /// * `chunk_timestamps` - `Instant` recorded on each content-bearing chunk.
-    /// * `stream_end` - `Instant::now()` captured after the stream is fully exhausted (after trailing metadata/`[DONE]` chunks). Used for TTLB.
+    /// `stream_start` - `Instant::now()` captured before initiating the stream.
+    /// `chunk_timestamps` - `Instant` recorded on each content-bearing chunk.
+    /// `stream_end` - `Instant::now()` captured after the stream is fully exhausted (after trailing metadata/`[DONE]` chunks). Used for TTLB.
     pub fn from_timestamps(
         stream_start: Instant,
         chunk_timestamps: &[Instant],

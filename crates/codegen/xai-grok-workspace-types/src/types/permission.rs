@@ -24,13 +24,8 @@ pub struct PermissionRequest {
     pub destructive: bool,
 }
 
-/// User decision delivered to the workspace via [`ToolResponse::Permission`](crate::chunks::ToolResponse::Permission).
-/// It arrives on the tool's bidi response sender.
-///
-/// Tagged with `tag = "type", content = "data"` (adjacent tagging) to match every other wire enum in the crate.
-/// See `crate::lib` doc-comment "# Wire format" for the rationale.
-/// Adjacent tagging is the only form that works uniformly across struct, newtype, and unit variants.
-/// It avoids the historical `{"decision":{"decision":"deny"}}` nesting hazard when this enum is itself the value of a parent's `decision` field.
+/// User decision delivered via [`ToolResponse::Permission`](crate::chunks::ToolResponse::Permission) on the tool's bidi sender.
+/// Adjacent tagging is the only form uniform across struct, newtype, and unit variants, and avoids the nested-`decision` hazard.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum PermissionDecision {

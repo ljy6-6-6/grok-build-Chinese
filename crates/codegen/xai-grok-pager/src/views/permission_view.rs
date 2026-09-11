@@ -873,6 +873,9 @@ pub fn render_permission_view_with_locale(
         }
 
         if is_followup && option.kind == acp::PermissionOptionKind::RejectOnce {
+            // Always-focused input row. No reverse-video overlay here: it is
+            // an editable line (hardware cursor + accent bar carry focus),
+            // so the terminal theme simply renders it bandless.
             let row_bg = theme.bg_visual;
 
             let full_row = Rect {
@@ -924,9 +927,9 @@ pub fn render_permission_view_with_locale(
 
         let is_cursor = i == state.active_idx;
         let is_hovered = hovered_item == Some(i);
-        let row_bg = if is_cursor && focused {
-            theme.bg_visual
-        } else if is_hovered {
+        // When the panel is unfocused, drop the cursor-row overlay so it
+        // reads as "no active selection" - same rule as question_view.
+        let row_bg = if is_hovered && !(is_cursor && focused) {
             hover_bg
         } else {
             theme.bg_light
@@ -959,11 +962,17 @@ pub fn render_permission_view_with_locale(
         };
         buf.set_style(row_rect, Style::default().bg(row_bg));
         buf.set_line(content_x, y, &line, content_width);
+        // Band on RGB themes; reverse video on the terminal theme.
+        if is_cursor && focused {
+            buf.set_style(row_rect, theme.selection_overlay());
+        } else if is_hovered {
+            buf.set_style(row_rect, theme.hover_overlay());
+        }
         y += 1;
     }
 
     if !focused {
-        crate::render::color::blend_area(buf, area, Some((theme.bg_light, 0.66)), None);
+        crate::render::color::recede_area(buf, area, theme.bg_light, 0.66);
     }
 
     PermissionRenderResult {
@@ -1003,7 +1012,13 @@ fn render_pattern_editor_line(
     let start = (cursor_idx + 1).saturating_sub(window);
 
     let text_style = Style::default().fg(theme.text_primary);
-    let caret_style = Style::default().fg(theme.bg_light).bg(theme.accent_user);
+    // Accent-colored block on RGB themes; reverse video on the bandless
+    // palette, whose Reset accent would paint no block at all.
+    let caret_style = if theme.is_bandless() {
+        theme.block_cursor_over(theme.bg_light)
+    } else {
+        Style::default().fg(theme.bg_light).bg(theme.accent_user)
+    };
 
     let end = (start + window).min(chars.len());
     let mut col: u16 = 0;
@@ -3362,6 +3377,10 @@ mod tests {
 
     #[test]
     fn execute_header_display_matches_overlay_body() {
+        // Both render paths read the process-global theme; hold the theme
+        // test lock so a concurrent theme test can't flip the palette (and
+        // the markdown polarity mode) between the two renders.
+        let _theme = crate::theme::cache::pin_theme();
         let script = dump_script_twin();
         for width in [12usize, 40, 400] {
             assert_eq!(

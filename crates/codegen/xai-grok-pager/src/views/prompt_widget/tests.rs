@@ -238,10 +238,8 @@
         pw
     }
 
-    /// Gate predicate: only Ghostty enables `Cmd+A` select-all today.
-    ///
-    /// The `match` below is exhaustive over `TerminalName`: a new variant fails to compile here until someone decides whether it opts in.
-    /// The gate is a per-brand policy choice and must not be silently inherited by future additions.
+    /// Gate predicate: only Ghostty enables `Cmd+A` select-all today. The gate is a per-brand policy
+    /// choice and must not be silently inherited by future additions.
     #[test]
     fn cmd_a_supported_only_for_ghostty() {
         use crate::terminal::TerminalName;
@@ -638,6 +636,21 @@
         assert_ne!(pw.textarea.text(), before);
     }
 
+    /// Terminals without the kitty keyboard protocol send Ctrl+Shift+Z as plain Ctrl+Z, so Alt+Z is the fallback redo key.
+    #[test]
+    fn alt_z_redoes() {
+        let mut pw = PromptWidget::new();
+        pw.handle_key(&key!('x').to_key_event());
+        pw.handle_key(&key!('z', CONTROL).to_key_event()); // undo
+        let before = pw.textarea.text().to_string();
+
+        assert_eq!(
+            pw.handle_key(&key!('z', ALT).to_key_event()),
+            PromptEvent::Edited,
+        );
+        assert_ne!(pw.textarea.text(), before);
+    }
+
     #[test]
     fn unknown_ctrl_key_is_ignored() {
         let mut pw = PromptWidget::new();
@@ -766,6 +779,41 @@
         assert_eq!(pw.textarea.text(), text);
         assert_eq!(pw.textarea.elements().len(), 1);
         assert_eq!(pw.textarea.elements()[0].kind, KIND_PASTE);
+    }
+
+    /// Display label of the single paste chip in the buffer, e.g. `[Pasted: 4 lines]`.
+    fn paste_chip_label(pw: &PromptWidget) -> String {
+        let elems = pw.textarea.elements();
+        assert_eq!(elems.len(), 1);
+        assert_eq!(elems[0].kind, KIND_PASTE);
+        elems[0]
+            .display
+            .as_ref()
+            .expect("chip has a display label")
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn paste_paragraph_separators_create_chip() {
+        // Rich-text clipboards (macOS voice memos) separate paragraphs with U+2029, which str::lines() does not split on
+        let mut pw = PromptWidget::new();
+        assert_eq!(
+            pw.handle_paste("line1\u{2029}line2\u{2029}line3\u{2029}line4"),
+            PromptEvent::Edited
+        );
+        assert_eq!(paste_chip_label(&pw), "[Pasted: 4 lines]");
+        assert_eq!(pw.textarea.text(), "line1\nline2\nline3\nline4");
+    }
+
+    #[test]
+    fn paste_below_threshold_separators_become_newlines() {
+        let mut pw = PromptWidget::new();
+        assert_eq!(pw.handle_paste("ab\u{2029}cd"), PromptEvent::Edited);
+        assert!(pw.textarea.elements().is_empty());
+        assert_eq!(pw.textarea.text(), "ab\ncd");
     }
 
     #[test]
@@ -1288,7 +1336,7 @@
 
     #[test]
     fn repaste_with_bare_cr_expands_chip() {
-        // normalize_cr is an identity on \r\n; bare \r is its non-identity case
+        // normalize_line_breaks is an identity on \r\n; bare \r is its non-identity case
         // The chip stores the \n form, so the repaste comparison must normalize the incoming bytes before comparing
         let mut pw = PromptWidget::new();
         let text = "line1\rline2\rline3\rline4";
@@ -1891,26 +1939,34 @@
         assert!(pw.textarea.elements().is_empty());
     }
 
-    // ── normalize_cr tests ─────────────────────────────────────────
+    // ── normalize_line_breaks tests ────────────────────────────────
 
     #[test]
-    fn normalize_cr_bare_cr() {
-        assert_eq!(normalize_cr("a\rb\rc"), "a\nb\nc");
+    fn normalize_line_breaks_bare_cr() {
+        assert_eq!(normalize_line_breaks("a\rb\rc"), "a\nb\nc");
     }
 
     #[test]
-    fn normalize_cr_crlf_preserved() {
-        assert_eq!(normalize_cr("a\r\nb\r\nc"), "a\r\nb\r\nc");
+    fn normalize_line_breaks_crlf_preserved() {
+        assert_eq!(normalize_line_breaks("a\r\nb\r\nc"), "a\r\nb\r\nc");
     }
 
     #[test]
-    fn normalize_cr_mixed() {
-        assert_eq!(normalize_cr("a\r\nb\rc"), "a\r\nb\nc");
+    fn normalize_line_breaks_mixed() {
+        assert_eq!(normalize_line_breaks("a\r\nb\rc"), "a\r\nb\nc");
     }
 
     #[test]
-    fn normalize_cr_no_cr() {
-        assert_eq!(normalize_cr("no cr\nhere"), "no cr\nhere");
+    fn normalize_line_breaks_no_cr() {
+        assert_eq!(normalize_line_breaks("no cr\nhere"), "no cr\nhere");
+    }
+
+    #[test]
+    fn normalize_line_breaks_unicode_separators() {
+        assert_eq!(normalize_line_breaks("a\u{2028}b\u{2029}c"), "a\nb\nc");
+        assert_eq!(normalize_line_breaks("a\r\nb\u{2029}c"), "a\r\nb\nc");
+        assert_eq!(normalize_line_breaks("a\r\u{2029}b"), "a\n\nb");
+        assert_eq!(normalize_line_breaks("a\u{2028}\r\nb"), "a\n\r\nb");
     }
 
     // ── Inline paste (handle_paste without element) ──────────────
@@ -1920,7 +1976,7 @@
         let mut pw = PromptWidget::new();
         let text = "line1\nline2\nline3";
         // Simulate Ctrl+Shift+V: insert_str directly, no element.
-        let normalized = normalize_cr(text);
+        let normalized = normalize_line_breaks(text);
         pw.textarea.insert_str(&normalized);
         assert_eq!(pw.textarea.text(), text);
         assert!(pw.textarea.elements().is_empty());
@@ -2474,10 +2530,8 @@
         }
     }
 
-    /// `self.images` is populated by `insert_image` in **chronological** order, but `textarea.elements()` is sorted by **buffer position**.
-    /// Inserting the second image at the start of the buffer (cursor-at-Home) is enough to make the two arrays diverge.
-    /// The drain, restore, set_images pipeline must still bind each `PastedImage` to the chip with the matching `display_number`.
-    /// A positional zip would silently swap them.
+    /// The drain, restore, set_images pipeline must still bind each `PastedImage` to the chip with the
+    /// matching `display_number`.
     #[test]
     fn set_images_pairs_by_display_number_after_out_of_order_insert() {
         let mut pw = PromptWidget::new();
@@ -3208,11 +3262,8 @@
 
     #[test]
     fn deleting_all_text_keeps_image_counter_high_water_mark() {
-        // Monotonic counter contract: within a single prompt lifetime the counter only ever advances upward
-        // Backspacing through the textarea content removes the chip elements but does NOT trigger a counter reset
-        // Only an explicit prompt reset (`set_text("")`, Ctrl+C) zeros the counter
-        // This prevents the bug where a brief empty-buffer state between drops let a fresh insertion reuse `#1`
-        // The user-reported sequence was `[Image #1] [Image #2] [Image #1]` in a single prompt
+        // Monotonic counter contract: within a single prompt lifetime the counter only ever advances
+        // upward. Only an explicit prompt reset (`set_text("")`, Ctrl+C) zeros the counter.
         let mut pw = PromptWidget::new();
         pw.insert_image(test_image()).unwrap();
         pw.handle_key(&key!(' ').to_key_event());
@@ -3335,10 +3386,9 @@
 
     #[test]
     fn right_arrow_drills_into_directory_result() {
-        // User typed `@src`, the highlighted suggestion is the directory `src`
-        // Right Arrow replaces the path portion of the @-token with the full selected path, WITHOUT a trailing `/`
-        // The missing slash keeps the context out of dir-mode so the dropdown re-populates with both files and directories under `src`
-        // If the user wants to filter to directories only, they can type `/` themselves
+        // User typed `@src`, the highlighted suggestion is the directory `src`. Right Arrow replaces the
+        // path portion of the @-token with the full selected path, WITHOUT a trailing `/`. If the user
+        // wants to filter to directories only, they can type `/` themselves.
         let mut pw = PromptWidget::new();
         seed_at_completion(&mut pw, "src", "src", true);
         assert!(pw.file_search.is_visible());
@@ -3369,10 +3419,8 @@
 
     #[test]
     fn right_arrow_in_dir_mode_drills_one_level_deeper() {
-        // Already in dir mode (`@src/`). Highlighted suggestion is the nested `src/foo` directory.
-        // Right Arrow replaces the @-token's path portion with `src/foo`, no trailing `/`
-        // This drops the user out of dir-mode, so the dropdown will then show files AND dirs whose path matches `src/foo`
-        // To keep filtering to dirs only, the user types `/` themselves
+        // Already in dir mode (`@src/`). Highlighted suggestion is the nested `src/foo` directory. To keep
+        // filtering to dirs only, the user types `/` themselves.
         let mut pw = PromptWidget::new();
         seed_at_completion(&mut pw, "src/", "src/foo", true);
         assert!(pw.file_search.is_visible());
@@ -3566,10 +3614,8 @@
 
     #[test]
     fn right_arrow_on_file_behaves_like_tab() {
-        // Highlighted suggestion is a file
-        // There is nothing nested under a file to drill into, so Right Arrow on a file is intentionally identical to Tab
-        // It inserts the file-ref element + a trailing space and dismisses the dropdown
-        // (The Right Arrow drill-down behavior is reserved for directory results.)
+        // Highlighted suggestion is a file. There is nothing nested under a file to drill into, so Right
+        // Arrow on a file is intentionally identical to Tab.
         let mut pw = PromptWidget::new();
         seed_at_completion(&mut pw, "READ", "README.md", false);
 
@@ -3677,6 +3723,191 @@
     }
 
     #[test]
+    fn mode_flags_show_plan_and_permission_together() {
+        use crate::app::actions::PermissionLabel;
+        let theme = Theme::current();
+        let cases = [
+            (Some("plan"), PermissionLabel::AlwaysApprove, vec!["plan", "always-approve"]),
+            (Some("plan"), PermissionLabel::Auto, vec!["plan", "auto"]),
+            (Some("plan approval"), PermissionLabel::Ask, vec!["plan approval"]),
+            (None, PermissionLabel::AlwaysApprove, vec!["always-approve"]),
+            (None, PermissionLabel::Auto, vec!["auto"]),
+            (None, PermissionLabel::Ask, vec![]),
+        ];
+        for (plan_label, permission, expected) in cases {
+            let flags = mode_flags(plan_label, permission, &theme);
+            let texts: Vec<&str> = flags.iter().map(|f| f.text).collect();
+            assert_eq!(texts, expected, "{plan_label:?} + {permission:?}");
+        }
+        let flags = mode_flags(Some("plan"), PermissionLabel::Auto, &theme);
+        assert_eq!(flags[0].color, Some(theme.accent_plan));
+        assert_eq!(flags[1].color, Some(theme.accent_system));
+    }
+
+    /// The "plan" mode flag on the bottom divider keeps its accent color on the terminal theme: the
+    /// subtle toward-bg dimming blend cannot be computed against a Reset bg, and the old gray fallback
+    /// (Reset there) erased the plan-mode cue entirely. RGB themes keep the dimmed blend.
+    #[test]
+    fn plan_flag_keeps_accent_color_on_terminal_theme() {
+        let _guard = crate::theme::cache::pin_theme();
+        let area = Rect::new(0, 0, 60, 4);
+
+        let render = || {
+            let theme = Theme::current();
+            let flags = [PromptFlag {
+                text: "plan",
+                color: Some(theme.accent_plan),
+                bold: false,
+            }];
+            let info = PromptInfo {
+                model_name: "grok",
+                flags: &flags,
+                ..Default::default()
+            };
+            let mut pw = PromptWidget::new();
+            let style = PromptStyle {
+                focused: true,
+                ..Default::default()
+            };
+            let mut buf = Buffer::empty(area);
+            pw.draw(&mut buf, area, None, &style, Some(&info), None);
+            for y in 0..area.height {
+                let row = buf_text_at(&buf, 0, area.width, y);
+                if let Some(byte_x) = row.find("plan") {
+                    // Byte offset → cell column (borders are multi-byte,
+                    // all glyphs on this row are single-width).
+                    let x = row[..byte_x].chars().count() as u16;
+                    return buf.cell((x, y)).unwrap().style();
+                }
+            }
+            panic!("plan flag not rendered");
+        };
+
+        crate::theme::cache::set(crate::theme::ThemeKind::Terminal);
+        let style = render();
+        assert_eq!(
+            style.fg,
+            Some(Theme::current().accent_plan),
+            "terminal theme keeps the solid plan accent"
+        );
+
+        // GrokNight: dimmed toward bg at truecolor; where quantization makes
+        // the palette named (blend inexpressible), the solid accent — never
+        // the old gray fallback.
+        crate::theme::cache::set(crate::theme::ThemeKind::GrokNight);
+        let style = render();
+        let theme = Theme::current();
+        assert_ne!(style.fg, Some(theme.gray), "never drops to gray");
+        match style.fg {
+            Some(ratatui::style::Color::Rgb(..)) => {
+                assert_ne!(style.fg, Some(theme.accent_plan), "truecolor dims")
+            }
+            _ => assert_eq!(style.fg, Some(theme.accent_plan), "quantized keeps accent"),
+        }
+    }
+
+    /// Plan mode recolors the composer border (`border_color_override`), but the model-name caption
+    /// drawn over the border must not inherit that accent from the cells underneath.
+    #[test]
+    fn plan_border_does_not_recolor_model_caption_on_terminal_theme() {
+        let _guard = crate::theme::cache::pin_theme();
+        crate::theme::cache::set(crate::theme::ThemeKind::Terminal);
+        let theme = Theme::current();
+        let area = Rect::new(0, 0, 60, 4);
+
+        let flags = [PromptFlag {
+            text: "plan",
+            color: Some(theme.accent_plan),
+            bold: false,
+        }];
+        let info = PromptInfo {
+            model_name: "grok",
+            flags: &flags,
+            ..Default::default()
+        };
+        let mut pw = PromptWidget::new();
+        let style = PromptStyle {
+            focused: true,
+            border_color_override: Some(theme.accent_plan),
+            ..Default::default()
+        };
+        let mut buf = Buffer::empty(area);
+        pw.draw(&mut buf, area, None, &style, Some(&info), None);
+
+        let find = |needle: &str| {
+            for y in 0..area.height {
+                let row = buf_text_at(&buf, 0, area.width, y);
+                if let Some(byte_x) = row.find(needle) {
+                    let x = row[..byte_x].chars().count() as u16;
+                    return buf.cell((x, y)).unwrap().style();
+                }
+            }
+            panic!("{needle} not rendered");
+        };
+
+        let caption = find("grok");
+        assert_eq!(
+            caption.fg,
+            Some(ratatui::style::Color::Reset),
+            "caption must not inherit the plan border accent, got {caption:?}"
+        );
+        assert!(caption.add_modifier.contains(Modifier::DIM));
+        assert_eq!(find("plan").fg, Some(theme.accent_plan), "flag stays yellow");
+    }
+
+    /// Colorless info-line chrome (uncolored flags, the "multiline" label)
+    /// renders via `muted()`: DIM on the terminal theme (where `gray` is
+    /// Reset and the old style painted full default fg), gray fg on RGB.
+    #[test]
+    fn info_line_chrome_is_muted_on_terminal_theme() {
+        let _guard = crate::theme::cache::pin_theme();
+        let area = Rect::new(0, 0, 60, 4);
+
+        let render = |needle: &str| {
+            let flags = [PromptFlag {
+                text: "yolo",
+                color: None,
+                bold: false,
+            }];
+            let info = PromptInfo {
+                model_name: "grok",
+                flags: &flags,
+                multiline: true,
+                ..Default::default()
+            };
+            let mut pw = PromptWidget::new();
+            let style = PromptStyle {
+                focused: true,
+                ..Default::default()
+            };
+            let mut buf = Buffer::empty(area);
+            pw.draw(&mut buf, area, None, &style, Some(&info), None);
+            for y in 0..area.height {
+                let row = buf_text_at(&buf, 0, area.width, y);
+                if let Some(byte_x) = row.find(needle) {
+                    let x = row[..byte_x].chars().count() as u16;
+                    return buf.cell((x, y)).unwrap().style();
+                }
+            }
+            panic!("{needle} not rendered");
+        };
+
+        crate::theme::cache::set(crate::theme::ThemeKind::Terminal);
+        for needle in ["yolo", "multiline"] {
+            let style = render(needle);
+            assert!(
+                style.add_modifier.contains(Modifier::DIM),
+                "terminal theme must render {needle} dim, got {style:?}"
+            );
+        }
+
+        crate::theme::cache::set(crate::theme::ThemeKind::GrokNight);
+        let style = render("yolo");
+        assert_eq!(style.fg, Some(Theme::current().gray), "RGB keeps gray fg");
+        assert!(!style.add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
     fn set_and_has_ghost_text() {
         let mut pw = PromptWidget::new();
         assert!(!pw.has_ghost_text());
@@ -3724,6 +3955,8 @@
 
     #[test]
     fn ghost_text_renders_at_cursor_when_at_end() {
+        // Pinned: asserts the RGB ghost fg, which reads the ambient theme.
+        let _guard = crate::theme::cache::pin_theme();
         let mut pw = PromptWidget::new();
         pw.textarea.insert_str("hello");
         pw.set_ghost_text(Some(" world".into()));
@@ -3834,6 +4067,43 @@
 
         // Unfocused means cursor_pos is None, so ghost text is skipped
         assert_eq!(buf_text_at(&buf, 5, 11, 0).trim(), "");
+    }
+
+    /// The empty-composer placeholder uses `Theme::muted()`: DIM on the
+    /// terminal theme (where `gray` is `Reset` and a plain fg would be
+    /// indistinguishable from typed text), gray fg on RGB themes.
+    #[test]
+    fn placeholder_is_dim_on_terminal_theme_and_gray_elsewhere() {
+        let _guard = crate::theme::cache::pin_theme();
+        let mut style = ghost_test_style();
+        style.focused = false;
+        let area = Rect::new(0, 0, 40, 1);
+
+        let render = |pw: &mut PromptWidget| {
+            let mut buf = Buffer::empty(area);
+            pw.draw(&mut buf, area, None, &style, None, None);
+            assert!(
+                buf_text_at(&buf, 0, 14, 0).contains("Build anything"),
+                "placeholder text missing"
+            );
+            buf.cell((0, 0)).unwrap().style()
+        };
+
+        crate::theme::cache::set(crate::theme::ThemeKind::Terminal);
+        let terminal = render(&mut PromptWidget::new());
+        assert!(
+            terminal.add_modifier.contains(Modifier::DIM),
+            "terminal-theme placeholder must be dimmed, got {terminal:?}"
+        );
+
+        crate::theme::cache::set(crate::theme::ThemeKind::GrokNight);
+        let groknight = render(&mut PromptWidget::new());
+        assert_eq!(
+            groknight.fg,
+            Some(Theme::current().gray),
+            "RGB-theme placeholder keeps the gray fg"
+        );
+        assert!(!groknight.add_modifier.contains(Modifier::DIM));
     }
 
     #[test]
@@ -4391,6 +4661,8 @@
 
     #[test]
     fn title_renders_on_top_border_with_corners_intact() {
+        // Pinned: the caption blend reads the ambient theme at draw time.
+        let _guard = crate::theme::cache::pin_theme();
         let buf = draw_bordered(40, &title_test_style(Some("my session")));
 
         // ` my session ` is 12 cols, right-aligned ending 2 cells before ╮: label at x 25..=36, dashes at 37..=38, corner at 39
@@ -4401,6 +4673,8 @@
 
         // Info-line treatment: dimmed secondary text on the prompt bg (same blend as `render_info_line`'s model name), no bold, no inverse
         let theme = Theme::current();
+        // The blend can fail even pinned (FORCE_COLOR envs quantize to
+        // ANSI16); the caption then keeps muted()'s gray fg.
         let expected_fg =
             crate::render::color::blend_color(theme.bg_base, theme.text_secondary, 0.6)
                 .unwrap_or(theme.gray);
@@ -4464,6 +4738,8 @@
     /// Uses a sentinel panel color so the test holds under terminal-default, where every palette entry quantizes to `Color::Reset`.
     #[test]
     fn panel_bg_repaints_paste_chip_to_panel_bg() {
+        // Pinned: the chip bg is read from the ambient theme at draw time.
+        let _guard = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         let panel = ratatui::style::Color::Rgb(12, 34, 56);
         assert_ne!(theme.paste_bg, panel, "fixture: sentinel must differ");

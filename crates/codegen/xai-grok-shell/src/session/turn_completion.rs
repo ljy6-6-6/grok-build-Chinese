@@ -10,7 +10,6 @@ use xai_grok_sampler::SamplingErrorKind;
 /// Build a `TurnCompleted` from a prompt id and the `(stop_reason, agent_result)` JSON pair from [`crate::sampling::error::prompt_complete_fields`].
 /// `stop_reason` is always a JSON string; `agent_result` is a string or null.
 /// Non-string inputs fall back to their JSON text so a terminal is never dropped for a shape mismatch.
-/// `error_kind` (a failed stop's typed kind) hits the wire as its stable `as_str` name.
 pub(crate) fn build_turn_completed(
     prompt_id: String,
     stop_reason: serde_json::Value,
@@ -26,7 +25,7 @@ pub(crate) fn build_turn_completed(
             serde_json::Value::Null => None,
             other => Some(json_to_string(other)),
         },
-        error_kind: error_kind.map(|k| k.as_str().to_string()),
+        error_kind: error_kind.map(|k| k.as_ref().to_string()),
         usage,
         elapsed_ms,
     }
@@ -35,7 +34,7 @@ pub(crate) fn build_turn_completed(
 /// Base `x.ai/session/prompt_complete` payload shared by every producer (live prompt, chat bridge, gateway remote turn).
 /// It carries the terminal fields from [`crate::sampling::error::prompt_complete_fields`] plus the optional typed `errorKind` stamp.
 /// Producers append their rail-specific fields (`turnId`, cancel meta).
-pub(crate) fn prompt_complete_payload(
+pub fn prompt_complete_payload(
     session_id: &agent_client_protocol::SessionId,
     prompt_id: &str,
     result: &std::result::Result<agent_client_protocol::StopReason, agent_client_protocol::Error>,
@@ -50,7 +49,7 @@ pub(crate) fn prompt_complete_payload(
     });
     if let Some(kind) = error_kind {
         payload[crate::extensions::notification::PROMPT_COMPLETE_ERROR_KIND_KEY] =
-            serde_json::json!(kind.as_str());
+            serde_json::json!(kind.as_ref());
     }
     payload
 }

@@ -59,8 +59,6 @@ pub fn claude_managed_settings_probe_path() -> Option<PathBuf> {
 const MAX_DIRNAME_BYTES: usize = 255;
 
 /// Encode a CWD string into a filesystem-safe directory name component.
-///
-/// Short CWDs (URL-encoded form <= 255 bytes) use URL-encoding for backward compatibility and human readability on disk.
 /// Long CWDs (> 255 bytes encoded) use a compact `{slug}-{blake3_hex16}` form that is always <= 57 bytes.
 /// Callers must write a `.cwd` metadata file via [`ensure_sessions_cwd_dir`] so the original CWD can be recovered by [`decode_cwd_from_dirname`].
 pub fn encode_cwd_dirname(cwd: &str) -> String {
@@ -80,7 +78,6 @@ pub fn encode_cwd_dirname(cwd: &str) -> String {
 }
 
 /// Recover the original CWD from a sessions CWD directory.
-///
 /// Tries URL-decoding the directory name first (works for short/legacy dirs).
 /// Falls back to reading a `.cwd` metadata file inside the directory (written by [`ensure_sessions_cwd_dir`] for hash-based dirs).
 pub fn decode_cwd_from_dirname(dir: &std::path::Path) -> Option<String> {

@@ -11,27 +11,15 @@ use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_m
 /// [`parse_fork_args`] returns this, and [`Action::Fork`](crate::app::actions::Action::Fork) carries it to the dispatcher.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct ForkArgs {
-    /// `None`        -> open the worktree question modal (the user is
-    ///                  asked every time; the choice is never persisted).
-    /// `Some(true)`  -> force worktree, skipping the modal.
-    /// `Some(false)` -> force no-worktree, skipping the modal.
+    /// `None` -> open the worktree question modal (the user is asked every time. the choice is never persisted).
     pub worktree_override: Option<bool>,
     /// Optional first prompt for the new session. Whitespace-trimmed.
     /// `None` when the user typed `/fork` (with or without flags) and no directive text; the new agent then opens with no first prompt.
     pub directive: Option<String>,
 }
 
-/// Parse the raw argument string after `/fork`.
-///
-/// Recognised flags appear at the start; everything after the last flag is the directive.
-/// An unknown flag is treated as the start of the directive, so `/fork --foo bar` becomes the directive `--foo bar`.
-/// The args are user-typed text, and a directive that happens to begin with `--` must not be rejected.
-///
-/// Errors:
-/// - `--worktree` and `--no-worktree` cannot both appear.
-/// - `--at <turn>` returns a friendly "not supported in this version" message.
-///   The shell already supports the parameter as `xai_grok_shell::session::fork::ForkSessionRequest::target_prompt_index`.
-///   A turn-picker UI is planned; rejecting the flag now tells the user the feature is deferred.
+/// Parse the raw argument string after `/fork`. The args are user-typed text, and a directive that happens to begin
+/// with `--` must not be rejected. `--worktree` and `--no-worktree` cannot both appear.
 pub fn parse_fork_args(args: &str) -> Result<ForkArgs, String> {
     let mut worktree_override: Option<bool> = None;
     let mut rest = args.trim_start();

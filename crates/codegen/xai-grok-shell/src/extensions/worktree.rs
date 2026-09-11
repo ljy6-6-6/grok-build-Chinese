@@ -3,7 +3,7 @@
 use agent_client_protocol as acp;
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
 
-use crate::agent::mvp_agent::MvpAgent;
+use crate::extensions::agent_runtime::AgentRuntime;
 use crate::session::ExtMethodResult;
 use crate::session::persistence::LocalSessionResolutionKind;
 use crate::session::worktree::{
@@ -15,6 +15,7 @@ use crate::session::worktree::{
 };
 use xai_grok_telemetry::instrument_task;
 use xai_grok_telemetry::region::Parent;
+use xai_grok_telemetry::session_ctx::spawn_local_in_session_ctx;
 
 type ExtResult = Result<acp::ExtResponse, acp::Error>;
 
@@ -150,12 +151,12 @@ fn log_effective_worktree_type(
 }
 #[tracing::instrument(name = "ext.worktree", skip_all, fields(method = %args.method))]
 pub async fn handle(
-    agent: &MvpAgent,
+    agent: &dyn AgentRuntime,
     ops: &xai_grok_workspace::WorkspaceOps,
     args: &acp::ExtRequest,
 ) -> ExtResult {
-    let worktree_type_default = agent.worktree_type;
-    let restore_code_default = agent.restore_code;
+    let worktree_type_default = agent.worktree_type();
+    let restore_code_default = agent.restore_code();
 
     match args.method.as_ref() {
         "x.ai/git/worktree/create" => {
@@ -165,7 +166,8 @@ pub async fn handle(
             if req.worktree_type.is_none() {
                 req.worktree_type = Some(worktree_type_default.into());
             }
-            apply_grove_worktree_flag(agent, &mut req.grove_worktree);
+            req.grove_gate_source =
+                Some(apply_grove_worktree_flag(agent, &mut req.grove_worktree).into());
             log_effective_worktree_type(
                 "x.ai/git/worktree/create",
                 request_worktree_type,
@@ -182,10 +184,10 @@ pub async fn handle(
             {
                 req.worktree_path = extract_creating_path(&Ok(resp));
                 let notifier = GatewayWorktreeNotifier {
-                    gateway: agent.gateway.clone(),
+                    gateway: agent.gateway().clone(),
                 };
                 let copy_context = agent.background_copy_context();
-                tokio::task::spawn_local(instrument_task!(
+                spawn_local_in_session_ctx(instrument_task!(
                     "worktree.create",
                     Parent::Root,
                     async move {
@@ -219,7 +221,8 @@ pub async fn handle(
             if req.worktree_type.is_none() {
                 req.worktree_type = Some(worktree_type_default.into());
             }
-            apply_grove_worktree_flag(agent, &mut req.grove_worktree);
+            req.grove_gate_source =
+                Some(apply_grove_worktree_flag(agent, &mut req.grove_worktree).into());
             log_effective_worktree_type(
                 "x.ai/git/worktree/create_from_worktree",
                 request_worktree_type,
@@ -251,9 +254,9 @@ pub async fn handle(
                 // Pin the resolved path so the async task reuses it instead of generating a new UUID via auto_label()
                 req.resolved_dest_path = extract_creating_path(&Ok(response.clone()));
                 let notifier = GatewayWorktreeNotifier {
-                    gateway: agent.gateway.clone(),
+                    gateway: agent.gateway().clone(),
                 };
-                tokio::task::spawn_local(instrument_task!(
+                spawn_local_in_session_ctx(instrument_task!(
                     "worktree.create",
                     Parent::Root,
                     async move {
@@ -301,7 +304,8 @@ pub async fn handle(
             if req.worktree_type.is_none() {
                 req.worktree_type = Some(worktree_type_default.into());
             }
-            apply_grove_worktree_flag(agent, &mut req.grove_worktree);
+            req.grove_gate_source =
+                Some(apply_grove_worktree_flag(agent, &mut req.grove_worktree).into());
             log_effective_worktree_type(
                 "x.ai/git/worktree/create_from_worktree_sync",
                 request_worktree_type,
@@ -329,7 +333,7 @@ pub async fn handle(
                 req.worktree_type.unwrap_or(worktree_type_default.into()),
             );
             let mut grove_worktree = None;
-            apply_grove_worktree_flag(agent, &mut grove_worktree);
+            let grove_gate_source = apply_grove_worktree_flag(agent, &mut grove_worktree);
             let grove_worktree = grove_worktree.unwrap_or(false);
             let registry_client = agent.session_registry_client();
             let agent_id = xai_grok_telemetry::id::agent_id();
@@ -341,9 +345,10 @@ pub async fn handle(
                     worktree_type_default,
                     restore_code_default,
                     registry_client.as_ref(),
-                    Some(agent.auth_manager.clone()),
+                    Some(agent.auth_manager().clone()),
                     &agent_id,
                     grove_worktree,
+                    grove_gate_source,
                 )
                 .await,
             )
@@ -508,11 +513,11 @@ pub async fn handle(
     }
 }
 
-fn apply_grove_worktree_flag(agent: &MvpAgent, slot: &mut Option<bool>) {
+fn apply_grove_worktree_flag(agent: &dyn AgentRuntime, slot: &mut Option<bool>) -> &'static str {
     let root = crate::config::load_effective_config()
         .unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()));
-    let cfg = agent.cfg.borrow();
-    apply_grove_worktree_gate(slot, &root, cfg.remote_settings.as_ref());
+    let remote = agent.remote_settings();
+    apply_grove_worktree_gate(slot, &root, remote.as_ref())
 }
 
 /// Always run the grove gate, even when `slot` is already `Some`; the kill switch applies last.
@@ -520,7 +525,7 @@ pub(crate) fn apply_grove_worktree_gate(
     slot: &mut Option<bool>,
     root: &toml::Value,
     remote: Option<&crate::util::config::RemoteSettings>,
-) {
+) -> &'static str {
     let (enabled, src) = crate::util::config::gate_grove_worktree(*slot, root, remote);
     tracing::info!(
         target: WORKTREE_EXT_LOG,
@@ -529,6 +534,7 @@ pub(crate) fn apply_grove_worktree_gate(
         "WORKTREE_REQUEST_SHELL: resolved grove materialize strategy"
     );
     *slot = Some(enabled);
+    src
 }
 
 #[cfg(test)]

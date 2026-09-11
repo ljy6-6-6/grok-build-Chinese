@@ -1005,19 +1005,9 @@ fn normalize_hyphenated_english_harmless() {
     assert!(result.starts_with("create a high-priority issue"));
 }
 
-// -- MCP name format coverage --
-//
-// Real MCP qualified names follow the pattern `{server}__{tool}` where server and tool names independently use different conventions:
-//
-//   Server formats:  simple        ("linear")
-//                    kebab-case    ("grafana-ai")
-//                    snake_case    ("grok_com_slack")
-//
-//   Tool formats:    snake_case    ("save_issue")
-//                    PascalCase    ("SearchDashboards")
-//                    camelCase     ("sendMessage")
-//                    kebab-case    ("notion-search")
-//                    single word   ("fetch")
+// Real MCP qualified names follow the pattern `{server}__{tool}` where server and tool names independently use different conventions.
+// Server formats: simple ("linear") kebab-case ("grafana-ai") snake_case ("grok_com_slack").
+// Tool formats: snake_case ("save_issue") PascalCase ("SearchDashboards") camelCase ("sendMessage") kebab-case ("notion-search") single word ("fetch").
 
 /// Fixture covering every combination of server and tool naming conventions observed in production MCP configs.
 fn mcp_format_tools() -> Vec<ToolMetadata> {
@@ -1338,10 +1328,9 @@ fn fmt_wrong_tool_name_falls_through() {
     );
 }
 
-// ── Needle-in-haystack: production-scale index ──────────────────
-//
-// Realistic fixture with ~55 tools across 5 servers (Slack 17, Notion 14, Grafana 9, Linear 8, GitHub 7)
-// Tests that BM25 finds the right tool via partial or natural-language queries when there are many competing documents
+// ── Needle-in-haystack: production-scale index ──────────────────.
+// Realistic fixture with ~55 tools across 5 servers (Slack 17, Notion 14, Grafana 9, Linear 8, GitHub 7).
+// Tests that BM25 finds the right tool via partial or natural-language queries when there are many competing documents.
 
 fn production_haystack() -> Vec<ToolMetadata> {
     let tool = |qn: &str, server: &str, name: &str, desc: &str, params: &[&str]| ToolMetadata {
@@ -2054,15 +2043,9 @@ fn haystack_total_tools() {
     assert_eq!(snap.total_hidden_tools, expected);
 }
 
-// ── Score comparison: before / after each rule ───────────────────
-//
-// Measures BM25 scores for the same queries under four configs:
-//   baseline       = old to_document (only _ split) + raw query
-//   +doc_norm      = new to_document (split_identifier) + raw query
-//   +query_norm    = old to_document + normalize_query
-//   +both          = new to_document + normalize_query
-//
-// Asserts that each rule independently improves the score for identifier-style queries and that the combined score is best
+// ── Score comparison: before / after each rule ───────────────────.
+// Measures BM25 scores for the same queries under four configs: baseline = old to_document (only _ split) + raw query +doc_norm = new to_document (split_identifier) + raw query +query_norm = old to_document +.
+// Asserts that each rule independently improves the score for identifier-style queries and that the combined score is best.
 
 /// Old to_document: only splits words containing `_`.
 fn to_document_baseline(t: &ToolMetadata) -> String {

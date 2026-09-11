@@ -21,7 +21,7 @@ use tempfile::TempDir;
 use super::*;
 use crate::default_db_path;
 use crate::test_support::{expected_member, member_key, new_member};
-use crate::types::RANK_GAP;
+use crate::types::{LayoutGrouping, RANK_GAP};
 
 fn temp_store() -> (TempDir, WorkspaceStore) {
     let tmp = TempDir::new().unwrap();
@@ -33,6 +33,13 @@ fn assign(id: &str, kind: MemberKind, rank: Option<i64>) -> RankAssignment {
     RankAssignment {
         key: member_key(id, kind),
         rank,
+    }
+}
+
+fn pin(id: &str, kind: MemberKind, pinned: bool) -> PinAssignment {
+    PinAssignment {
+        key: member_key(id, kind),
+        pinned,
     }
 }
 
@@ -244,9 +251,14 @@ fn pinned_members_are_never_evicted_and_all_pinned_refuses() {
             ))
             .unwrap();
     }
-    store
-        .set_pin_rank(&[assign("m000", MemberKind::Build, Some(RANK_GAP))])
-        .unwrap();
+    assert!(matches!(
+        store.apply_layout_patch(&LayoutPatch {
+            pin_assignments: vec![pin("m000", MemberKind::Build, true)],
+            manual_order: None,
+            grouping: None,
+        }),
+        LayoutApplyOutcome::Committed(_)
+    ));
 
     let newcomer = new_member("z-new", MemberKind::Build, MemberOrigin::Local, 9999);
     assert_eq!(
@@ -255,21 +267,27 @@ fn pinned_members_are_never_evicted_and_all_pinned_refuses() {
         "the pinned oldest member is exempt; the next-oldest goes"
     );
 
-    let all_pinned: Vec<RankAssignment> = store
+    let all_pinned: Vec<PinAssignment> = store
         .snapshot()
         .unwrap()
         .members
         .iter()
-        .enumerate()
-        .map(|(i, m)| RankAssignment {
+        .map(|m| PinAssignment {
             key: MemberKey {
                 session_id: m.session_id.clone(),
                 kind: m.kind.clone(),
             },
-            rank: Some((i as i64 + 1) * RANK_GAP),
+            pinned: true,
         })
         .collect();
-    store.set_pin_rank(&all_pinned).unwrap();
+    assert!(matches!(
+        store.apply_layout_patch(&LayoutPatch {
+            pin_assignments: all_pinned,
+            manual_order: None,
+            grouping: None,
+        }),
+        LayoutApplyOutcome::Committed(_)
+    ));
 
     let before = store.snapshot().unwrap();
     let error = store
@@ -561,6 +579,259 @@ fn rank_batch_is_atomic_and_grouping_persists() {
         store.snapshot().unwrap().grouping,
         Grouping::Directory,
         "grouping must survive a reopen"
+    );
+}
+
+#[test]
+fn layout_patch_commits_one_snapshot_and_rewrites_complete_order_subset() {
+    let (_tmp, mut store) = temp_store();
+    let a = new_member("a", MemberKind::Build, MemberOrigin::Local, 1);
+    let b = new_member("b", MemberKind::Build, MemberOrigin::Local, 2);
+    let c = new_member("c", MemberKind::Build, MemberOrigin::Local, 3);
+    for member in [&a, &b, &c] {
+        store.insert_member(member.clone()).unwrap();
+    }
+    store
+        .set_order_rank(&[
+            assign("a", MemberKind::Build, Some(9)),
+            assign("c", MemberKind::Build, Some(10)),
+        ])
+        .unwrap();
+
+    let outcome = store.apply_layout_patch(&LayoutPatch {
+        pin_assignments: vec![pin("b", MemberKind::Build, true)],
+        manual_order: Some(vec![b.key.clone(), a.key.clone()]),
+        grouping: Some(LayoutGrouping::Directory),
+    });
+    let LayoutApplyOutcome::Committed(snapshot) = outcome else {
+        panic!("layout patch should commit");
+    };
+
+    assert_eq!(snapshot.grouping, Grouping::Directory);
+    assert_eq!(
+        snapshot.members,
+        vec![
+            expected_member(&a, None, Some(2 * RANK_GAP)),
+            expected_member(&b, Some(RANK_GAP), Some(RANK_GAP)),
+            expected_member(&c, None, None),
+        ]
+    );
+    assert_eq!(store.snapshot().unwrap(), snapshot);
+}
+
+#[test]
+fn missing_layout_member_rolls_back_every_field_and_returns_reliable_snapshot() {
+    let (_tmp, mut store) = temp_store();
+    let a = new_member("a", MemberKind::Build, MemberOrigin::Local, 1);
+    store.insert_member(a).unwrap();
+    let before = store.snapshot().unwrap();
+
+    let outcome = store.apply_layout_patch(&LayoutPatch {
+        pin_assignments: vec![pin("a", MemberKind::Build, true)],
+        manual_order: Some(vec![member_key("missing", MemberKind::Build)]),
+        grouping: Some(LayoutGrouping::Directory),
+    });
+    let LayoutApplyOutcome::Rejected { error, snapshot } = outcome else {
+        panic!("missing member should reject with rollback snapshot");
+    };
+
+    assert!(matches!(
+        error,
+        StoreError::MemberNotFound { session_id, .. } if session_id == "missing"
+    ));
+    assert_eq!(snapshot, before);
+    assert_eq!(store.snapshot().unwrap(), before);
+}
+
+#[test]
+fn layout_commit_failure_returns_no_snapshot_and_leaves_committed_state_unchanged() {
+    let (_tmp, mut store) = temp_store();
+    let a = new_member("a", MemberKind::Build, MemberOrigin::Local, 1);
+    store.insert_member(a.clone()).unwrap();
+    store
+        .conn
+        .execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE layout_test_parent (id INTEGER PRIMARY KEY);
+             CREATE TABLE layout_test_child (
+                 parent_id INTEGER REFERENCES layout_test_parent(id)
+                     DEFERRABLE INITIALLY DEFERRED
+             );
+             CREATE TRIGGER layout_test_commit_failure
+             AFTER UPDATE OF pin_rank ON members
+             BEGIN
+                 INSERT INTO layout_test_child(parent_id) VALUES (999);
+             END;",
+        )
+        .unwrap();
+
+    let outcome = store.apply_layout_patch(&LayoutPatch {
+        pin_assignments: vec![pin("a", MemberKind::Build, true)],
+        manual_order: None,
+        grouping: None,
+    });
+
+    assert!(matches!(
+        outcome,
+        LayoutApplyOutcome::Failed {
+            error: StoreError::Sqlite(_)
+        }
+    ));
+    assert_eq!(
+        store.snapshot().unwrap().members,
+        vec![expected_member(&a, None, None)]
+    );
+}
+
+#[test]
+fn layout_patch_reports_newer_schema_as_typed_failed_outcome() {
+    let tmp = TempDir::new().unwrap();
+    let db = default_db_path(tmp.path());
+    let mut store = WorkspaceStore::open(&db).unwrap();
+    let peer = rusqlite::Connection::open(store.path()).unwrap();
+    peer.pragma_update(None, "user_version", USER_VERSION + 1)
+        .unwrap();
+    drop(peer);
+
+    let outcome = store.apply_layout_patch(&LayoutPatch {
+        pin_assignments: vec![],
+        manual_order: None,
+        grouping: Some(LayoutGrouping::Directory),
+    });
+
+    assert!(matches!(
+        outcome,
+        LayoutApplyOutcome::Failed {
+            error: StoreError::NewerSchema {
+                found,
+                supported: USER_VERSION
+            }
+        } if found == USER_VERSION + 1
+    ));
+    assert_eq!(
+        store.schema_state(),
+        SchemaState::NewerReadOnly {
+            user_version: USER_VERSION + 1
+        }
+    );
+}
+
+#[test]
+fn layout_patch_public_boundary_rejects_invalid_semantics() {
+    let (_tmp, mut store) = temp_store();
+    let invalid = [
+        LayoutPatch {
+            pin_assignments: vec![pin("chat", MemberKind::Conversation, true)],
+            manual_order: None,
+            grouping: None,
+        },
+        LayoutPatch {
+            pin_assignments: vec![],
+            manual_order: Some(vec![member_key("chat", MemberKind::Conversation)]),
+            grouping: None,
+        },
+    ];
+
+    for patch in invalid {
+        assert!(matches!(
+            store.apply_layout_patch(&patch),
+            LayoutApplyOutcome::Failed {
+                error: StoreError::InvalidLayoutPatch { .. }
+            }
+        ));
+    }
+}
+
+#[test]
+fn layout_patch_deduplicates_public_assignments_before_writing() {
+    let (_tmp, mut store) = temp_store();
+    let a = new_member("a", MemberKind::Build, MemberOrigin::Local, 1);
+    store.insert_member(a.clone()).unwrap();
+
+    let outcome = store.apply_layout_patch(&LayoutPatch {
+        pin_assignments: vec![
+            pin("a", MemberKind::Build, false),
+            pin("a", MemberKind::Build, true),
+        ],
+        manual_order: Some(vec![a.key.clone(), a.key.clone()]),
+        grouping: None,
+    });
+    let LayoutApplyOutcome::Committed(snapshot) = outcome else {
+        panic!("deduplicated patch should commit");
+    };
+    assert_eq!(
+        snapshot.members,
+        vec![expected_member(&a, Some(RANK_GAP), Some(RANK_GAP))]
+    );
+}
+
+#[test]
+fn pin_only_layout_patch_preserves_unknown_grouping() {
+    let (_tmp, mut store) = temp_store();
+    let a = new_member("a", MemberKind::Build, MemberOrigin::Local, 1);
+    store.insert_member(a).unwrap();
+    let future = Grouping::from_raw("future-grouping").unwrap();
+    store.set_grouping(&future).unwrap();
+
+    let outcome = store.apply_layout_patch(&LayoutPatch {
+        pin_assignments: vec![pin("a", MemberKind::Build, true)],
+        manual_order: None,
+        grouping: None,
+    });
+    let LayoutApplyOutcome::Committed(snapshot) = outcome else {
+        panic!("pin-only patch should commit");
+    };
+    assert_eq!(snapshot.grouping, future);
+}
+
+#[test]
+fn remove_and_reinsert_resets_member_layout() {
+    let (_tmp, mut store) = temp_store();
+    let a = new_member("a", MemberKind::Build, MemberOrigin::Local, 1);
+    store.insert_member(a.clone()).unwrap();
+    assert!(matches!(
+        store.apply_layout_patch(&LayoutPatch {
+            pin_assignments: vec![pin("a", MemberKind::Build, true)],
+            manual_order: Some(vec![a.key.clone()]),
+            grouping: None,
+        }),
+        LayoutApplyOutcome::Committed(_)
+    ));
+
+    store.remove_member(&a.key).unwrap();
+    store.insert_member(a.clone()).unwrap();
+
+    assert_eq!(
+        store.snapshot().unwrap().members,
+        vec![expected_member(&a, None, None)]
+    );
+}
+
+#[test]
+fn peer_layout_patch_advances_data_version_and_converges_snapshot() {
+    let tmp = TempDir::new().unwrap();
+    let db = default_db_path(tmp.path());
+    let mut local = WorkspaceStore::open(&db).unwrap();
+    let a = new_member("a", MemberKind::Build, MemberOrigin::Local, 1);
+    local.insert_member(a.clone()).unwrap();
+    let baseline = local.snapshot().unwrap().data_version;
+    let mut peer = WorkspaceStore::open(&db).unwrap();
+
+    assert!(matches!(
+        peer.apply_layout_patch(&LayoutPatch {
+            pin_assignments: vec![pin("a", MemberKind::Build, true)],
+            manual_order: Some(vec![a.key.clone()]),
+            grouping: Some(LayoutGrouping::Directory),
+        }),
+        LayoutApplyOutcome::Committed(_)
+    ));
+
+    assert_ne!(local.data_version().unwrap(), baseline);
+    let refreshed = local.snapshot().unwrap();
+    assert_eq!(refreshed.grouping, Grouping::Directory);
+    assert_eq!(
+        refreshed.members,
+        vec![expected_member(&a, Some(RANK_GAP), Some(RANK_GAP))]
     );
 }
 

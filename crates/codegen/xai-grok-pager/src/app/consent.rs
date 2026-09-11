@@ -232,9 +232,6 @@ fn split_markdown_links(
 
 impl ConsentNotice {
     /// Validate a served payload.
-    ///
-    /// # Errors
-    ///
     /// [`ConsentArmRefusal`] when the payload cannot safely arm the gate; every variant fails open.
     pub fn try_from_remote(gate: &ConsentGate) -> Result<Self, ConsentArmRefusal> {
         let body_source = gate.body.as_deref().unwrap_or_default();

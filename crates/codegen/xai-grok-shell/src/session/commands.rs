@@ -6,10 +6,9 @@ use crate::extensions::notification::SessionNotification;
 use crate::session::signals::TurnDeltaSnapshot;
 use agent_client_protocol as acp;
 use tokio::sync::oneshot;
+use xai_grok_tools::types::skill_discovery_tracker::SkillUpdateKind;
 /// Structured context for a cancelled turn.
-/// This is the wire shape of `cancellationContext` on the turn-end rails and of the AfterTurn hook payload's `cancellation_context`.
 /// Clients deserialize into this same type.
-/// Keys are snake_case on purpose: that is the shape already shipped to AfterTurn hook consumers, and the convention for fields hooks receive.
 /// Absent fields are skipped.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -53,11 +52,8 @@ pub enum PromptCompletionKind {
     },
     Rewound,
     /// A queued prompt was removed (or cleared) from the server-authoritative queue before it ever ran.
-    /// Used to resolve the still-pending `session/prompt` RPC of the client that submitted it WITHOUT triggering turn-completion side effects.
     /// The prompt never started a turn, so the `prompt_complete` broadcast and the roster `Idle` delta must be skipped.
-    /// That broadcast carries no `promptId` and would tell every attached leader-mode client the *running* turn ended.
     /// The `Idle` delta would flip the dashboard off `Working` while the real turn is still in flight.
-    /// See `MvpAgent::prompt`'s short-circuit and `respond_removed_prompt`.
     RemovedFromQueue,
 }
 /// `_meta.completionKind` on a `PromptResponse`. Distinguishes a queued prompt
@@ -135,10 +131,8 @@ pub(crate) fn ok_end_turn(tokens: u64, snapshot: Option<TurnDeltaSnapshot>) -> P
         tool_overrides: None,
     })
 }
-/// Bound on awaiting [`ParsedPromptInfo`] for the metadata upload, shared by
-/// the main-session and subagent paths so the two bounds can't drift. The
-/// prompt is parsed early in the turn, so this only fires when the turn never
-/// dispatched (or the actor is wedged).
+/// Bound on awaiting [`ParsedPromptInfo`] for the metadata upload, shared by the main-session and subagent paths so the two bounds can't drift.
+/// The prompt is parsed early in the turn, so this only fires when the turn never dispatched (or the actor is wedged).
 pub(crate) const PARSED_PROMPT_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
 /// Pre-parsed prompt metadata sent back to the caller after `parse_prompt`.
 pub struct ParsedPromptInfo {
@@ -255,6 +249,45 @@ pub struct CancelOptions {
     /// Drives the cancel-rate metric, and marks an untriggered cancel as the user's.
     pub user_initiated: bool,
 }
+/// Why the catalog is being (re-)advertised; labels the `slash.advertise` unified-log line.
+#[derive(Debug, Clone, Copy)]
+pub enum AdvertiseTrigger {
+    /// A new session pushed its first catalog.
+    SessionStart,
+    /// A loaded session re-pushed its catalog to the reconnecting client.
+    SessionLoad,
+    /// The skill baseline was replaced (disk reload, plugins, bundle sync, `/clear`).
+    SkillsReload,
+    /// A tool call surfaced new skills mid-turn.
+    SkillDiscovery,
+    /// A workflow watcher or an explicit workflow reload saw a change.
+    WorkflowsChanged,
+    /// `set_session_model` swapped in a harness with a different toolset.
+    HarnessRebuild,
+    /// Per-response token-usage meta refresh; the catalog itself is unchanged.
+    UsageMeta,
+}
+impl AdvertiseTrigger {
+    pub fn as_label(self) -> &'static str {
+        match self {
+            Self::SessionStart => "session_start",
+            Self::SessionLoad => "session_load",
+            Self::SkillsReload => "skills_reload",
+            Self::SkillDiscovery => "skill_discovery",
+            Self::WorkflowsChanged => "workflows_changed",
+            Self::HarnessRebuild => "harness_rebuild",
+            Self::UsageMeta => "usage_meta",
+        }
+    }
+}
+impl From<SkillUpdateKind> for AdvertiseTrigger {
+    fn from(kind: SkillUpdateKind) -> Self {
+        match kind {
+            SkillUpdateKind::Discovery => Self::SkillDiscovery,
+            SkillUpdateKind::BaselineChange => Self::SkillsReload,
+        }
+    }
+}
 pub enum SessionCommand {
     Initialize {
         system_prompt: String,
@@ -312,9 +345,8 @@ pub enum SessionCommand {
         respond_to: oneshot::Sender<PromptTurnResult>,
         /// Optional initial-child readiness signal.
         /// Carried onto the queued item and resolved only when that exact row is promoted, or closed on removal.
-        prompt_admitted: Option<oneshot::Sender<()>>,
+        prompt_admitted: Option<oneshot::Sender<oneshot::Sender<()>>>,
         /// Optional oneshot fired once the prompt's persistence is settled, before LLM inference begins.
-        /// It fires after the user message has been appended to chat history and a flush barrier has completed.
         /// When a `UserPromptSubmit` hook blocked the prompt it fires immediately: nothing was stored, so there is nothing to flush.
         /// Used by callers that need `chat_history.jsonl` settled before trace snapshots or `session/load`; a blocked prompt never appears there.
         persist_ack: Option<oneshot::Sender<()>>,
@@ -323,7 +355,7 @@ pub enum SessionCommand {
         /// The session sends on this channel right after parsing.
         parsed_prompt_tx: Option<oneshot::Sender<ParsedPromptInfo>>,
     },
-    /// Admit an owning root's model-authored message as an ordinary protected turn.
+    /// Admit an owning parent's message as an ordinary protected turn or running-turn Steer.
     ParentAgentMessage {
         delivery:
             xai_grok_tools::implementations::grok_build::task::types::ActiveAgentMessageDelivery,
@@ -350,7 +382,6 @@ pub enum SessionCommand {
         /// Set by the model-switch orchestrator immediately after a successful `RebuildAgentForDefinition`.
         /// The rebuild handler already installed the fresh harness's prompt; the concise/default swap must not clobber it.
         skip_prompt_rewrite: bool,
-        /// Re-resolved auto-compact threshold for the new model.
         /// Computed by `MvpAgent` against the new model id.
         /// Per-model remote settings and per-model user TOML overrides then target the right model after a `/model` switch.
         /// The session actor stores this on `compaction.threshold_percent` (which is `Cell<u8>` so it can update without `&mut self`).
@@ -365,23 +396,14 @@ pub enum SessionCommand {
     },
     /// Zero-turn harness rebuild: build a brand-new `Agent` from the session's `AgentRebuildSpec` and the new `AgentDefinition`.
     /// Re-register MCP tools, swap the live `Agent`, and rewrite the system message in the conversation.
-    /// Persist the new prompt artifacts and update `active_agent_type`.
-    ///
     /// Triggered by `MvpAgent::set_session_model` when the new model's `agent_type` differs from the session's current one.
-    /// It only fires while no user message has been sent (`turn_count == 0`).
     RebuildAgentForDefinition {
         definition: xai_grok_agent::AgentDefinition,
         responds_to: oneshot::Sender<Result<(), acp::Error>>,
     },
-    /// Override the model name and optionally inject extra HTTP headers into the session's sampling config.
-    ///
-    /// Unlike `SetSessionModel` (which requires a fully resolved `ModelEntry`), this also calls `set_primary_model()`.
-    /// Signals then report the override model rather than the agent-level default (e.g. `grok-4.5`).
+    /// Signals then report the override model rather than the agent-level default.
     /// `SetSessionModel` does NOT update `primaryModelId` in signals; the resolved model is already tracked via inference responses.
     /// Keeps the existing base_url, api_key, and other config; only the `model` field in the `x-grok-model-override` header changes.
-    /// Any additional headers are merged in (e.g. `x-openrouter-api-key` for BYOK).
-    /// Used to set model IDs (e.g. opaque third-party routing names) that are routing hints for the backend.
-    /// Those IDs need not exist in the agent's local model registry.
     OverrideModelName {
         model_name: String,
         extra_headers: indexmap::IndexMap<String, String>,
@@ -439,7 +461,6 @@ pub enum SessionCommand {
     /// Out-of-band history repair (`x.ai/session/repair`): fix tool-pairing violations that would otherwise 400 on every request.
     /// The violations: orphaned or displaced `ToolResult`s, duplicates, and unanswered calls.
     /// `dry_run` only reports.
-    /// Refused while a turn is in flight.
     RepairHistory {
         dry_run: bool,
         respond_to:
@@ -456,9 +477,6 @@ pub enum SessionCommand {
     },
     /// Reconcile the file-state rewind tracker after a bridge-mode `ConversationOnly` rewind that already committed server-side.
     /// Runs the same tracker bookkeeping `handle_rewind` does for `ConversationOnly`.
-    /// It merges the discarded prompts' file effects into the prior rewind point and persists, without reverting files or rewinding the conversation.
-    /// Both of those live server-side in bridge mode.
-    /// Fire-and-forget (no ack): the server rewind has already committed, and the local truncation in `handle_rewind` is itself fire-and-forget.
     /// The bridge therefore does not block its response on the merge.
     ReconcileRewindTracker {
         target_prompt_index: usize,
@@ -522,7 +540,6 @@ pub enum SessionCommand {
     },
     /// Update MCP servers for an existing session (used during reconnect or mid-session via the `x.ai/session/update_mcp_servers` extension method).
     /// This replaces the current MCP server configuration and triggers re-initialization.
-    ///
     /// The caller is notified via `respond_to` once MCP re-initialization completes (or immediately if configs are unchanged).
     UpdateMcpServers {
         mcp_servers: Vec<acp::McpServer>,
@@ -626,8 +643,23 @@ pub enum SessionCommand {
     ListTasks {
         respond_to: oneshot::Sender<Option<Vec<xai_grok_tools::types::TaskSnapshot>>>,
     },
-    /// Query whether the session has work in flight: a running turn (`running_task.is_some()`) **or** queued inputs (`pending_inputs` non-empty).
-    /// Used by the leader's idle-unload decision on client disconnect to avoid unloading a session that still has pending work.
+    /// Persist + broadcast the current background-task list via
+    /// `x.ai/session_notification` (`SessionUpdate::BackgroundTasks`).
+    ///
+    /// `respond_to` means load enqueued the persist+broadcast before returning.
+    /// It is not a client-delivery ack. Live incremental follow-ups leave it `None`.
+    ///
+    /// `pending` is the bridge coalesce bit. Live incrementals pass `Some` so
+    /// a burst collapses to one emit; load leaves it `None` (forced flush).
+    EmitBackgroundTasksSnapshot {
+        respond_to: Option<oneshot::Sender<()>>,
+        pending: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    },
+    /// Query whether the session has work in flight: a running turn
+    /// (`running_task.is_some()`) **or** queued inputs
+    /// (`pending_inputs` non-empty). Used by the leader's idle-unload decision
+    /// on client disconnect (the no-evict keystone) to avoid unloading a
+    /// session that still has pending work.
     IsBusy {
         respond_to: oneshot::Sender<bool>,
     },
@@ -676,11 +708,9 @@ pub enum SessionCommand {
     /// Record background-task ids reparented from a harness-internal verifier/planner subagent's surviving dev server on subagent exit.
     /// The handler inserts them into `goal_turn_task_ids` whenever the goal harness is enabled (not gated on the racy `Active` status).
     /// Their late auto-wake completions are then suppressed by `maybe_drain_notifications`.
-    /// That holds even when a final verification round has already flipped the goal to Blocked.
     RecordGoalTurnTaskIds {
         task_ids: Vec<String>,
     },
-    /// Remove a queued (not-yet-running) prompt from the authoritative prompt queue.
     /// Versioned and idempotent: a stale `expected_version` or an already-drained `id` is a no-op.
     /// On a no-op the actor just re-broadcasts the current queue so the client reconciles.
     /// When `owner` is `Some`, the removal only applies if the item's attribution matches (edit authority: a client edits its own items).
@@ -704,7 +734,6 @@ pub enum SessionCommand {
     /// Replace the text of a queued (not-yet-running) prompt in place (server-side LWW).
     /// Last write wins via the actor's serialized mailbox; the rebroadcast of `x.ai/queue/changed` is the truth signal for every attached client.
     /// The original `owner` attribution is preserved; `editor` is recorded as the most recent editor (for future "alice edited this" UX).
-    /// A missing id, or an id that names the currently-running turn, is a benign no-op.
     EditQueuedPrompt {
         id: String,
         new_text: String,
@@ -721,12 +750,8 @@ pub enum SessionCommand {
         id: String,
     },
     /// Atomically interject a queued (not-yet-running) prompt into the running turn.
-    /// The actor removes it from `pending_inputs` and pushes its text into `pending_interjections` in a single mailbox op.
     /// The in-flight turn merges it at the next safe point, and the prompt can never both interject *and* later run as its own turn.
     /// Versioned and idempotent like [`RemoveQueuedPrompt`].
-    /// A benign no-op when no turn is running, the id names the running turn, the id is stale or already drained, or `owner` doesn't match.
-    /// On a no-op the prompt stays queued and runs normally.
-    /// The rebroadcast of `x.ai/queue/changed` is the truth signal for every attached client.
     InterjectQueuedPrompt {
         id: String,
         expected_version: u64,
@@ -738,6 +763,9 @@ pub enum SessionCommand {
     },
     Cancel(CancelOptions),
     Shutdown(ShutdownKind),
+    PersistResumeStatus {
+        respond_to: oneshot::Sender<()>,
+    },
     /// Force-trigger a feedback request notification for local client testing.
     /// Bypasses all heuristics, sampling, and cooldown checks.
     TriggerTestFeedback {
@@ -748,7 +776,9 @@ pub enum SessionCommand {
     /// Persist a local feedback entry via the persistence actor.
     /// feedback.jsonl is then written through the same channel as other session files and included in GCS CopyFile snapshots.
     PersistFeedback(Box<crate::session::persistence::LocalFeedbackEntry>),
-    AdvertiseCommands,
+    AdvertiseCommands {
+        trigger: AdvertiseTrigger,
+    },
     GetWorkflowCatalogState {
         respond_to: oneshot::Sender<(bool, bool)>,
     },
@@ -779,7 +809,6 @@ pub enum SessionCommand {
         respond_to: oneshot::Sender<Result<String, SideQuestionError>>,
     },
     /// Generate a session recap (a short "where was I" summary) and broadcast it to clients via `SessionUpdate::SessionRecap`.
-    ///
     /// Fire-and-forget: the session snapshots the conversation, makes a single tool-free model call, and emits the result for display only.
     /// It never mutates the conversation, so unlike `SideQuestion` it needs no reply channel; the answer travels back as a notification.
     Recap {
@@ -787,7 +816,6 @@ pub enum SessionCommand {
         auto: bool,
     },
     /// Request an AI-generated shell command suggestion.
-    ///
     /// The session actor builds a minimal prompt from `prefix` and `cwd`.
     /// It calls the sampler with low temperature and low max_tokens, and returns the suggested completion via `respond_to`.
     AISuggest {
@@ -796,12 +824,8 @@ pub enum SessionCommand {
         model_override: Option<String>,
         respond_to: oneshot::Sender<Option<String>>,
     },
-    /// Predict the user's likely next prompt (tab autocomplete ghost text).
-    ///
-    /// Fired by the client after a turn completes.
     /// The session builds a compact text-only transcript of the recent conversation and makes one tool-free model call.
     /// The call defaults to `grok-4.6` when available via `model_override`, else it uses the session model.
-    /// It sanitizes the output and returns the predicted prompt via `respond_to`.
     /// Best-effort: any failure returns `None`.
     SuggestPrompt {
         model_override: Option<String>,
@@ -829,7 +853,6 @@ pub enum SessionCommand {
     /// Trigger a model turn so the model can print a visible goal progress summary.
     /// The goal orchestrator injects a system reminder into context (via `push_parent_reminder`) *before* sending this command.
     /// The session actor queues a short synthetic prompt instructing the model to summarize the reminder, then calls `maybe_start_running_task`.
-    /// Fire-and-forget.
     GoalSummaryTurn {
         /// Short instruction appended as a verbatim user message.
         prompt_text: String,
@@ -849,16 +872,9 @@ pub enum SessionCommand {
         respond_to:
             oneshot::Sender<Vec<Vec<xai_grok_sampling_types::conversation::ConversationItem>>>,
     },
-    /// Take and clear the session actor's out-of-band streaming-turn capture.
-    ///
     /// Returns `Some(...)` when the current turn streamed reasoning or text but the canonical assistant response never reached `chat_state`.
-    /// That happens on a user cancel mid-stream or a terminal sampler failure such as `MaxTokensTruncation`.
     /// The consumer uploads it as `streaming_partial.json` for trace inspection; `chat_state` is never mutated by this command.
-    ///
     /// `prompt_id` lets the handler detect a race.
-    /// A queued turn's `StreamStarted` may have reset the live slot to a different prompt between cancel and take.
-    /// On mismatch the handler emits a `tracing::warn!` tripwire and returns `None`.
-    /// There is no stash, so the capture from that race is dropped rather than misattributed.
     TakeStreamingCapture {
         prompt_id: String,
         #[allow(private_interfaces)]

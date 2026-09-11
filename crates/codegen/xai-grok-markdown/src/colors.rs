@@ -41,13 +41,7 @@ impl ColorLevel {
 static COLOR_LEVEL: OnceLock<ColorLevel> = OnceLock::new();
 
 /// Detect the terminal's color support level.
-///
-/// This uses the `supports-color` crate which checks:
-/// - `COLORTERM` environment variable (for truecolor detection)
-/// - `TERM` environment variable
-/// - Terminal-specific environment variables (like `ITERM_SESSION_ID`)
-/// - Whether stdout is a TTY
-///
+/// `COLORTERM` environment variable (for truecolor detection); `TERM` environment variable; Terminal-specific environment variables (like `ITERM_SESSION_ID`); Whether stdout is a TTY.
 /// The result is cached after the first call.
 pub fn detect_color_level() -> ColorLevel {
     *COLOR_LEVEL.get_or_init(|| {
@@ -84,8 +78,7 @@ pub fn detect_color_level() -> ColorLevel {
 }
 
 /// Check whether the terminal emulator is known to support truecolor.
-///
-/// Used as a fallback when `COLORTERM` is missing (e.g. inside tmux or over SSH).
+/// Used as a fallback when `COLORTERM` is missing.
 /// Checks terminal-specific env vars that survive session forwarding even when `COLORTERM` and `TERM_PROGRAM` are stripped.
 fn terminal_supports_truecolor() -> bool {
     use std::env;
@@ -198,10 +191,7 @@ pub fn adapt_color(color: Color) -> Option<Color> {
 }
 
 /// Polarity-safe remap for syntax tokens painted on a transparent canvas.
-///
-/// - Near-gray RGB maps to `None` (inherit terminal default fg)
-/// - Chromatic RGB maps to base ANSI Red/Green/Yellow/Blue/Magenta/Cyan
-/// - Existing ANSI: bright white and white body slots demote to `None`; accents stay
+/// Near-gray RGB maps to `None` (inherit terminal default fg); Chromatic RGB maps to base ANSI Red/Green/Yellow/Blue/Magenta/Cyan; Existing ANSI: bright white and white body slots demote to `None`; accents stay.
 fn adapt_color_polarity_safe(color: Color) -> Option<Color> {
     match color {
         Color::Rgb(rgb) => polarity_safe_syntax_ansi(rgb.0, rgb.1, rgb.2).map(Color::Ansi),
@@ -229,7 +219,6 @@ fn adapt_color_polarity_safe(color: Color) -> Option<Color> {
 }
 
 /// Dual-polarity-safe ANSI mapping for syntax tokens (minimal mode).
-///
 /// Returns `None` for near-gray (caller inherits terminal default fg).
 /// Chromatic hues map to base ANSI colors only, never White/Black.
 pub fn polarity_safe_syntax_ansi(r: u8, g: u8, b: u8) -> Option<AnsiColor> {

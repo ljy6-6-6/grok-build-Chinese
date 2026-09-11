@@ -50,11 +50,11 @@ pub mod result {
 /// One MCP server running for a session.
 pub(crate) struct SessionMcpServer {
     pub(crate) bridge: McpBridgeHandle,
-    /// The ids this server contributed to the session's advertised tool set,
-    /// i.e. what survived collision filtering. Dropping the server
-    /// unregisters exactly these, so a native tool that shadowed a same-named
-    /// MCP tool is never torn down along with it.
+    /// The ids this server contributed to the session's advertised tool set, i.e. Dropping the server unregisters exactly these, so a native tool that shadowed a same-named MCP tool is never torn down along with it.
     pub(crate) tool_ids: Vec<ToolId>,
+    /// Fixed for the server's life from the bind config it started under:
+    /// re-claims after a reload rank it the same way its start did.
+    pub(crate) tier: crate::mcp_claim::McpServerTier,
 }
 /// The MCP servers a session is running.
 pub(crate) struct ActiveMcp {
@@ -63,10 +63,7 @@ pub(crate) struct ActiveMcp {
     /// a later reload can add servers to it.
     pub(crate) servers: HashMap<String, SessionMcpServer>,
 }
-/// Whether a session takes part in the workspace's configured MCP set.
-///
-/// `Uninitialized` is a session that never joined: unbound, an `rpc_only`
-/// bind, or a bind whose toolset failed to resolve. Reloads skip those.
+/// Whether a session takes part in the workspace's configured MCP set. `Uninitialized` is a session that never joined: unbound, an `rpc_only` bind, or a bind whose toolset failed to resolve.
 pub(crate) enum WorkspaceMcpBinding {
     Uninitialized,
     Active(ActiveMcp),
@@ -112,25 +109,17 @@ pub struct WorkspaceSession {
     pub(crate) depth: u32,
     pub(crate) fork_budget: u32,
     pub(crate) hunk_tracker: HunkTrackerHandle,
-    /// Cancel token for the workspace-spawned [`HunkTrackerActor`] backing [`Self::hunk_tracker`].
-    /// [`Self::cancel_hunk_tracker`] fires it on session teardown.
-    /// `None` when the tracker is externally owned (e.g. `create_session_with_tracker` / local shell mode).
-    ///
-    /// [`HunkTrackerActor`]: xai_hunk_tracker::HunkTrackerActor
+    /// Cancel token for the workspace-spawned hunk tracker. [`Self::cancel_hunk_tracker`] fires it on session teardown.
+    /// `None` when the tracker is externally owned, so teardown must not cancel a tracker the caller still holds.
     pub(crate) hunk_tracker_cancel: Option<tokio_util::sync::CancellationToken>,
     pub(crate) file_state_tracker: Arc<FileStateTracker>,
     /// Per-turn hunk deltas keyed by `prompt_index`, captured at finalize and replayed on rewind (only when `workspace_rewind_hunks` is on).
-    /// Rewind restores from this map; the durable on-disk mirror is the [`checkpoint_store`] field.
-    ///
-    /// [`checkpoint_store`]: WorkspaceSession::checkpoint_store
+    /// Rewind restores from this map; the durable on-disk mirror is the [`checkpoint_store`] field. [`checkpoint_store`]: WorkspaceSession::checkpoint_store
     pub(crate) hunk_checkpoints:
         Arc<tokio::sync::Mutex<HashMap<usize, xai_hunk_tracker::HunkTurnDelta>>>,
     /// Git domain of the per-prompt rewind checkpoints (HEAD and the staged set).
     pub(crate) git_checkpoints: crate::session::git::GitCheckpointStore,
-    /// Disk-backed durability mirror for finalized checkpoints, fronted by an in-memory cache.
-    /// Gated by `workspace_rewind_durable` (off means no disk I/O, the legacy path).
-    /// Lives in the working tree so the rootfs snapshot carries it and a restored session rehydrates the cache.
-    /// Only a mirror: restore stays in-process.
+    /// Disk-backed durability mirror for finalized checkpoints, fronted by an in-memory cache. Only a mirror: restore stays in-process.
     pub(crate) checkpoint_store: crate::session::checkpoint_store::CheckpointStore,
     pub(crate) async_fs: AsyncFsWrapper,
     inner: RwLock<WorkspaceSessionInner>,
@@ -140,61 +129,28 @@ pub struct WorkspaceSession {
     pub(crate) mcp_state: Arc<tokio::sync::Mutex<McpState>>,
     /// Workspace hub publication state for MCP bridges and registered aliases.
     pub(crate) mcp_binding: tokio::sync::Mutex<WorkspaceMcpBinding>,
-    /// Cancels the session's in-flight MCP server starts. Teardown flips the
-    /// binding to `Closed` for everything that COMPLETES afterwards, but a
-    /// start still connecting holds its child process inside a pending
-    /// future — cancelling drops those futures, killing the children now
-    /// instead of at the discovery deadline. A revive bind (re-opening a
-    /// `Closed` binding) swaps in a fresh token.
+    /// Cancels the session's in-flight MCP server starts. Teardown flips the binding to `Closed` for everything that COMPLETES afterwards, but a start still connecting holds its child process inside a pending future — cancelling drops those futures, killing the children now instead of at the discovery deadline.
+    /// A revive bind (re-opening a `Closed` binding) swaps in a fresh token.
     pub(crate) mcp_cancel: parking_lot::Mutex<tokio_util::sync::CancellationToken>,
-    /// MCP life counter, only ever bumped under `mcp_binding`: an enrolment
-    /// that TRANSITIONS the binding to Active starts a life, teardown ends
-    /// one. A soft rebind of an already-Active binding continues the life —
-    /// its cancel token and its hub registrations' life tags are the
-    /// life's, and must stay coherent with this counter. Two fences read
-    /// it:
-    ///
-    /// - A bind snapshots it when its resolution starts, and enrolment
-    ///   refuses a stale snapshot — so a stale soft rebind landing just
-    ///   after a genuine session-end teardown cannot re-open the binding
-    ///   and start servers nothing will ever tear down.
-    /// - A hub `session.unbind` snapshots it when the frame arrives, and
-    ///   its spawned teardown runs only while that life is still current
-    ///   (`teardown_session_mcp_for_event`) — so a stale unbind task
-    ///   cannot tear down a newer life a reconnect bind enrolled meanwhile.
+    /// MCP life counter, only ever bumped under `mcp_binding`: an enrolment that TRANSITIONS the binding to Active starts a life, teardown ends one.
+    /// A soft rebind of an already-Active binding continues the life — its cancel token and its hub registrations' life tags are the life's, and must stay coherent with this counter.
+    /// Two fences read it: - A bind snapshots it when its resolution starts, and enrolment refuses a stale snapshot — so a stale soft rebind landing just after a genuine session-end teardown cannot re-open the binding and start servers nothing will ever tear down.
     pub(crate) mcp_epoch: std::sync::atomic::AtomicU64,
-    /// Accepted-bind counter, bumped under `mcp_binding` by every bind the
-    /// resolver accepts (enrolments, soft rebinds, re-opens — anything that
-    /// returns bind success). A hub unbind's DEFERRED teardown snapshots it
-    /// beside the epoch and re-checks both: a soft rebind continues the
-    /// life (same epoch — wave 13), so the epoch alone cannot distinguish
-    /// "before the unbind" from "after the reconnect bind"; a bind accepted
-    /// after the unbind arrived must invalidate the pending teardown, or it
-    /// would close MCP under the accepted bind with nothing to re-open it.
+    /// Accepted-bind counter, bumped under `mcp_binding` by every bind the resolver accepts (enrolments, soft rebinds, re-opens — anything that returns bind success).
+    /// A hub unbind's DEFERRED teardown snapshots it beside the epoch and re-checks both: a soft rebind continues the life (same epoch — wave 13), so the epoch alone cannot distinguish "before the unbind" from "after the reconnect bind"; a bind accepted after the unbind arrived must invalidate the pending teardown, or it would close MCP under the accepted bind with nothing to re-open it.
     pub(crate) mcp_bind_generation: std::sync::atomic::AtomicU64,
-    /// The native tool ids the session's last bind advertised (including the
-    /// RPC handler), recorded by the bind resolver. `claim_tools` refuses an
-    /// MCP tool whose id collides with one of these, and only the bind knows
-    /// them — the hub snapshot also holds already-advertised MCP tools.
+    /// The native tool ids the session's last bind advertised (including the RPC handler), recorded by the bind resolver.
+    /// `claim_tools` refuses an MCP tool whose id collides with one of these, and only the bind knows them — the hub snapshot also holds already-advertised MCP tools.
     pub(crate) mcp_native_tool_ids: parking_lot::Mutex<std::collections::HashSet<ToolId>>,
     /// Per-user feature-flag bag resolved at session-bind time, frozen for
     /// the session lifetime. `None` → tools use their safe defaults.
     pub(crate) viewer_ctx: Option<WorkspaceViewerContext>,
     /// Auto-approve (YOLO) state. Seeded from `session.bind` metadata, refreshed by each before-turn hook.
     pub(crate) yolo_mode: std::sync::atomic::AtomicBool,
-    /// Session-lifetime terminal backend (background-task registry and persistent shell).
-    /// Created once at session construction; every toolset re-resolve reuses it, so background tasks and shell state survive toolset swaps.
-    /// Its child processes die only via `kill_task`, [`Self::shutdown_terminal_backend`] (`drop_session`/evict), or process exit.
-    ///
-    /// Local-mode exception: `bind_local_session` installs an externally built toolset via plain [`Self::replace`].
-    /// That toolset's `Terminal` resource is the shell's own backend while this one sits idle as the sole safe teardown target.
+    /// Session-lifetime terminal backend (background-task registry and persistent shell). Its child processes die only via `kill_task`, [`Self::shutdown_terminal_backend`] (`drop_session`/evict), or process exit.
     /// Never adopt an externally owned backend into this field: drop/evict would SIGKILL a backend shared with the shell.
-    /// Never query this field for the live task table; the toolset's `Terminal` resource is the source of truth.
     terminal_backend: crate::config::SessionTerminalBackend,
-    /// Canonical JSON of the explicit `session.bind` toolset this session was created (or last rebound) with.
-    /// `None` when the session was resolved from the workspace default (no explicit toolset in the bind metadata).
-    /// Lets a rebind detect a config change and re-resolve instead of silently reusing a stale toolset.
-    /// For example, a hub revive bind carries no metadata; a later client rebind that carries a config must correct the session it created.
+    /// Canonical JSON of the explicit `session.bind` toolset this session was created (or last rebound) with. Lets a rebind detect a config change and re-resolve instead of silently reusing a stale toolset.
     bind_tool_config_fingerprint: std::sync::Mutex<Option<serde_json::Value>>,
     /// The last snapshot-driven rebuild failed and kept a stale toolset; cleared by any successful install.
     /// While set, an identical-config re-apply (update RPC or owner rebind) heals instead of reusing.
@@ -359,11 +315,7 @@ impl WorkspaceSession {
     ) {
         let _ = self.path_virtualization.set(mapping);
     }
-    /// Install a rewritten bind cwd on a session that already exists.
-    ///
-    /// First-bind `create_session` already constructed `cwd`; rebind only fills the `path_virtualization` `OnceLock`.
-    /// That would leave a stale `/workspace` (or `/workspace/artifacts`) cwd against inbound `/workspace/<conv>` rewrites.
-    /// Remounts LocalFs, the checkpoint store, the hunk tracker, and the live toolset `Cwd` so relative work follows the real session tree.
+    /// Install a rewritten bind cwd on a session that already exists. First-bind `create_session` already constructed `cwd`; rebind only fills the `path_virtualization` `OnceLock`.
     pub(crate) async fn set_cwd_for_virtualization(&self, cwd: PathBuf) -> Result<(), String> {
         if self.cwd() == cwd.as_path() {
             return Ok(());
@@ -504,10 +456,7 @@ impl WorkspaceSession {
     pub fn toolset(&self) -> Arc<FinalizedToolset> {
         self.inner.read().toolset.clone()
     }
-    /// Whether the current toolset's `Terminal` resource is the session-owned backend.
-    /// `false` means `bind_local_session` installed an externally owned toolset whose `Terminal` is the shell's own backend.
-    /// Rebuild paths must skip such sessions: finalizing around [`Self::terminal_backend`] would detach tools from the shell's live task table.
-    /// A toolset with no `Terminal` resource counts as session-owned (nothing to detach).
+    /// Whether the current toolset's `Terminal` resource is the session-owned backend. Rebuild paths must skip such sessions: finalizing around [`Self::terminal_backend`] would detach tools from the shell's live task table.
     pub(crate) async fn toolset_terminal_is_session_owned(&self) -> bool {
         let toolset = self.toolset();
         let res = toolset.resources.lock().await;
@@ -554,9 +503,7 @@ impl WorkspaceSession {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = fingerprint;
     }
-    /// [`Self::set_bind_tool_config_fingerprint`], but only when no fingerprint was recorded yet.
-    /// The `session.bind` create path uses this (outside `update_lock`).
-    /// A concurrent rebind can race between session insertion and this call, swap in its own toolset, and record its fingerprint under the lock.
+    /// [`Self::set_bind_tool_config_fingerprint`], but only when no fingerprint was recorded yet. A concurrent rebind can race between session insertion and this call, swap in its own toolset, and record its fingerprint under the lock.
     /// This call must not clobber that fingerprint, or the stored value would describe a toolset that is no longer live.
     pub(crate) fn set_bind_tool_config_fingerprint_if_unset(
         &self,
@@ -570,12 +517,8 @@ impl WorkspaceSession {
             *guard = fingerprint;
         }
     }
-    /// Replace both the baseline config and the resolved toolset atomically.
-    ///
-    /// TOOL-STATE CAVEAT: the outgoing toolset is not flushed here.
-    /// An in-process rebuild can drop up to one debounce window (500 ms) of unpersisted state.
+    /// Replace both the baseline config and the resolved toolset atomically. TOOL-STATE CAVEAT: the outgoing toolset is not flushed here.
     /// A flush before the rebuild would not fix it: tool `call()` does not hold `update_lock`, so a concurrent call would still race.
-    /// Restart/snapshot scenarios are unaffected.
     pub(crate) fn replace(
         &self,
         new_effective_tool_config: Arc<ToolServerConfig>,
@@ -586,12 +529,8 @@ impl WorkspaceSession {
         w.toolset = new_toolset;
     }
     /// [`Self::replace`], but first carries the session's `BrowserServiceHandle` from the old toolset into the new one.
-    /// Rebuilds produce a fresh `FinalizedToolset`.
     /// The browser service seeded by `finalize_session_setup` must be carried forward or the session's live browser state is lost.
-    ///
     /// Without the optional browser backend there is no browser service to carry; only the terminal-orphan diagnostic runs before the swap.
-    ///
-    /// Callers must hold the session's `update_lock` so the read-then-swap cannot interleave with another rebuild.
     pub(crate) async fn replace_carrying_browser_service(
         &self,
         new_effective_tool_config: Arc<ToolServerConfig>,
@@ -633,10 +572,7 @@ pub struct WorkspaceShared {
     pub(crate) root_cwd: std::path::PathBuf,
     pub(crate) sessions: RwLock<HashMap<String, Arc<WorkspaceSession>>>,
     pub(crate) session_factory: Arc<dyn SessionContextFactory>,
-    /// `Some` iff every admitted session binds a configured set of MCP
-    /// servers. The contents are hot-swappable through
-    /// [`WorkspaceHandle::reload_bind_mcp`](crate::handle::WorkspaceHandle::reload_bind_mcp),
-    /// so a user can add or remove servers without restarting the process.
+    /// `Some` iff every admitted session binds a configured set of MCP servers. The contents are hot-swappable through [`WorkspaceHandle::reload_bind_mcp`](crate::handle::WorkspaceHandle::reload_bind_mcp), so a user can add or remove servers without restarting the process.
     pub(crate) bind_mcp: Option<parking_lot::RwLock<crate::config::BindMcpConfig>>,
     pub(crate) mcp_tools_snapshot: arc_swap::ArcSwap<Vec<ToolConfig>>,
     pub(crate) events: tokio::sync::broadcast::Sender<xai_grok_workspace_types::WorkspaceEvent>,
@@ -650,9 +586,7 @@ pub struct WorkspaceShared {
     /// Plugin discovery configuration (CLI dirs, config paths, disabled/enabled lists).
     /// Used by `discover_plugins` via the `discovery` module.
     pub(crate) plugin_discovery_config: crate::discovery::PluginDiscoveryConfig,
-    /// Live server connection handle.
-    /// `None` until [`WorkspaceHandle::connect_hub`](crate::handle::WorkspaceHandle::connect_hub) is called (or if no [`HubConfig`] was provided).
-    ///
+    /// Live server connection handle. `None` until [`WorkspaceHandle::connect_hub`](crate::handle::WorkspaceHandle::connect_hub) is called (or if no [`HubConfig`] was provided).
     /// Uses `tokio::sync::Mutex` so the guard can be held across the async `HubHandle::connect()` call, preventing TOCTOU races.
     pub(crate) hub_handle: tokio::sync::Mutex<Option<HubHandle>>,
     /// Remote-origin tool configs (consumer direction), updated by the notification listener.
@@ -706,9 +640,7 @@ pub struct WorkspaceShared {
     /// The initial bind emission does not consult this map.
     pub(crate) tool_defs_last_emit: dashmap::DashMap<String, std::time::Instant>,
     /// Per-session `events.jsonl` writers, keyed by `session_id`, lazily opened on first use under `workspace_home/sessions/{session_id}/`.
-    /// Held in an `Arc` shared with [`ActivityTracker`](crate::activity::ActivityTracker).
-    /// That sharing lets `Tool*` events resolve the right writer without a back-reference to `WorkspaceShared`.
-    /// Stays empty whenever `events_enabled` is `false`.
+    /// Held in an `Arc` shared with [`ActivityTracker`](crate::activity::ActivityTracker). That sharing lets `Tool*` events resolve the right writer without a back-reference to `WorkspaceShared`.
     pub(crate) session_event_writers:
         Arc<dashmap::DashMap<String, xai_grok_session_events::EventWriter>>,
     /// In-flight before-turn enqueue tasks, keyed by `(session_id, turn)`.
@@ -723,10 +655,8 @@ pub struct WorkspaceShared {
     pub(crate) producer_tasks: tokio_util::task::TaskTracker,
     /// Bind-time probe-then-mount hook. Default no-op until a command is set.
     pub(crate) bind_mount_hook: arc_swap::ArcSwap<crate::path_virtualization::BindMountHook>,
-    /// Memo of sha256 by `(path, size, mtime_ms)` for the client-facing `workspace.client_fs_*` ops.
-    /// Unchanged files hash once per workspace instead of per stat/read.
+    /// Memo of sha256 by `(path, size, mtime_ms)` for the client-facing `workspace.client_fs_*` ops. Unchanged files hash once per workspace instead of per stat/read.
     /// Test-only hook, run by `resolve_and_swap_session_toolset_locked` after the re-resolve returns and before the turn re-check and install.
-    /// Tests use it to interleave a turn start inside that window deterministically.
     #[cfg(test)]
     pub(crate) post_resolve_test_hook: parking_lot::Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     pub(crate) client_fs_hash_memo: crate::file_system::client_fs::FileHashMemo,
@@ -746,10 +676,8 @@ impl WorkspaceShared {
         self.upload_queue.as_ref()
     }
     /// Return the per-session `events.jsonl` writer for `session_id`, opened and cached on first use under `workspace_home/sessions/{session_id}/`.
-    ///
     /// When `events_enabled` is `false` this returns [`EventWriter::noop()`](xai_grok_session_events::EventWriter::noop).
     /// It touches neither the cache nor the filesystem, so the flag-off path stays byte-for-byte identical to the legacy behaviour.
-    /// The returned handle is `Clone + Send + Sync`; callers emit through it directly.
     pub(crate) fn session_event_writer(
         &self,
         session_id: &str,
@@ -808,11 +736,7 @@ impl WorkspaceShared {
     pub fn mcp_tools_snapshot(&self) -> Arc<Vec<ToolConfig>> {
         self.mcp_tools_snapshot.load_full()
     }
-    /// The tool server, if a server connection is active.
-    ///
-    /// Returns a clone of the [`ToolServer`](xai_computer_hub_sdk::ToolServer) which is cheap (`Arc` bump).
-    /// Uses `try_lock` to avoid blocking on the async mutex from synchronous contexts.
-    /// Returns `None` if the lock is held (i.e. a `connect_hub` call is in progress).
+    /// The tool server, if a server connection is active. Uses `try_lock` to avoid blocking on the async mutex from synchronous contexts.
     pub fn hub_server(&self) -> Option<xai_computer_hub_sdk::ToolServer> {
         self.hub_handle
             .try_lock()
@@ -833,9 +757,7 @@ impl WorkspaceShared {
         self.hub_tools_snapshot.load_full()
     }
     /// Compose a session's tool `ctx.notification_handle` as a fan-out of the connection-level activity feed and the opt-in `system.notify` sender.
-    /// The activity feed leg is internal tracker accounting.
     /// Only the `system.notify` leg reaches a client, so the fan-out cannot wake the client twice.
-    /// `None` means the factory default.
     pub(crate) fn compose_session_notification_handle(
         &self,
         system_notify_handle: Option<ToolNotificationHandle>,
@@ -876,13 +798,7 @@ impl WorkspaceShared {
     pub fn plugin_discovery_config(&self) -> &crate::discovery::PluginDiscoveryConfig {
         &self.plugin_discovery_config
     }
-    /// Re-resolve every session's toolset and emit `ToolsChanged` events.
-    ///
-    /// Shared implementation used by `on_mcp_snapshot_changed`, `on_hub_tools_changed`, and the server notification listener.
-    ///
-    /// When `use_async_lock` is true, uses `.lock().await` on each session's `update_lock`.
-    /// Appropriate for spawned async tasks where notifications must not be silently lost.
-    /// When false, uses `try_lock()` and skips sessions whose lock is held.
+    /// Re-resolve every session's toolset and emit `ToolsChanged` events. Appropriate for spawned async tasks where notifications must not be silently lost.
     pub(crate) async fn re_resolve_all_sessions(
         self: &Arc<Self>,
         source: &str,
@@ -1011,11 +927,7 @@ impl WorkspaceShared {
     }
 }
 /// Core get-or-open logic for a session's `events.jsonl` writer, factored out of [`WorkspaceShared::session_event_writer`].
-/// The split lets the `enabled` gate be unit-tested without touching process environment.
-///
-/// - `enabled == false`: returns [`EventWriter::noop()`]; the `writers` map and the filesystem are left untouched (legacy behaviour preserved).
-/// - `enabled == true`: returns the cached writer for `session_id`, opening a fresh one under `workspace_home/sessions/{session_id}/` on first use.
-///   [`EventWriter::open`] uses `create(true).append(true)`, so a re-open after a workspace restart APPENDS to the existing `events.jsonl`.
+/// The split lets the `enabled` gate be unit-tested without touching process environment. - `enabled == false`: returns [`EventWriter::noop()`]; the `writers` map and the filesystem are left untouched (legacy behaviour preserved).
 pub(crate) fn get_or_open_session_writer(
     enabled: bool,
     writers: &dashmap::DashMap<String, xai_grok_session_events::EventWriter>,

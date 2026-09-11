@@ -19,13 +19,9 @@ use xai_grok_pager::scrollback::wrappers::EntryRenderer;
 use xai_grok_pager::theme::Theme;
 use xai_grok_pager::views::prompt_widget::{PromptBg, PromptStyle};
 use xai_grok_pager::views::turn_status;
-/// Left inset (columns) for every auxiliary live-region row and the prompt's `chrome_pad_left`.
-/// The auxiliary rows are the status row, the info bar, the exit hint, and the todo panel.
-///
-/// Minimal is flush-left.
-/// Committed and tail blocks zero their block pads via [`super::commit::committed_appearance`] and reclaim the accent column via `hide_accent`.
-/// Content glyphs (`◆` / `$` / message text) thus start at column 0, matching the welcome card's outer edge.
-/// The prompt and auxiliary rows share that left edge (no chrome pad) so nothing sits ragged against the welcome box.
+/// Left inset (columns) for every auxiliary live-region row and the prompt's `chrome_pad_left`. Minimal is
+/// flush-left. Content glyphs (`◆` / `$` / message text) thus start at column 0, matching the welcome card's outer
+/// edge.
 pub(super) fn live_left_inset(_appearance: &xai_grok_pager::appearance::AppearanceConfig) -> u16 {
     0
 }
@@ -53,12 +49,8 @@ fn paintable_btw_area(frame_area: Rect, area: Rect) -> Option<Rect> {
         && area.y.saturating_add(area.height) <= frame_area.y.saturating_add(frame_area.height))
     .then_some(area)
 }
-/// The prompt style used by the minimal live region.
-///
-/// Shared with [`super::overlay::sync_viewport`] so viewport sizing measures the prompt's height exactly as the live region will draw it.
-///
-/// `input_mode` wires special composer modes (bash `! `, feedback `~ `, remember `# `) the same way the full TUI does.
-/// Without it, `!` on an empty prompt would flip mode invisibly (key consumed, default `❯` remains).
+/// The prompt style used by the minimal live region. Without it, `!` on an empty prompt would flip mode invisibly
+/// (key consumed, default `❯` remains).
 pub(super) fn prompt_style(
     appearance: &xai_grok_pager::appearance::AppearanceConfig,
     input_mode: xai_grok_pager::app::agent_view::PromptInputMode,
@@ -440,11 +432,9 @@ fn live_tail_renderer<'a>(
 ) -> EntryRenderer<'a> {
     super::commit::minimal_renderer(entry, theme, appearance.clone(), cwd, tick)
 }
-/// Render the uncommitted tail (entries past the commit frontier), bottom-anchored so the most recent output is always visible.
-/// The topmost visible entry is clipped via `with_skip_rows` when the run is taller than the tail area.
-///
-/// Starts at the shared [`super::commit::scan_frontier`] stop point so it renders exactly the entries [`tail_height`] measured.
-/// The viewport was sized to that; any disagreement makes the prompt jump on commit.
+/// Render the uncommitted tail (entries past the commit frontier), bottom-anchored so the most recent output is
+/// always visible. Starts at the shared [`super::commit::scan_frontier`] stop point so it renders exactly the
+/// entries [`tail_height`] measured.
 #[allow(clippy::too_many_arguments)]
 fn draw_tail(
     buf: &mut Buffer,
@@ -518,10 +508,8 @@ fn draw_tail(
         }
     }
 }
-/// Resolve the current turn activity and advance the phase timer when it changes.
-/// The full TUI resets `activity_started_at` on every phase transition inside its own `draw`.
-/// Minimal has a separate draw path, so it must drive the same logic or the phase timer would never reset.
-/// Returns the resolved activity for [`render_minimal_status`].
+/// Resolve the current turn activity and advance the phase timer when it changes. Minimal has a separate draw path,
+/// so it must drive the same logic or the phase timer would never reset.
 fn minimal_advance_phase_timer(
     agent: &mut xai_grok_pager::app::agent_view::AgentView,
 ) -> Option<xai_grok_pager::acp::tracker::TurnActivity> {
@@ -532,14 +520,9 @@ fn minimal_advance_phase_timer(
     }
     activity
 }
-/// Render the one-line minimal status indicator above the prompt.
-///
 /// Reuses the full-TUI [`turn_status::render_turn_status`] widget instead of collapsing everything to "working…".
-/// Minimal thus shows the same activity detail (`Run …` / `Thinking…` / `Waiting on subagent…` / `Retrying (attempt N)…` / `Cancelling…`).
-/// It also shows the per-phase and turn timers, and the "… still running" cue (running commands / monitors / loops / background subagents).
-/// Keyboard-only, so the mouse `[stop]` / `[↓]` buttons are suppressed (`None`).
-/// `flat_background` keeps the row transparent like the rest of the live region.
-/// When the widget would draw nothing a small `minimal · /help` hint is shown instead.
+/// Keyboard-only, so the mouse `[stop]` / `[↓]` buttons are suppressed (`None`). When the widget would draw nothing
+/// a small `minimal · /help` hint is shown instead.
 fn render_minimal_status(
     buf: &mut Buffer,
     area: Rect,
@@ -672,17 +655,9 @@ fn render_idle_hint(
         .unwrap_or_else(|| std::borrow::Cow::Borrowed(english));
     buf.set_span(area.x, area.y, &Span::styled(hint, style), area.width);
 }
-/// Render the one-line info bar directly below the prompt.
-/// It shows the selected model, the session mode (the Shift+Tab cycle: plan / always-approve / auto), and context usage (absolute and percentage).
-/// An `N queued` count appears when prompts are waiting behind a running turn.
-/// The trailing segment is the full-transcript hint: "ctrl+o transcript", or "/transcript" where Ctrl+O is the interject chord (Apple Terminal).
-///
-/// Mirrors the regular TUI's model label, mode flags, and context bar.
-/// The transcript hint stands in for the full TUI's shortcuts bar, which minimal never renders.
-/// Without it the folded conversation has no visible way back to the full view.
-/// The mode flag keeps its accent color so the Shift+Tab cycle, otherwise invisible in minimal mode, stays visible.
-/// Drawn only when no menu/dropdown owns the band below the prompt (the caller gates on that).
-/// The elapsed-time / token count lives in the turn-status row above the prompt (see [`render_minimal_status`]), so it is not repeated here.
+/// Without it the folded conversation has no visible way back to the full view. The mode flag keeps its accent
+/// color so the Shift+Tab cycle, otherwise invisible in minimal mode, stays visible. Drawn only when no
+/// menu/dropdown owns the band below the prompt (the caller gates on that).
 fn render_prompt_info(
     buf: &mut Buffer,
     area: Rect,
@@ -809,15 +784,9 @@ fn render_exit_hint(buf: &mut Buffer, area: Rect, theme: &Theme, hint: &str) {
         area.width,
     );
 }
-/// Height (rows) of the tail that will REMAIN after this frame's commit pass.
-/// That is the entries `commit_active` will NOT consume, from the first non-committable entry (past the scan cursor) onward.
-///
-/// The overlay host sizes the live viewport to this *post-commit* tail so the prompt sits right after the streaming output.
-/// There is no fixed gap while a turn is "thinking" with nothing streamed yet.
-/// Sizing to the post-commit tail (rather than the current tail) matters: `sync_viewport` runs just *before* `commit_active`.
-/// The viewport is already at its post-commit height when the commit's `insert_before` prints finalized blocks.
-/// The commit can then reposition the correctly-sized viewport to sit directly after them.
-/// Sizing to the tall streaming tail left the viewport oversized at commit time, and the collapse stranded the prompt at the top of the screen.
+/// Height (rows) of the tail that will REMAIN after this frame's commit pass. The overlay host sizes the live
+/// viewport to this *post-commit* tail so the prompt sits right after the streaming output. Sizing to the
+/// post-commit tail (rather than the current tail) matters: `sync_viewport` runs just *before* `commit_active`.
 pub(super) fn tail_height(
     agent: &xai_grok_pager::app::agent_view::AgentView,
     width: u16,

@@ -5,10 +5,8 @@
     unreachable_code,
     dead_code
 )]
-//! Backend environment presets for the Grok CLI crate family: endpoint URL defaults, environment selection, and env-var test support.
-//!
-//! Public builds expose production endpoints.
-//! Values resolve as a `GROK_*` env-var override when set, else the compiled production default.
+mod registry;
+pub use registry::{FIRST_PARTY_CREDENTIAL_ENV_VARS, env_bool, env_string};
 /// The endpoint set for one backend environment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GrokBuildEndpoints {
@@ -116,7 +114,6 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     lock
 }
 /// RAII env-var override for tests: constructors snapshot the prior value under [`ENV_LOCK`], `Drop` restores it, panics included.
-///
 /// A guard owns [`ENV_LOCK`] for its whole lifetime, so one thread can only ever hold one.
 /// To override several keys at once, chain [`Self::and_set`] / [`Self::and_remove`] onto a single guard.
 #[cfg(any(test, feature = "test-support"))]

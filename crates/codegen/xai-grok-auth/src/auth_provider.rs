@@ -27,8 +27,7 @@ pub struct CredentialSnapshot {
 }
 
 /// Source of truth for outbound auth on data-collector requests.
-///
-/// Supertrait of `HttpAuth` so a single impl satisfies both this trait (refresh-aware snapshot + 401 recovery) and `HttpAuth` (header construction).
+/// Supertrait of `HttpAuth` so one impl covers refresh-aware snapshot, 401 recovery, and header construction.
 /// Callers add headers via `HttpAuth::apply`.
 #[async_trait::async_trait]
 pub trait AuthCredentialProvider: HttpAuth + Send + Sync + 'static {
@@ -56,10 +55,8 @@ pub trait AuthCredentialProvider: HttpAuth + Send + Sync + 'static {
     }
 }
 
-/// Static credential provider. Used by tests and by callers that pass a raw `&str` token with no `AuthManager` available.
-///
-/// `bearer` is the wire bearer the inner `HttpAuth` will send in the `Authorization` header.
-/// Stored alongside the inner so `snapshot().token` returns the same prefix that goes out on the wire (used by 401-attribution telemetry).
+/// Static credential provider for tests and callers with a raw token and no `AuthManager`.
+/// `bearer` is the wire bearer; stored so `snapshot().token` matches what goes out (401-attribution).
 /// `None` when no bearer is configured.
 pub struct StaticAuthCredentialProvider {
     inner: Box<dyn HttpAuth>,

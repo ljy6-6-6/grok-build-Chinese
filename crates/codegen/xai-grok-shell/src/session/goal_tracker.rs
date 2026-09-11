@@ -34,9 +34,6 @@ pub enum GoalPhase {
 }
 
 /// `UserPaused` covers Ctrl+C and `/goal pause`; `BackOffPaused` means the classifier run cap was hit.
-/// `Blocked` means the model determined the goal is not achievable in the current environment.
-///
-/// **Backwards-compat serde aliases:** older shells serialized this enum with the default PascalCase form.
 /// The `#[serde(alias = ...)]` attributes preserve in-flight goal snapshots written by older shells.
 /// Legacy `"Paused"` maps to `UserPaused` (matches the pager-side fallback).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -140,7 +137,6 @@ impl GoalPauseReason {
     }
 }
 
-/// Aggregate verdict produced by the goal-verification stage.
 /// `Achieved` indicates the adversarial skeptic panel judged the goal complete; `NotAchieved` means another worker round is warranted.
 /// Serialized in snake_case to match `GoalStatus` / `GoalPhase`.
 /// The enum name retains the `Classifier` prefix for wire stability across the verification-stage rewire.
@@ -210,10 +206,7 @@ impl GoalHistoryEntry {
 // GoalOrchestration (full persisted state)
 
 /// Generate a short opaque identifier scoping the per-goal scratch root (`<temp_dir>/grok-goal-<id>`) and the verifier verdict/details files in it.
-///
 /// The id is a 12-char prefix of a UUIDv4 simple form, about 48 bits of entropy.
-/// That is enough to avoid collision between concurrent goals on the same machine.
-/// It stays short enough that the orchestrator model can copy it verbatim into spawned verifier prompts without truncation or typo risk.
 pub(crate) fn generate_verifier_id() -> String {
     let mut s = uuid::Uuid::new_v4().simple().to_string();
     s.truncate(12);
@@ -221,9 +214,7 @@ pub(crate) fn generate_verifier_id() -> String {
 }
 
 /// Private per-goal scratch root: `<temp_dir>/grok-goal-<verifier_id>`.
-///
 /// Rooted at [`std::env::temp_dir`] (respects `TMPDIR`) and namespaced by the goal's `verifier_id`.
-/// So concurrent goals never collide and cleanup of one never touches another.
 /// Removed wholesale on every terminal goal transition.
 pub(crate) fn goal_scratch_root(verifier_id: &str) -> PathBuf {
     std::env::temp_dir().join(format!("grok-goal-{verifier_id}"))
@@ -232,9 +223,6 @@ pub(crate) fn goal_scratch_root(verifier_id: &str) -> PathBuf {
 /// Create (or verify) the goal's scratch root, locked to the owner (0700 on unix).
 /// Artifact names under it are predictable from the prompt/log-visible `verifier_id`, so the root itself is the symlink/squat defense.
 /// Creation is atomic with mode 0700 (no default-mode window).
-/// A pre-existing entry is accepted only if [`verify_owned_real_dir`] passes, then re-pinned to 0700.
-/// The chmod is safe: the entry is proven ours and the sticky-bit temp parent prevents swapping it.
-/// Callers treat `Err` as "do not write classifier artifacts here".
 pub(crate) fn ensure_goal_scratch_root(verifier_id: &str) -> std::io::Result<PathBuf> {
     let root = goal_scratch_root(verifier_id);
     #[cfg(unix)]
@@ -299,13 +287,9 @@ fn parse_skeptic_report_order(name: &str) -> Option<(u32, u32)> {
     Some((attempt.parse().ok()?, idx.parse().ok()?))
 }
 
-/// Inline the per-skeptic reports below the just-rescued canonical details file.
-/// Its path references die with the scratch root, so the rescued file must be self-contained.
-///
 /// Numeric (attempt DESC, skeptic ASC) order so budget elision drops stale attempts, never the final attempt the canonical body references.
 /// Whole files only: each report's on-disk size is checked against the remaining budget BEFORE reading.
 /// The harness does not cap report size and this runs under the tracker lock.
-/// The first overflow writes an elision marker and stops.
 fn append_skeptic_reports(scratch_root: &std::path::Path, dest: &std::path::Path) {
     use std::io::Write;
 
@@ -390,7 +374,6 @@ pub struct GoalOrchestration {
     /// Monotonic high-water mark ratcheted by `SessionActor::goal_tokens` so wire values never decrease across compactions.
     #[serde(default)]
     pub tokens_used_high_water: i64,
-    /// Cumulative parent-session tokens spent on this goal: the sum of positive per-call deltas of the session token total.
     /// Unlike a `current - baseline` difference, this can never shrink or freeze when auto-compaction reduces the context-size total.
     /// Best-effort sampling: growth fully consumed by a compaction between two `goal_tokens` calls is unobserved.
     /// Spend accrued since the last persisted snapshot is lost on crash (bounded by the snapshot cadence).
@@ -404,7 +387,6 @@ pub struct GoalOrchestration {
 
     /// Human-readable explanation set when the goal transitions to a paused state with a meaningful reason.
     /// `Blocked` and `InfraPaused` populate it (via [`GoalTracker::pause_with_message`]).
-    /// The field is independent of the status so future reasons can reuse it.
     /// [`GoalTracker::resume`], [`GoalTracker::complete`], and [`GoalTracker::budget_limit`] all reset it to `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pause_message: Option<String>,
@@ -413,15 +395,8 @@ pub struct GoalOrchestration {
     #[serde(default)]
     pub evaluator_blocked_streak: u32,
 
-    /// Short opaque identifier used to scope per-goal artifact paths owned by the harness.
-    /// Today's consumers:
-    ///
-    /// * `goal_classifier.rs`: classifier details, changes diff, and per-skeptic verdict files (the `*_PATH_TEMPLATE` consts there).
-    ///
+    /// `goal_classifier.rs`: classifier details, changes diff, and per-skeptic verdict files (the `*_PATH_TEMPLATE` consts there).
     /// Generated by [`generate_verifier_id`] when the goal is created and persisted alongside the rest of the orchestration.
-    /// So the same id is reused across pause/resume cycles.
-    /// The current model-facing template no longer references this id; the model is no longer instructed to read per-goal verdict files.
-    ///
     /// The `serde(default)` attribute backfills a fresh id on load so verdict-file paths stay well-formed even after an upgrade.
     #[serde(default = "generate_verifier_id")]
     pub verifier_id: String,
@@ -455,16 +430,13 @@ pub struct GoalOrchestration {
     /// Captured once (capped); never cleared on `Achieved`: it must outlive each round.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_final_response: Option<String>,
-    /// Child session id of skeptic 0 (the persistent reject-gatekeeper) from the most recent N > 1 verification attempt.
     /// The next attempt resumes it (`resume_from`) so it re-checks just the prior gaps instead of re-analyzing cold.
     /// Cleared by [`GoalTracker::from_snapshot`] and on goal completion; never set for an N == 1 sole-judge panel.
     /// The in-memory token records that anchor a resumed child's marginal accounting do not survive a restart, hence the `from_snapshot` clear.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skeptic0_session_id: Option<String>,
     /// Maps each skeptic index to its `{model, agent_type}` assignment, frozen at the first verification panel and reused on every resume.
-    /// So skeptic-0 (and the cold panel) keep stable models across attempts.
     /// Index `i` holds `pool[i % pool.len()]`; the vector grows (clamped) but never rewrites a committed index.
-    /// Empty means all skeptics inherit the current model.
     /// Persists across snapshot save/restore exactly like `skeptic0_session_id`, and is reset on the same terminal transitions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skeptic_model_assignment: Vec<crate::util::config::GoalRoleModel>,
@@ -478,16 +450,12 @@ pub struct GoalOrchestration {
     pub classifier_stall_count: u32,
     /// Count of consecutive `NotAchieved` verifications regardless of gap content (resets to 0 on an `Achieved` verdict).
     /// Drives the stall-triggered strategist.
-    /// It fires when this reaches the configured `goal_strategist_every` (N) and again at each multiple (2N, 3N, …).
     /// Distinct from `classifier_stall_count`, which only counts *identical*-fingerprint repeats.
-    /// This catches the case where each round flags a different gap.
     #[serde(default)]
     pub consecutive_not_achieved: u32,
     /// The `consecutive_not_achieved` value at which the strategist last fired.
-    /// The trigger fires when `consecutive_not_achieved >= last_strategist_fired_at + N`.
     /// The synthetic concurrent-in-flight path can bump the streak past a multiple of N without landing exactly on it.
     /// A strict `% N == 0` check would then miss the fire.
-    /// Reset to 0 with `consecutive_not_achieved`.
     #[serde(default)]
     pub last_strategist_fired_at: u32,
     /// Added to the resolved classifier cap once the strategist has fired.
@@ -514,15 +482,12 @@ pub struct GoalOrchestration {
     /// Path to the goal's plan markdown (`<session_dir>/goal/plan.md`, via [`GoalTracker::plan_path`]).
     /// `None` until a planner writes one.
     /// `is_some()` is the single source of truth for "this goal has a plan".
-    /// It gates setup-time fire, the resume-retry path, and the load-time reconciler.
-    /// Persisted across restart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_file: Option<PathBuf>,
 
     /// Path to the immutable snapshot of the planner's ORIGINAL plan (`<session_dir>/goal/plan.baseline.md`, [`GoalTracker::plan_baseline_path`]).
     /// Captured once right after the planner first writes `plan_file`; never overwritten on later attempts or restarts.
     /// The verifier diffs the CURRENT plan against it (`capture_plan_changes`).
-    /// So a skeptic sees every edit the agent made to `plan.md` during the run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_baseline_file: Option<PathBuf>,
 
@@ -611,12 +576,9 @@ impl GoalTracker {
         }
     }
 
-    /// Restore from a persisted snapshot.
-    ///
     /// If the snapshot had an in-flight phase (Planning, Executing), reset to Idle because subagents don't survive a restart.
     /// An in-flight `Active` goal becomes `UserPaused`.
     /// Other paused variants (including [`GoalStatus::InfraPaused`]) are preserved so `pause_message` and pause cause stay aligned.
-    /// Clear `current_subagent_id`.
     pub(crate) fn from_snapshot(session_dir: PathBuf, mut snapshot: GoalOrchestration) -> Self {
         if matches!(snapshot.phase, GoalPhase::Planning | GoalPhase::Executing) {
             snapshot.phase = GoalPhase::Idle;
@@ -751,25 +713,15 @@ impl GoalTracker {
     }
 
     /// Path to the strategist's advisory note (`<session_dir>/goal/strategy.md`).
-    /// The strategist writes here, NOT `plan.md`.
-    /// Its `PlanGuard` snapshots `plan.md` and restores it byte-for-byte (and on cancellation), reverting ANY strategist edit.
     /// Whole-file restore is safe because the strategist runs synchronously as the sole writer (the goal turn is blocked awaiting it).
-    /// So there's no concurrent implementer edit to clobber.
     /// May not exist until the strategist first runs.
     pub(crate) fn strategy_path(&self) -> PathBuf {
         self.goal_dir().join("strategy.md")
     }
 
-    /// Move the last classifier details file out of the scratch root (which the caller is about to remove) into the durable session goal dir.
-    /// Also update `last_classifier_details_path`, so the "See <path>" shown by the achieved ack stays readable.
     /// Per-skeptic reports are inlined below it ([`append_skeptic_reports`]) to keep it self-contained.
-    ///
-    /// The stored source path is snapshot-controlled.
     /// `..` components are rejected (`starts_with` is lexical).
-    /// The copy fallback is [`copy_no_follow`].
     /// The path is stamped only after a move from the verified root succeeds; otherwise it is left unchanged.
-    ///
-    /// Runs under the tracker lock: bounded I/O (at most the panel cap) on cold, one-shot transitions.
     fn rescue_classifier_details(&mut self) {
         let goal_dir = self.goal_dir();
         let Some(o) = self.orchestration.as_mut() else {
@@ -806,7 +758,6 @@ impl GoalTracker {
     }
 
     /// Replaces any existing orchestration.
-    ///
     /// `baseline_commit` is the `git rev-parse HEAD` captured at the call site (or `None` if not available).
     /// It is consumed by value; callers with `&str` should `.to_string()` at the call site rather than have the helper clone.
     pub(crate) fn create_goal(
@@ -911,10 +862,8 @@ impl GoalTracker {
     }
 
     /// Only transitions from `Active`.
-    /// Flushes elapsed time and stops the timer.
     /// The `pause_message` field on the orchestration is NOT modified.
     /// To stash a human-readable reason alongside the pause, use [`Self::pause_with_message`].
-    /// Returns `true` if the transition was applied.
     pub fn pause(&mut self, reason: GoalPauseReason) -> bool {
         self.pause_inner(reason, None)
     }
@@ -955,7 +904,6 @@ impl GoalTracker {
     /// Resume a paused goal (any paused variant, including `Blocked`).
     /// Sets `active_since` and clears [`GoalOrchestration::pause_message`].
     /// Resets every per-attempt auto-pause counter so a user resume starts fully fresh.
-    /// Returns `true` if applied.
     pub fn resume(&mut self) -> bool {
         if let Some(o) = &mut self.orchestration
             && o.status.is_paused()
@@ -1041,7 +989,6 @@ impl GoalTracker {
 
     /// Clear the goal entirely (`GoalClear`).
     /// Dropping the whole orchestration also drops `plan_baseline_file` / `skeptic0_session_id`, so no per-field reset is needed here.
-    /// But the on-disk scratch root outlives the struct, so rescue the surfaced details file and remove the root explicitly first.
     /// Mirrors the `complete` / `budget_limit` cleanup.
     pub fn clear(&mut self) {
         self.rescue_classifier_details();
@@ -1093,10 +1040,7 @@ impl GoalTracker {
     }
 
     /// Record a `NotAchieved` rejection's gap `fingerprint` and report whether the goal has stalled.
-    /// Stalled means the same fingerprint has now appeared on enough consecutive rejections that the model changed nothing in the flagged gaps.
     /// The threshold is [`GOAL_CLASSIFIER_STALL_THRESHOLD`].
-    /// It relaxes to [`GOAL_STRATEGIST_STALL_THRESHOLD`] while a strategist restructure is running (cap bonus active).
-    /// A fingerprint that differs from the previous one resets the streak to its first occurrence.
     /// No-op (returns `false`) without an orchestration.
     pub(crate) fn record_classifier_stall(&mut self, fingerprint: &str) -> bool {
         let Some(o) = self.orchestration.as_mut() else {
@@ -1165,10 +1109,7 @@ impl GoalTracker {
     }
 
     /// If `should_fire(consecutive_not_achieved, last_strategist_fired_at)` holds, mark the fire at the current streak.
-    /// The mark makes the next fire wait for another N failures; the call returns `Some(consecutive_not_achieved)`.
     /// Folding the check and the record into one critical section keeps them indivisible, so a streak can never double-fire the strategist.
-    /// On fire it also grants the cap bonus and resets the gap-fingerprint stall streak.
-    /// So the restructure runs against a relaxed, freshly-measured stall window.
     /// No-op (`None`) without an orchestration.
     pub(crate) fn claim_strategist_fire(
         &mut self,
@@ -1188,7 +1129,6 @@ impl GoalTracker {
     /// Revoke the cap bonus granted by [`Self::claim_strategist_fire`] when the strategist delivered no restructure.
     /// `last_strategist_fired_at` keeps the claim so the next fire still waits a full window.
     /// Deliberately conservative: the bonus is set, never stacked, so this also wipes an earlier successful fire's bonus.
-    /// Capping early beats running unearned rounds under a relaxed stall guard.
     pub(crate) fn revoke_strategist_cap_bonus(&mut self) {
         if let Some(o) = self.orchestration.as_mut() {
             o.strategist_cap_bonus = 0;

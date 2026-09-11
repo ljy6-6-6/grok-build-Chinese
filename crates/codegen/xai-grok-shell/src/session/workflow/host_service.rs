@@ -562,6 +562,7 @@ impl HostService {
                     fork_context,
                     owner: SubagentOwner::workflow(&self.params.run_id),
                     cancel_token: cancel_token.clone(),
+                    spawn_root: Default::default(),
                 }
             };
 

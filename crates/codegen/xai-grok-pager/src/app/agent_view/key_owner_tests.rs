@@ -100,7 +100,7 @@ fn permission_key(agent: &mut AgentView, code: KeyCode, modifiers: KeyModifiers)
 
 fn hint_labels(agent: &AgentView) -> Vec<String> {
     agent
-        .current_shortcut_hints(&ActionRegistry::defaults(), false)
+        .current_shortcut_hints(&ActionRegistry::defaults())
         .iter()
         .map(|hint| hint.label.to_string())
         .collect()
@@ -313,7 +313,7 @@ fn a_parked_card_contributes_one_route_back() {
     assert!(hint_labels(&agent).contains(&"next answer".to_string()));
 
     agent.active_pane = AgentPane::Scrollback;
-    let hints = agent.current_shortcut_hints(&ActionRegistry::defaults(), false);
+    let hints = agent.current_shortcut_hints(&ActionRegistry::defaults());
     let labels: Vec<String> = hints.iter().map(|h| h.label.to_string()).collect();
     assert!(
         !labels.contains(&"next answer".to_string()),
@@ -701,8 +701,6 @@ fn esc_on_the_cancel_turn_panel_does_not_cancel_the_turn() {
 
 /// Inside the dashboard overlay the ladder's last rung is the dashboard, and anything parked behind a bare scrollback is on it.
 /// That covers a card that parks rather than backing out (a later question, or a permission prompt, which has no back-out rung at all).
-/// It also covers a plan approval, alone or on top of a parked card.
-/// None of them hold the keyboard there, so none can consume `Esc`.
 /// The swallow that protects the turn would otherwise leave the key inert until the user tabbed back in.
 #[test]
 fn anything_parked_in_the_overlay_keeps_an_esc_route_to_the_dashboard() {

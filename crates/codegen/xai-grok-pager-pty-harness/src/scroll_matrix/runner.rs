@@ -310,7 +310,7 @@ fn classify(
                 }
             };
             InvariantReport {
-                id: id.as_str().to_owned(),
+                id: id.as_ref().to_owned(),
                 status,
                 detail,
             }

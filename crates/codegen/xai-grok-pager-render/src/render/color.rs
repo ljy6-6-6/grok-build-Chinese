@@ -8,10 +8,7 @@ use ratatui::text::{Line, Span};
 /// The 6 channel values in the 256-color 6×6×6 cube.
 const CUBE_VALUES: [u8; 6] = [0, 95, 135, 175, 215, 255];
 
-/// Handles all three regions of the 256-color palette:
-/// - 0–15:    standard/bright ANSI colors (uses common xterm defaults)
-/// - 16–231:  6×6×6 color cube
-/// - 232–255: 24-step grayscale ramp
+/// 0–15 xterm ANSI, 16–231 color cube, 232–255 grayscale. A customized terminal palette will differ.
 pub fn indexed_to_rgb(index: u8) -> (u8, u8, u8) {
     match index {
         // Standard colors (0-7): common xterm defaults
@@ -48,10 +45,7 @@ pub fn indexed_to_rgb(index: u8) -> (u8, u8, u8) {
     }
 }
 
-/// Map an RGB triplet to the nearest 256-color palette index (16–255).
-///
-/// Searches both the 6×6×6 color cube (16-231) and the 24-step grayscale ramp (232-255).
-/// Returns whichever has the smallest squared Euclidean distance.
+/// Nearest of the color cube and the grayscale ramp by squared Euclidean distance.
 pub fn nearest_indexed(r: u8, g: u8, b: u8) -> u8 {
     // --- nearest in the 6×6×6 color cube (16–231) ---
     let ri = nearest_cube_channel(r);
@@ -118,10 +112,7 @@ fn color_to_rgb(color: Color) -> Option<(u8, u8, u8)> {
     }
 }
 
-/// Map every [`Color`] variant to an xterm-default RGB triple.
-/// Returns `None` only for `Color::Reset`, which has no defined RGB; the caller chooses a fallback.
-/// Progress-bar gradients and OSC 12 cursor-color updates need an RGB for every color value, whatever the terminal color depth.
-/// Named colors map to the same xterm defaults [`indexed_to_rgb`] uses for 0-15; a terminal that customised those entries will differ.
+/// `None` only for `Reset`. Named colors use xterm 0-15 defaults; a customized terminal palette will differ.
 pub fn resolve_to_rgb(color: Color) -> Option<(u8, u8, u8)> {
     let idx: u8 = match color {
         Color::Rgb(r, g, b) => return Some((r, g, b)),
@@ -147,10 +138,7 @@ pub fn resolve_to_rgb(color: Color) -> Option<(u8, u8, u8)> {
     Some(indexed_to_rgb(idx))
 }
 
-/// Blend a single color channel: lerp from base toward original based on opacity.
-///
-/// - `opacity = 0.0`: returns `base` (fully faded)
-/// - `opacity = 1.0`: returns `original` (no change)
+/// Lerp from `base` (opacity 0) toward `original` (opacity 1).
 #[inline]
 pub fn blend_channel(base: u8, original: u8, opacity: f32) -> u8 {
     // result = base + (original - base) * opacity
@@ -159,15 +147,7 @@ pub fn blend_channel(base: u8, original: u8, opacity: f32) -> u8 {
     result.round() as u8
 }
 
-/// Blend a color toward a base color based on opacity.
-///
-/// - `opacity = 0.0`: returns `base` (fully faded)
-/// - `opacity = 1.0`: returns `original` (no change)
-///
-/// Indexed colors blend via their RGB equivalents.
-/// When either input is `Color::Indexed`, the result is quantized back to the nearest 256-color index so the output stays terminal-compatible.
-///
-/// Returns `None` for named ANSI colors (Color::Red, etc.) since their RGB values are terminal-dependent.
+/// Indexed inputs quantize back to a 256-color index. `None` for named ANSI: their RGB is terminal-dependent.
 pub fn blend_color(base: Color, original: Color, opacity: f32) -> Option<Color> {
     let (base_r, base_g, base_b) = color_to_rgb(base)?;
     let (orig_r, orig_g, orig_b) = color_to_rgb(original)?;
@@ -183,12 +163,7 @@ pub fn blend_color(base: Color, original: Color, opacity: f32) -> Option<Color> 
     })
 }
 
-/// Blend all span colors in a line toward a base color.
-///
-/// - `opacity = 0.0`: fully faded to base color
-/// - `opacity = 1.0`: no change (original colors)
-///
-/// Named ANSI colors are left unchanged.
+/// Named ANSI spans are left unchanged; their RGB is terminal-dependent.
 pub fn blend_line(line: Line<'static>, base: Color, opacity: f32) -> Line<'static> {
     let blended_spans: Vec<Span<'static>> = line
         .spans
@@ -206,14 +181,7 @@ pub fn blend_line(line: Line<'static>, base: Color, opacity: f32) -> Line<'stati
     Line::from(blended_spans).style(line.style)
 }
 
-/// Blend all span colors in a line toward a base color, with default foreground.
-///
-/// Like `blend_line`, but spans without an explicit fg color are assigned `default_fg` before blending.
-///
-/// - `opacity = 0.0`: fully faded to base color
-/// - `opacity = 1.0`: no change (original colors)
-///
-/// Named ANSI colors are left unchanged.
+/// Spans without an explicit fg get `default_fg` before blending. Named ANSI is left unchanged.
 pub fn blend_line_with_default(
     line: Line<'static>,
     base: Color,
@@ -235,13 +203,7 @@ pub fn blend_line_with_default(
     Line::from(blended_spans).style(line.style)
 }
 
-/// Fade a region of the buffer toward a base color.
-///
-/// This blends both foreground and background colors of each cell toward `base_color` based on `opacity`:
-/// - `opacity = 0.0`: fully faded (cells become base_color)
-/// - `opacity = 1.0`: no change
-///
-/// Both RGB and Indexed colors are blended; named ANSI colors (Color::Red, etc.) are left unchanged since their RGB values are terminal-dependent.
+/// Blends fg and bg. Named ANSI is left unchanged; its RGB is terminal-dependent.
 pub fn fade_region(buf: &mut Buffer, area: Rect, base_color: Color, opacity: f32) {
     blend_area(
         buf,
@@ -251,15 +213,7 @@ pub fn fade_region(buf: &mut Buffer, area: Rect, base_color: Color, opacity: f32
     );
 }
 
-/// Blend fg and/or bg of every cell in an area toward target colors.
-///
-/// Each parameter is `Option<(target, opacity)>`:
-/// - `None`: leave that channel unchanged
-/// - `Some((target, opacity))`: blend toward `target` at `opacity`
-///   - `opacity = 0.0`: fully target (original gone)
-///   - `opacity = 1.0`: no change (original kept)
-///
-/// Both RGB and Indexed colors are blended; named ANSI color cells are skipped.
+/// `None` leaves that channel. Named ANSI cells are skipped; their RGB is terminal-dependent.
 pub fn blend_area(
     buf: &mut Buffer,
     area: Rect,
@@ -284,20 +238,56 @@ pub fn blend_area(
     }
 }
 
-/// Dim a screen area: reset all modifiers then blend toward a background color.
-///
-/// Resetting modifiers keeps bold/italic/underline from bleeding through the dimmed overlay.
-pub fn dim_area(buf: &mut Buffer, area: Rect, blend_bg: ratatui::style::Color, blend_factor: f32) {
+/// Profile palettes cannot express the blend (`bg` is Reset/named ANSI), so fall back to DIM or unfocused panels never recede.
+pub fn recede_area(buf: &mut Buffer, area: Rect, bg: Color, opacity: f32) {
+    if color_to_rgb(bg).is_some() {
+        blend_area(buf, area, Some((bg, opacity)), None);
+        return;
+    }
     use ratatui::style::Modifier;
-
     for y in area.y..area.y + area.height {
         for x in area.x..area.x + area.width {
             if let Some(cell) = buf.cell_mut((x, y)) {
-                cell.modifier = Modifier::empty();
+                cell.modifier.insert(Modifier::DIM);
+                // Many terminals ignore faint when bold is set (the theme's
+                // bold prompts would stay at full weight): drop bold too.
+                cell.modifier.remove(Modifier::BOLD);
             }
         }
     }
-    crate::render::color::blend_area(buf, area, Some((blend_bg, blend_factor)), None);
+}
+
+/// Post-pass: row builders bake their own fgs, so a uniform row must be repainted after it is drawn.
+pub fn force_area_fg(buf: &mut Buffer, area: Rect, fg: Color) {
+    for y in area.y..area.y + area.height {
+        for x in area.x..area.x + area.width {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_fg(fg);
+            }
+        }
+    }
+}
+
+/// Reset modifiers so bold/italic do not bleed through. Inexpressible `blend_bg` becomes DIM so previously-DIM text does not pop brighter.
+pub fn dim_area(buf: &mut Buffer, area: Rect, blend_bg: ratatui::style::Color, blend_factor: f32) {
+    use ratatui::style::Modifier;
+
+    let blendable = color_to_rgb(blend_bg).is_some();
+    let replacement = if blendable {
+        Modifier::empty()
+    } else {
+        Modifier::DIM
+    };
+    for y in area.y..area.y + area.height {
+        for x in area.x..area.x + area.width {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.modifier = replacement;
+            }
+        }
+    }
+    if blendable {
+        crate::render::color::blend_area(buf, area, Some((blend_bg, blend_factor)), None);
+    }
 }
 
 #[cfg(test)]
@@ -602,5 +592,59 @@ mod tests {
         let cell = buf.cell((0, 0)).unwrap();
         assert!(matches!(cell.fg, Color::Indexed(_)));
         assert!(matches!(cell.bg, Color::Indexed(_)));
+    }
+
+    /// Inexpressible bg falls back to DIM; `blend_area` would be a no-op and unfocused panels would never recede.
+    #[test]
+    fn recede_area_dims_when_blend_is_inexpressible() {
+        use ratatui::style::Modifier;
+
+        // RGB bg: fg blends, no DIM.
+        let mut buf = Buffer::empty(Rect::new(0, 0, 1, 1));
+        buf.cell_mut((0, 0))
+            .unwrap()
+            .set_fg(Color::Rgb(200, 200, 200));
+        recede_area(&mut buf, Rect::new(0, 0, 1, 1), Color::Rgb(0, 0, 0), 0.66);
+        let cell = buf.cell((0, 0)).unwrap();
+        assert_ne!(cell.fg, Color::Rgb(200, 200, 200), "fg blended toward bg");
+        assert!(!cell.modifier.contains(Modifier::DIM));
+
+        // Reset / named-ANSI bg: fg untouched, DIM applied, BOLD dropped
+        // (bold defeats faint on many terminals — bold prompts must recede).
+        for bg in [Color::Reset, Color::DarkGray] {
+            let mut buf = Buffer::empty(Rect::new(0, 0, 1, 1));
+            buf.cell_mut((0, 0)).unwrap().modifier = Modifier::BOLD;
+            recede_area(&mut buf, Rect::new(0, 0, 1, 1), bg, 0.66);
+            let cell = buf.cell((0, 0)).unwrap();
+            assert_eq!(cell.fg, Color::Reset, "fg not clobbered");
+            assert!(cell.modifier.contains(Modifier::DIM), "recedes via DIM");
+            assert!(!cell.modifier.contains(Modifier::BOLD), "bold dropped");
+        }
+    }
+
+    /// `dim_area` backdrops: RGB targets strip modifiers then blend; a
+    /// Reset target (terminal theme) replaces the modifiers with DIM so the
+    /// backdrop recedes and previously-DIM text doesn't pop brighter.
+    #[test]
+    fn dim_area_recedes_via_dim_when_blend_is_inexpressible() {
+        use ratatui::style::Modifier;
+
+        // RGB target: modifiers stripped, fg blended, no DIM.
+        let mut buf = Buffer::empty(Rect::new(0, 0, 1, 1));
+        let cell = buf.cell_mut((0, 0)).unwrap();
+        cell.set_fg(Color::Rgb(200, 200, 200));
+        cell.modifier = Modifier::BOLD | Modifier::DIM;
+        dim_area(&mut buf, Rect::new(0, 0, 1, 1), Color::Rgb(0, 0, 0), 0.5);
+        let cell = buf.cell((0, 0)).unwrap();
+        assert_eq!(cell.modifier, Modifier::empty());
+        assert_ne!(cell.fg, Color::Rgb(200, 200, 200), "fg blended");
+
+        // Reset target: BOLD stripped, DIM applied, fg untouched.
+        let mut buf = Buffer::empty(Rect::new(0, 0, 1, 1));
+        buf.cell_mut((0, 0)).unwrap().modifier = Modifier::BOLD;
+        dim_area(&mut buf, Rect::new(0, 0, 1, 1), Color::Reset, 0.5);
+        let cell = buf.cell((0, 0)).unwrap();
+        assert_eq!(cell.modifier, Modifier::DIM, "recedes via DIM, BOLD gone");
+        assert_eq!(cell.fg, Color::Reset, "fg not clobbered");
     }
 }

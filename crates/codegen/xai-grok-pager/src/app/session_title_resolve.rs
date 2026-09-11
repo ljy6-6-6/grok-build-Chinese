@@ -29,12 +29,9 @@ pub(crate) fn title_miss_hint(arg: &str) -> String {
     )
 }
 
-/// Select the local session a resume arg names by title.
-///
-/// - `Ok(None)`: UUID-shaped or blank arg, or no title matched; the caller keeps id-miss behavior.
-/// - `Ok(Some)`: exactly one match, or a sole manual `/rename` among duplicates (explicit user intent beats colliding auto titles).
-/// - `Err`: ambiguous; never silently pick one, headless scripts need determinism.
-///   Candidate titles are Debug-escaped: `/rename` accepts arbitrary text, and raw control characters would corrupt the listing.
+/// `Ok(Some)`: exactly one match, or a sole manual `/rename` among duplicates (explicit user intent beats colliding auto titles).
+/// `Err`: ambiguous; never silently pick one, headless scripts need determinism.
+/// Candidate titles are Debug-escaped: `/rename` accepts arbitrary text, and raw control characters would corrupt the listing.
 pub(crate) fn select_by_title<'a>(
     arg: &str,
     summaries: &'a [Summary],
@@ -103,9 +100,7 @@ impl PinnedResumeTarget {
     }
 }
 
-/// Resolve an explicit resume arg to a pinned local session id before the (irreversible) OS sandbox.
 /// The saved-profile peek and materialization must consume one immutable target, not re-run title selection against mutable summaries.
-/// Id lookups stay authoritative (same order as `resolve_existing_session`).
 /// That preserves the restored-child id so the peek cannot drift to a same-id session in another cwd.
 /// Errs on a listing failure (fail closed instead of guessing) and on ambiguity, which must be reported before the sandbox rather than after it.
 pub(crate) fn presandbox_resume_target(
@@ -140,7 +135,6 @@ pub(crate) fn presandbox_resume_target(
         .unwrap_or(PinnedResumeTarget::Unresolved))
 }
 
-/// Failure message for a worktree resume.
 /// `local_miss_target` is `Some(arg)` only when materialization deferred exactly this target after missing local id/title resolution.
 /// Provenance is threaded, never inferred from id shape, so a resolved legacy non-UUID id gets no false no-match hint.
 /// `detail` must already be user-sanitized: sanitizing the composed message would collapse disk-full chains whole and erase the appended hint.

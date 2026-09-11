@@ -226,9 +226,14 @@ pub fn spawn_agent_thread(name: &str) -> (acp_harness::AgentPipes, AgentThread) 
                 let agent_config = AgentConfig::default();
                 let auth_manager = Arc::new(agent_config.create_auth_manager());
                 let (gw_tx, gw_rx) = tokio::sync::mpsc::unbounded_channel();
-                let agent =
-                    MvpAgent::new(GatewaySender::new(gw_tx), &agent_config, auth_manager, None)
-                        .expect("valid config");
+                let agent = MvpAgent::new(
+                    GatewaySender::new(gw_tx),
+                    &agent_config,
+                    auth_manager,
+                    None,
+                    None,
+                )
+                .expect("valid config");
 
                 let agent_incoming = LineBufferedRead::spawn_local(c2a_agent.compat());
                 let (agent_conn, agent_io) = acp::AgentSideConnection::new(
@@ -241,7 +246,7 @@ pub fn spawn_agent_thread(name: &str) -> (acp_harness::AgentPipes, AgentThread) 
                 );
                 tokio::task::spawn_local(
                     GatewayReceiver::new(gw_rx, agent_conn)
-                        .with_on_meta(xai_file_utils::trace_context::span_from_meta_traceparent)
+                        .with_on_meta(xai_grok_otel::span_from_meta_traceparent)
                         .run(),
                 );
                 tokio::task::spawn_local(agent_io);

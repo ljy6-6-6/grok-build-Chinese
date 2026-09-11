@@ -8,7 +8,6 @@ use nucleo::{
 };
 
 /// Fuzzy matcher backed by nucleo.
-///
 /// Maintains internal state (pattern and matcher) between calls for efficiency.
 /// Not thread-safe; intended for single-threaded use within `SlashController`.
 #[derive(Debug)]
@@ -31,12 +30,9 @@ impl FuzzyMatcher {
         }
     }
 
-    /// Rank items by fuzzy match score.
-    ///
-    /// Returns `(index, score)` pairs sorted by descending score, then ascending key text.
-    /// At most `limit` results are returned.
-    ///
-    /// When `query` is empty, returns the first `limit` items with score 0 (insertion order).
+    /// Rank items by fuzzy match score. Returns `(index, score)` pairs sorted by descending score, then ascending key
+    /// text. At most `limit` results are returned. When `query` is empty, returns the first `limit` items with score 0
+    /// (insertion order).
     pub fn rank<T, F>(
         &mut self,
         items: &[T],

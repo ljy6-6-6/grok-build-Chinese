@@ -6,8 +6,6 @@ pub(crate) fn is_server_initiated_prompt(prompt_id: &str) -> bool {
 }
 
 /// Returns true if the prompt_id is a scheduled-task (`/loop`) fire.
-///
-/// These fires are synthetic, so [`is_server_initiated_prompt`] is also true for them.
 /// Unlike wake turns they run through `MvpAgent::prompt()` and emit the `x.ai/session/prompt_complete` turn-end signal.
 /// That exit is why a viewer can enter `TurnRunning` for them without stranding, and why the dashboard shows a running `/loop` session as Working.
 pub(crate) fn is_scheduler_fired_prompt(prompt_id: &str) -> bool {
@@ -20,7 +18,6 @@ pub(crate) fn is_scheduler_fired_prompt(prompt_id: &str) -> bool {
 /// Decides which replayed turns close without a terminal marker.
 /// A wake stays markerless when it streamed nothing visible; a wake that errored always keeps its marker.
 /// A direct-bash turn keeps its marker only for cancel and error, matching live.
-/// Every other server-initiated synthetic turn stays markerless, except `/loop` fires, which keep their markers.
 pub(crate) fn suppress_replay_marker_for_origin(
     is_direct_bash: bool,
     had_visible_output: bool,
@@ -63,9 +60,6 @@ pub(super) fn rate_limited_wake_failure_event(
 /// Returns true for the auto-wake turn families (`task-completed-…`, `subagent-completed-…`, `workflow-completed-…`, `notifications-…`).
 /// These run non-adopted: no `PromptResponse`, no viewer finalize.
 /// Their durable `TurnCompleted` is the only signal that the session went back to idle.
-/// [`finish_wake_turn`] closes a wake that streamed visible output with a marker and leaves a silent one markerless.
-/// The set is deliberately narrower than "non-adopted synthetic".
-/// Goal turns render through the goal chip and loop chrome, and `plan-resume-…` keeps its own markerless shape.
 pub(crate) fn is_wake_prompt(prompt_id: &str) -> bool {
     matches!(
         xai_grok_shell::session::PromptOrigin::from_prompt_id(prompt_id),
@@ -73,28 +67,20 @@ pub(crate) fn is_wake_prompt(prompt_id: &str) -> bool {
             | xai_grok_shell::session::PromptOrigin::SubagentCompleted { .. }
             | xai_grok_shell::session::PromptOrigin::WorkflowCompleted { .. }
             | xai_grok_shell::session::PromptOrigin::ParentAgentMessage { .. }
+            | xai_grok_shell::session::PromptOrigin::ParentHumanMessage { .. }
             | xai_grok_shell::session::PromptOrigin::NotificationDrain
     )
 }
 
-/// Whether a viewer may bind this running `prompt_id` as its `current_prompt_id` and show a live `TurnRunning`.
 /// That is safe only when the turn will emit a terminal `x.ai/session/prompt_complete`, the only non-interactive way a viewer leaves `TurnRunning`.
-/// User-driven turns and `/loop` (`scheduler-fired-…`) fires run via `MvpAgent::prompt()` and emit it.
 /// Actor-run synthetic turns never do, so adopting one strands the viewer in `TurnRunning`.
-///
 /// This guard reads only the prompt id.
-/// The session-load paths use the agent-aware [`AgentView::should_adopt_running_prompt`], which also rejects a turn that replay already ended.
-///
-/// [`AgentView::should_adopt_running_prompt`]: crate::app::agent_view::AgentView::should_adopt_running_prompt
 pub(crate) fn should_adopt_running_prompt(prompt_id: &str) -> bool {
     !is_server_initiated_prompt(prompt_id) || is_scheduler_fired_prompt(prompt_id)
 }
 
 /// Compute the monotonic anchor a viewer should use as its turn-start time.
-///
 /// A viewer adopts the driver's turn mid-stream, so stamping `Instant::now()` would undercount elapsed by the wait for the first delta.
-/// Both the live counter and the final "Worked for X" marker read this anchor via [`AgentView::turn_elapsed`].
-/// The shell stamps the wall-clock turn start in `meta.turnStartMs` (UTC ms), so back-date the anchor from it to match the driver's elapsed.
 /// Falls back to `now` when `turnStartMs` is absent (older shell) or the wall clock is skewed forward.
 pub(super) fn viewer_turn_anchor(turn_start_ms: Option<i64>) -> std::time::Instant {
     let now = std::time::Instant::now();
@@ -114,8 +100,6 @@ pub(super) fn viewer_turn_anchor(turn_start_ms: Option<i64>) -> std::time::Insta
 /// Wire fields of the wake turn's terminal signal.
 /// `cancel_trigger` is `_meta.cancelTrigger`: `"send_now"` marks an internal cancel-and-send, so the `TurnCancelled` marker is suppressed.
 /// The wire trigger wins; `expect_send_now_cancel` is the fallback for older shells.
-/// `cancellation_category` is `_meta.cancellationCategory`: `"HookDenied"` picks the blocked-by-a-hook marker.
-/// `error_kind` is the terminal's typed failure kind; it picks error-specific failure copy.
 pub(super) struct WakeTerminal<'a> {
     pub stop_reason: &'a str,
     pub agent_result: Option<&'a str>,
@@ -125,10 +109,7 @@ pub(super) struct WakeTerminal<'a> {
 }
 
 /// Close out a wake turn. This is the only place that flushes its streamed entries still in flight, because wake turns skip `PromptResponse`.
-/// A wake with visible output closes with a marker; a silent one closes with none.
 /// Failures are the exception and still get a marker when silent, because the user's standing instruction stopped executing invisibly.
-/// A silent rate limit stays quiet and defers to the retry notifications, as real turns do.
-/// A hook-denied wake follows the cancelled policy.
 /// The `HookAnnotation` warning attributes the deny but is not turn output, so a silently blocked wake closes without a marker.
 pub(super) fn finish_wake_turn(agent: &mut AgentView, prompt_id: &str, terminal: WakeTerminal<'_>) {
     let WakeTerminal {
@@ -200,10 +181,7 @@ pub(super) fn finish_wake_turn(agent: &mut AgentView, prompt_id: &str, terminal:
             },
         ),
     };
-    if event.is_some() {
-        crate::app::turn_completion::push_turn_terminal_marker(agent, event, Some(prompt_id));
-    }
-    // Wake turns are synthetic and never gated, so no hook detail exists here.
+    crate::app::turn_completion::push_turn_terminal_marker(agent, event);
     crate::app::turn_completion::note_hook_blocked_turn(
         agent,
         Some(prompt_id),

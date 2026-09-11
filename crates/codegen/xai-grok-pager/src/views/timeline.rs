@@ -32,19 +32,12 @@ pub struct TimelineRail {
     pub ticks_y: u16,
     /// Active turn (viewport top), if any.
     pub active: Option<usize>,
-    /// The ▲ target: the nearest turn strictly above the viewport top ([`ScrollbackState::turn_above_viewport_top`]), NOT `active - 1`.
-    /// Stepping from `active` could target trailing turns that no scroll can bring to the top (a stuck ▲).
-    ///
-    /// [`ScrollbackState::turn_above_viewport_top`]:
-    /// crate::scrollback::ScrollbackState::turn_above_viewport_top
+    /// The ▲ target: the nearest turn strictly above the viewport top
+    /// ([`ScrollbackState::turn_above_viewport_top`]), NOT `active - 1`.
     pub up_target: Option<usize>,
-    /// The ▼ target: the nearest turn below the viewport top ([`ScrollbackState::turn_below_viewport_top`]).
-    /// ▼ anchors it to the top exactly like clicking its tick.
-    /// Both go through `jump_to_turn`, which over-scrolls trailing turns rather than dimming.
-    /// `None` only when the last turn already owns the top.
-    ///
-    /// [`ScrollbackState::turn_below_viewport_top`]:
-    /// crate::scrollback::ScrollbackState::turn_below_viewport_top
+    /// The ▼ target: the nearest turn below the viewport top
+    /// ([`ScrollbackState::turn_below_viewport_top`]). Both go through `jump_to_turn`, which
+    /// over-scrolls trailing turns rather than dimming.
     pub down_target: Option<usize>,
     /// Chevron rows.
     pub up_y: u16,
@@ -156,11 +149,8 @@ pub fn compute_rail(
     })
 }
 
-/// The turn a rail interaction jumps to, derived from the rail's own fields (the same state that dims the chevrons).
-/// Display and action therefore cannot disagree; `None` means an end stop (dim chevron, click is a no-op).
-///
-/// ▼ steps to `down_target` even at the bottom: `jump_to_turn` over-scrolls a trailing turn to the top, identical to clicking its tick.
-/// The chevron therefore matches the click instead of doing nothing.
+/// Display and action therefore cannot disagree; `None` means an end stop (dim chevron, click is a
+/// no-op). The chevron therefore matches the click instead of doing nothing.
 pub fn chevron_target(rail: &TimelineRail, hit: TimelineHit) -> Option<usize> {
     match hit {
         TimelineHit::Tick(turn_idx) => Some(turn_idx),
@@ -251,10 +241,9 @@ pub fn render_rail(
     }
 }
 
-/// Floating preview card for a hovered tick, anchored left of the rail.
-///
-/// Shrinks to fit, in the house popup chrome (a clear, a dark base fill, and a rounded `Block`, like the pickers and /btw panel).
-/// The interior must stay `bg_base`: border glyphs draw mid-cell, so any lighter fill bleeds a half-cell past the border line.
+/// Floating preview card for a hovered tick, anchored left of the rail. The interior must stay
+/// `bg_base`: border glyphs draw mid-cell, so any lighter fill bleeds a half-cell past the border
+/// line.
 pub fn render_tick_hover_popup(
     buf: &mut Buffer,
     rail: &TimelineRail,

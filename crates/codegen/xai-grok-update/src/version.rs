@@ -57,10 +57,9 @@ fn is_loopback_base(base: &str) -> bool {
     }
 }
 
-/// Minimal configuration the update system needs from the environment.
-///
-/// Constructed once from `GrokBuildEnvironment` at startup and threaded through the update call chain.
-/// `auto_update` and `version` never need to know about the `GrokBuildEnvironment` enum directly.
+/// Minimal configuration the update system needs from the environment. Constructed once from `GrokBuildEnvironment` at
+/// startup and threaded through the update call chain. `auto_update` and `version` never need to know about the
+/// `GrokBuildEnvironment` enum directly.
 #[derive(Debug, Clone)]
 pub struct UpdateConfig {
     /// Chat API proxy base URL (versioned `https://cli-chat-proxy.grok.com/v1` endpoint).
@@ -81,7 +80,7 @@ impl UpdateConfig {
     pub fn from_environment(env: &GrokBuildEnvironment) -> Self {
         Self {
             proxy_base_url: env.cli_chat_proxy_base_url(),
-            auth_scope: xai_grok_shell::auth::GrokComConfig::default().auth_scope(),
+            auth_scope: xai_grok_login::GrokComConfig::default().auth_scope(),
             deployment_key: None,
             alpha_test_key: None,
             channel: "stable".to_string(),
@@ -252,15 +251,9 @@ async fn fetch_gh_release_latest(exclude_pre: bool) -> Result<String> {
     Ok(version)
 }
 
-/// Fetch the latest version from a public CLI channel pointer.
-///
-/// Reads `{base}/{channel}` which contains a plain-text semver string (e.g. `0.1.181`).
-/// No auth required; the upstream bucket is public.
-///
-/// For the alpha channel, fetches both `alpha` and `stable` pointers and returns the semver-greater, matching the npm and gh-release paths.
-///
-/// Tries each base URL in [`CLI_BASE_URLS`] in order and stops at the first success.
-/// Each base also retries up to 3 times with exponential backoff (1s, 2s, 4s) on transient failures before falling through to the next base.
+/// No auth required; the upstream bucket is public. For the alpha channel, fetches both `alpha` and `stable` pointers and
+/// returns the semver-greater, matching the npm and gh-release paths. Each base also retries up to 3 times with
+/// exponential backoff (1s, 2s, 4s) on transient failures before falling through to the next base.
 pub(crate) async fn fetch_gcs_version(channel: &str) -> Result<String> {
     let mut last_err: Option<anyhow::Error> = None;
     let bases = cli_base_urls();
@@ -395,10 +388,9 @@ fn version_cache_path() -> std::path::PathBuf {
     }
 }
 
-/// Write the version cache to disk, recording that `version` was seen at the current time.
-/// Call after confirming the version is current (no update needed) or after a successful install.
-///
-/// `stable_version` records the current stable channel pointer so that `channel_label()` can derive `[alpha]` vs `[stable]` without network I/O.
+/// Write the version cache to disk, recording that `version` was seen at the current time. Call after confirming the
+/// version is current (no update needed) or after a successful install. `stable_version` records the current stable
+/// channel pointer so that `channel_label()` can derive `[alpha]` vs `[stable]` without network I/O.
 pub async fn write_version_cache(version: &str, stable_version: Option<&str>) {
     if crate::ensure_selected_updates_enabled().is_err() {
         return;
@@ -433,13 +425,9 @@ pub async fn write_version_cache(version: &str, stable_version: Option<&str>) {
     }
 }
 
-/// Fetch the latest version for the given installer type and cache it.
-///
-/// Each installer is fully independent: there is no cross-installer fallback.
-///
-/// - `"npm"`: uses `npm view` against the public registry.
-/// - `"internal"`: reads the channel pointer from the public GCS bucket.
-/// - `"gh-release"`: uses `gh release list` against GitHub Releases.
+/// Fetch the latest version for the given installer type and cache it. Each installer is fully independent: there is no
+/// cross-installer fallback. `"npm"`: uses `npm view` against the public registry; `"internal"`: reads the channel
+/// pointer from the public GCS bucket; `"gh-release"`: uses `gh release list` against GitHub Releases.
 pub async fn get_latest_version(installer: &str, config: &UpdateConfig) -> Result<String> {
     let version = fetch_latest_version(installer, config).await?;
     let stable_ptr = try_fetch_stable_pointer().await;
@@ -462,21 +450,9 @@ pub async fn is_version_cache_fresh() -> bool {
 
 pub use xai_grok_version::installed as get_installed_grok_version;
 
-/// Version of the managed grok binary currently on disk, read from the
-/// `~/.grok/bin/grok` symlink target (`../downloads/grok-<version>-<platform>`)
-/// without exec'ing anything.
-///
-/// Concurrent updaters (TUI background download, leader hourly checker, explicit `grok update`) decide staleness from this.
-/// They use it instead of their own compiled-in version, so a binary another process already installed is never downloaded a second time.
-///
-/// Returns `None` when there is no parseable managed symlink (Windows
-/// copy-based installs, dev builds) or when the symlink is DANGLING — a
-/// link whose target binary was deleted (e.g. manual `~/.grok/downloads`
-/// cleanup) must not report an installed version, or every updater would
-/// claim "already up to date" forever while no runnable binary exists.
-/// NOTE: the symlink existing does not prove the *active installer* maintains it.
-/// npm manages its own global install and a leftover symlink from a previous internal install would lie about the npm install's version.
-/// Callers must gate on the installer (see `disk_version_for_installer` in `auto_update`).
+/// Returns `None` when there is no parseable managed symlink (Windows copy-based installs, dev builds) or when the
+/// symlink is DANGLING — a link whose target binary was deleted (e.g. manual `~/.grok/downloads` cleanup) must not report
+/// an installed version, or every updater would claim "already up to date" forever while no runnable binary exists.
 pub fn installed_on_disk_version() -> Option<String> {
     #[cfg(unix)]
     {
@@ -513,21 +489,9 @@ pub fn installed_on_disk_version() -> Option<String> {
     }
 }
 
-/// Everything between the `{bin_prefix}-` prefix and the first platform-OS component is the version, validated as semver.
-/// Handles the internal layout (`grok-0.1.150-macos-aarch64`) and the npm layout without a platform suffix (`grok-0.1.150`).
-/// Pre-releases parse whole: `grok-0.1.150-alpha.1-linux-x86_64` gives `0.1.150-alpha.1`.
-/// Unknown layouts (`grok-latest`, `grok-pager-*` when `bin_prefix` is `grok`) return `None` instead of garbage.
-///
-/// Handles the internal layout (`grok-0.1.150-macos-aarch64`, including
-/// pre-releases: `grok-0.1.150-alpha.1-linux-x86_64` → `0.1.150-alpha.1`)
-/// and the npm layout without a platform suffix (`grok-0.1.150`,
-/// `grok-0.1.150-alpha.1`): everything between the `{bin_prefix}-` prefix
-/// and a recognized platform suffix is the version, validated as semver
-/// so unknown layouts (`grok-latest`, `grok-pager-*` when `bin_prefix` is
-/// `grok`) return `None` instead of garbage.
-///
-/// Shared by the disk-version probe above and `cleanup_old_downloads` in
-/// `auto_update` — keep it the single place that understands this naming.
+/// Handles the internal layout (`grok-0.1.150-macos-aarch64`) and the npm layout without a platform suffix
+/// (`grok-0.1.150`). Pre-releases parse whole: `grok-0.1.150-alpha.1-linux-x86_64` gives `0.1.150-alpha.1`. Unknown
+/// layouts (`grok-latest`, `grok-pager-*` when `bin_prefix` is `grok`) return `None` instead of garbage.
 pub(crate) fn version_from_versioned_binary_name(name: &str, bin_prefix: &str) -> Option<String> {
     let suffix = name.strip_prefix(bin_prefix)?.strip_prefix('-')?;
     const PLATFORM_SUFFIXES: &[&str] = &[
@@ -594,14 +558,9 @@ pub(crate) fn version_from_current_community_unix_binary_name(name: &str) -> Opt
     }
 }
 
-/// Fetch the stable channel pointer for caching alongside the version.
-///
-/// Tries each base URL in [`CLI_BASE_URLS`] and returns the first success.
-/// Best-effort: returns `None` on any failure, and `channel_label()` returns `""` until the next successful fetch.
-///
-/// The entire operation is capped at 500 ms to keep startup and post-install paths fast.
-/// The stable pointer is only used to derive the `[alpha]`/`[stable]` channel label; it is never required for correctness.
-/// On slow or unreachable networks the timeout fires and we return `None`; the label populates on the next successful TTL check (~30 min).
+/// Best-effort: returns `None` on any failure, and `channel_label()` returns `""` until the next successful fetch. The
+/// entire operation is capped at 500 ms to keep startup and post-install paths fast. The stable pointer is only used to
+/// derive the `[alpha]`/`[stable]` channel label; it is never required for correctness.
 pub(crate) async fn try_fetch_stable_pointer() -> Option<String> {
     #[cfg(feature = "community-build")]
     {
@@ -655,12 +614,9 @@ fn derive_channel<'a>(current: &str, stable: &str) -> Option<&'a str> {
     }
 }
 
-/// Machine-readable channel name derived from the cached stable pointer.
-///
-/// Returns `Some("alpha")` when the current version is ahead of the cached stable pointer, `Some("stable")` when at or behind.
-/// Returns `None` when no cached pointer is available (first launch, old cache format, parse error).
-///
-/// The result is computed once and cached for the process lifetime.
+/// Machine-readable channel name derived from the cached stable pointer. Returns `Some("alpha")` when the current version
+/// is ahead of the cached stable pointer, `Some("stable")` when at or behind. Returns `None` when no cached pointer is
+/// available (first launch, old cache format, parse error).
 pub fn channel_name() -> Option<&'static str> {
     use std::sync::OnceLock;
     static NAME: OnceLock<Option<&'static str>> = OnceLock::new();
@@ -670,15 +626,9 @@ pub fn channel_name() -> Option<&'static str> {
     })
 }
 
-/// Channel label derived from the cached stable pointer.
-///
-/// Compares the compiled-in `VERSION` against the stable pointer stored in
-/// `~/.grok/version.json` (written by the auto-updater):
-/// - `" [alpha]"` when the current version is ahead of stable,
-/// - `" [stable]"` when at or behind stable,
-/// - `""` when no cached pointer is available (first launch, old cache format).
-///
-/// The result is computed once and cached for the process lifetime.
+/// Compares the compiled-in `VERSION` against the stable pointer stored in `~/.grok/version.json` (written by the
+/// auto-updater): `" [alpha]"` when the current version is ahead of stable,; `" [stable]"` when at or behind stable,;
+/// `""` when no cached pointer is available (first launch, old cache format).
 pub fn channel_label() -> &'static str {
     use std::sync::OnceLock;
     static LABEL: OnceLock<&'static str> = OnceLock::new();
@@ -820,12 +770,9 @@ mod tests {
         }
     }
 
-    // ──────────────────────────────────────────────────────────────────────
-    // derive_channel — invariant matrix
-    //
-    // Tests the pure comparison logic that determines [alpha] vs [stable].
-    // Covers current 0.1.X-alpha.N, future 0.2.X, edge cases, and errors.
-    // ──────────────────────────────────────────────────────────────────────
+    // ────────────────────────────────────────────────────────────────────── derive_channel — invariant matrix. Tests the
+    // pure comparison logic that determines [alpha] vs [stable]. Covers current 0.1.X-alpha.N, future 0.2.X, edge cases, and
+    // errors. ──────────────────────────────────────────────────────────────────────
 
     #[test]
     fn test_derive_channel_matrix() {

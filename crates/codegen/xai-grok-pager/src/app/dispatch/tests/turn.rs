@@ -24,12 +24,8 @@ fn demote_dispatch_keeps_turn_session_and_execute_guards() {
 }
 
 /// Regression (leader mode): a queued prompt's parked `session/prompt` RPC can resolve as an *error*.
-/// For example, the leader drops its `respond_to` when the prompt is removed from the shared queue.
 /// That surfaces as `Internal error: "session failed to respond"`.
 /// An `acp::Error` carries no `promptId`, so before the Err-arm gate this error was misattributed to the running turn.
-/// It rendered as a spurious "Turn failed" and killed an unrelated in-flight turn.
-/// The handler now gates the Err arm on the `prompt_id` the pager minted for that RPC.
-/// An error whose id is NOT the running turn is discarded; the running turn is left untouched.
 #[test]
 fn queued_prompt_rpc_error_does_not_kill_running_turn() {
     let mut app = test_app_with_agent();
@@ -236,7 +232,11 @@ fn cancel_turn_in_subagent_view_kills_focused_subagent() {
         ),
         "stop in a subagent view must kill the focused subagent, got {effects:?}"
     );
-    assert!(app.agents[&id].subagent_sessions["child-1"].pending_kill);
+    assert!(
+        app.agents[&id].subagent_sessions["child-1"]
+            .attempt
+            .pending_kill
+    );
 }
 
 /// The kill routing keys off the focused running subagent, not root idleness.
@@ -279,7 +279,7 @@ fn cancel_turn_in_finished_subagent_view_falls_through_to_root() {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.state = AgentState::TurnRunning;
         let mut info = make_test_subagent("child-1", "sa-1");
-        info.finished = true;
+        info.set_finished_for_test(true);
         agent.subagent_sessions.insert("child-1".to_string(), info);
         agent.active_subagent = Some("child-1".into());
     }
@@ -294,16 +294,16 @@ fn cancel_turn_in_finished_subagent_view_falls_through_to_root() {
 
 #[test]
 fn cancel_turn_forwards_trigger_hint_to_effect() {
-    // The key/mouse producer sets `cancel_trigger_hint` (here ESC) before dispatching CancelTurn
+    // The key/mouse producer sets `cancel_trigger_hint` (here the dashboard stop) before dispatching CancelTurn
     // `do_cancel_turn` must forward it onto `Effect::CancelTurn.trigger` (which becomes `_meta.cancelTrigger`) and consume it
-    // The Ctrl+C end-to-end test exercises the same path; only the `CancelTrigger` value differs across producers (esc/ctrl_c/mouse)
+    // The Ctrl+C end-to-end test exercises the same path; only the `CancelTrigger` value differs across producers (ctrl_c/mouse/dashboard_stop)
     use crate::app::actions::CancelTrigger;
     let mut app = test_app_with_agent();
     let id = AgentId(0);
     {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.state = AgentState::TurnRunning;
-        agent.cancel_trigger_hint = Some(CancelTrigger::Esc);
+        agent.cancel_trigger_hint = Some(CancelTrigger::DashboardStop);
     }
 
     let effects = dispatch(Action::CancelTurn, &mut app);
@@ -311,7 +311,7 @@ fn cancel_turn_forwards_trigger_hint_to_effect() {
     assert!(matches!(
         &effects[0],
         Effect::CancelTurn {
-            trigger: Some(CancelTrigger::Esc),
+            trigger: Some(CancelTrigger::DashboardStop),
             ..
         }
     ));
@@ -570,12 +570,12 @@ fn hintless_retry_replays_recorded_trigger() {
     {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.state = AgentState::TurnRunning;
-        agent.cancel_trigger_hint = Some(CancelTrigger::Esc);
+        agent.cancel_trigger_hint = Some(CancelTrigger::DashboardStop);
     }
     assert!(matches!(
         dispatch(Action::CancelTurn, &mut app).as_slice(),
         [Effect::CancelTurn {
-            trigger: Some(CancelTrigger::Esc),
+            trigger: Some(CancelTrigger::DashboardStop),
             ..
         }]
     ));
@@ -585,7 +585,7 @@ fn hintless_retry_replays_recorded_trigger() {
         matches!(
             effects.as_slice(),
             [Effect::CancelTurn {
-                trigger: Some(CancelTrigger::Esc),
+                trigger: Some(CancelTrigger::DashboardStop),
                 ..
             }]
         ),
@@ -608,7 +608,7 @@ fn cancel_turn_stops_compact_even_with_stale_wake_marker() {
             prompt_id: "task-completed-bg1".into(),
             cancel_sent: false,
         });
-        agent.cancel_trigger_hint = Some(CancelTrigger::Esc);
+        agent.cancel_trigger_hint = Some(CancelTrigger::DashboardStop);
     }
 
     let effects = dispatch(Action::CancelTurn, &mut app);
@@ -644,7 +644,7 @@ fn cancel_after_local_send_during_wake_does_not_arm_resend() {
         });
         agent.start_turn_boundary(Some("user-1"));
         agent.session.current_prompt_id = Some("user-1".into());
-        agent.cancel_trigger_hint = Some(CancelTrigger::Esc);
+        agent.cancel_trigger_hint = Some(CancelTrigger::DashboardStop);
     }
 
     let effects = dispatch(Action::CancelTurn, &mut app);
@@ -652,7 +652,7 @@ fn cancel_after_local_send_during_wake_does_not_arm_resend() {
         matches!(
             effects.as_slice(),
             [Effect::CancelTurn {
-                trigger: Some(CancelTrigger::Esc),
+                trigger: Some(CancelTrigger::DashboardStop),
                 rewind_prompt_id: None,
                 ..
             }]
@@ -693,7 +693,7 @@ fn stale_cancel_resend_clears_once_pane_is_idle() {
             attempts: 3,
             confirmed: true,
             cancel_subagents: false,
-            trigger: CancelTrigger::Esc,
+            trigger: CancelTrigger::DashboardStop,
         });
     }
     assert!(reconcile_overdue_cancels(&mut app).is_none());
@@ -963,7 +963,7 @@ fn cancel_turn_choice_after_subagents_finished_still_cancels() {
     app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
 
     let mut info = make_test_subagent("child-1", "sa-1");
-    info.finished = true;
+    info.set_finished_for_test(true);
     app.agents
         .get_mut(&id)
         .unwrap()
@@ -2472,7 +2472,7 @@ fn subagent_label_strips_control_characters() {
     let agent = app.agents.get_mut(&AgentId(0)).unwrap();
     let mut info = make_test_subagent("child-evil", "sa-evil");
     // Inject an ANSI escape into the persona: this is what flows through `format_subagent_label` into the row builder sanitisation
-    info.persona = Some(Arc::from("a\x1b[31mevil\x1b[0m"));
+    info.attempt.persona = Some(Arc::from("a\x1b[31mevil\x1b[0m"));
     agent
         .subagent_sessions
         .insert(info.child_session_id.to_string(), info);

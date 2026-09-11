@@ -25,7 +25,7 @@ pub enum ClassifierSecurityFinding {
     FileWrite,
     /// Dangerous command segment (`rm`, `chmod`, `git push`, …).
     DangerousCommand,
-    /// Special executable/disclosure surface (`rg --pre`, Git drivers/pagers, kubectl config/auth overrides, process-environment dump).
+    /// Special executable/disclosure surface (`rg` unsafe flags, Git drivers/pagers, kubectl config/auth overrides, process-environment dump).
     SpecialExecSurface,
 }
 
@@ -82,10 +82,9 @@ impl ClassifierSecurityFinding {
         }
     }
 
-    /// Whether this finding constrains a *broad* grant (session `allow_bash_execute` blanket, prefix/glob grant, sandbox auto-allow).
-    /// These are effects a broad grant cannot vouch for, so their presence must reach the classifier rather than auto-allow.
-    /// `DangerousCommand` is excluded here because the blanket grant path already refuses dangerous segments.
-    /// `UnparseableShell` and `FailClosedPolicy` are handled by their own decision arms.
+    /// Whether this finding constrains a broad grant (blanket execute, prefix/glob, sandbox auto-allow).
+    /// A broad grant cannot vouch for these effects, so they must reach the classifier rather than auto-allow.
+    /// `DangerousCommand`, `UnparseableShell`, and `FailClosedPolicy` are handled by their own arms.
     const fn is_grant_floor(self) -> bool {
         matches!(
             self,
@@ -99,11 +98,8 @@ impl ClassifierSecurityFinding {
     }
 }
 
-/// The single canonical, ordered, deduplicated finding set for one request.
-///
-/// The `BTreeSet` encodes the ordering/dedup invariant in the type itself, so no caller can supply duplicates or arbitrary order.
-/// Built once at the detector sites in `evaluate_bash`; the manager clones it and adds `FailClosedPolicy` when a managed-policy gate failed closed.
-/// `Default` is the empty assessment (non-Bash access, or a fully safe command).
+/// Canonical ordered, deduplicated finding set for one request; `BTreeSet` encodes that invariant so callers cannot reorder or duplicate.
+/// Built once in `evaluate_bash`; the manager may add `FailClosedPolicy`. `Default` is empty (non-Bash or fully safe).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BashSecurityAssessment(BTreeSet<ClassifierSecurityFinding>);
 

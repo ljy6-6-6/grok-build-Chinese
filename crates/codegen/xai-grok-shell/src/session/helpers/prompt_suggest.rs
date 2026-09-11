@@ -128,9 +128,6 @@ fn transcript_line(role: &str, text: &str) -> Option<String> {
 
 /// Keeps genuine `User` messages (skipping runtime-synthesized ones) and `Assistant` text, newest-last.
 /// Walks backwards until the character budget is exhausted.
-/// Tool calls/results, reasoning, and the system prompt are dropped.
-/// The user/assistant dialogue carries the signal for "what will the user type next", and dropping the rest keeps the request cheap.
-///
 /// Returns `None` when the conversation has no assistant reply yet (nothing to predict from).
 pub(crate) fn build_transcript(conversation: &[ConversationItem]) -> Option<String> {
     let mut lines: Vec<String> = Vec::new();

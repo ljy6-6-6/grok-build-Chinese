@@ -774,7 +774,7 @@ fn team_auth_disables_agent_billing_surface() {
         .get_mut(&AgentId(0))
         .unwrap()
         .billing_surface_visible = true;
-    app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta {
+    app.apply_auth_meta(&xai_grok_login::AuthMeta {
         team_id: Some("team-uuid".into()),
         team_name: Some("Acme Corp".into()),
         ..Default::default()
@@ -1146,6 +1146,7 @@ fn app_billing_fetched_stores_autotopup() {
             autotopup: crate::views::credit_bar::AutoTopupFetch::Resolved(
                 crate::views::credit_bar::AutoTopupInfo::disabled(),
             ),
+            nonce: 0,
         }),
         &mut app,
     );
@@ -1154,6 +1155,22 @@ fn app_billing_fetched_stores_autotopup() {
         Some(500)
     );
     assert!(app.auto_topup.is_some_and(|at| !at.enabled));
+}
+
+/// A failed app-level fetch is not a "no billing data" answer: the cached balance behind the welcome warning stays put.
+#[test]
+fn app_billing_error_keeps_cached_balance() {
+    let mut app = test_app_with_agent();
+    app.credit_balance = Some(test_bal(77.0));
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::AppBillingError {
+            error: "timeout".to_string(),
+            nonce: 0,
+        }),
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    assert_eq!(app.credit_balance.as_ref().map(|b| b.usage_pct), Some(77.0));
 }
 
 // ── BillingError dispatch tests ─────────────────────────────────────
@@ -1214,6 +1231,23 @@ fn free_usage_error_detected_by_embedded_code() {
     assert!(!is_free_usage_exhausted_error(
         "unauthorized:missing-acl: nope"
     ));
+}
+
+#[test]
+fn free_usage_upsell_displaces_feedback_before_opening_question() {
+    let mut app = test_app_with_agent();
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    agent.feedback_modal = Some(crate::views::feedback_modal::FeedbackModalState::new(
+        crate::views::feedback_modal::OpenFeedbackModal {
+            text: Some("unsent report".to_owned()),
+            ..Default::default()
+        },
+    ));
+
+    open_free_usage_upsell(agent, None);
+
+    assert!(agent.feedback_modal.is_none());
+    assert!(agent.question_view.is_some());
 }
 
 #[test]

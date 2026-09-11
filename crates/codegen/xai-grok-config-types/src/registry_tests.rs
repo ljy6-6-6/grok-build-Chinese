@@ -76,6 +76,7 @@ fn registered_settings() {
                 ("GROK_REPO_STATUS_IN_SYSTEM_PROMPT", true),
             ),
             ("dock", ("GROK_DOCK", false)),
+            ("terminal_theme", ("GROK_TERMINAL_THEME", false)),
         ]),
     );
 }
@@ -109,6 +110,7 @@ fn every_registered_feature_reads_its_own_remote_setting() {
                 settings.repo_status_in_system_prompt = Some(value)
             }
             Feature::Dock => settings.dock_enabled = Some(value),
+            Feature::TerminalTheme => settings.terminal_theme_enabled = Some(value),
             // The one row with no remote tier, stated as such rather than as a projection that reads nothing
             Feature::BackendTools => {
                 assert!(spec.remote.is_none(), "{} grew a remote tier", spec.key);

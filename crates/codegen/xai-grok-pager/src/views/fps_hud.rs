@@ -163,10 +163,8 @@ mod tests {
         assert!(!hud.enabled());
         assert!(hud.overlay(0).is_none());
     }
-    /// Default test builds compile without dev instrumentation (release-shaped for this gate), so a truthy env must construct enabled.
-    /// A debug/dev test build hands the env to `FrameMetrics` instead.
-    /// Asserting against [`HONORS_GROK_FPS_ENV`] keeps the test true under both cfgs.
-    /// The dev half is pinned by the constant's shape, the same limitation as the `/debug` visibility test.
+    /// Default test builds compile without dev instrumentation (release-shaped for this gate), so a
+    /// truthy env must construct enabled.
     #[test]
     fn grok_fps_env_enables_hud_where_dev_overlay_absent() {
         for truthy in ["1", "full", " "] {

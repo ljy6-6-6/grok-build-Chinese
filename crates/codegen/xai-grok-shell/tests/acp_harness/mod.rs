@@ -37,6 +37,69 @@ impl acp::Client for AutoApproveClient {
     }
 }
 
+/// Auto-approving client that records `subagent_finished` ids so a test can wait for children to finish.
+#[allow(dead_code)]
+#[derive(Clone, Default)]
+pub struct SubagentFinishedRecorder {
+    finished: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    changed: std::rc::Rc<tokio::sync::Notify>,
+}
+
+#[allow(dead_code)]
+impl SubagentFinishedRecorder {
+    pub async fn wait_for_subagent_finished(&self, ids: &[&str], timeout: Duration) {
+        tokio::time::timeout(timeout, async {
+            loop {
+                if ids
+                    .iter()
+                    .all(|id| self.finished.borrow().iter().any(|f| f == id))
+                {
+                    return;
+                }
+                self.changed.notified().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "subagent_finished never arrived for {ids:?}; saw {:?}",
+                self.finished.borrow()
+            )
+        });
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl acp::Client for SubagentFinishedRecorder {
+    async fn request_permission(
+        &self,
+        args: acp::RequestPermissionRequest,
+    ) -> acp::Result<acp::RequestPermissionResponse> {
+        Ok(acp::RequestPermissionResponse::new(allow_once(&args)))
+    }
+
+    async fn session_notification(&self, _args: acp::SessionNotification) -> acp::Result<()> {
+        Ok(())
+    }
+
+    async fn ext_notification(&self, args: acp::ExtNotification) -> acp::Result<()> {
+        if args.method.as_ref() != "x.ai/session_notification" {
+            return Ok(());
+        }
+        let Ok(params) = serde_json::from_str::<serde_json::Value>(args.params.get()) else {
+            return Ok(());
+        };
+        let update = &params["update"];
+        if update["sessionUpdate"] == "subagent_finished"
+            && let Some(subagent_id) = update["subagent_id"].as_str()
+        {
+            self.finished.borrow_mut().push(subagent_id.to_owned());
+            self.changed.notify_one();
+        }
+        Ok(())
+    }
+}
+
 pub fn allow_once(args: &acp::RequestPermissionRequest) -> acp::RequestPermissionOutcome {
     args.options
         .iter()
@@ -57,16 +120,24 @@ pub struct AgentPipes {
 }
 
 /// Stand up `MvpAgent` plus its ACP connection and IO tasks on the current `LocalSet`.
-/// Callers wanting another topology build the same pieces elsewhere and hand [`connect_client`] the pipes.
-pub fn spawn_agent_local() -> AgentPipes {
+/// `remote` is installed before `MvpAgent::new` so the grove gate does not fail
+/// closed as `remote_unavailable`.
+fn spawn_agent_local(remote: Option<xai_grok_shell::util::config::RemoteSettings>) -> AgentPipes {
     let (c2a_a, c2a_b) = tokio::io::duplex(DUPLEX_BUFFER_BYTES);
     let (a2c_a, a2c_b) = tokio::io::duplex(DUPLEX_BUFFER_BYTES);
 
-    let agent_config = AgentConfig::default();
+    let mut agent_config = AgentConfig::default();
+    agent_config.remote_settings = remote;
     let auth_manager = Arc::new(agent_config.create_auth_manager());
     let (gw_tx, gw_rx) = tokio::sync::mpsc::unbounded_channel();
-    let agent = MvpAgent::new(GatewaySender::new(gw_tx), &agent_config, auth_manager, None)
-        .expect("valid config");
+    let agent = MvpAgent::new(
+        GatewaySender::new(gw_tx),
+        &agent_config,
+        auth_manager,
+        None,
+        None,
+    )
+    .expect("valid config");
 
     let agent_incoming = LineBufferedRead::spawn_local(c2a_b.compat());
     let (agent_conn, agent_io) =
@@ -75,7 +146,7 @@ pub fn spawn_agent_local() -> AgentPipes {
         });
     tokio::task::spawn_local(
         GatewayReceiver::new(gw_rx, agent_conn)
-            .with_on_meta(xai_file_utils::trace_context::span_from_meta_traceparent)
+            .with_on_meta(xai_grok_otel::span_from_meta_traceparent)
             .run(),
     );
     tokio::task::spawn_local(agent_io);
@@ -94,7 +165,20 @@ pub async fn connect_and_auth<C>(
 where
     C: acp::Client + 'static,
 {
-    let pipes = spawn_agent_local();
+    connect_and_auth_with_remote(client, client_type, None).await
+}
+
+/// [`connect_and_auth`] with a seeded remote-settings object (grove gate).
+#[allow(dead_code)]
+pub async fn connect_and_auth_with_remote<C>(
+    client: C,
+    client_type: &str,
+    remote: Option<xai_grok_shell::util::config::RemoteSettings>,
+) -> (acp::ClientSideConnection, acp::InitializeResponse)
+where
+    C: acp::Client + 'static,
+{
+    let pipes = spawn_agent_local(remote);
     connect_client(client, client_type, pipes).await
 }
 
@@ -229,6 +313,32 @@ pub async fn prompt_turn(
     );
 }
 
+/// Clears process-global prefetch / profile / OTEL state on enter and drop.
+struct RestoreProcessGlobals;
+
+impl RestoreProcessGlobals {
+    fn enter() -> Self {
+        Self::reset();
+        Self
+    }
+
+    fn reset() {
+        // These seams exist only when the library is built with test-support
+        // (integration tests) or as a unit-test crate.
+        #[cfg(feature = "test-support")]
+        {
+            xai_grok_shell::managed_config::clear_startup_profile_for_tests();
+        }
+        xai_grok_telemetry::external::mark_external_otel_settings_resolved();
+    }
+}
+
+impl Drop for RestoreProcessGlobals {
+    fn drop(&mut self) {
+        Self::reset();
+    }
+}
+
 fn set_test_env(grok_home: &std::path::Path, server_url: &str) {
     // SAFETY: the only live threads are the mock's HTTP workers, which never read env.
     unsafe {
@@ -269,6 +379,7 @@ pub fn run_agent_test_with_models<F, Fut>(
     Fut: std::future::Future<Output = ()>,
 {
     let _env_guard = hold_global_env();
+    xai_grok_shell::agent::remote_config::settings_get::reset_startup_settings_for_tests();
     xai_grok_extra_ca::ensure_default_crypto_provider();
 
     // Own thread: agent startup blocks on a models prefetch and would starve the mock.
@@ -285,6 +396,8 @@ pub fn run_agent_test_with_models<F, Fut>(
     let grok_home = tempfile::TempDir::new().expect("grok home");
     let workdir = tempfile::TempDir::new().expect("workdir");
     set_test_env(grok_home.path(), &server.url());
+    // After GROK_HOME is the temp dir, so teardown cannot OnceLock ~/.grok.
+    let _globals = RestoreProcessGlobals::enter();
 
     let agent_rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()

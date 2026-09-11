@@ -57,6 +57,7 @@ pub struct ViewportSnapshot {
     pub(crate) scroll_offset: usize,
     pub(crate) follow_mode: bool,
     pub(crate) follow_preserve_scroll: bool,
+    pub(crate) follow_preserve_content_generation: u64,
     pub(crate) viewport_height: u16,
     pub(crate) last_width: u16,
     pub(crate) selected: Option<usize>,
@@ -95,11 +96,8 @@ pub struct EntryLayoutInfo {
     pub height: u16,
     /// Gap rows after this entry (0 for dense group members, 1 otherwise).
     pub gap_after: u16,
-    /// When non-zero, this entry renders as a group header instead of its normal block content.
-    /// For N-more truncation headers it is the number of hidden entries, driving the plain "╶╶ N more" fallback text.
-    /// Frames with fold spans render the aggregated bucket label instead.
-    /// For verb-group headers it is the run's MEMBER count (tool calls and subagent rows; folded thoughts never count) and is never rendered.
-    /// Every check for "is this a header" goes through [`Self::is_group_header`].
+    /// When non-zero, this entry renders as a group header instead of its normal block content. Frames with fold spans
+    /// render the aggregated bucket label instead. folded thoughts never count) and is never rendered.
     pub group_header_count: u16,
     /// When true, this entry renders as an expanded-group collapse header, set on the first entry of a manually-expanded group.
     /// N-more headers replace the entry's content; verb-group headers stack above member 0.

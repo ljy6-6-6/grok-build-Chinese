@@ -24,10 +24,7 @@ pub struct BenchResults {
 }
 
 impl BenchResults {
-    /// Compute aggregate statistics from per-frame timings.
-    ///
-    /// `wall_time` is the total elapsed time during which frames were collected, used to compute `avg_fps`.
-    /// This should be measured by the caller.
+    /// `wall_time` is caller-measured elapsed collection time, used for `avg_fps`.
     pub fn from_timings(scenario: &str, timings: &[FrameTiming], wall_time: Duration) -> Self {
         let total_frames = timings.len() as u64;
 
@@ -151,10 +148,7 @@ pub fn compare_baseline(
     regressions
 }
 
-/// Compute the `pct`-th percentile from a **sorted** slice of values.
-///
-/// `pct` must be in `[0.0, 100.0]`.
-/// The input slice must be sorted in ascending order; this is enforced by debug assertion.
+/// `pct` in `[0.0, 100.0]`. Input must be sorted ascending (debug-asserted).
 pub fn percentile(sorted: &[f64], pct: f64) -> f64 {
     debug_assert!(
         (0.0..=100.0).contains(&pct),

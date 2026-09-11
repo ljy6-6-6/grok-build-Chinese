@@ -2,7 +2,7 @@
 //!
 //! Routing: prefers explicit `cwd`, falls back to session lookup via `sessionId`.
 
-use crate::agent::mvp_agent::MvpAgent;
+use crate::extensions::agent_runtime::AgentRuntime;
 use crate::session::ExtMethodResult;
 use agent_client_protocol as acp;
 use serde::{Deserialize, Serialize};
@@ -43,7 +43,7 @@ fn parse<T: for<'de> Deserialize<'de>>(s: &str) -> Result<T, acp::Error> {
 
 /// Resolve the search root, preferring an explicit `cwd` over a `sessionId` lookup.
 fn resolve_cwd(
-    agent: &MvpAgent,
+    agent: &dyn AgentRuntime,
     cwd: Option<String>,
     session_id: Option<&acp::SessionId>,
 ) -> Result<PathBuf, acp::Error> {
@@ -112,7 +112,7 @@ pub struct ContentSearchRequest {
     pub params: ContentSearchRequestParams,
 }
 
-pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+pub async fn handle(agent: &dyn AgentRuntime, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
         "x.ai/search/fuzzy/open" => {
             let req: FuzzyOpenRequest = parse(args.params.get())?;

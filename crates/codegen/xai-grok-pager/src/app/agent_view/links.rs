@@ -107,6 +107,28 @@ impl AgentView {
             self.push_cta_link_span(link_spans_out, self.hit_upgrade_cta.rect, url);
         }
     }
+    /// Append one OSC 8 span per painted row of the connectors URL inside the extensions modal's wait
+    /// overlay. The overlay is the topmost paint in that frame, so no occluder check applies; the
+    /// active-wait accessor already withholds rects while a message or pending action covers it.
+    pub(super) fn push_managed_connectors_wait_link_spans(
+        link_spans_out: &mut Vec<xai_ratatui_inline::LinkSpan>,
+        modal_state: &crate::views::extensions_modal::ExtensionsModalState,
+    ) {
+        let Some(wait) = modal_state.active_managed_connectors_wait() else {
+            return;
+        };
+        link_spans_out.extend(
+            wait.url_rects
+                .iter()
+                .map(|rect| xai_ratatui_inline::LinkSpan {
+                    row: rect.y,
+                    col_start: rect.x,
+                    col_end: rect.x.saturating_add(rect.width),
+                    url: std::sync::Arc::clone(&wait.url),
+                    id: None,
+                }),
+        );
+    }
     /// Append the OSC 8 spans a `command` status row opened, in the screen columns the row was painted at, under the same occluder rule as the CTAs.
     pub(super) fn push_status_line_link_spans(
         &self,
@@ -188,11 +210,8 @@ impl AgentView {
     /// Any pointer movement, including the reflexive nudge people make before Cmd+clicking, restarts the window via the mouse event.
     #[cfg(target_os = "macos")]
     const LINK_MODIFIER_POLL_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
-    /// Whether macOS should keep ticking and polling Cmd for link hover.
     /// Covers scrollback (`hovered_entry`) and `/btw` panel links: releasing Cmd over the panel must not leave a stuck highlight.
-    ///
     /// `hovered_entry` is set whenever the pointer rests over content, so gating on it alone would poll as long as the mouse sits over the window.
-    /// Each poll tick runs a CoreGraphics modifier query at ~30fps, so the poll is instead bounded by recent pointer movement.
     /// An active link highlight (`hovered_link_idx`) keeps polling past the window so a held Cmd never strands a stuck underline.
     pub fn needs_link_modifier_poll(&self) -> bool {
         if has_native_link_hover() || self.visible_link_map.is_empty() {
@@ -1244,8 +1263,6 @@ mod link_click_tests {
     }
     /// Second suppression layer: a frame occluder covering the banner row must swallow both button clicks and drop the promo OSC 8 span whole.
     /// (Goal-detail overlays register in `frame_occluder_rects`, not as dropdowns, so the banner rects stay armed.)
-    /// The next overlay-free frame re-enables all three.
-    /// The span half calls `push_promo_cta_link_span` directly.
     /// `draw` only reaches it behind the process-global `hyperlink_route().emit_osc8` gate, which is brand-dependent and unforceable per-test.
     #[test]
     fn frame_occluder_over_banner_swallows_clicks_and_drops_cta_link_span() {
@@ -1680,7 +1697,6 @@ mod link_click_tests {
     /// The Cmd link-hover poll is bounded by pointer activity.
     /// A pointer merely resting over content (hovered_entry set, no recent movement) must not demand ticks forever.
     /// It used to hold a permanent ~30fps loop with a CoreGraphics query per tick on macOS.
-    /// An active link highlight keeps polling regardless (so Cmd release is observed).
     #[test]
     #[cfg(target_os = "macos")]
     fn needs_link_modifier_poll_expires_without_recent_mouse_movement() {
@@ -2102,7 +2118,6 @@ mod link_click_tests {
         }
     }
     /// Wait for the daemon to publish the result of the most recent keystroke.
-    ///
     /// One keystroke is one atomic `Update`, so it bumps the snapshot exactly once; break on the first `poll` that observes it.
     /// Panics if the daemon never responds so a wedged daemon fails here rather than in a confusing downstream assertion.
     fn settle_search(agent: &mut AgentView) {
@@ -2508,9 +2523,7 @@ mod link_click_tests {
             "tip is only hidden by precedence, not cleared"
         );
     }
-    /// Regression: an ephemeral tip that reserved the banner row must keep its own styling even when a session tip reaches `draw` in the same frame.
-    /// The session tip's bold `Tip: ` prefix used to underpaint the row.
-    /// `Cell::set_style` merges modifiers, so BOLD leaked into the first five cells of the ephemeral tip ("**Queue**d · Enter to send now").
+    /// `Cell::set_style` merges modifiers, so session-tip underpainting must not leak BOLD into ephemeral tips.
     #[test]
     fn ephemeral_tip_not_bolded_by_session_tip_underpaint() {
         use ratatui::style::Modifier;
@@ -2519,8 +2532,31 @@ mod link_click_tests {
         let tall = Rect::new(0, 0, 80, 30);
         let mut agent = make_agent();
         agent.last_terminal_size = (80, 30);
-        let _ =
-            agent.show_ephemeral_tip(crate::tips::send_now::send_now_tip(), &mut HashMap::new());
+        let theme = crate::theme::Theme::current();
+        let prefix = "Status · ";
+        let chord = "Enter";
+        let _ = agent.show_ephemeral_tip(
+            crate::tips::EphemeralTip::new(
+                "styled-tip",
+                ratatui::text::Line::from(vec![
+                    ratatui::text::Span::styled(
+                        prefix,
+                        ratatui::style::Style::default().fg(theme.gray),
+                    ),
+                    ratatui::text::Span::styled(
+                        chord,
+                        ratatui::style::Style::default()
+                            .fg(theme.text_secondary)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    ratatui::text::Span::styled(
+                        " to continue",
+                        ratatui::style::Style::default().fg(theme.gray),
+                    ),
+                ]),
+            ),
+            &mut HashMap::new(),
+        );
         assert!(agent.ephemeral_tip.is_active());
         let mut buf = Buffer::empty(tall);
         let mut scratch = ScratchBuffer::new();
@@ -2552,14 +2588,14 @@ mod link_click_tests {
             crate::app::agent_view::AppRenderParams::default(),
         );
         let tip_y = (0..tall.height)
-            .find(|&y| buffer_row(&buf, tall.width, y).contains("Queued"))
+            .find(|&y| buffer_row(&buf, tall.width, y).contains("Status"))
             .expect("ephemeral tip must paint into the banner row");
         let row = buffer_row(&buf, tall.width, tip_y);
         assert!(
             !(0..tall.height).any(|y| buffer_row(&buf, tall.width, y).contains("ZZSESSIONTIPZZ")),
             "session tip must not remain visible in the agent view"
         );
-        let start = row[..row.find("Queued").expect("tip text")].chars().count() as u16;
+        let start = row[..row.find("Status").expect("tip text")].chars().count() as u16;
         let bold_cols: Vec<u16> = (0..tall.width)
             .filter(|&x| {
                 buf.cell((x, tip_y))
@@ -2568,9 +2604,10 @@ mod link_click_tests {
                     .contains(Modifier::BOLD)
             })
             .collect();
+        let chord_start = start + prefix.chars().count() as u16;
         assert_eq!(
             bold_cols,
-            (start + 9..start + 14).collect::<Vec<u16>>(),
+            (chord_start..chord_start + chord.chars().count() as u16).collect::<Vec<u16>>(),
             "only the Enter chord may be bold, got row {row:?}"
         );
     }
@@ -2924,7 +2961,12 @@ mod link_click_tests {
         use crate::app::app_view::AppView;
         use crate::app::dispatch::{SwitchCause, dispatch, switch_to_agent};
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = AppView::new(tx.clone(), ModelState::default(), Vec::new());
+        let mut app = AppView::new(
+            tx.clone(),
+            ModelState::default(),
+            Vec::new(),
+            crate::render::draw::EscapeWriter::disconnected(),
+        );
         let id = AgentId(0);
         let mut agent = make_agent();
         add_multiple_links(&mut agent);

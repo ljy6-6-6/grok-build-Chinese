@@ -11,21 +11,15 @@ use std::sync::Arc;
 use crate::wrap_restore::ModeTracker;
 
 /// Maximum size for a buffered escape sequence candidate (1 MiB).
-///
 /// This bounds the memory used while accumulating a candidate OSC 52 or DCS sequence.
 /// It must be large enough to hold the base64-encoded form of `MAX_CLIPBOARD_PAYLOAD` (~1.33x expansion) plus the escape envelope.
 const MAX_ESC_BUFFER: usize = 1024 * 1024;
 
-/// Maximum size for a buffered CSI sequence.
-///
-/// CSI bytes are withheld until the final byte arrives so complete sequences can be reported to the wrap mode tracker before forwarding verbatim.
-/// It must comfortably fit a single DECSET listing every tracked mode (~69 bytes today).
-/// A unit test pins that relationship, so mode-table growth cannot silently cross the cap.
-/// Anything larger is malformed and flushes through unreported (mirroring the `MAX_ESC_BUFFER` overflow pattern).
+/// Maximum size for a buffered CSI sequence. It must comfortably fit a single DECSET listing every tracked mode
+/// (~69 bytes today). A unit test pins that relationship, so mode-table growth cannot silently cross the cap.
 const MAX_CSI_BUFFER: usize = 128;
 
 /// Maximum decoded clipboard payload size (768 KiB).
-///
 /// Aligned with `MAX_ESC_BUFFER`: a 768 KiB payload encodes to ~1 MiB of base64, fitting within the buffer limit.
 /// Payloads larger than this are unrealistic for clipboard content over SSH.
 const MAX_CLIPBOARD_PAYLOAD: usize = 768 * 1024;
@@ -37,7 +31,6 @@ const OSC52_PREFIX: &[u8] = b"52;";
 const TMUX_DCS_PREFIX: &[u8] = b"tmux;\x1b\x1b]";
 
 /// Base64 engine that accepts both padded and unpadded input.
-///
 /// OSC 52 emitters in the wild (including some Go-based tools and terminals) may omit `=` padding.
 /// `Indifferent` mode avoids silent decode failures from legitimate clipboard sequences.
 const BASE64_STANDARD_INDIFFERENT: base64::engine::GeneralPurpose =
@@ -54,10 +47,9 @@ enum FilterState {
     Normal,
     /// Saw ESC (0x1b), waiting for next byte to determine sequence type.
     Esc,
-    /// Inside CSI: saw `ESC [`, accumulating until the final byte (0x40-0x7E).
-    /// The complete sequence is reported to the mode tracker, then forwarded verbatim.
-    /// A fragment truncated by child EOF is intentionally never flushed.
-    /// Emitting a half-open CSI would leave the real terminal's parser mid-sequence, eating the restore bytes the exit path writes right after.
+    /// Inside CSI: saw `ESC [`, accumulating until the final byte (0x40-0x7E). A fragment truncated by child EOF is
+    /// intentionally never flushed. Emitting a half-open CSI would leave the real terminal's parser mid-sequence,
+    /// eating the restore bytes the exit path writes right after.
     Csi,
     /// Inside OSC: saw `ESC ]`, accumulating until BEL or ST.
     Osc,
@@ -77,7 +69,6 @@ type ClipboardSink = Box<dyn FnMut(&[u8])>;
 type WrapImageRequestHandler = Box<dyn FnMut()>;
 
 /// Streaming filter that intercepts OSC 52 clipboard sequences from PTY output and sends their decoded payload to the local clipboard.
-///
 /// All non-OSC-52 bytes pass through unchanged.
 /// The parser handles sequences split across arbitrary byte boundaries.
 pub(crate) struct Osc52Filter {
@@ -124,7 +115,6 @@ impl Osc52Filter {
     }
 
     /// Process a chunk of bytes from PTY output.
-    ///
     /// Returns bytes that should be written to stdout.
     /// OSC 52 clipboard sequences are consumed (not included in the output) and their decoded payload is sent to the clipboard sink.
     pub(crate) fn feed(&mut self, data: &[u8]) -> Vec<u8> {
@@ -298,12 +288,9 @@ impl Osc52Filter {
         true
     }
 
-    /// Try to handle the buffered bytes as a tmux-wrapped OSC 52 sequence.
-    ///
-    /// Expected buffer format:
-    ///   `\x1bPtmux;\x1b\x1b]52;<sel>;<base64>\x07\x1b\\`
-    ///
-    /// Returns `true` if the sequence was a valid OSC 52 and was consumed.
+    /// Try to handle the buffered bytes as a tmux-wrapped OSC 52 sequence. Expected buffer format:
+    /// `\x1bPtmux;\x1b\x1b]52;<sel>;<base64>\x07\x1b\\`. Returns `true` if the sequence was a valid OSC 52 and was
+    /// consumed.
     fn try_handle_tmux_osc52(&mut self) -> bool {
         // Strip the DCS tmux prefix: \x1bPtmux;\x1b\x1b] (total 9 bytes) and the DCS ST terminator: \x1b\ (2 bytes at the end)
         // Copy the body to avoid borrowing self.buf while calling &mut self.
@@ -364,7 +351,6 @@ fn strip_osc_terminator(body: &[u8]) -> &[u8] {
 }
 
 /// Write decoded clipboard payload to the local system clipboard.
-///
 /// Delegates to [`xai_grok_shell::util::clipboard::set_text`], which uses `pbcopy` on macOS and `arboard` elsewhere.
 /// Failures are logged but do not propagate: clipboard access is best-effort.
 fn set_local_clipboard(data: &[u8]) {

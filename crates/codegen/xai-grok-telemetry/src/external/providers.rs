@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use http::{HeaderMap, HeaderName, HeaderValue};
+// PEM inspection helpers are single-homed in the foundation crate.
 use opentelemetry_otlp::{
     Protocol, WithExportConfig, WithHttpConfig, WithTonicConfig,
     tonic_types::metadata::MetadataMap,
@@ -25,6 +26,7 @@ use opentelemetry_sdk::metrics::{
     MeterProviderBuilder, PeriodicReader as ThreadPeriodicReader, SdkMeterProvider, Temporality,
     periodic_reader_with_async_runtime::PeriodicReader as RuntimePeriodicReader,
 };
+use xai_grok_otel::otlp::{pem_contains_certificate, pem_contains_private_key};
 type BuildResult<T> = Result<T, opentelemetry_otlp::ExporterBuildError>;
 
 type RuntimeCommand = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
@@ -252,54 +254,6 @@ pub(crate) struct BuiltProviders {
     pub meter_provider: Option<SdkMeterProvider>,
 }
 
-/// TLS configurations to try, in order, when building a gRPC exporter.
-///
-/// `opentelemetry-otlp` 0.32 must be handed an explicit `ClientTlsConfig` for `https://` endpoints.
-/// Its own fallback is `ClientTlsConfig::new()`, whose root store is **empty** in tonic 0.14 (`Endpoint::from_shared` never auto-enables roots).
-/// Every handshake would therefore fail with `UnknownIssuer`.
-///
-/// For https endpoints this returns two candidates:
-/// 1. system CA store and embedded webpki roots (and the customer CA, if any);
-/// 2. embedded webpki roots only (and the customer CA, if any).
-///    Candidate 2 is the fallback for hosts whose native store is missing or unreadable, where tonic fails candidate 1 (`NativeCertsNotFound`).
-///    This keeps parity with the HTTP transport's embedded-roots reqwest client.
-///
-/// For plain `http://` endpoints it returns a single `None` (no TLS).
-/// `true` when the bytes contain at least one PEM certificate block.
-///
-/// The emptiness gate for fail-closed CA handling: a readable but cert-less bundle must fail exporter construction.
-/// It must not silently fall back to the default roots.
-/// Malformed blocks are caught later by the TLS stack's own parser (also fail-closed, at exporter build).
-pub(crate) fn pem_contains_certificate(pem: &[u8]) -> bool {
-    const MARKER: &[u8] = b"-----BEGIN CERTIFICATE-----";
-    pem.windows(MARKER.len()).any(|window| window == MARKER)
-}
-
-/// Assemble a PEM BEGIN line from fragments so source scanners do not treat the marker itself as committed key material.
-fn pem_begin_line(label_parts: &[&[u8]]) -> Vec<u8> {
-    let mut line = Vec::with_capacity(32);
-    line.extend_from_slice(b"-----BEGIN ");
-    for part in label_parts {
-        line.extend_from_slice(part);
-    }
-    line.extend_from_slice(b"-----");
-    line
-}
-
-/// `true` when the bytes contain at least one PEM private-key block.
-pub(crate) fn pem_contains_private_key(pem: &[u8]) -> bool {
-    // Labels split so full `BEGIN … KEY` literals never appear contiguously.
-    const LABELS: &[&[&[u8]]] = &[
-        &[b"PRIVATE", b" KEY"],
-        &[b"RSA ", b"PRIVATE", b" KEY"],
-        &[b"EC ", b"PRIVATE", b" KEY"],
-    ];
-    LABELS.iter().any(|parts| {
-        let marker = pem_begin_line(parts);
-        pem.windows(marker.len()).any(|window| window == marker)
-    })
-}
-
 /// Re-encode validated DER roots as one multi-block PEM string (tonic's `Certificate::from_pem` parses every block in a single certificate).
 /// `None` when `ders` is empty.
 fn ders_to_pem_bundle(ders: &[Vec<u8>]) -> Option<String> {
@@ -316,6 +270,9 @@ fn ders_to_pem_bundle(ders: &[Vec<u8>]) -> Option<String> {
     Some(pem)
 }
 
+/// `opentelemetry-otlp` 0.32 must be handed an explicit `ClientTlsConfig` for `https://` endpoints. Its own fallback is
+/// `ClientTlsConfig::new()`, whose root store is empty in tonic 0.14 (`Endpoint::from_shared` never auto-enables roots).
+/// This keeps parity with the HTTP transport's embedded-roots reqwest client.
 fn grpc_tls_candidates(
     endpoint: &str,
     ca_certificate_path: Option<&str>,
@@ -421,7 +378,7 @@ fn build_with_tls_fallback<T>(
 }
 
 enum OtlpExportTransport<'a> {
-    HttpProtobuf(&'a crate::otlp_http::BlockingOtlpClient),
+    HttpProtobuf(&'a crate::otlp::BlockingOtlpClient),
     Grpc(&'a DedicatedRuntime),
 }
 
@@ -447,6 +404,8 @@ impl OtlpExportFactory for OtlpLogExporterBuilder<'_> {
                     // `http-json` (unified into the Bazel build) flips the default to JSON, while a pure-cargo build defaults to protobuf
                     // Pin explicitly so the contract holds on every build when HTTP transport is selected
                     .with_protocol(Protocol::HttpBinary)
+                    // The injected client owns the per-export timeout (see `BlockingOtlpClient`);
+                    // gRPC below has no such client and sets its own `.with_timeout`.
                     .with_http_client(http_client.clone())
                     .with_endpoint(&self.cfg.logs_endpoint)
                     .with_headers(customer_headers(&self.cfg.logs_headers))
@@ -535,7 +494,7 @@ fn build_log_otlp_provider(
     builder: LoggerProviderBuilder,
     cfg: &ExternalOtelConfig,
     batch_config: BatchConfig,
-    http_client: Option<&crate::otlp_http::BlockingOtlpClient>,
+    http_client: Option<&crate::otlp::BlockingOtlpClient>,
     gates: SharedGates,
     health: Arc<ExportHealth>,
 ) -> BuildResult<LoggerProviderBuilder> {
@@ -573,7 +532,7 @@ fn build_log_otlp_provider(
 fn build_metric_otlp_provider(
     builder: MeterProviderBuilder,
     cfg: &ExternalOtelConfig,
-    http_client: Option<&crate::otlp_http::BlockingOtlpClient>,
+    http_client: Option<&crate::otlp::BlockingOtlpClient>,
     health: Arc<ExportHealth>,
 ) -> BuildResult<MeterProviderBuilder> {
     let exporter_builder = OtlpMetricExporterBuilder {
@@ -643,15 +602,15 @@ fn wrap_console_metric_exporter(
 }
 
 fn build_signal_http_client(
-    cfg: &ExternalOtelConfig,
+    timeout: std::time::Duration,
     ca_certificate: Option<&str>,
     client_certificate: Option<&str>,
     client_key: Option<&str>,
-) -> Result<crate::otlp_http::BlockingOtlpClient, opentelemetry_otlp::ExporterBuildError> {
+) -> Result<crate::otlp::BlockingOtlpClient, opentelemetry_otlp::ExporterBuildError> {
     let ca_files: Vec<&str> = ca_certificate.into_iter().collect();
     let identity = match (client_certificate, client_key) {
         (Some(certificate), Some(key)) => {
-            Some(crate::otlp_http::ClientIdentityPaths { certificate, key })
+            Some(crate::otlp::ClientIdentityPaths { certificate, key })
         }
         (None, None) => None,
         _ => {
@@ -660,7 +619,7 @@ fn build_signal_http_client(
             ));
         }
     };
-    crate::otlp_http::build_blocking_client_with_identity(cfg.timeout, &ca_files, identity)
+    crate::otlp::build_blocking_client_with_identity(timeout, &ca_files, identity)
         .map_err(opentelemetry_otlp::ExporterBuildError::InternalFailure)
 }
 
@@ -674,7 +633,7 @@ pub(crate) fn build(
         && cfg.logs_exporter == ExporterSelection::Otlp)
         .then(|| {
             build_signal_http_client(
-                cfg,
+                cfg.logs_export_timeout,
                 cfg.logs_ca_certificate.as_deref(),
                 cfg.logs_client_certificate.as_deref(),
                 cfg.logs_client_key.as_deref(),
@@ -685,7 +644,7 @@ pub(crate) fn build(
         && cfg.metrics_exporter == ExporterSelection::Otlp)
         .then(|| {
             build_signal_http_client(
-                cfg,
+                cfg.timeout,
                 cfg.metrics_ca_certificate.as_deref(),
                 cfg.metrics_client_certificate.as_deref(),
                 cfg.metrics_client_key.as_deref(),
@@ -709,6 +668,7 @@ pub(crate) fn build(
             let batch_config = BatchConfigBuilder::default()
                 .with_scheduled_delay(cfg.logs_export_interval)
                 .with_max_export_batch_size(64)
+                .with_max_export_timeout(cfg.logs_export_timeout)
                 .build();
             let builder = SdkLoggerProvider::builder().with_resource(build_resource(cfg));
             let provider = match selection {
@@ -929,14 +889,17 @@ mod tests {
 
     #[test]
     fn pem_private_key_detection() {
-        let mut pkcs8 = pem_begin_line(&[b"PRIVATE", b" KEY"]);
-        pkcs8.extend_from_slice(b"\nAAAA\n-----END ");
+        // Labels split so a full BEGIN/END key marker never appears contiguously in source.
+        let mut pkcs8 = b"-----BEGIN ".to_vec();
+        pkcs8.extend_from_slice(b"PRIVATE");
+        pkcs8.extend_from_slice(b" KEY-----\nAAAA\n-----END ");
         pkcs8.extend_from_slice(b"PRIVATE");
         pkcs8.extend_from_slice(b" KEY-----\n");
         assert!(pem_contains_private_key(&pkcs8));
 
-        let mut rsa = pem_begin_line(&[b"RSA ", b"PRIVATE", b" KEY"]);
-        rsa.extend_from_slice(b"\nAAAA\n-----END RSA ");
+        let mut rsa = b"-----BEGIN RSA ".to_vec();
+        rsa.extend_from_slice(b"PRIVATE");
+        rsa.extend_from_slice(b" KEY-----\nAAAA\n-----END RSA ");
         rsa.extend_from_slice(b"PRIVATE");
         rsa.extend_from_slice(b" KEY-----\n");
         assert!(pem_contains_private_key(&rsa));

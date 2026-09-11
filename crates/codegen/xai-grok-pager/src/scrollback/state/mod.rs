@@ -72,34 +72,25 @@ pub struct ScrollbackState {
     /// Used for incremental layout updates: only these entries need height recomputation.
     dirty_heights: HashSet<EntryId>,
 
-    /// Minimal mode only: entry IDs already emitted into the terminal's native scrollback.
-    /// Keyed by `EntryId` (not a per-entry flag) so it survives `shift_remove` / `remove_from` reordering for free.
-    /// A positional index would be stranded by a below-cursor removal.
-    /// Pruned when an entry is removed and merged by `append_entries_from`, exactly like the sibling `running` / `dirty_heights` id-sets.
-    /// Empty in the alt-screen / inline modes, which never commit.
-    /// Driven by `crate::minimal` via `minimal_api::{is_committed, mark_committed}`.
+    /// Minimal mode only: entry IDs already emitted into the terminal's native scrollback. Keyed by `EntryId` (not a
+    /// per-entry flag) so it survives `shift_remove` / `remove_from` reordering for free. A positional index would be
+    /// stranded by a below-cursor removal. Empty in the alt-screen / inline modes, which never commit.
     committed: HashSet<EntryId>,
 
-    /// Minimal mode only: lowest entry index that *might* be uncommitted (not yet printed into native scrollback).
-    /// A lower-bound perf hint so the per-frame commit pass is O(new) rather than O(history).
-    /// The authoritative state is the `committed` id-set above.
-    /// Unused (always 0) in the alt-screen / inline modes.
-    ///
-    /// **Contract for every mutation that shifts entry positions:** the cursor must never end up *above* an uncommitted entry's index.
-    /// Moving it *down* is free: the scan re-skips committed entries via the id-set, and the only cost is a longer walk.
-    /// An entry below the cursor is scanned by nobody (neither committed to native scrollback nor drawn in the live tail), so it silently vanishes.
+    /// Edits this session opened for a permission prompt. Only these refold when the prompt ends.
+    permission_opened: HashSet<EntryId>,
+
+    /// Minimal mode only: lowest entry index that *might* be uncommitted (not yet printed into native scrollback). A
+    /// lower-bound perf hint so the per-frame commit pass is O(new) rather than O(history). Contract for every mutation
+    /// that shifts entry positions: the cursor must never end up *above* an uncommitted entry's index.
     commit_scan_cursor: usize,
 
-    /// Minimal mode only: a bounded ring of entry IDs committed to native scrollback while folded (collapsed reasoning, truncated tool output).
-    /// `Ctrl+E` / `/expand` pops the most-recent one and re-prints it fully below.
-    /// (Committed terminal text can't be mutated, so expansion is a re-print.)
-    /// Bounded so a long session never grows it without limit; reset by `clear()`.
+    /// Minimal mode only: a bounded ring of entry IDs committed to native scrollback while folded (collapsed reasoning,
+    /// truncated tool output). (Committed terminal text can't be mutated, so expansion is a re-print.). Bounded so a
+    /// long session never grows it without limit.
     commit_expand_ring: VecDeque<EntryId>,
-    // Scroll
-    /// Scroll offset in rows from top.
-    ///
-    /// `usize` (not `u16`): a long session can render well past 65 535 rows, so the cumulative scroll position must match `virtual_y` (`Vec<usize>`).
-    /// A `u16` here stranded the bottom of very long sessions.
+    // Scroll. `usize` (not `u16`): a long session can render well past 65 535 rows, so the cumulative scroll position
+    // must match `virtual_y` (`Vec<usize>`).
     scroll_offset: usize,
 
     /// Total content height (cached, updated on render).
@@ -119,9 +110,12 @@ pub struct ScrollbackState {
     /// This lets dispatch_send_prompt position the prompt at the viewport top while still enabling follow for new content.
     follow_preserve_scroll: bool,
 
+    /// Content generation captured when follow-preserve is armed, so synthetic turns distinguish appended output from geometry-only rebuilds.
+    follow_preserve_content_generation: u64,
+
     /// Extra rows under the latest user prompt so a page-flip can keep that prompt at the top.
-    /// Independent of follow mode: a user scroll must not collapse it (that clamp is the tail-jump).
-    /// Dropped when the prompt scrolls fully below the fold, or when the transcript is cleared.
+    /// Independent of follow mode and viewport position so scrolling through history does not
+    /// make the page-flip position unreachable. Dropped on an explicit bottom gesture or reset.
     pin_reserve_active: bool,
 
     /// Rows currently added to `total_height` by [`Self::pin_reserve_active`].
@@ -160,10 +154,8 @@ pub struct ScrollbackState {
     /// View mode: all turns or single turn.
     view_mode: ViewMode,
 
-    // Cache
-    /// Last width used for rendering (to detect resize).
-    // Width change invalidates the entire layout cache and triggers a full recompute of entry heights
-    // Resize events are debounced at the event-loop level so only the final width triggers a rebuild
+    // Cache. Width change invalidates the entire layout cache and triggers a full recompute of entry heights. Resize
+    // events are debounced at the event-loop level so only the final width triggers a rebuild.
     last_width: u16,
 
     /// Layout cache for navigation (entry heights, prompt descriptors).
@@ -173,10 +165,8 @@ pub struct ScrollbackState {
     /// Consumed by the next `prepare_layout`; see [`StructuralScrollAnchor`].
     structural_scroll_anchor: Option<StructuralScrollAnchor>,
 
-    // Sticky modes
-    /// Display mode applied to thinking blocks when they finish running.
-    /// Defaults to `Collapsed` (auto-collapse on finish).
-    /// Toggled by `expand_all_thinking()` (Ctrl+E) between `Expanded` and `Collapsed`.
+    // Sticky modes. Display mode applied to thinking blocks when they finish running. Defaults to `Collapsed`
+    // (auto-collapse on finish). Toggled by `expand_all_thinking()` (Ctrl+E) between `Expanded` and `Collapsed`.
     thinking_display_mode: DisplayMode,
 
     // Animation
@@ -195,6 +185,9 @@ pub struct ScrollbackState {
     /// True when gap_after values may need recomputation (display_mode changed, entries added/removed).
     /// Streaming content mutations (`push_chunk_to_*`) leave this false, enabling an O(1) incremental virtual_y patch instead of an O(n) full rebuild.
     gaps_may_be_dirty: bool,
+
+    /// A synchronous settings rebuild populated the cache, but the next frame must still run the full reserve lifecycle.
+    full_settlement_pending: bool,
 
     warm_above: DeferredWarmAbove,
 
@@ -249,6 +242,7 @@ impl ScrollbackState {
             flashing: Vec::new(),
             dirty_heights: HashSet::new(),
             committed: HashSet::new(),
+            permission_opened: HashSet::new(),
             commit_scan_cursor: 0,
             commit_expand_ring: VecDeque::new(),
             scroll_offset: 0,
@@ -256,6 +250,7 @@ impl ScrollbackState {
             viewport_height: 0,
             follow_mode: true,
             follow_preserve_scroll: false,
+            follow_preserve_content_generation: 0,
             pin_reserve_active: false,
             pin_reserve_pad: 0,
             pin_reserve_target: None,
@@ -274,6 +269,7 @@ impl ScrollbackState {
             appearance: AppearanceConfig::default(),
             batch_depth: 0,
             gaps_may_be_dirty: false,
+            full_settlement_pending: false,
             warm_above: DeferredWarmAbove::Idle,
             ffmpeg_available_snapshot: false,
             expanded_groups: HashSet::new(),
@@ -329,16 +325,9 @@ impl ScrollbackState {
         self.bump_generation();
     }
 
-    /// Create an empty state that continues this one's identity: same appearance and user view preferences.
-    /// `EntryId` allocation resumes from this state's counter.
-    /// The invalidation generations continue one past this state's, since the content visibly changes at the swap.
-    /// Scroll position and selection deliberately reset with the content.
-    ///
-    /// Used by the reconnect session-reload to stage replay into fresh state while the pre-outage content is stashed for a possible restore.
-    /// Keeping the id space shared means `EntryId`s referenced across the swap (e.g. `SubagentInfo::scrollback_entry_id`) dangle harmlessly.
-    /// They cannot alias an unrelated entry, and [`Self::append_entries_from`] can merge without collisions.
-    /// The generation continuity matters to equality-cached consumers (`VisibleLinkMap::is_stale`, the search index).
-    /// Without it they would mistake the swapped-in state for the one they indexed.
+    /// Create empty continuation state with shared appearance, preferences, and `EntryId` space.
+    /// Reconnect replay uses it while pre-outage content is stashed; cross-swap ids may dangle but cannot alias.
+    /// Generations advance so equality-cached consumers observe the content swap.
     pub fn fresh_continuation(&self) -> Self {
         let mut fresh = Self::new();
         fresh.next_id = self.next_id;
@@ -359,7 +348,6 @@ impl ScrollbackState {
     }
 
     /// Ensure future `EntryId`s are allocated at or above `floor`.
-    ///
     /// Called when a stashed state is swapped back in after a [`fresh_continuation`](Self::fresh_continuation) sibling allocated ids.
     /// Ids handed out by the discarded sibling are then never reused.
     pub(crate) fn raise_id_floor(&mut self, floor: u64) {
@@ -384,11 +372,9 @@ impl ScrollbackState {
         self.batch_depth > 0
     }
 
-    /// Append all entries from `tail` (a [`fresh_continuation`](Self::fresh_continuation) sibling of this state) after the existing content.
-    /// Their `EntryId`s are preserved so tracker references into the tail stay valid.
-    ///
-    /// Used by the cursor-found reconnect reload: nothing was replayed, so the pre-outage transcript is kept.
-    /// Only the post-cursor live tail that accumulated in the staging state is attached below it.
+    /// Append all entries from `tail` (a `fresh_continuation` sibling of this state) after the existing content. Used
+    /// by the cursor-found reconnect reload: nothing was replayed, so the pre-outage transcript is kept. Only the
+    /// post-cursor live tail that accumulated in the staging state is attached below it.
     pub(crate) fn append_entries_from(&mut self, tail: ScrollbackState) {
         debug_assert!(
             tail.next_id >= self.next_id,
@@ -400,6 +386,7 @@ impl ScrollbackState {
         // Carry the tail's committed frontier: with a per-entry flag this traveled with the entry
         // As an id-set it must be merged explicitly so already-committed tail blocks are not re-emitted after the reload
         self.committed.extend(tail.committed);
+        self.permission_opened.extend(tail.permission_opened);
         self.expanded_groups.extend(tail.expanded_groups);
         self.next_id = self.next_id.max(tail.next_id);
         // The tail (live during the window) is what equality-cached consumers last saw; the merged state must read as newer than both halves
@@ -427,15 +414,15 @@ impl ScrollbackState {
     }
 
     /// Remeasure every entry when a process-wide visibility flag flips (e.g. show thinking blocks) without changing `AppearanceConfig`.
-    /// Eagerly rebuilds when `last_width` is known; clears dirty markers so the next `prepare_layout` does not re-enter the incremental path.
+    /// Refreshes the cache synchronously for settings callers and leaves full-dirty state for the next frame's reserve lifecycle settlement.
     pub fn invalidate_heights(&mut self) {
         for entry in self.entries.values_mut() {
             entry.invalidate_cache();
         }
         self.rebuild_layout();
-        // rebuild_layout already remeasured; leave Case 2 empty so follow mode is not re-run as if heights were still streaming-dirty
-        self.dirty_heights.clear();
-        self.gaps_may_be_dirty = false;
+        self.dirty_heights = self.entries.keys().copied().collect();
+        self.gaps_may_be_dirty = true;
+        self.full_settlement_pending = true;
         self.bump_generation();
     }
 
@@ -457,24 +444,17 @@ impl ScrollbackState {
         self.tick
     }
 
-    /// Advance the animation tick counter.
-    /// Returns `true` if a redraw is needed (there are running/animated entries).
-    ///
-    /// Call this at a fixed rate (e.g., 30fps) from the main loop.
-    /// The return value tells you whether to keep ticking and whether to redraw.
-    ///
-    /// A redraw is requested only when an animated entry (running wave accent or unexpired finish-flash) is actually inside the viewport window.
-    /// An off-screen running entry (a background task scrolled far away, or a running entry in another tab's scrollback) must not force full redraws.
-    /// Redrawing an otherwise static screen at ~30fps is pure waste: the frame diff would be empty.
+    /// A redraw is requested only when an animated entry (running wave accent or unexpired finish-flash) is actually
+    /// inside the viewport window. Redrawing an otherwise static screen at ~30fps is pure waste: the frame diff would
+    /// be empty.
     pub fn tick(&mut self) -> bool {
         self.tick = self.tick.wrapping_add(1);
 
         let mut needs_redraw = !self.running.is_empty() && self.any_running_in_viewport();
 
-        // Finish-flash: O(flashing) over recently-finished entries, not
-        // O(entries) over the whole scrollback
-        // Emit one final redraw when a flash expires so the accent repaints in its static state
-        // Otherwise the last-painted bright frame would linger until the next event
+        // Finish-flash: O(flashing) over recently-finished entries, not O(entries) over the whole scrollback. Emit one
+        // final redraw when a flash expires so the accent repaints in its static state. Otherwise the last-painted bright
+        // frame would linger until the next event.
         if !self.flashing.is_empty() {
             let flash_dur = FINISH_FLASH_DURATION_MS as u128;
             let mut still_flashing = std::mem::take(&mut self.flashing);
@@ -520,14 +500,8 @@ impl ScrollbackState {
         self.tick
     }
 
-    /// Check if animation ticks are needed.
-    /// Returns `true` if there is a running entry inside the viewport window.
-    /// Off-screen running entries don't need ticks.
-    /// The wave phase resumes when they scroll back in; any scroll input restarts the tick via `schedule_tick`.
-    ///
-    /// Finish-flashes deliberately do not demand ticks: they animate opportunistically while ticks flow for other reasons.
-    /// `tick()` tracks them in O(flashing) and repaints once on expiry when possible.
-    /// Use this to decide whether to start the animation timer.
+    /// Check if animation ticks are needed. Off-screen running entries don't need ticks. Finish-flashes deliberately do
+    /// not demand ticks: they animate opportunistically while ticks flow for other reasons.
     pub fn needs_animation(&self) -> bool {
         !self.running.is_empty() && self.any_running_in_viewport()
     }
@@ -605,10 +579,8 @@ impl ScrollbackState {
         self.entries.insert(id, entry);
         if self.batch_depth == 0 {
             self.rebuild_turns();
-            // Try to extend the cache incrementally
-            // The new entry's height/gap/virtual_y are computed and appended in O(1) (plus one cheap pairwise recompute for the previous entry's gap)
-            // If extension isn't possible (no cache yet, or cache out of sync), fall back to the full invalidation
-            // The next prepare_layout handles that in Case 1
+            // Try to extend the cache incrementally. If extension isn't possible (no cache yet, or cache out of sync), fall
+            // back to the full invalidation.
             let new_idx = self.entries.len() - 1;
             if !self.extend_layout_cache_with_new_entry(new_idx) {
                 self.gaps_may_be_dirty = true;
@@ -646,13 +618,9 @@ impl ScrollbackState {
         self.push(ScrollbackEntry::new(block))
     }
 
-    /// Add a finalized block positioned immediately **before** the entry `anchor`, instead of at the end.
-    /// Falls back to [`Self::push_block`] when `anchor` is no longer present.
-    ///
-    /// # Precondition
-    ///
-    /// **`anchor` must not already be committed.** A terminal's native scrollback is append-only.
-    /// Inserting above a block already printed there would emit the new block below content that logically follows it.
+    /// Add a finalized block positioned immediately before the entry `anchor`, instead of at the end. `anchor` must not
+    /// already be committed. A terminal's native scrollback is append-only. Inserting above a block already printed
+    /// there would emit the new block below content that logically follows it.
     pub fn insert_block_before(&mut self, anchor: EntryId, block: RenderBlock) -> EntryId {
         let Some(index) = self.entries.get_index_of(&anchor) else {
             return self.push_block(block);
@@ -710,11 +678,8 @@ impl ScrollbackState {
         }
     }
 
-    /// Remove an entry by EntryId.
-    /// No-op if the id is not present.
-    ///
-    /// Used by the cancel-with-restore flow to undo the user prompt block that was pushed at turn start.
-    /// Returns `true` if an entry was removed.
+    /// Remove an entry by EntryId. No-op if the id is not present. Used by the cancel-with-restore flow to undo the
+    /// user prompt block that was pushed at turn start. Returns `true` if an entry was removed.
     pub fn remove_entry(&mut self, id: EntryId) -> bool {
         // Capture the index before the removal shifts everything after it down.
         let Some(removed_index) = self.entries.get_index_of(&id) else {
@@ -727,6 +692,7 @@ impl ScrollbackState {
         self.running.remove(&id);
         self.dirty_heights.remove(&id);
         self.committed.remove(&id);
+        self.permission_opened.remove(&id);
         self.expanded_groups.remove(&id);
         if let Some(sel) = self.selected
             && sel >= self.entries.len()
@@ -754,6 +720,7 @@ impl ScrollbackState {
                 self.running.remove(&id);
                 self.dirty_heights.remove(&id);
                 self.committed.remove(&id);
+                self.permission_opened.remove(&id);
                 self.expanded_groups.remove(&id);
                 removed.push(entry);
             }
@@ -775,147 +742,8 @@ impl ScrollbackState {
         removed
     }
 
-    /// Find the EntryId of the last real tool call block in the scrollback.
-    ///
-    /// Skips `ToolCallBlock::Lifecycle` entries (e.g. `user_prompt_submit`) so that tool-associated hooks only attach to actual tool calls.
-    pub fn last_tool_call_entry_id(&self) -> Option<EntryId> {
-        self.entries.iter().rev().find_map(|(id, entry)| {
-            if let RenderBlock::ToolCall(ref tcb) = entry.block {
-                // Skip lifecycle event blocks (e.g. user_prompt_submit): they are not real tool calls and shouldn't receive tool hooks.
-                if matches!(tcb, ToolCallBlock::Lifecycle(_)) {
-                    return None;
-                }
-                Some(*id)
-            } else {
-                None
-            }
-        })
-    }
-
-    /// Attach hook data to a tool call entry.
-    pub fn attach_hooks(
-        &mut self,
-        id: EntryId,
-        phase: super::blocks::tool::HookPhase,
-        hook_entries: Vec<super::blocks::tool::HookRunEntry>,
-    ) {
-        if let Some(entry) = self.entries.get_mut(&id) {
-            let data = entry.hook_data.get_or_insert_with(Default::default);
-            match phase {
-                super::blocks::tool::HookPhase::Pre => data.pre_hooks = hook_entries,
-                super::blocks::tool::HookPhase::Post => data.post_hooks = hook_entries,
-            }
-            entry.invalidate_cache();
-            // A height remeasure would revive a folded member whose cached height is zero; reapplying folds keeps hidden members hidden
-            self.mark_structurally_dirty(id);
-        }
-    }
-
-    /// Push a standalone lifecycle hook block (`session_start`, replayed `stop`, …).
-    /// It renders as a collapsed tool-like row with the event name as header and the runs as fold-out detail.
-    pub fn push_lifecycle_hooks(
-        &mut self,
-        event_name: String,
-        hook_entries: Vec<super::blocks::tool::HookRunEntry>,
-    ) -> EntryId {
-        use super::blocks::tool::{LifecycleEventBlock, ToolCallHookData};
-        let block = LifecycleEventBlock::new(&event_name);
-        let mut entry = super::entry::ScrollbackEntry::new(RenderBlock::ToolCall(
-            ToolCallBlock::Lifecycle(block),
-        ));
-        entry.hook_data = Some(ToolCallHookData {
-            pre_hooks: Vec::new(),
-            post_hooks: Vec::new(),
-            lifecycle: vec![(event_name, hook_entries)],
-        });
-        self.push(entry)
-    }
-
-    /// The most recent turn-terminal marker ("Turn completed/cancelled/failed") that can accept a live `stop`/`stop_failure` batch.
-    /// The batch arrives after the marker in viewer order.
-    /// The walk skips blocks appended after the marker.
-    /// A stamped batch needs the marker to carry the same prompt id.
-    /// An unstamped batch is positional (tail only) and stops at any terminal-event marker; without a pid there is no proof it belongs further back.
-    /// A same-name repeat (e.g. the session-end `stop`) is always refused.
-    pub fn latest_turn_marker_accepting(
-        &self,
-        event_name: &str,
-        batch_prompt_id: Option<&str>,
-    ) -> Option<EntryId> {
-        for (position_from_tail, (id, entry)) in self.entries.iter().rev().enumerate() {
-            let RenderBlock::SessionEvent(b) = &entry.block else {
-                continue;
-            };
-            if !b.event.is_turn_terminal() {
-                continue;
-            }
-            if b.stop_hooks.iter().any(|(name, _)| name == event_name) {
-                return None;
-            }
-            let accept = match (batch_prompt_id, b.prompt_id.as_deref()) {
-                (Some(batch), Some(marker)) => batch == marker,
-                (Some(_), None) => false,
-                (None, _) => position_from_tail == 0,
-            };
-            return accept.then_some(*id);
-        }
-        None
-    }
-
-    /// Fold a turn-end hook batch into a turn-terminal marker and collapse it, so the summary rather than the detail is the resting state.
-    /// `false` unless the entry is such a marker (see [`Self::latest_turn_marker_accepting`]).
-    /// Re-checked here so a stray caller can't attach hooks to the wrong entry.
-    pub fn attach_stop_hooks_to_marker(
-        &mut self,
-        id: EntryId,
-        event_name: String,
-        hook_entries: Vec<super::blocks::tool::HookRunEntry>,
-        batch_prompt_id: Option<&str>,
-    ) -> bool {
-        let Some(entry) = self.entries.get_mut(&id) else {
-            return false;
-        };
-        let RenderBlock::SessionEvent(ref mut block) = entry.block else {
-            return false;
-        };
-        if !block.event.is_turn_terminal() {
-            return false;
-        }
-        let attributable = match (batch_prompt_id, block.prompt_id.as_deref()) {
-            (Some(batch), Some(marker)) => batch == marker,
-            (Some(_), None) => false,
-            (None, _) => true,
-        };
-        if !attributable {
-            return false;
-        }
-        block.stop_hooks.push((event_name, hook_entries));
-        if !entry.display_mode_pinned {
-            entry.display_mode = DisplayMode::Collapsed;
-        }
-        entry.invalidate_cache();
-        self.mark_structurally_dirty(id);
-        true
-    }
-
-    /// Push a text chunk to an agent message entry.
-    ///
-    /// This is the preferred way to append streaming content because it:
-    /// 1. Appends the chunk to the agent message
-    /// 2. Invalidates the entry's render cache
-    /// 3. Marks the entry's height as dirty for incremental layout updates
-    ///
-    /// Returns true if the chunk was successfully appended, false if the entry doesn't exist or isn't an agent message.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let id = state.push_block(RenderBlock::agent_message(""));
-    /// state.set_last_running(true);
-    ///
-    /// // In streaming loop:
-    /// state.push_chunk_to_agent(id, "Hello ");
-    /// state.push_chunk_to_agent(id, "world!");
-    /// ```
+    /// Preferred streaming append: writes the chunk, invalidates the render cache, and marks height dirty.
+    /// Returns false if the entry is missing or is not an agent message.
     pub fn push_chunk_to_agent(&mut self, id: EntryId, chunk: &str) -> bool {
         if let Some(entry) = self.entries.get_mut(&id)
             && let RenderBlock::AgentMessage(ref mut msg) = entry.block
@@ -943,12 +771,8 @@ impl ScrollbackState {
         false
     }
 
-    /// Push streaming output to an execute block entry.
-    ///
-    /// `output` is the full accumulated output bytes (not a delta).
-    /// We replace the block's output entirely on each call (the shell sends the full buffer each tick, not incremental deltas).
-    ///
-    /// Returns true if successful, false if the entry doesn't exist or isn't an execute block.
+    /// Push streaming output to an execute block entry. Returns true if successful, false if the entry doesn't exist or
+    /// isn't an execute block.
     pub fn set_execute_output(&mut self, id: EntryId, output: &str) -> bool {
         if let Some(entry) = self.entries.get_mut(&id)
             && let RenderBlock::ToolCall(ToolCallBlock::Execute(ref mut exec)) = entry.block
@@ -965,9 +789,7 @@ impl ScrollbackState {
     }
 
     /// Push a text chunk to a thinking block entry.
-    ///
     /// Similar to `push_chunk_to_agent()`, this handles all necessary cache invalidation for streaming thinking content.
-    ///
     /// Returns true if successful, false if the entry doesn't exist or isn't a thinking block.
     pub fn push_chunk_to_thinking(&mut self, id: EntryId, chunk: &str) -> bool {
         if let Some(entry) = self.entries.get_mut(&id)
@@ -996,20 +818,15 @@ impl ScrollbackState {
         false
     }
 
-    /// Append incremental output delta to an execute tool call entry.
-    ///
-    /// Used when the shell sends incremental `output_delta` instead of full buffers.
-    /// Delegates to `push_chunk_to_execute` which handles cache invalidation.
-    ///
+    /// Append incremental output delta to an execute tool call entry. Used when the shell sends incremental
+    /// `output_delta` instead of full buffers. Delegates to `push_chunk_to_execute` which handles cache invalidation.
     /// Returns true if successful, false if the entry doesn't exist or isn't an execute block.
     pub fn append_execute_output(&mut self, id: EntryId, delta: &str) -> bool {
         self.push_chunk_to_execute(id, delta)
     }
 
     /// Push an output chunk to an execute tool call entry.
-    ///
     /// Similar to `push_chunk_to_agent()`, this handles all necessary cache invalidation for streaming command output.
-    ///
     /// Returns true if successful, false if the entry doesn't exist or isn't an execute block.
     pub fn push_chunk_to_execute(&mut self, id: EntryId, chunk: &str) -> bool {
         if let Some(entry) = self.entries.get_mut(&id)
@@ -1032,7 +849,6 @@ impl ScrollbackState {
     pub fn mark_height_dirty(&mut self, id: EntryId) {
         self.dirty_heights.insert(id);
         self.gaps_may_be_dirty = true;
-        self.layout_cache = None;
         self.bump_content_generation();
     }
 
@@ -1073,6 +889,7 @@ impl ScrollbackState {
         self.flashing.clear();
         self.dirty_heights.clear();
         self.committed.clear();
+        self.permission_opened.clear();
         self.expanded_groups.clear();
         // Note: we don't reset next_id to avoid ID reuse
         self.selected = None;
@@ -1090,8 +907,6 @@ impl ScrollbackState {
         self.bump_content_generation();
     }
 
-    // ── Minimal-mode committed frontier ──────────────────────────────────
-    //
     // These support `crate::minimal`'s commit pipeline (print finalized blocks into native scrollback)
     // The authoritative state is the `committed` id-set; `commit_scan_cursor` is only a lower-bound hint to keep the per-frame scan O(new)
     // Reached from the minimal crate via `minimal_api::{is_committed, mark_committed, commit_scan_cursor, …}`
@@ -1159,13 +974,23 @@ impl ScrollbackState {
         self.entries.last().map(|(_, v)| v)
     }
 
+    #[cfg(test)]
+    pub(crate) fn session_events(&self) -> Vec<super::blocks::SessionEvent> {
+        self.entries
+            .values()
+            .filter_map(|entry| match &entry.block {
+                RenderBlock::SessionEvent(block) => Some(block.event.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Get the last entry mutably.
     pub fn last_mut(&mut self) -> Option<&mut ScrollbackEntry> {
         self.entries.last_mut().map(|(_, v)| v)
     }
 
     /// Mark the last entry as running.
-    ///
     /// When entering running state (`running = true`), also starts timing on tool call blocks via `ToolCallBlock::start_timing()`.
     /// This is the single point where block timing begins; constructors default to `started_at = None`.
     pub fn set_last_running(&mut self, running: bool) {
@@ -1193,7 +1018,6 @@ impl ScrollbackState {
 
     /// Get entry by ID.
     /// O(1) average via IndexMap.
-    ///
     /// Returns None if the entry doesn't exist (was removed or ID is invalid).
     pub fn get_by_id(&self, id: EntryId) -> Option<&ScrollbackEntry> {
         self.entries.get(&id)
@@ -1201,27 +1025,14 @@ impl ScrollbackState {
 
     /// Get entry by ID mutably.
     /// O(1) average via IndexMap.
-    ///
     /// Returns None if the entry doesn't exist (was removed or ID is invalid).
     pub fn get_by_id_mut(&mut self, id: EntryId) -> Option<&mut ScrollbackEntry> {
         self.entries.get_mut(&id)
     }
 
-    /// Replace `entry_id`'s tool-call block in place.
-    /// This is the single owner of the display-mode policy for lifecycle swaps (tracker refinement and completion):
-    ///
-    /// - Same-kind swaps (Execute-to-Execute progress ticks, Edit refinements) keep the entry's current mode.
-    ///   A mid-run expand therefore survives later stdout and completion.
-    ///   Edit-to-Edit exception: when the swap first turns the summary untrusted (a later Diff revealed a multi-file call), the entry escalates to
-    ///   Expanded: the one-liner it was collapsed to no longer tells the truth.
-    ///   The escalation fires only on that rising edge, so a user's collapse of an already-untrusted block sticks.
-    /// - Pinned (user-folded) entries keep their mode under `respect_manual_folds`.
-    /// - Any other swap (e.g. the eager `Other` placeholder refining into its real kind) resets to the new block's default, with Edits routed through
-    ///   the same materialize policy as `push`.
-    ///
-    /// Stamps `started_at` on the new block and invalidates the entry's render cache.
-    /// Marks the entry structurally dirty when its verb-group kind changed.
-    /// Returns false when the entry no longer exists.
+    /// The escalation fires only on that rising edge, so a user's collapse of an already-untrusted block sticks. A row
+    /// already awaiting a permission then opens once if the new Edit has hunks, unless the fold is pinned. Stamps
+    /// `started_at` on the new block and invalidates the entry's render cache.
     pub(crate) fn replace_tool_block(
         &mut self,
         entry_id: EntryId,
@@ -1277,24 +1088,22 @@ impl ScrollbackState {
                 block => block.default_display_mode(),
             };
         }
+        let pending = entry.is_pending_user_input;
         entry.invalidate_cache();
         if kind_changed {
             self.mark_structurally_dirty(entry_id);
         }
+        // The first pending mark often lands on the eager Other placeholder, before
+        // hunks exist. Open once when that Edit arrives, unless the user pinned a fold.
+        if pending {
+            self.open_permission_edit(entry_id);
+        }
         true
     }
 
-    /// Apply a live `collapsed_edit_blocks` flag flip (settings toggle or remote settings update; the cache is already set to the new value).
-    ///
-    /// Entries still sitting on their old policy default re-materialize under the new one, so the toggle is visible on the existing transcript.
-    /// Any other mode is a user gesture and survives.
-    /// (An explicit fold back to the old default is indistinguishable and flips too, the same caveat as `push`'s materialize gate.)
-    /// Pins win under `respect_manual_folds`.
-    /// An explicit pager.toml `expanded_by_default` makes both defaults equal, so the walk naturally no-ops.
-    /// Heights are rebuilt afterwards: Edit rows change height on a mode flip.
-    /// The collapsed header's `+N/-M` suffix (read live via `effective_line_summary`) needs a repaint even without one.
-    /// Stale group-expansion ids describe the old dense-run shape (collapsed Edits participate).
-    /// They are dropped like the `group_tool_verbs` flip does.
+    /// Entries still sitting on their old policy default re-materialize under the new one, so the toggle is visible on
+    /// the existing transcript. An explicit pager.toml `expanded_by_default` makes both defaults equal, so the walk
+    /// naturally no-ops.
     pub fn apply_collapsed_edit_blocks_flip(&mut self, old_flag: bool, new_flag: bool) {
         let edit_cfg = &self.appearance.scrollback.blocks.edit;
         let old_expanded = edit_cfg.effective_expanded(old_flag);
@@ -1341,11 +1150,7 @@ impl ScrollbackState {
         self.finish_running_with_time(id, None);
     }
 
-    /// Mark every running entry finished.
-    ///
-    /// Used when a transcript is restored or merged after a reconnect reload.
-    /// Entries left running by the pre-outage turn are unknown to the fresh tracker.
-    /// `finish_turn` alone would leave them animating forever.
+    /// Mark every running entry finished. `finish_turn` alone would leave them animating forever.
     pub(crate) fn finish_all_running(&mut self) {
         let ids: Vec<EntryId> = self.running.iter().copied().collect();
         for id in ids {
@@ -1392,10 +1197,9 @@ impl ScrollbackState {
                 RenderBlock::ToolCall(ToolCallBlock::Other(b)) => b.finish(),
                 _ => {}
             }
-            // Let the block decide what display mode to adopt on finish.
-            // For thinking blocks, use the sticky `thinking_display_mode` so Ctrl+E is respected across the session
-            // Exception: an already-Expanded thinking block keeps its mode
-            // Entries the user manually folded (pinned) keep their mode
+            // Let the block decide what display mode to adopt on finish. For thinking blocks, use the sticky
+            // `thinking_display_mode` so Ctrl+E is respected across the session. Exception: an already-Expanded thinking block
+            // keeps its mode. Entries the user manually folded (pinned) keep their mode.
             if respect_manual_folds && entry.display_mode_pinned {
                 let would_be_mode = if matches!(entry.block, RenderBlock::Thinking(_)) {
                     (entry.display_mode != DisplayMode::Expanded).then_some(thinking_mode)
@@ -1428,14 +1232,8 @@ impl ScrollbackState {
         self.bump_content_generation();
     }
 
-    /// Mark an entry as awaiting (or no longer awaiting) user input.
-    ///
-    /// Used by `AgentView` to flag tool-call entries that are blocked on a permission prompt or `ask_user_question`.
-    /// The renderer swaps the wave
-    /// "loading" animation for a pulsing-circle bullet on flagged entries.
-    ///
-    /// Returns `true` if the flag actually changed (caller may want to trigger a redraw).
-    /// Returns `false` if the entry doesn't exist or already had the requested value.
+    /// Mark an entry as awaiting (or no longer awaiting) user input. Returns `false` if the entry doesn't exist or
+    /// already had the requested value.
     pub fn set_pending_user_input(&mut self, id: EntryId, pending: bool) -> bool {
         let Some(entry) = self.get_by_id_mut(id) else {
             return false;
@@ -1451,14 +1249,66 @@ impl ScrollbackState {
         true
     }
 
+    /// Open a permission edit once. A pinned fold is a user choice and must stick
+    /// across the per-frame pending clear/re-mark.
+    pub(crate) fn open_permission_edit(&mut self, id: EntryId) {
+        if self.permission_opened.contains(&id) {
+            return;
+        }
+        let Some(entry) = self.get_by_id_mut(id) else {
+            return;
+        };
+        if entry.display_mode_pinned {
+            return;
+        }
+        let RenderBlock::ToolCall(ToolCallBlock::Edit(edit)) = &entry.block else {
+            return;
+        };
+        if edit.hunks.is_empty() || entry.display_mode == DisplayMode::Expanded {
+            return;
+        }
+        entry.display_mode = DisplayMode::Expanded;
+        entry.invalidate_cache();
+        self.permission_opened.insert(id);
+        self.mark_structurally_dirty(id);
+    }
+
+    /// Put a permission-opened edit back to its default fold once the prompt is gone.
+    /// A pinned fold is a user choice and is left alone.
+    pub(crate) fn close_permission_edit(&mut self, id: EntryId) {
+        if !self.permission_opened.remove(&id) {
+            return;
+        }
+        let expanded_by_default = self
+            .appearance
+            .scrollback
+            .blocks
+            .edit
+            .effective_expanded(crate::appearance::cache::load_collapsed_edit_blocks());
+        let Some(entry) = self.get_by_id_mut(id) else {
+            return;
+        };
+        if entry.display_mode_pinned {
+            return;
+        }
+        let RenderBlock::ToolCall(ToolCallBlock::Edit(edit)) = &entry.block else {
+            return;
+        };
+        let mode = edit_default_display_mode(expanded_by_default, edit);
+        if entry.display_mode != mode {
+            entry.display_mode = mode;
+            entry.invalidate_cache();
+            self.mark_structurally_dirty(id);
+        }
+    }
+
     /// Clear the pending-user-input flag from every entry.
     ///
     /// Called by `AgentView` before re-syncing flags from the current permission/question queues so stale marks don't linger.
     pub fn clear_all_pending_user_input(&mut self) {
-        // Real transitions are structural (mirrors `set_pending_user_input`): un-flagging returns a row to verb-group membership
-        // This clear is the only path back to false when a resolved permission simply stops being re-marked by the next sync
-        // Steady-state flags re-cycle through clear+re-mark each frame while a prompt is open
-        // That costs one gap/fold pass per frame, the same order as this walk
+        // Real transitions are structural (mirrors `set_pending_user_input`): un-flagging returns a row to verb-group
+        // membership. This clear is the only path back to false when a resolved permission simply stops being re-marked by
+        // the next sync.
         let flagged: Vec<EntryId> = self
             .entries
             .iter()
@@ -1472,6 +1322,13 @@ impl ScrollbackState {
         }
     }
 
+    pub(crate) fn pending_user_input_ids(&self) -> std::collections::HashSet<EntryId> {
+        self.entries
+            .iter()
+            .filter_map(|(id, entry)| entry.is_pending_user_input.then_some(*id))
+            .collect()
+    }
+
     /// Whether any entry is currently flagged as awaiting user input.
     ///
     /// Used by the animation driver: a flagged entry needs ticks even when nothing is `running` (the tool is paused on the user, not the model).
@@ -1480,7 +1337,6 @@ impl ScrollbackState {
     }
 
     /// Invalidate all running entries for re-render.
-    ///
     /// Call this periodically (e.g., every second) to update dynamic content like "[Running for Xs]" timers.
     /// This is O(running_count), not O(total).
     pub fn tick_running(&mut self) {
@@ -1493,7 +1349,6 @@ impl ScrollbackState {
     }
 
     /// Start a new streaming agent message.
-    ///
     /// Creates an empty AgentMessageBlock in streaming mode and returns its EntryId.
     /// Use `get_by_id_mut()` to access the entry and push chunks.
     pub fn start_streaming_agent(&mut self) -> EntryId {
@@ -1514,25 +1369,8 @@ impl ScrollbackState {
 
     // Widget Helpers (used by ScrollbackPane widget)
 
-    /// Prepare layout for rendering.
-    ///
-    /// Call this before rendering when the viewport might have changed.
-    /// This is the one place where pre-render layout mutations happen:
-    /// - Updates viewport dimensions
-    /// - Recomputes layout cache if needed (heights, prompt descriptors)
-    /// - Computes total_height from cache
-    /// - Handles follow mode (auto-scroll to bottom)
-    /// - Settles lazy viewport measurements (may further adjust heights/scroll)
-    ///
-    /// Returns true if the cache was rebuilt (Case 1/2), not counting the lazy settle pass, which can also adjust heights/scroll.
-    /// The sole caller ignores it.
-    ///
-    /// # Example
-    /// ```ignore
-    /// // In render loop:
-    /// state.prepare_layout(area.width, area.height);
-    /// pane.render_with_scratch(area, buf, &state, &mut scratch);
-    /// ```
+    /// The one pre-render mutation point: refresh viewport size, rebuild the layout cache if needed, then apply follow-mode scroll.
+    /// Callers must not mutate layout elsewhere or heights and scroll position drift from what is painted.
     pub fn prepare_layout(&mut self, width: u16, height: u16) -> bool {
         // Mid-session ffmpeg install: invalidate cached banner-sized reservations.
         if !self.ffmpeg_available_snapshot && crate::inline_media_ffmpeg::ffmpeg_available() {
@@ -1548,18 +1386,17 @@ impl ScrollbackState {
 
         // Update viewport height
         self.viewport_height = height;
+        self.release_pin_reserve_outside_view();
 
         // Take an armed StructuralScrollAnchor unconditionally so it never outlives the first layout pass after its mutation
         // Only the same-width full rebuild below applies it
         let structural_anchor = self.structural_scroll_anchor.take();
 
         // Case 1: Cache missing or width changed, full rebuild
-        if self.layout_cache.is_none() || width != self.last_width {
-            // A width change re-wraps every entry
-            // The absolute wrapped-row scroll_offset would then point at different content after the rebuild (the resize jump)
-            // While the old cache is still valid, anchor the viewport-top content; restore it below
-            // Anchoring is intentionally limited to the not-following path
-            // Follow mode (including the follow_preserve_scroll page-flip) re-pins each frame, so it needs no anchor
+        if self.layout_cache.is_none() || width != self.last_width || self.full_settlement_pending {
+            // A width change re-wraps every entry. The absolute wrapped-row scroll_offset would then point at different
+            // content after the rebuild (the resize jump). Anchoring is intentionally limited to the not-following path.
+            // Follow mode (including the follow_preserve_scroll page-flip) re-pins each frame, so it needs no anchor.
             let scroll_anchor =
                 if width != self.last_width && !self.follow_mode && self.scroll_offset > 0 {
                     self.capture_scroll_anchor()
@@ -1569,21 +1406,28 @@ impl ScrollbackState {
 
             let width_changed = width != self.last_width;
             let resized = width_changed && self.last_width != 0;
+            let pre_rebuild_pin = self.pin_reserve_target;
+            let has_targeted_dirty =
+                !self.dirty_heights.is_empty() && self.dirty_heights.len() < self.entries.len();
             if width_changed {
                 for entry in self.entries.values_mut() {
                     entry.invalidate_width_caches();
                 }
                 self.last_width = width;
             }
+            if self.full_settlement_pending {
+                self.layout_cache = None;
+                self.full_settlement_pending = false;
+            }
             // Full rebuild produces cheap height ESTIMATES for every entry.
             self.ensure_layout_cache(width);
-            // Width changes invalidate the captured row coordinate
-            // Re-pin before the release logic compares the new target with `scroll_offset`
-            if resized && self.pin_reserve_active {
-                self.pin_reserve_target = self.pin_reserve_prompt_scroll_target();
-                if let Some(target) = self.pin_reserve_target {
-                    self.scroll_offset = target;
-                }
+            if resized
+                && self.follow_mode
+                && self.follow_preserve_scroll
+                && self.pin_reserve_active
+                && let Some(target) = self.pin_reserve_prompt_scroll_target()
+            {
+                self.scroll_offset = target;
             }
             self.compute_total_height_from_cache();
             // Re-pin the anchored content to the viewport top now that virtual_y is rebuilt at the new width (before settle clamps / re-pins to it)
@@ -1595,11 +1439,63 @@ impl ScrollbackState {
                 self.apply_structural_scroll_anchor(structural_anchor, width);
             }
             self.fixup_hidden_selection();
+            if self.follow_mode && !self.follow_preserve_scroll {
+                self.handle_follow_mode();
+            }
+            // Page-flip preserve defers release until its authoritative target is restored/reset.
+            self.settle_visible_measurements(width, layout::SettlementFollowPolicy::Defer);
+            if resized {
+                self.reset_pin_reserve_target();
+                self.compute_total_height_from_cache();
+                if self.follow_mode
+                    && self.follow_preserve_scroll
+                    && self.pin_reserve_active
+                    && let Some(target) = self.pin_reserve_target
+                {
+                    self.scroll_offset = target;
+                } else {
+                    self.scroll_offset = self.scroll_offset.min(self.max_scroll_offset());
+                }
+            } else if self.pin_reserve_active {
+                self.compute_total_height_from_cache();
+                self.settle_pin_reserve_target();
+            }
+            let pin_entry_gone = self.pin_reserve_active
+                && self.pin_reserve_prompt_id.is_some()
+                && self.pin_reserve_prompt_index().is_none();
+            if pin_entry_gone {
+                let unpadded_total = self.total_height.saturating_sub(self.pin_reserve_pad);
+                let was_following = self.follow_mode;
+                self.follow_preserve_scroll = false;
+                self.clear_pin_reserve();
+                self.total_height = unpadded_total;
+                self.pin_reserve_pad = 0;
+                if was_following {
+                    self.scroll_offset = self.max_scroll_offset();
+                } else {
+                    self.scroll_offset = self.scroll_offset.min(self.max_scroll_offset());
+                }
+            } else if !resized
+                && (has_targeted_dirty || self.pin_reserve_after_turn)
+                && self.follow_mode
+                && self.follow_preserve_scroll
+            {
+                let unpadded_total = self.total_height.saturating_sub(self.pin_reserve_pad);
+                let shrink_target = if has_targeted_dirty {
+                    pre_rebuild_pin
+                } else {
+                    self.pin_reserve_target
+                };
+                if shrink_target.is_some_and(|target| target >= unpadded_total) {
+                    self.follow_preserve_scroll = false;
+                    self.clear_pin_reserve();
+                    self.total_height = unpadded_total;
+                    self.pin_reserve_pad = 0;
+                    self.scroll_offset = self.max_scroll_offset();
+                }
+            }
             self.handle_follow_mode();
-            // Upgrade the on-screen entries to exact heights (O(viewport), not O(history)) and re-pin the viewport to the measured content
-            self.settle_visible_measurements(width);
             // Pre-measure a few pages above the bottom so the first scroll-up is glitch-free (no-op unless bottom-pinned)
-            //
             // Warming three off-screen pages per drag event, only to throw them away at the next width, profiled as the largest cost of a resize
             // Hence the deferral
             if resized {
@@ -1618,14 +1514,16 @@ impl ScrollbackState {
             // Viewport-top identity before heights change
             // Case 2 retains the cache (no insert/remove), so the plain index stays valid for the duration of this call
             let top_anchor = self.viewport_top_anchor_point();
+            let pin_before = self.pin_reserve_prompt_scroll_target();
             let changes = self.update_dirty_entry_heights(width);
             self.dirty_heights.clear();
-            self.shift_pin_reserve_target_for_changes(&changes);
 
             if !changes.is_empty() {
                 if self.gaps_may_be_dirty {
                     // Structural change (fold/expand/add/remove): full rebuild
                     self.rebuild_virtual_y_from_heights();
+                    let pin_after = self.pin_reserve_prompt_scroll_target();
+                    self.shift_pin_reserve_target_for_layout(pin_before, pin_after);
                     self.gaps_may_be_dirty = false;
                     self.compute_total_height_from_cache();
                     self.fixup_hidden_selection();
@@ -1633,11 +1531,11 @@ impl ScrollbackState {
                     // Fast path (streaming): only heights changed, gaps are stable.
                     // Patch virtual_y in O(n-k) where k is the earliest dirty index.
                     // For streaming (dirty entry at end), this is O(1).
+                    self.shift_pin_reserve_target_for_changes(&changes);
                     let total_delta = self.patch_virtual_y_for_dirty(&changes);
                     // Streamed growth must shrink the reserve rather than inflate max_offset.
                     let content = self.total_height.saturating_sub(self.pin_reserve_pad);
                     let new_content = (content as i64 + total_delta as i64).max(0) as usize;
-                    self.release_pin_reserve_if_below_fold();
                     self.pin_reserve_pad = self.pin_reserve_pad_rows(new_content);
                     self.total_height = new_content.saturating_add(self.pin_reserve_pad);
                 }
@@ -1645,6 +1543,8 @@ impl ScrollbackState {
                 // Heights didn't change, but structural state is dirty (e.g., a new entry was pushed that extends a group needing truncation)
                 // Must rebuild to apply group truncation even though heights are stable.
                 self.rebuild_virtual_y_from_heights();
+                let pin_after = self.pin_reserve_prompt_scroll_target();
+                self.shift_pin_reserve_target_for_layout(pin_before, pin_after);
                 self.gaps_may_be_dirty = false;
                 self.compute_total_height_from_cache();
                 self.fixup_hidden_selection();
@@ -1660,13 +1560,13 @@ impl ScrollbackState {
             }
             self.handle_follow_mode();
             // A scroll/content change may have brought estimated entries into view (e.g. streaming while scrolled up); measure them exactly.
-            self.settle_visible_measurements(width);
+            self.settle_visible_measurements(width, layout::SettlementFollowPolicy::Evaluate);
             self.run_pending_warm_above(width);
             return !changes.is_empty();
         }
 
         // Case 3: Nothing structurally changed, but total_height still depends on visible_entry_range()
-        // That range can change between renders (view mode switch, turn navigation)
+        // That range can change between renders (view mode switch, turn navigation).
         // Recompute unconditionally; it's just summing a slice
         self.compute_total_height_from_cache();
         // Handle follow mode even when nothing changed structurally.
@@ -1674,9 +1574,12 @@ impl ScrollbackState {
         // Follow/preserve state may still need to react to the new total_height (e.g., consume preserve on overflow)
         if self.follow_mode {
             self.handle_follow_mode();
+            if self.follow_preserve_scroll && !self.pin_reserve_active {
+                self.scroll_offset = self.scroll_offset.min(self.max_scroll_offset());
+            }
         }
         // Scroll-up (no dirty heights) reveals estimated off-screen entries; this is the on-demand measurement path for plain scrolling
-        self.settle_visible_measurements(width);
+        self.settle_visible_measurements(width, layout::SettlementFollowPolicy::Evaluate);
         self.run_pending_warm_above(width);
         false
     }
@@ -1720,6 +1623,7 @@ impl ScrollbackState {
             scroll_offset: self.scroll_offset,
             follow_mode: self.follow_mode,
             follow_preserve_scroll: self.follow_preserve_scroll,
+            follow_preserve_content_generation: self.follow_preserve_content_generation,
             viewport_height: self.viewport_height,
             last_width: self.last_width,
             selected: self.selected,
@@ -1733,6 +1637,7 @@ impl ScrollbackState {
         self.scroll_offset = snap.scroll_offset;
         self.follow_mode = snap.follow_mode;
         self.follow_preserve_scroll = snap.follow_preserve_scroll;
+        self.follow_preserve_content_generation = snap.follow_preserve_content_generation;
         self.viewport_height = snap.viewport_height;
         self.last_width = snap.last_width;
         self.selected = snap.selected;
@@ -1760,7 +1665,6 @@ impl ScrollbackState {
             .saturating_sub(self.viewport_height as usize);
         self.scroll_offset = offset.min(max_offset);
         self.follow_mode = false;
-        self.maybe_release_pin_reserve();
         self.bump_generation();
     }
 
@@ -1805,9 +1709,8 @@ impl ScrollbackState {
 }
 
 /// Display mode a freshly materialized Edit block adopts (fresh `push`, or a kind upgrade in `replace_tool_block`).
-/// Failed edits collapse; summaries the one-liner can't truthfully compress expand.
-/// Otherwise the effective expanded default (`EditBlockConfig::effective_expanded`) decides.
-/// An explicit pager.toml shape beats the shell's `collapsed_edit_blocks` flag.
+/// Failed edits collapse; summaries the one-liner can't truthfully compress expand. Otherwise the effective
+/// expanded default (`EditBlockConfig::effective_expanded`) decides.
 fn edit_default_display_mode(expanded_by_default: bool, edit: &EditToolCallBlock) -> DisplayMode {
     if edit.is_success() && (edit.summary_untrusted || expanded_by_default) {
         DisplayMode::Expanded
@@ -2121,6 +2024,130 @@ mod tests {
         );
     }
 
+    #[test]
+    fn pending_permission_edit_expands() {
+        let mut state = edit_state(false);
+        let id = state.push_block(edit_block(EditToolCallBlock::new(
+            "config.toml",
+            vec![vec![]],
+        )));
+        assert_eq!(
+            state.get_by_id(id).unwrap().display_mode,
+            DisplayMode::Collapsed
+        );
+        state.open_permission_edit(id);
+        assert_eq!(
+            state.get_by_id(id).unwrap().display_mode,
+            DisplayMode::Expanded
+        );
+
+        {
+            let entry = state.get_by_id_mut(id).unwrap();
+            entry.set_display_mode(DisplayMode::Collapsed);
+            entry.display_mode_pinned = true;
+        }
+        state.open_permission_edit(id);
+        assert_eq!(
+            state.get_by_id(id).unwrap().display_mode,
+            DisplayMode::Collapsed
+        );
+    }
+
+    #[test]
+    fn permission_open_is_once_and_refolds_only_that_row() {
+        let mut state = edit_state(false);
+        let id = state.push_block(edit_block(EditToolCallBlock::new(
+            "config.toml",
+            vec![vec![]],
+        )));
+        state.set_pending_user_input(id, true);
+        state.open_permission_edit(id);
+        assert_eq!(
+            state.get_by_id(id).unwrap().display_mode,
+            DisplayMode::Expanded
+        );
+
+        state
+            .get_by_id_mut(id)
+            .unwrap()
+            .set_display_mode(DisplayMode::Collapsed);
+        assert!(state.replace_tool_block(
+            id,
+            edit_block(EditToolCallBlock::new("config.toml", vec![vec![]],)),
+            None
+        ));
+        assert_eq!(
+            state.get_by_id(id).unwrap().display_mode,
+            DisplayMode::Collapsed
+        );
+
+        state.set_pending_user_input(id, false);
+        state.close_permission_edit(id);
+        assert_eq!(
+            state.get_by_id(id).unwrap().display_mode,
+            DisplayMode::Collapsed
+        );
+
+        let other = state.push_block(edit_block(EditToolCallBlock::new("other.rs", vec![vec![]])));
+        state
+            .get_by_id_mut(other)
+            .unwrap()
+            .set_display_mode(DisplayMode::Expanded);
+        state.close_permission_edit(other);
+        assert_eq!(
+            state.get_by_id(other).unwrap().display_mode,
+            DisplayMode::Expanded
+        );
+
+        state.open_permission_edit(id);
+        let mut tail = state.fresh_continuation();
+        tail.permission_opened.insert(id);
+        state.append_entries_from(tail);
+        assert!(state.permission_opened.contains(&id));
+    }
+
+    /// A permission can mark the eager Other placeholder before the Edit (and its hunks) exist.
+    /// The later refine must open the row; a pinned fold must still stick.
+    #[test]
+    fn pending_other_refine_to_edit_expands() {
+        let mut state = edit_state(false);
+        let id = state.push_block(RenderBlock::tool_call("Other", "pending", true));
+        assert!(state.set_pending_user_input(id, true));
+        state.open_permission_edit(id);
+        assert_eq!(
+            state.get_by_id(id).unwrap().display_mode,
+            DisplayMode::Collapsed,
+            "placeholder is not an Edit yet"
+        );
+
+        assert!(state.replace_tool_block(
+            id,
+            edit_block(EditToolCallBlock::new("config.toml", vec![vec![]],)),
+            None
+        ));
+        assert_eq!(
+            state.get_by_id(id).unwrap().display_mode,
+            DisplayMode::Expanded,
+            "Other→Edit refine while a permission is pending must open"
+        );
+
+        {
+            let entry = state.get_by_id_mut(id).unwrap();
+            entry.set_display_mode(DisplayMode::Collapsed);
+            entry.display_mode_pinned = true;
+        }
+        assert!(state.replace_tool_block(
+            id,
+            edit_block(EditToolCallBlock::new("config.toml", vec![vec![]],)),
+            None
+        ));
+        assert_eq!(
+            state.get_by_id(id).unwrap().display_mode,
+            DisplayMode::Collapsed,
+            "a pinned fold survives a later replace while the prompt is up"
+        );
+    }
+
     /// The untrusted rising edge overrides the Edit-to-Edit preserve rule.
     /// Once a later Diff reveals a multi-file call, the collapsed one-liner lies and the entry must open.
     /// Steady-state untrusted swaps keep a user's collapse.
@@ -2154,10 +2181,9 @@ mod tests {
         );
     }
 
-    /// Same-kind Execute-to-Execute must keep a mid-run user expand (progress ticks rebuild the row through `replace_tool_block` without pinning).
-    /// The kind upgrade Other-to-Execute still adopts the agent Collapsed default even if the placeholder was expanded.
-    /// Completion (`replace` then `finish_running`) must not snap the expand shut; a user-collapsed
-    /// Execute must not auto-open.
+    /// Same-kind Execute-to-Execute must keep a mid-run user expand (progress ticks rebuild the row through
+    /// `replace_tool_block` without pinning). Completion (`replace` then `finish_running`) must not snap the expand
+    /// shut; a user-collapsed. Execute must not auto-open.
     #[test]
     fn replace_tool_block_execute_same_kind_preserves_mode() {
         use crate::scrollback::blocks::tool::ExecuteToolCallBlock;
@@ -2281,10 +2307,9 @@ mod tests {
         );
     }
 
-    /// With the pager.toml shape keys unset (the shipped default), the shell-owned `collapsed_edit_blocks` flag decides materialization.
-    /// On means the collapsed one-liner, off means the legacy expanded diff.
-    /// Untrusted summaries still escape the collapse.
-    /// Spawned thread: the cache is a sticky thread-local seeded explicitly here.
+    /// With the pager.toml shape keys unset (the shipped default), the shell-owned `collapsed_edit_blocks` flag decides
+    /// materialization. On means the collapsed one-liner, off means the legacy expanded diff. Untrusted summaries still
+    /// escape the collapse. Spawned thread: the cache is a sticky thread-local seeded explicitly here.
     #[test]
     fn push_defaults_follow_collapsed_edit_blocks_flag_when_shape_unset() {
         std::thread::spawn(|| {
@@ -2374,153 +2399,6 @@ mod tests {
         })
         .join()
         .unwrap();
-    }
-
-    #[test]
-    fn stop_hooks_attach_only_to_turn_terminal_markers() {
-        use crate::scrollback::blocks::SessionEvent;
-        use crate::scrollback::blocks::tool::{HookRunEntry, HookRunStatus};
-        let entries = || {
-            vec![HookRunEntry {
-                name: "h".into(),
-                status: HookRunStatus::Success {
-                    elapsed: std::time::Duration::from_millis(1),
-                },
-                output: None,
-            }]
-        };
-
-        let mut state = ScrollbackState::new();
-        let marker = state.push_block(RenderBlock::session_event(SessionEvent::TurnCompleted {
-            elapsed: Some(std::time::Duration::from_secs(2)),
-        }));
-        // An unstamped marker can't confirm a stamped batch, so it is refused; an unstamped batch keeps the tail-only heuristic
-        assert_eq!(
-            state.latest_turn_marker_accepting("stop", Some("pid-a")),
-            None
-        );
-        assert!(!state.attach_stop_hooks_to_marker(
-            marker,
-            "stop".into(),
-            entries(),
-            Some("pid-a")
-        ));
-        assert_eq!(
-            state.latest_turn_marker_accepting("stop", None),
-            Some(marker)
-        );
-        assert!(state.attach_stop_hooks_to_marker(marker, "stop".into(), entries(), None));
-
-        // Same-name repeat is refused; a new event name is accepted.
-        assert_eq!(state.latest_turn_marker_accepting("stop", None), None);
-        assert_eq!(
-            state.latest_turn_marker_accepting("stop_failure", None),
-            Some(marker)
-        );
-    }
-
-    #[test]
-    fn stop_hooks_respect_marker_prompt_id() {
-        use crate::scrollback::blocks::tool::{HookRunEntry, HookRunStatus};
-        use crate::scrollback::blocks::{SessionEvent, SessionEventBlock};
-        let entries = || {
-            vec![HookRunEntry {
-                name: "h".into(),
-                status: HookRunStatus::Success {
-                    elapsed: std::time::Duration::from_millis(1),
-                },
-                output: None,
-            }]
-        };
-
-        let mut state = ScrollbackState::new();
-        let marker = state.push_block(RenderBlock::SessionEvent(
-            SessionEventBlock::with_stop_hooks(
-                SessionEvent::TurnCompleted {
-                    elapsed: Some(std::time::Duration::from_secs(2)),
-                },
-                Vec::new(),
-                Some("pid-new".into()),
-            ),
-        ));
-
-        // A batch stamped with another turn's pid is refused even though the marker has no same-name group
-        // An unstamped (legacy) batch and a matching pid are accepted
-        assert_eq!(
-            state.latest_turn_marker_accepting("stop", Some("pid-old")),
-            None
-        );
-        assert!(!state.attach_stop_hooks_to_marker(
-            marker,
-            "stop".into(),
-            entries(),
-            Some("pid-old")
-        ));
-        assert_eq!(
-            state.latest_turn_marker_accepting("stop", None),
-            Some(marker)
-        );
-        assert_eq!(
-            state.latest_turn_marker_accepting("stop", Some("pid-new")),
-            Some(marker)
-        );
-        assert!(state.attach_stop_hooks_to_marker(
-            marker,
-            "stop".into(),
-            entries(),
-            Some("pid-new")
-        ));
-    }
-
-    #[test]
-    fn stop_hooks_merge_walks_past_interleaved_tail_blocks() {
-        use crate::scrollback::blocks::{SessionEvent, SessionEventBlock};
-
-        let mut state = ScrollbackState::new();
-        let marker = state.push_block(RenderBlock::SessionEvent(
-            SessionEventBlock::with_stop_hooks(
-                SessionEvent::TurnCompleted {
-                    elapsed: Some(std::time::Duration::from_secs(2)),
-                },
-                Vec::new(),
-                Some("pid-new".into()),
-            ),
-        ));
-        // A block lands between the marker and the batch (compaction, recap, a previous batch's standalone fallback, …)
-        state.push_block(RenderBlock::session_event(
-            SessionEvent::CompactionCompleted {
-                tokens_before: Some(100),
-                tokens_after: 10,
-                elapsed_ms: Some(5),
-            },
-        ));
-
-        // An exact pid match merges across the interleaved block
-        // An unstamped batch can't be attributed off-tail and a foreign pid is refused outright
-        assert_eq!(
-            state.latest_turn_marker_accepting("stop", Some("pid-new")),
-            Some(marker)
-        );
-        assert_eq!(state.latest_turn_marker_accepting("stop", None), None);
-        assert_eq!(
-            state.latest_turn_marker_accepting("stop", Some("pid-old")),
-            None
-        );
-
-        // The walk never skips past a newer turn-terminal marker: the batch belongs to the latest turn or to nothing
-        state.push_block(RenderBlock::SessionEvent(
-            SessionEventBlock::with_stop_hooks(
-                SessionEvent::TurnCompleted {
-                    elapsed: Some(std::time::Duration::from_secs(3)),
-                },
-                Vec::new(),
-                Some("pid-newer".into()),
-            ),
-        ));
-        assert_eq!(
-            state.latest_turn_marker_accepting("stop", Some("pid-new")),
-            None
-        );
     }
 
     /// A finished user `!` command expands to its full output; a Collapsed entry keeps its fold (no snap-open at completion).
@@ -3454,6 +3332,7 @@ mod tests {
         state.prepare_layout(W0, H0);
         state.follow_mode = false;
         state.follow_preserve_scroll = true;
+        state.follow_preserve_content_generation = 17;
         state.set_selected(Some(0));
         state.set_scroll_offset(3);
         state.view_mode = ViewMode::SingleTurn;
@@ -3464,6 +3343,7 @@ mod tests {
         let expected_offset = snap.scroll_offset;
         let expected_follow = snap.follow_mode;
         let expected_preserve = snap.follow_preserve_scroll;
+        let expected_preserve_generation = snap.follow_preserve_content_generation;
         let expected_vh = snap.viewport_height;
         let expected_lw = snap.last_width;
         let expected_sel = snap.selected;
@@ -3481,6 +3361,10 @@ mod tests {
         assert_eq!(state.scroll_offset, expected_offset);
         assert_eq!(state.follow_mode, expected_follow);
         assert_eq!(state.follow_preserve_scroll, expected_preserve);
+        assert_eq!(
+            state.follow_preserve_content_generation,
+            expected_preserve_generation
+        );
         assert_eq!(state.viewport_height, expected_vh);
         assert_eq!(state.last_width, expected_lw);
         assert_eq!(state.selected, expected_sel);

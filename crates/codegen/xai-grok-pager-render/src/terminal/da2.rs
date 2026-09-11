@@ -100,10 +100,7 @@ fn query_and_read() {
     let _ = DA2_VERSION.set(None);
 }
 
-/// Decode `CSI > Pp ; Pv ; Pc c`, rejecting anything that is not Alacritty's exact reply shape.
-///
-/// `Pv` means whatever its emulator decided: xterm puts a patch level there, so `> 0 ; 388 ; 0 c` would decode to a confident, wrong `0.3.88`.
-/// The brand evidence here is only `TERM=alacritty`, so the shape upstream hardcodes (`Pp == 0`, `Pc == 1`) is what makes the number trustworthy.
+/// Reject anything but Alacritty's exact shape (`Pp == 0`, `Pc == 1`). `Pv` is emulator-defined, so a looser parse would invent a version.
 #[cfg(any(unix, test))]
 fn parse_version(reply: &[u8]) -> Option<Da2Version> {
     let text = String::from_utf8_lossy(reply);
@@ -120,10 +117,7 @@ fn parse_version(reply: &[u8]) -> Option<Da2Version> {
     unpack_version(packed)
 }
 
-/// For Alacritty the decoded value is the `alacritty_terminal` **library** version, not the application release.
-/// Upstream packs the library crate's own `CARGO_PKG_VERSION`, and the two diverged after 0.5: release 0.15.1 answers `2500`.
-/// The value is reported as-is.
-/// Pre-release suffixes are stripped upstream, so a `-dev` build is indistinguishable from the matching release.
+/// Library crate version, not the app release (they diverged after 0.5). Reported as-is; upstream strips `-dev`.
 #[cfg(any(unix, test))]
 fn unpack_version(packed: u32) -> Option<Da2Version> {
     if packed == 0 || packed > MAX_PACKED_VERSION {

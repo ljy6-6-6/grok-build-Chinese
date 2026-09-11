@@ -32,18 +32,8 @@ impl ChatStateActor {
     }
 
     /// Truncate conversation to a target prompt index (rewind).
-    ///
-    /// Walks the conversation to find the Nth `User` item (where N =
-    /// `target_prompt_index`), truncates everything from that point onward,
-    /// truncates `prompt_texts` to match, persists, and emits `ConversationReset`.
-    ///
-    /// Prompt index semantics:
-    /// - 0 = no user turns have started (only system message, if any)
-    /// - 1 = one user turn completed
-    /// - N = N user turns completed
-    ///
-    /// Truncating to `target_prompt_index = 1` keeps only items up to (but not
-    /// including) the 2nd `User` message.
+    /// Walks to the Nth `User` item, drops everything from there on, and emits `ConversationReset`.
+    /// `target_prompt_index = N` keeps items up to but not including the (N+1)th `User` message.
     pub(super) fn truncate_to_prompt_index(&mut self, target_prompt_index: usize) {
         if target_prompt_index >= self.state.prompt_index {
             // Nothing to truncate — already at or before the target.
@@ -81,9 +71,7 @@ impl ChatStateActor {
     }
 
     /// Check if auto-compact is needed based on token utilization.
-    ///
-    /// Returns `Some(AutoCompactTrigger)` if `total_tokens` exceeds
-    /// `context_window * threshold_percent / 100`, otherwise `None`.
+    /// `Some` when `total_tokens` exceeds `context_window * threshold_percent / 100`.
     pub(super) fn check_auto_compact_needed(
         &self,
         threshold_percent: u8,
@@ -135,11 +123,8 @@ impl ChatStateActor {
         xai_grok_sampling_types::has_dangling_tool_calls(&self.state.conversation)
     }
 
-    /// Return the text content of the last assistant message with non-empty text.
-    ///
-    /// Walks the conversation backwards and returns the first `Assistant` item
-    /// whose `content` field is non-empty after trimming. Returns `None` when
-    /// no such item exists.
+    /// Return the text of the last assistant message with non-empty text.
+    /// Walks backwards; `None` when no such item exists.
     pub(super) fn get_last_assistant_text(&self) -> Option<String> {
         self.state.conversation.iter().rev().find_map(|item| {
             if let xai_grok_sampling_types::ConversationItem::Assistant(a) = item
@@ -151,12 +136,8 @@ impl ChatStateActor {
         })
     }
 
-    /// Reassemble a Length-salvaged report: the turn's last assistant text
-    /// (same seek as [`Self::get_last_assistant_text_in_turn`], walking past
-    /// mid-turn synthetics and tool items), then earlier segments joined
-    /// backwards across `Reasoning` and `LengthContinue` user items only.
-    /// Joined forward with no separator — Length cuts mid-token and
-    /// continuations carry their own whitespace.
+    /// Reassemble a Length-salvaged report from this turn's assistant texts.
+    /// Joined forward with no separator — Length cuts mid-token and continuations carry their own whitespace.
     pub(super) fn get_trailing_assistant_report(&self) -> Option<String> {
         let mut items = self.state.conversation.iter().rev();
         let mut segments: Vec<&str> = Vec::new();
@@ -182,10 +163,9 @@ impl ChatStateActor {
                 _ => {}
             }
         }
-        // Join earlier salvage segments. The reminder is injected only on
-        // the first continue, so later segments sit adjacent (with at most
-        // `Reasoning` siblings between) — bare-`Reasoning` adjacency must
-        // join or a multi-continue report loses every middle segment.
+        // Join earlier salvage segments. The reminder is injected only on the first continue,
+        // so later segments sit adjacent (with at most `Reasoning` siblings between).
+        // Bare-`Reasoning` adjacency must join or a multi-continue report loses every middle segment.
         for item in items {
             match item {
                 xai_grok_sampling_types::ConversationItem::Assistant(a) => {
@@ -217,13 +197,8 @@ impl ChatStateActor {
     }
 
     /// Non-empty assistant texts in the current turn, chronological.
-    ///
-    /// The backwards walk stops at the turn boundary (a user item with
-    /// `prompt_index` set, a genuine user message, or a synthetic reason with
-    /// [`SyntheticReason::starts_prompt_turn`]); mid-turn synthetic injections
-    /// are walked past. Whitespace-only assistant items are skipped.
-    ///
-    /// [`SyntheticReason::starts_prompt_turn`]: xai_grok_sampling_types::SyntheticReason::starts_prompt_turn
+    /// The backwards walk stops at a real turn boundary; mid-turn synthetics are walked past.
+    /// Whitespace-only assistant items are skipped.
     fn assistant_texts_in_turn(&self) -> Vec<String> {
         let mut texts = Vec::new();
         for item in self.state.conversation.iter().rev() {
@@ -248,21 +223,15 @@ impl ChatStateActor {
         texts
     }
 
-    /// Return the current turn's last assistant message with non-empty text, or
-    /// `None` when the turn produced none.
-    ///
-    /// Like [`Self::get_last_assistant_text`], but bounded to the current prompt
-    /// turn; see [`Self::assistant_texts_in_turn`].
+    /// Return the current turn's last assistant message with non-empty text.
+    /// Bounded to the current prompt turn; see [`Self::assistant_texts_in_turn`].
     pub(super) fn get_last_assistant_text_in_turn(&self) -> Option<String> {
         self.assistant_texts_in_turn().pop()
     }
 
-    /// Concatenate every non-empty assistant message in the current turn
-    /// (chronological, `"\n"`-joined), or `None` when the turn produced none.
-    ///
+    /// Concatenate every non-empty assistant message in the current turn (`"\n"`-joined).
     /// Same turn-boundary rules as [`Self::get_last_assistant_text_in_turn`].
-    /// Use this for turn-scoped export that must keep earlier bubbles of a
-    /// multi-round tool turn, not only the last.
+    /// Use this when export must keep earlier bubbles of a multi-round tool turn.
     pub(super) fn get_assistant_text_in_turn(&self) -> Option<String> {
         let texts = self.assistant_texts_in_turn();
         if texts.is_empty() {
@@ -272,14 +241,8 @@ impl ChatStateActor {
         }
     }
 
-    /// Return the text of the **first content part** of the first `User` message,
-    /// if and only if that part is `ContentPart::Text`.
-    ///
-    /// Matches the original call-site semantics exactly: if the first user
-    /// message leads with a non-text part (e.g. an image in a multimodal
-    /// prompt), this returns `None` rather than scanning further parts.
-    /// Callers that need "any text part" rather than "first-part-is-text"
-    /// should use `get_conversation()` directly.
+    /// Text of the first content part of the first `User` message, only if that part is `Text`.
+    /// A leading non-text part returns `None` rather than scanning further.
     pub(super) fn get_first_user_text(&self) -> Option<String> {
         self.state.conversation.iter().find_map(|item| {
             if let xai_grok_sampling_types::ConversationItem::User(u) = item {
@@ -307,9 +270,7 @@ impl ChatStateActor {
     }
 
     /// Return the processed text of the last user query (metadata tags stripped).
-    ///
-    /// Delegates to [`extract_last_user_query`] so the caller does not need a
-    /// full conversation clone.
+    /// Delegates to [`extract_last_user_query`] so the caller does not need a full conversation clone.
     pub(super) fn get_last_user_query_text(&self) -> Option<String> {
         extract_last_user_query(&self.state.conversation)
     }

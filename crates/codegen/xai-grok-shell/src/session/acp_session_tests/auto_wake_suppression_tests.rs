@@ -34,6 +34,55 @@ fn goal_summary_input(prompt_id: &str) -> InputItem {
 fn user_input(prompt_id: &str) -> InputItem {
     input_with_origin(prompt_id, crate::session::PromptOrigin::User)
 }
+/// Same body `inject_subagent_completed_prompt` sends.
+fn wake_body(subagent_id: &str) -> String {
+    xai_grok_tools::reminders::wrap_reminder(
+        &xai_grok_tools::reminders::task_completion::format_subagent_completion(
+            &subagent_summary(subagent_id),
+            Some("get_command_or_subagent_output"),
+            None,
+            None,
+        ),
+    )
+}
+async fn run_wake_turn(
+    actor: &std::sync::Arc<SessionActor>,
+    subagent_id: &str,
+    persist_ack: Option<oneshot::Sender<()>>,
+) -> PromptTurnResult {
+    actor
+        .handle_prompt(
+            &format!("subagent-completed-{subagent_id}"),
+            vec![acp::ContentBlock::Text(acp::TextContent::new(wake_body(
+                subagent_id,
+            )))],
+            PromptMode::Agent,
+            None,
+            None,
+            None,
+            None,
+            true,
+            false,
+            None,
+            persist_ack,
+            None,
+        )
+        .await
+}
+/// Aborts the wake turn after its commit: the test sampler never answers.
+async fn run_wake_turn_to_commit(actor: &std::sync::Arc<SessionActor>, subagent_id: &str) {
+    let (ack_tx, ack_rx) = oneshot::channel();
+    let actor_for_turn = actor.clone();
+    let subagent_id = subagent_id.to_owned();
+    let turn = tokio::task::spawn_local(async move {
+        run_wake_turn(&actor_for_turn, &subagent_id, Some(ack_tx)).await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), ack_rx)
+        .await
+        .expect("wake turn must reach the prompt commit")
+        .expect("persist ack must resolve");
+    turn.abort();
+}
 fn task_output_result(task_id: &str, status: &str) -> TaskOutputResult {
     TaskOutputResult {
         task_id: task_id.to_string(),
@@ -411,21 +460,8 @@ async fn task_completion_wake_is_admitted_without_cancel_barrier() {
                     if task_id == "bg-normal"
             ));
             drop(state);
-            let resources = actor
-                .agent
-                .borrow()
-                .tool_bridge()
-                .clone()
-                .shared_resources()
-                .await;
             assert!(
-                resources
-                    .lock()
-                    .await
-                    .get::<xai_grok_tools::types::resources::State<
-                        xai_grok_tools::reminders::task_completion::ReportedTaskCompletions,
-                    >>()
-                    .is_none(),
+                !already_reported(&actor, "bg-normal").await,
                 "queue acceptance alone must not mark the completion reported"
             );
             let actor_for_turn = actor.clone();
@@ -477,20 +513,7 @@ async fn disk_full_refusal_still_clears_task_completion_reservation() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let (gateway_tx, _gateway_rx) =
-                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
-            let (persistence_tx, mut persistence_rx) =
-                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
-            tokio::task::spawn_local(async move {
-                while let Some(msg) = persistence_rx.recv().await {
-                    if let PersistenceMsg::ProbeWritable { respond_to } = msg {
-                        let _ = respond_to
-                            .send(Err(std::io::Error::from(std::io::ErrorKind::StorageFull)));
-                    }
-                }
-            });
-            let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
-            actor.notifications.disk_full = tokio::sync::watch::channel(true).1;
+            let actor = disk_full_actor().await;
             actor
                 .tool_context
                 .task_completion_reservations
@@ -517,8 +540,8 @@ async fn disk_full_refusal_still_clears_task_completion_reservation() {
                 .expect_err("latched disk-full must refuse the wake");
             assert_eq!(error.message, "No space left on device");
             assert!(
-                already_reported(&actor, "bg-disk").await,
-                "disk-full refusal must mark the completion reported"
+                !already_reported(&actor, "bg-disk").await,
+                "a refused wake never reached the model, so a later drain must still be able to surface it"
             );
             assert!(
                 actor
@@ -821,9 +844,8 @@ async fn task_output_completed_drops_matching_pending_input() {
         .await;
 }
 /// An auto-wake turn polls its own task's output, so the consumed id matches the front `task-completed-{id}` entry, which IS the in-flight turn.
-/// (`maybe_start_running_task` promotes the front without popping it.)
+/// (`maybe_start_running_task` promotes the front without popping it.).
 /// Deleting it shifts whatever is queued behind (a real user prompt) to index 0, which the next interactive cancel resolves as Cancelled.
-/// That destroys the user's message.
 #[tokio::test(flavor = "current_thread")]
 async fn sweep_never_drops_running_turns_own_slot() {
     let local = tokio::task::LocalSet::new();
@@ -1318,16 +1340,15 @@ async fn handle_bridge_tool_success_runs_consumed_completion_sweep() {
         })
         .await;
 }
-/// Once marked, the per-tool-call `TaskCompletionReminder` won't resurface the id.
-/// It mirrors the resource access in `SessionActor::mark_completions_reported`.
+/// Read-only: safe to call before a drain.
 async fn already_reported(actor: &SessionActor, task_id: &str) -> bool {
     use xai_grok_tools::reminders::task_completion::ReportedTaskCompletions;
     use xai_grok_tools::types::resources::State;
     let bridge = actor.agent.borrow().tool_bridge().clone();
     let resources = bridge.shared_resources().await;
-    let mut res = resources.lock().await;
-    let reported = res.get_or_default::<State<ReportedTaskCompletions>>();
-    !reported.mark_reported(task_id)
+    let res = resources.lock().await;
+    res.get::<State<ReportedTaskCompletions>>()
+        .is_some_and(|reported| reported.is_reported(task_id))
 }
 /// Pure decision: a goal-turn-origin task is dropped even when the blanket goal Active/Complete gate is OFF (status Blocked / paused / None).
 /// That is the exact bug.
@@ -1482,14 +1503,138 @@ async fn reparented_record_is_noop_without_goal_harness() {
         })
         .await;
 }
-/// Without completion reservations feeding `suppress_ids`, the same completion is reported twice.
-/// It lands once as the auto-wake "Background subagent … completed" prompt.
-/// It lands again as the "While you were idle, N background subagent(s) completed" reminder.
+/// Three children finished in one idle window before the first wake ran.
 #[tokio::test(flavor = "current_thread")]
-async fn between_turn_drain_suppresses_reserved_subagents() {
-    use xai_grok_tools::implementations::grok_build::task::types::{
-        SubagentCompletionSummary, SubagentEvent,
-    };
+async fn wake_turn_digest_coalesces_unreported_siblings() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, gateway_rx) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            drain_gateway(gateway_rx);
+            let (persistence_tx, persistence_rx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            drain_persistence(persistence_rx);
+            let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            let ids = ["sa-1", "sa-2", "sa-3"];
+            let fake = spawn_fake_coordinator(
+                &mut actor,
+                ids.iter().map(|id| subagent_summary(id)).collect(),
+            );
+            let actor = std::sync::Arc::new(actor);
+            run_wake_turn_to_commit(&actor, "sa-1").await;
+            assert_eq!(
+                fake.peeks(),
+                1,
+                "the wake turn reads the buffer exactly once"
+            );
+            assert!(
+                fake.returned().is_empty(),
+                "the wake turn must not drain the coordinator: {:?}",
+                fake.returned()
+            );
+            assert_eq!(
+                fake.suppress_seen(),
+                [ids.map(str::to_owned)],
+                "the wake turn's own drain leaves every digested completion buffered"
+            );
+            actor.drain_between_turn_completions(&[]).await;
+            assert_eq!(
+                fake.returned(),
+                ids,
+                "the next drain hands the committed copies back"
+            );
+            let conversation = actor.chat_state_handle.get_conversation().await;
+            let mentions: Vec<&ConversationItem> = conversation
+                .iter()
+                .filter(|i| {
+                    let text = i.text_content();
+                    ids.iter().any(|id| text.contains(id))
+                })
+                .collect();
+            assert!(
+                matches!(
+                    mentions.as_slice(),
+                    [ConversationItem::User(u)]
+                        if u.synthetic_reason == Some(SyntheticReason::SubagentCompleted)
+                ),
+                "only the wake turn may name the children: {mentions:?}"
+            );
+            let digest = mentions[0].text_content();
+            assert!(
+                digest.contains("While you were idle"),
+                "the wake turn's message must be the digest: {digest}"
+            );
+            for id in ids {
+                assert!(digest.contains(id), "digest must name {id}: {digest}");
+                assert!(
+                    already_reported(&actor, id).await,
+                    "{id} must be marked reported at the digest's commit"
+                );
+            }
+        })
+        .await;
+}
+/// A reported wake is queued ahead of an unreported sibling.
+#[tokio::test(flavor = "current_thread")]
+async fn promotion_drops_reported_wake_without_running_turn() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _gateway_rx) = build_actor().await;
+            actor.mark_completions_reported(&["sa-dup"]).await;
+            let (respond_to, mut dup_rx) = oneshot::channel();
+            let _ = actor
+                .queue_input(QueueInputRequest {
+                    verbatim: true,
+                    ..queue_input_request(vec![], "subagent-completed-sa-dup", respond_to)
+                })
+                .await;
+            let (respond_to, mut live_rx) = oneshot::channel();
+            let _ = actor
+                .queue_input(QueueInputRequest {
+                    verbatim: true,
+                    ..queue_input_request(vec![], "subagent-completed-sa-live", respond_to)
+                })
+                .await;
+            let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+            actor.clone().maybe_start_running_task(completion_tx).await;
+            {
+                let mut state = actor.state.try_lock().expect("uncontended test state");
+                assert_eq!(
+                    state.running_prompt_id(),
+                    Some("subagent-completed-sa-live"),
+                    "the unreported sibling behind the dead wake must be promoted"
+                );
+                let queued: Vec<&str> = state
+                    .pending_inputs
+                    .iter()
+                    .map(|i| i.prompt_id.as_str())
+                    .collect();
+                assert_eq!(queued, ["subagent-completed-sa-live"]);
+                if let Some(task) = state.running_task.take() {
+                    task.abort();
+                }
+            }
+            assert!(
+                matches!(
+                    dup_rx.try_recv(),
+                    Ok(Ok(crate::session::commands::PromptTurnOk {
+                        completion_kind: PromptCompletionKind::RemovedFromQueue,
+                        ..
+                    }))
+                ),
+                "the dropped wake must resolve as removed from the queue"
+            );
+            assert!(
+                matches!(live_rx.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+                "the promoted wake must not be resolved as removed"
+            );
+        })
+        .await;
+}
+#[tokio::test(flavor = "current_thread")]
+async fn preempted_wake_is_redelivered_by_next_between_turn_drain() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -1497,66 +1642,220 @@ async fn between_turn_drain_suppresses_reserved_subagents() {
                 tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
             let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
-            actor
-                .tool_context
-                .task_completion_reservations
-                .as_ref()
-                .expect("completion reservations")
-                .reserve("sa-autowake".to_string());
-            let captured: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
-                std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<SubagentEvent>();
-            actor.tool_context.subagent_event_tx = Some(tx);
-            let captured_task = std::sync::Arc::clone(&captured);
-            tokio::task::spawn_local(async move {
-                while let Some(ev) = rx.recv().await {
-                    if let SubagentEvent::Completions(req) = ev {
-                        *captured_task.lock().unwrap() = req.suppress_ids.clone();
-                        let mk = |id: &str| SubagentCompletionSummary {
-                            subagent_id: id.into(),
-                            subagent_type: "general-purpose".into(),
-                            description: format!("desc {id}"),
-                            loop_task_id: None,
-                            success: true,
-                            duration_ms: 1000,
-                            tool_calls: 3,
-                            turns: 1,
-                            output: std::sync::Arc::from("done"),
-                        };
-                        let mut completions = vec![mk("sa-autowake"), mk("sa-fresh")];
-                        completions.retain(|c| !req.suppress_ids.contains(&c.subagent_id));
-                        let _ = req.respond_to.send(completions);
-                    }
-                }
-            });
-            actor.drain_between_turn_completions().await;
-            let suppress = captured.lock().unwrap().clone();
+            let fake = spawn_fake_coordinator(&mut actor, vec![subagent_summary("sa-pre")]);
+            actor.state.lock().await.running_task = Some(running_task_stub("user-running"));
+            let (respond_to, _wake_rx) = oneshot::channel();
+            let _ = actor
+                .queue_input(QueueInputRequest {
+                    verbatim: true,
+                    ..queue_input_request(vec![], "subagent-completed-sa-pre", respond_to)
+                })
+                .await;
             assert!(
-                suppress.contains(&"sa-autowake".to_string()),
-                "between-turn drain must pass reserved ids as suppress_ids: \
-                 {suppress:?}",
+                !already_reported(&actor, "sa-pre").await,
+                "a queued wake is not delivered yet and must not be marked reported"
             );
-            let conversation = actor.chat_state_handle.get_conversation().await;
-            let texts: String = conversation
+            let (respond_to, _user_rx) = oneshot::channel();
+            let _ = actor
+                .queue_input(queue_input_request(vec![], "user-typed", respond_to))
+                .await;
+            let remaining: Vec<String> = actor
+                .state
+                .lock()
+                .await
+                .pending_inputs
                 .iter()
-                .map(|i| i.text_content())
-                .collect::<Vec<_>>()
-                .join("\n");
+                .map(|i| i.prompt_id.clone())
+                .collect();
+            assert_eq!(remaining, ["user-typed"]);
             assert!(
-                texts.contains("While you were idle") && texts.contains("sa-fresh"),
-                "between-turn drain should surface the fresh completion: {texts}",
+                !already_reported(&actor, "sa-pre").await,
+                "a dropped wake must leave the ledger untouched"
+            );
+            actor.drain_between_turn_completions(&[]).await;
+            assert_eq!(fake.suppress_seen(), [Vec::<String>::new()]);
+            assert_eq!(fake.returned(), ["sa-pre"]);
+            let conversation = actor.chat_state_handle.get_conversation().await;
+            let digests: Vec<&ConversationItem> = conversation
+                .iter()
+                .filter(|i| i.text_content().contains("sa-pre"))
+                .collect();
+            assert!(
+                matches!(
+                    digests.as_slice(),
+                    [ConversationItem::User(u)]
+                        if u.synthetic_reason == Some(SyntheticReason::SystemReminder)
+                ),
+                "the dropped wake must be redelivered as exactly one digest: {digests:?}"
+            );
+            assert!(already_reported(&actor, "sa-pre").await);
+        })
+        .await;
+}
+/// Disk-full refuses the wake before the peek.
+#[tokio::test(flavor = "current_thread")]
+async fn refused_wake_leaves_completion_unreported() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let mut actor = disk_full_actor().await;
+            let fake = spawn_fake_coordinator(&mut actor, vec![subagent_summary("sa-refused")]);
+            let actor = std::sync::Arc::new(actor);
+            run_wake_turn(&actor, "sa-refused", None)
+                .await
+                .expect_err("latched disk-full must refuse the wake");
+            assert_eq!(
+                fake.peeks(),
+                0,
+                "the refusal comes before the buffer is read"
             );
             assert!(
-                !texts.contains("sa-autowake"),
-                "reserved completion must NOT be re-surfaced: {texts}",
+                !already_reported(&actor, "sa-refused").await,
+                "a wake the model never saw must stay unreported"
             );
+            actor.drain_between_turn_completions(&[]).await;
+            assert_eq!(fake.returned(), ["sa-refused"]);
+            let conversation = actor.chat_state_handle.get_conversation().await;
             assert!(
-                actor
-                    .tool_context
-                    .task_completion_reservations
-                    .as_ref()
-                    .is_some_and(|ids| ids.contains("sa-autowake"))
+                conversation
+                    .iter()
+                    .any(|i| i.text_content().contains("sa-refused")),
+                "the refused wake's completion must be redelivered"
             );
+            assert!(already_reported(&actor, "sa-refused").await);
+        })
+        .await;
+}
+/// Backstop behind the promotion-time drop.
+#[tokio::test(flavor = "current_thread")]
+async fn already_reported_wake_ends_turn_without_sampling() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            let fake = spawn_fake_coordinator(&mut actor, vec![subagent_summary("sa-dup")]);
+            actor.mark_completions_reported(&["sa-dup"]).await;
+            let actor = std::sync::Arc::new(actor);
+            let conversation_len_before = actor.chat_state_handle.get_conversation().await.len();
+            let result = run_wake_turn(&actor, "sa-dup", None).await;
+            assert!(
+                matches!(
+                    result,
+                    Ok(crate::session::commands::PromptTurnOk {
+                        stop_reason: acp::StopReason::EndTurn,
+                        total_tokens: 0,
+                        completion_kind: PromptCompletionKind::Completed,
+                        ..
+                    })
+                ),
+                "a reported wake ends the turn silently: {result:?}"
+            );
+            assert_eq!(
+                actor.chat_state_handle.get_conversation().await.len(),
+                conversation_len_before,
+                "a silent wake pushes no message"
+            );
+            assert!(fake.returned().is_empty(), "a silent wake drains nothing");
+        })
+        .await;
+}
+#[tokio::test(flavor = "current_thread")]
+async fn wake_missing_from_buffer_falls_back_to_injected_body() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, gateway_rx) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            drain_gateway(gateway_rx);
+            let (persistence_tx, persistence_rx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            drain_persistence(persistence_rx);
+            let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            let fake = spawn_fake_coordinator(&mut actor, vec![]);
+            let actor = std::sync::Arc::new(actor);
+            run_wake_turn_to_commit(&actor, "sa-evicted").await;
+            assert_eq!(fake.peeks(), 1);
+            let conversation = actor.chat_state_handle.get_conversation().await;
+            let mentions: Vec<&ConversationItem> = conversation
+                .iter()
+                .filter(|i| i.text_content().contains("sa-evicted"))
+                .collect();
+            assert!(
+                matches!(
+                    mentions.as_slice(),
+                    [ConversationItem::User(u)]
+                        if u.synthetic_reason == Some(SyntheticReason::SubagentCompleted)
+                ),
+                "the wake turn carries exactly one message: {mentions:?}"
+            );
+            assert_eq!(
+                mentions[0].text_content(),
+                wake_body("sa-evicted"),
+                "without a buffered copy the injected body is what the model sees"
+            );
+            assert!(already_reported(&actor, "sa-evicted").await);
+            assert_eq!(
+                fake.suppress_seen(),
+                [["sa-evicted"]],
+                "the body path still runs the normal drain, suppressing only its own id"
+            );
+        })
+        .await;
+}
+#[tokio::test(flavor = "current_thread")]
+async fn wake_turn_under_goal_loop_is_silent_and_marks() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            set_goal_harness_for_tests(&actor);
+            actor.goal_tracker.lock().create_goal(
+                "g".into(),
+                "obj".into(),
+                None,
+                0,
+                "2026-01-01T00:00:00Z".into(),
+                None,
+            );
+            assert!(actor.goal_loop_active(), "precondition: goal loop active");
+            let fake = spawn_fake_coordinator(
+                &mut actor,
+                vec![
+                    subagent_summary("sa-goal"),
+                    subagent_summary("sa-goal-sibling"),
+                ],
+            );
+            let actor = std::sync::Arc::new(actor);
+            let conversation_len_before = actor.chat_state_handle.get_conversation().await.len();
+            let result = run_wake_turn(&actor, "sa-goal", None).await;
+            assert!(
+                matches!(
+                    result,
+                    Ok(crate::session::commands::PromptTurnOk {
+                        stop_reason: acp::StopReason::EndTurn,
+                        total_tokens: 0,
+                        ..
+                    })
+                ),
+                "a wake under the goal loop ends silently: {result:?}"
+            );
+            assert_eq!(
+                actor.chat_state_handle.get_conversation().await.len(),
+                conversation_len_before
+            );
+            for id in ["sa-goal", "sa-goal-sibling"] {
+                assert!(
+                    already_reported(&actor, id).await,
+                    "{id} must be dropped as reported"
+                );
+            }
+            assert!(fake.returned().is_empty());
         })
         .await;
 }
@@ -1741,6 +2040,168 @@ async fn is_busy_reflects_parked_plan_approval() {
             assert!(
                 !actor.is_busy().await,
                 "a bare permission park must not by itself keep the session busy"
+            );
+        })
+        .await;
+}
+/// Regression: `InjectNotification` must gate on THIS session's turn, not the agent-wide flag.
+/// In a multi-session process (dashboard, leader) another session's turn kept the shared flag `true`,
+/// so an idle session parked its monitor events in the mid-turn buffer, where they sat unseen until its
+/// next user prompt. The event must instead become a pending notification that wakes the idle session.
+#[tokio::test(flavor = "current_thread")]
+async fn monitor_event_for_idle_session_is_not_parked_while_another_session_runs_a_turn() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) = tokio::sync::mpsc::unbounded_channel::<
+                xai_acp_lib::AcpClientMessage,
+            >();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<
+                PersistenceMsg,
+            >();
+            let (mut actor, event_rx) = create_test_actor_ex(
+                    0,
+                    256_000,
+                    85,
+                    gateway_tx,
+                    persistence_tx,
+                )
+                .await;
+            let agent_wide_turn_active = std::sync::Arc::new(
+                std::sync::atomic::AtomicBool::new(true),
+            );
+            let shared_buffer = xai_grok_tools::implementations::grok_build::monitor::types::MonitorEventBuffer::new();
+            actor.tool_context.is_turn_active = Some(agent_wide_turn_active);
+            actor.tool_context.monitor_event_buffer = Some(shared_buffer.clone());
+            actor.state.lock().await.notifications_suppressed = true;
+            let actor = std::sync::Arc::new(actor);
+            let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<
+                SessionCommand,
+            >();
+            let (_chat_tx, chat_rx) = tokio::sync::mpsc::unbounded_channel::<
+                xai_chat_state::ChatStateEvent,
+            >();
+            let codebase_indexes = std::sync::Arc::new(
+                parking_lot::Mutex::new(
+                    xai_grok_workspace::file_system::CodebaseIndexManager::new(),
+                ),
+            );
+            tokio::task::spawn_local(
+                super::run_session(
+                    actor.clone(),
+                    cmd_rx,
+                    chat_rx,
+                    event_rx,
+                    None,
+                    codebase_indexes,
+                    std::path::PathBuf::from("/tmp"),
+                    crate::session::fs_watch::FsWatchCapabilities::none(),
+                ),
+            );
+            cmd_tx
+                .send(SessionCommand::InjectNotification {
+                    prompt_id: "monitor-idle".to_string(),
+                    prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(
+                        "<monitor-event task_id=\"watch-1\">\nnew message\n</monitor-event>",
+                    ))],
+                    priority: NotificationPriority::Next,
+                    source: NotificationSource::MonitorEvent {
+                        task_id: "watch-1".to_string(),
+                    },
+                })
+                .expect("run_session must be receiving commands");
+            for _ in 0..100 {
+                if !actor.state.lock().await.pending_notifications.is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert!(
+                shared_buffer.is_empty(),
+                "an idle session must not park its monitor event in the mid-turn buffer because another session is mid-turn"
+            );
+            let state = actor.state.lock().await;
+            assert_eq!(
+                state
+                    .pending_notifications
+                    .iter()
+                    .map(|n| n.source.task_id())
+                    .collect::<Vec<_>>(),
+                vec!["watch-1"],
+                "the monitor event must queue as a wake for this idle session"
+            );
+        })
+        .await;
+}
+/// The mid-turn buffer is still the right place when THIS session is the one running a turn.
+#[tokio::test(flavor = "current_thread")]
+async fn monitor_event_during_own_turn_is_buffered_for_the_turn_loop() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _) = tokio::sync::mpsc::unbounded_channel::<
+                xai_acp_lib::AcpClientMessage,
+            >();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<
+                PersistenceMsg,
+            >();
+            let (mut actor, event_rx) = create_test_actor_ex(
+                    0,
+                    256_000,
+                    85,
+                    gateway_tx,
+                    persistence_tx,
+                )
+                .await;
+            let shared_buffer = xai_grok_tools::implementations::grok_build::monitor::types::MonitorEventBuffer::new();
+            actor.tool_context.monitor_event_buffer = Some(shared_buffer.clone());
+            actor.session_turn_active.store(true, std::sync::atomic::Ordering::SeqCst);
+            let actor = std::sync::Arc::new(actor);
+            let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<
+                SessionCommand,
+            >();
+            let (_chat_tx, chat_rx) = tokio::sync::mpsc::unbounded_channel::<
+                xai_chat_state::ChatStateEvent,
+            >();
+            let codebase_indexes = std::sync::Arc::new(
+                parking_lot::Mutex::new(
+                    xai_grok_workspace::file_system::CodebaseIndexManager::new(),
+                ),
+            );
+            tokio::task::spawn_local(
+                super::run_session(
+                    actor.clone(),
+                    cmd_rx,
+                    chat_rx,
+                    event_rx,
+                    None,
+                    codebase_indexes,
+                    std::path::PathBuf::from("/tmp"),
+                    crate::session::fs_watch::FsWatchCapabilities::none(),
+                ),
+            );
+            cmd_tx
+                .send(SessionCommand::InjectNotification {
+                    prompt_id: "monitor-busy".to_string(),
+                    prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(
+                        "<monitor-event task_id=\"watch-2\">\nnew message\n</monitor-event>",
+                    ))],
+                    priority: NotificationPriority::Next,
+                    source: NotificationSource::MonitorEvent {
+                        task_id: "watch-2".to_string(),
+                    },
+                })
+                .expect("run_session must be receiving commands");
+            for _ in 0..100 {
+                if !shared_buffer.is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(shared_buffer.len(), 1, "own-turn monitor events go to the turn loop's buffer");
+            assert!(
+                actor.state.lock().await.pending_notifications.is_empty(),
+                "own-turn monitor events must not also queue a wake"
             );
         })
         .await;

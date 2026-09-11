@@ -270,7 +270,7 @@ mod tests {
                     cell.invariants.contains(id),
                     "{}: xfail {} not in the invariant list",
                     cell.id,
-                    id.as_str()
+                    id.as_ref()
                 );
             }
         }
@@ -309,7 +309,7 @@ mod tests {
         for cell in CELLS {
             let mut seen = HashSet::new();
             for id in cell.invariants {
-                assert!(seen.insert(id), "{}: duplicate {}", cell.id, id.as_str());
+                assert!(seen.insert(id), "{}: duplicate {}", cell.id, id.as_ref());
             }
             // Consistency invariants match the forced mode.
             assert_eq!(

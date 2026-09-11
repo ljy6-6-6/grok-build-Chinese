@@ -3,7 +3,6 @@
 //! terminal records.
 use super::*;
 use crate::upload::trace::tests::read_tar_gz_entries;
-use crate::upload::trace::{ArchiveBuildFault, set_archive_build_fault, spawn_upload_queue};
 #[tokio::test(flavor = "current_thread")]
 #[serial_test::serial(archive_build_fault)]
 async fn memory_archive_build_archives_seeded_root_off_runtime() {

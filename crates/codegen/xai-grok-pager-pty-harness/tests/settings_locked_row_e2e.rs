@@ -51,10 +51,8 @@ async fn team_member_sees_admin_managed_row_and_no_banner() {
     run_team_member().await.expect("team-member locked-row e2e");
 }
 
-/// The rollout flag is forced on: the banner would show for a plain opted-out user.
-/// The sandbox's fake `XAI_API_KEY` is removed so the seeded team OAuth entry is the active auth.
-/// ZDR product access is enabled; without it a ZDR account gets the blocked welcome screen ("not yet available") and can never reach settings.
-/// The row lock and banner suppression key off `is_zdr` regardless.
+/// Rollout on so a plain opted-out user would see the banner. Fake API key removed so team OAuth is active.
+/// ZDR access must be enabled or the blocked welcome never reaches settings. Lock and suppression key off `is_zdr`.
 fn locked_row_env_ops() -> [EnvOp<'static>; 3] {
     [
         EnvOp::set("GROK_PRIVACY_NOTICE_ROLLOUT", "1"),
@@ -189,18 +187,13 @@ fn assert_no_banner_on_welcome(pager: &mut PtyHarness) -> Result<()> {
     Ok(())
 }
 
-/// Open settings via F2 and return the screen line holding the Coding data sharing row.
-/// F2's `OpenSettings` binding is `When::AgentScreen` only; the welcome screen never routes it.
-/// Enter therefore first starts a session (`Action::NewSession`), then F2 in the agent view opens the modal (`dispatch_open_settings`).
-///
-/// Navigation is always via the modal's `/` filter: typing the query clamps the selection to the filtered set (`clamp_selected_to_visible`).
-/// Enter commits back to Browse PRESERVING query and selection, so afterwards the row is both in the viewport and FOCUSED.
-/// That is the precondition for the `→` expansion in [`expand_focused_row`].
-/// The lowercase query cannot collide with the case-sensitive label.
+/// F2 is AgentScreen-only, so Ctrl+N leaves home first. `/` filter then Enter keeps the row focused for [`expand_focused_row`].
 fn open_settings_and_grab_row_line(pager: &mut PtyHarness) -> Result<String> {
-    pager.inject_keys(keys::ENTER).context("start session")?;
     pager
-        .wait_for_text_absent("New worktree", Duration::from_secs(20))
+        .inject_keys(keys::CTRL_N)
+        .context("leave home into a session")?;
+    pager
+        .wait_for_text("Shift+Tab", Duration::from_secs(20))
         .context("agent view opened")?;
     pager.update(Duration::from_millis(500));
     pager.inject_keys(keys::F2).context("press F2")?;

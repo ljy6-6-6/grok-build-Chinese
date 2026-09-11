@@ -20,80 +20,61 @@ use super::log::{ScrollLogLine, StreamGroup};
 const F32_TOLERANCE: f64 = 0.01;
 
 /// Invariant identifier; `as_str` gives the I-* label.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, strum::AsRefStr, strum::IntoStaticStr)]
 pub enum InvariantId {
     /// I-ORD: `ts_ms` is non-decreasing across the capture (flip boundaries legitimately share a timestamp).
+    #[strum(serialize = "I-ORD")]
     Ord,
     /// I-CAP: every record's `|flushed| ≤ cap`, the teleport guard.
+    #[strum(serialize = "I-CAP")]
     Cap,
     /// I-DROP-EQ: finalize carries `dropped == backlog_after` (the producer constructs it that way; a mismatch is producer drift).
+    #[strum(serialize = "I-DROP-EQ")]
     DropEq,
-    /// I-CADENCE: intra-stream flush spacings ≥ `REDRAW_CADENCE_MS − 1`, the busy-spin guard.
-    /// Skips `promotion`-triggered records (they flush immediately by design) and `finalize` records.
-    /// The finalize flush deliberately ignores the cadence gate (`finalize_stream_at` in `mouse.rs`) and a flip finalize can land mid-slot.
-    /// A gap finalize is at least 80ms anyway, so nothing real is lost.
+    /// Intra-stream flush spacing ≥ cadence−1. Skips promotion (immediate by design) and finalize (ignores the cadence gate).
+    #[strum(serialize = "I-CADENCE")]
     Cadence,
     /// I-CONS-W: forced-wheel totals are exact, `|applied+dropped| == trunc(events × wheel_lpt/ept × speed)` ±1.
     /// The `MIN_LINES_PER_WHEEL_STREAM` substitution applies when the raw pricing truncates to zero.
     /// Wheel pricing never includes carry.
+    #[strum(serialize = "I-CONS-W")]
     ConsW,
-    /// I-CONS-A: auto/trackpad totals are bounded.
-    /// Per-event pricing lies in `[min(wheel_lpt/ept, tp_lpt/3), max(wheel_lpt/ept, ACCEL_MAX × tp_lpt/3)] × speed`.
-    /// The trackpad divisor is the normalized 3; the accel ceiling 3.0 is `trackpad_accel_max`.
-    /// Effective accel tops at 2.5, so the bound is loose but sound.
-    /// Checks the finalize's `desired` within `[lo, hi]` and the delivered `|applied+dropped| ≤ hi`; ±1 slack absorbs carry/trunc.
+    /// Auto/trackpad totals stay in the accel-free to accel-max band. Effective accel tops at 2.5, so the 3.0 ceiling is loose but sound.
+    #[strum(serialize = "I-CONS-A")]
     ConsA,
     /// I-ACCEL: `1.0 ≤ accel ≤ 3.0` on every record, and `avg_interval_ms`, when present, is ≥ `ACCEL_MIN_INTERVAL_MS` (6).
     /// The G5 clause: even ghostty-style 4ms duplicate reports must never drag the average under 6.
     /// The producer excludes sub-6ms intervals from the window, so a lower value means that artifact guard regressed.
+    #[strum(serialize = "I-ACCEL")]
     Accel,
-    /// I-CARRY: `|carry| < 1.0` everywhere (only sub-line remainders ride across streams).
-    /// A wheel-kind finalize zeroes the carry, so the NEXT `stream_start` must echo `carry == 0`.
-    /// The log carries no direction, but the machine zeroes carry at wheel finalize and resets it on direction change.
-    /// The next-start check therefore holds for both same- and opposite-direction successors.
+    /// `|carry| < 1.0`. Wheel finalize zeroes carry, so the next start must echo 0 for either successor direction.
+    #[strum(serialize = "I-CARRY")]
     Carry,
     /// I-CFG: the `stream_start` config echo matches the cell's expected profile (mode/ept/wheel_lpt/trackpad_lpt/invert/speed).
     /// It proves the cell's env actually selected the profile.
+    #[strum(serialize = "I-CFG")]
     Cfg,
-    /// I-MUX-NO-OVER: delivered total per stream ≤ `events × speed + 1`.
-    /// The conservative remuxed profile (ept=1/wheel_lpt=1) prices at most one line per event.
-    /// Attach only to accel-free gestures, over 20ms spacing: a fast trackpad-classified mux stream may legitimately exceed the bound via accel.
-    /// Exactly 20ms still interpolates to 1.6× in the accel band; G9's 55ms clears it.
+    /// Remuxed ept=1 prices at most one line per event. Attach only to accel-free gestures over 20ms; exactly 20ms still accel-bands.
+    #[strum(serialize = "I-MUX-NO-OVER")]
     MuxNoOver,
     /// I-SMOOTH-COAST: per stream, `Σ|flushed|` over flush-bearing records with `events_since_flush == 0` stays ≤ cap.
     /// Motion delivered after input stopped is at most one capped catch-up.
     /// The jerk's coast-drain plus finalize re-price burst exceeds it (xfail until the finalize-decel fix).
+    #[strum(serialize = "I-SMOOTH-COAST")]
     SmoothCoast,
     /// I-NO-DROP: every finalize has `dropped == 0`.
     /// Attach to gestures the cap can keep up with; floods legitimately drop.
+    #[strum(serialize = "I-NO-DROP")]
     NoDrop,
     /// I-SCREEN (harness-side): the viewport marker delta matches the gesture, moved on scroll and clamped at the bottom pin (G7).
+    #[strum(serialize = "I-SCREEN")]
     Screen,
     /// I-QUIET (harness-side): the frame watermark stays put after the last finalize, no post-gesture repaint churn.
+    #[strum(serialize = "I-QUIET")]
     Quiet,
 }
 
 impl InvariantId {
-    /// The I-* label.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            InvariantId::Ord => "I-ORD",
-            InvariantId::Cap => "I-CAP",
-            InvariantId::DropEq => "I-DROP-EQ",
-            InvariantId::Cadence => "I-CADENCE",
-            InvariantId::ConsW => "I-CONS-W",
-            InvariantId::ConsA => "I-CONS-A",
-            InvariantId::Accel => "I-ACCEL",
-            InvariantId::Carry => "I-CARRY",
-            InvariantId::Cfg => "I-CFG",
-            InvariantId::MuxNoOver => "I-MUX-NO-OVER",
-            InvariantId::SmoothCoast => "I-SMOOTH-COAST",
-            InvariantId::NoDrop => "I-NO-DROP",
-            InvariantId::Screen => "I-SCREEN",
-            InvariantId::Quiet => "I-QUIET",
-        }
-    }
-
     /// Whether [`check_log_invariant`] can evaluate this id from the log alone.
     /// `false` means harness-side (screen/frame state), owned by the matrix runner.
     pub fn is_log_side(self) -> bool {
@@ -155,7 +136,7 @@ pub fn check_log_invariant(
         InvariantId::Screen | InvariantId::Quiet => panic!(
             "{} is harness-side (needs PtyHarness screen/frame state); the A13 matrix \
              runner checks it — route by InvariantId::is_log_side",
-            id.as_str()
+            id.as_ref()
         ),
     }
 }
@@ -553,7 +534,7 @@ mod tests {
             InvariantId::NoDrop,
         ] {
             let result = check(id, &C1, &fixture);
-            assert!(result.is_pass(), "{} on canonical: {result:?}", id.as_str());
+            assert!(result.is_pass(), "{} on canonical: {result:?}", id.as_ref());
         }
     }
 
@@ -713,7 +694,7 @@ mod tests {
             InvariantId::Cfg,
         ] {
             let result = check(id, &C1, &fixture);
-            assert!(result.is_pass(), "{} on jerk: {result:?}", id.as_str());
+            assert!(result.is_pass(), "{} on jerk: {result:?}", id.as_ref());
         }
     }
 
@@ -739,7 +720,7 @@ mod tests {
     #[test]
     fn log_side_partition_matches_the_a13_split() {
         for id in [InvariantId::Screen, InvariantId::Quiet] {
-            assert!(!id.is_log_side(), "{}", id.as_str());
+            assert!(!id.is_log_side(), "{}", id.as_ref());
         }
         for id in [
             InvariantId::Ord,
@@ -755,7 +736,7 @@ mod tests {
             InvariantId::SmoothCoast,
             InvariantId::NoDrop,
         ] {
-            assert!(id.is_log_side(), "{}", id.as_str());
+            assert!(id.is_log_side(), "{}", id.as_ref());
         }
     }
 }

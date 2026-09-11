@@ -14,14 +14,8 @@ pub fn wait_for_labels_absent(h: &mut PtyHarness, labels: &[&str], timeout: Dura
     });
 }
 
-/// Submit `prompt` from `h`, then keep re-pressing Enter until the turn actually starts streaming (`sentinel` appears) or `timeout` elapses.
-///
-/// In a heavy multi-client leader cluster, the driver's submit Enter can be dropped when it races the other client's attach/replay on the leader.
-/// The typed prompt is left sitting unsubmitted in the composer, the turn never starts, and a plain `wait_for_text` then times out.
-/// That was the `leader_two_clients_shared_session` flake: client A idle with `again` still in the composer at 75s.
-/// Re-pressing Enter is safe: submitting takes the composer draft synchronously (`std::mem::take` in `dispatch`).
-/// Once a turn has really been sent the composer is empty and an extra Enter is a no-op.
-/// It can only submit a still-stuck prompt, never double-submit a sent one (which would break exactly-once scrollback asserts).
+/// Re-press Enter until `sentinel`: a leader attach race can drop the first submit and leave the prompt in the composer.
+/// Extra Enter is a no-op once the draft is taken, so it cannot double-submit.
 pub fn submit_turn(h: &mut PtyHarness, prompt: &str, sentinel: &str, timeout: Duration) {
     h.inject_keys(format!("{prompt}\r").as_bytes())
         .expect("inject prompt submit");
@@ -58,13 +52,8 @@ pub fn inference_request_count(content: &ContentController) -> usize {
         .count()
 }
 
-/// Seed a fake xAI OAuth entry into the isolated home's `auth.json` so the shell has session auth.
-/// The harness's `XAI_API_KEY` is ApiKey/BYOK mode and never enters the auth manager.
-/// The scope key must be `<issuer>::<client_id>`, `auth_mode` must be `oidc`, and `expires_at` must be far-future so no network refresh happens.
-/// `coding_data_retention_opt_out` must be `false` so collection/upload-path e2es (e.g. storage park-on-401) still enqueue traces.
-/// When that field is missing it deserializes as opted-out via `default_coding_data_retention_opt_out()`.
-/// The mock server accepts any bearer.
-/// Pair with [`oauth_credential_ops`].
+/// `XAI_API_KEY` never enters the auth manager. Scope is `<issuer>::<client_id>`, oidc, far-future expiry so no refresh.
+/// Opt-out must be false or collection e2es never enqueue; a missing field deserializes as opted-out.
 pub fn seed_fake_oauth(content: &ContentController, user: &str) {
     seed_fake_oauth_with_opt_out(content, user, false);
 }
@@ -142,10 +131,7 @@ pub fn oauth_credential_ops() -> [crate::EnvOp<'static>; 1] {
     [crate::EnvOp::remove("XAI_API_KEY")]
 }
 
-/// Drive `/new` until `model` shows on screen.
-/// Campaigns apply to **new sessions only** and the pager's settings prefetch is deliberately 2s-capped.
-/// On a loaded runner the first session can legitimately open without the campaign applied.
-/// Each `/new` after the settings fetch lands re-resolves with the campaign.
+/// Campaigns apply to new sessions only, and settings prefetch is 2s-capped, so the first session may lack the model.
 pub fn wait_for_model_via_new_sessions(h: &mut PtyHarness, model: &str, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {

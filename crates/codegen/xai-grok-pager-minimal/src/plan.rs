@@ -71,26 +71,9 @@ fn plan_scrollback_body(
         })
 }
 
-/// Commit the active plan into native scrollback, once per plan (and once per revision).
-///
-/// Minimal has no separate plan pane: the terminal's scrollback *is* the history.
-/// The plan is pushed as an ordinary finalized agent-message block and printed into native scrollback by the normal commit pass.
-/// Only the decision controls remain under the prompt.
-/// De-duplicated by the plan's `tool_call_id`; a revised plan arrives as a fresh ExitPlanMode with a new id and is committed as its own block.
-/// Empty / whitespace-only plans still commit a short notice so the user sees why approval is parked.
-/// Otherwise only the controls strip appears and the session looks stuck.
-///
-/// The block is anchored **above** the still-running `exit_plan_mode` tool row, not appended after it.
-/// The commit frontier then reaches the plan while the approval is still parked.
-/// Users reported losing the head of a plan to the clipped live tail.
-///
-/// NOTE (draw-path state mutation and replay durability): this pushes into `ScrollbackState` from the render path.
-/// That is a deliberate exception: the plan block must enter the normal commit pipeline.
-/// The pushed block is client-render state, not a server event: a resumed session will not replay it.
-/// Post-reload `/transcript` shows the plan only through whatever the agent itself messaged.
-/// Accepted for v1: the live session, which is all minimal shows, stays consistent.
-///
-/// Call once per frame from [`crate::draw`], before the commit pass.
+/// Commit each plan (and revision) once, anchored above the still-running `exit_plan_mode` row so the clipped live tail cannot hide its head.
+/// Empty plans still commit a notice; otherwise only the controls strip shows and the session looks stuck.
+/// Deliberate render-path push into `ScrollbackState`: client state, not a server event, so a resumed session will not replay it.
 pub fn maybe_commit_plan(app: &mut AppView) {
     let locale = app.locale.clone();
     let ActiveView::Agent(id) = &app.active_view else {
@@ -143,10 +126,8 @@ pub fn height(agent: &AgentView) -> u16 {
     2u16.saturating_add(input)
 }
 
-/// Render the compact plan-approval controls strip into `area`.
-/// The plan itself lives in native scrollback ([`maybe_commit_plan`]).
-/// This only draws the header, the decision hint, and (when revising) the feedback input.
-/// Returns the text cursor when the feedback input is focused, else `None`.
+/// Render the compact plan-approval controls strip into `area`. This only draws the header, the decision hint, and
+/// (when revising) the feedback input.
 pub fn render(
     buf: &mut Buffer,
     area: Rect,

@@ -47,7 +47,7 @@ pub(super) fn handle_permission_request(
         app.notification_service.notify(NotificationEvent {
             kind: NotificationEventKind::ApprovalRequired,
             title: "Grok".into(),
-            body: NotificationEventKind::ApprovalRequired.as_str().into(),
+            body: NotificationEventKind::ApprovalRequired.as_ref().into(),
             session_id: Some(perm.request.session_id.0.to_string()),
         });
         app.notification_service.mark_permission_notified();
@@ -61,6 +61,11 @@ fn enqueue_permission(
     perm: xai_acp_lib::AcpArgs<acp::RequestPermissionRequest>,
     agent: &mut AgentView,
 ) -> bool {
+    // Mandatory ingress wins: evict an open feedback modal before the permission stashes the composer.
+    agent.displace_feedback_modal(
+        crate::views::feedback_modal::FeedbackModalDisplacement::Permission,
+    );
+
     let bash_highlights: Option<BashCommandHighlights> = perm
         .request
         .meta
@@ -445,7 +450,7 @@ fn cli_is_idle_for_recap(agent: &crate::app::agent_view::AgentView) -> bool {
     if agent.session.in_flight_prompt.is_some() || agent.has_held_user_queue() {
         return false;
     }
-    if agent.subagent_sessions.values().any(|s| !s.finished) {
+    if agent.subagent_sessions.values().any(|s| s.is_running()) {
         return false;
     }
     if agent

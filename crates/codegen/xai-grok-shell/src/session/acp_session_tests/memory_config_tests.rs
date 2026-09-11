@@ -91,10 +91,16 @@ async fn create_test_actor_with_memory(
         tokio_util::sync::CancellationToken::new(),
     );
     let tool_context = ToolContext::new(cwd.clone(), None, None, fs, terminal, hunk_tracker_handle);
-    let memory_storage = memory_config
-        .as_ref()
-        .filter(|mc| mc.enabled)
-        .map(|_| crate::session::memory::MemoryStorage::new(&cwd_path, None));
+    let configured_storage = memory_config.as_ref().map(|mc| {
+        crate::session::memory::MemoryStorage::new_for_mode(
+            &cwd_path,
+            mc.root_dir_override.as_deref(),
+            mc.mode,
+        )
+    });
+    let memory_storage = configured_storage
+        .clone()
+        .filter(|_| memory_config.as_ref().is_some_and(|config| config.enabled));
     let state = TokioMutex::new(State {
         running_task: None,
         finalization_gate: Default::default(),
@@ -114,12 +120,16 @@ async fn create_test_actor_with_memory(
         vec![],
         xai_grok_sampling_types::SamplingConfig {
             base_url: "http://localhost".to_string(),
+            mtls_cert_dir: None,
             model: "test".to_string(),
             max_completion_tokens: None,
             temperature: None,
             top_p: None,
+            max_retries: None,
+            rate_limit_retry_threshold: None,
             api_backend: Default::default(),
             extra_headers: Default::default(),
+            conversation_group_id: None,
             query_params: Default::default(),
             env_http_headers: Default::default(),
             context_window: std::num::NonZeroU64::new(context_window)
@@ -135,7 +145,14 @@ async fn create_test_actor_with_memory(
     std::mem::forget(tmp);
     let memory_initial_injection_config = memory_config
         .as_ref()
-        .map_or_else(Default::default, |mc| mc.initial_injection.clone());
+        .filter(|mc| mc.mode.is_legacy())
+        .map_or_else(
+            || crate::config::MemoryInitialInjectionConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            |mc| mc.initial_injection.clone(),
+        );
     SessionActor {
         repo_status_prefetch: crate::session::repo_status_prefix::RepoStatusPrefetchState::default(
         ),
@@ -153,12 +170,10 @@ async fn create_test_actor_with_memory(
         auth_manager: None,
         is_chat_kind: false,
         state,
-        notifications: NotificationSender {
-            gateway: GatewaySender::new(gateway_tx),
-            gateway_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        notifications: NotificationSender::for_tests(
+            GatewaySender::new(gateway_tx),
             persistence_tx,
-            disk_full: crate::session::notifications::idle_disk_full_rx(),
-        },
+        ),
         permissions: PermissionHandle::allow_all(),
         tool_context,
         deny_read_globs: Vec::new(),
@@ -200,13 +215,28 @@ async fn create_test_actor_with_memory(
             cancel: Default::default(),
         },
         memory: crate::session::memory_state::SessionMemory {
+            configured_mode: memory_config.as_ref().map(|mc| mc.mode),
+            configured_storage: configured_storage.filter(|storage| {
+                storage.mode().is_v2()
+                    || memory_config.as_ref().is_some_and(|config| config.enabled)
+            }),
             flush_config: memory_config
                 .as_ref()
-                .map_or_else(Default::default, |mc| mc.flush.clone()),
+                .filter(|mc| mc.mode.is_legacy())
+                .map_or_else(
+                    || crate::config::MemoryFlushConfig {
+                        enabled: false,
+                        idle_timeout_secs: None,
+                        ..Default::default()
+                    },
+                    |mc| mc.flush.clone(),
+                ),
             is_flushing: std::sync::atomic::AtomicBool::new(false),
             last_flush_compaction: std::sync::atomic::AtomicU64::new(0),
             storage: std::cell::RefCell::new(memory_storage),
-            save_on_end: true,
+            save_on_end: memory_config
+                .as_ref()
+                .is_none_or(|mc| mc.mode.is_legacy() && mc.session.save_on_end),
             backend_params: None,
             initial_injection_config: memory_initial_injection_config,
             context_injected: std::sync::atomic::AtomicBool::new(false),
@@ -219,13 +249,24 @@ async fn create_test_actor_with_memory(
             compaction_recovery_count: std::sync::atomic::AtomicU64::new(0),
             chunks_added: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             init_reindex_handle: std::cell::RefCell::new(None),
-            dream_config: Default::default(),
+            dream_config: memory_config
+                .as_ref()
+                .filter(|mc| mc.mode.is_legacy())
+                .map_or_else(
+                    || crate::config::MemoryDreamConfig {
+                        enabled: false,
+                        check_interval_secs: None,
+                        ..Default::default()
+                    },
+                    |mc| mc.dream,
+                ),
             dream_count: std::sync::atomic::AtomicU64::new(0),
             dream_success_count: std::sync::atomic::AtomicU64::new(0),
             dream_error_count: std::sync::atomic::AtomicU64::new(0),
         },
         session_start: std::time::Instant::now(),
         inference_idle_timeout: Duration::from_secs(300),
+        uncharged_401_park_enabled: true,
         max_retries: 3,
         rate_limit_waits: crate::session::acp_session::RateLimitWaitConfig::default(),
         max_turns: None,
@@ -233,11 +274,12 @@ async fn create_test_actor_with_memory(
         pending_skill_reminders: Mutex::new(Vec::new()),
         idle_flush_timeout: memory_config
             .as_ref()
+            .filter(|mc| mc.mode.is_legacy())
             .and_then(|mc| mc.flush.idle_timeout_secs)
             .map(std::time::Duration::from_secs),
         dream_check_timeout: memory_config
             .as_ref()
-            .filter(|mc| mc.dream.enabled)
+            .filter(|mc| mc.mode.is_legacy() && mc.dream.enabled)
             .and_then(|mc| mc.dream.check_interval_secs)
             .filter(|&s| s > 0)
             .map(std::time::Duration::from_secs),
@@ -257,6 +299,7 @@ async fn create_test_actor_with_memory(
         display_cwd: std::sync::OnceLock::new(),
         active_agent_type: parking_lot::Mutex::new(None),
         queue_exit_reminder_on_approved_exit: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        emit_local_background_tasks: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         active_skill: parking_lot::Mutex::new(None),
         current_prompt_mode: Arc::new(parking_lot::Mutex::new(PromptMode::Agent)),
         turn_start_prompt_mode: parking_lot::Mutex::new(PromptMode::Agent),
@@ -302,17 +345,22 @@ async fn create_test_actor_with_memory(
         mcp_reminder_mode: McpReminderMode::Delta,
         mcp_reminder_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         mcp_connecting_reminder_injected: std::cell::Cell::new(false),
-        mcp_handshakes_done: Arc::new(tokio::sync::Notify::new()),
+        mcp_refresh_gate: Arc::new(tokio::sync::Mutex::new(())),
         user_input_generation: std::sync::atomic::AtomicU64::new(0),
         laziness_debug_log: None,
         last_live_orphan_reconcile: std::cell::Cell::new(None),
-        deferred_prefix: TaskSlot::new(),
+        deferred_prefix: DeferredPrefix::new(),
+        mcp_startup_waits: Default::default(),
+        mcp_init_tasks: Default::default(),
+        weak_self: std::sync::Weak::new(),
+        startup_tasks: Default::default(),
         extension_registry: xai_agent_lifecycle::LocalExtensionRegistry::default(),
         last_announced_local_date: std::cell::Cell::new(chrono::Local::now().date_naive()),
         prefix_carries_fallback_date: std::cell::Cell::new(false),
         last_search_prompt_index: std::sync::atomic::AtomicI64::new(-1),
         last_api_request_at: std::sync::atomic::AtomicI64::new(0),
         hook_registry: std::cell::RefCell::new(None),
+        hook_disabled: Default::default(),
         turn_report: Default::default(),
         turn_abort: Default::default(),
         turn_end_tx: Default::default(),
@@ -325,6 +373,7 @@ async fn create_test_actor_with_memory(
         events: crate::session::events::EventTracker::new(std::path::Path::new("/tmp")),
         observability_bridge: noop_observability_bridge(),
         current_turn_number: std::cell::Cell::new(0),
+        turn_phases: std::sync::Arc::default(),
         last_recap_main_turn: std::cell::Cell::new(0),
         recap_in_flight: std::cell::Cell::new(false),
         recap_epoch: std::cell::Cell::new(0),
@@ -337,6 +386,8 @@ async fn create_test_actor_with_memory(
         title_refresh_enabled: false,
         session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
+        stream_apply_span: parking_lot::Mutex::new(None),
+        current_turn_span_id: parking_lot::Mutex::new(None),
         turn_stream_drained: parking_lot::Mutex::new(std::collections::HashMap::new()),
         pending_image_strip: parking_lot::Mutex::new(std::collections::HashMap::new()),
         image_strip_rewrite_barrier: ImageStripRewriteBarrier::new(),
@@ -519,6 +570,132 @@ async fn test_memory_storage_created_when_enabled() {
                 !actor2.memory.is_enabled(),
                 "memory_storage should be None when disabled"
             );
+        })
+        .await;
+}
+#[tokio::test(flavor = "current_thread")]
+#[allow(clippy::field_reassign_with_default)]
+async fn v2_session_is_pinned_to_isolated_storage_and_disables_legacy_pipeline() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let temp = tempfile::TempDir::new().unwrap();
+            let legacy_root = temp.path().join("memory");
+            let v2_root = temp.path().join("memory-v2");
+            std::fs::create_dir_all(&legacy_root).unwrap();
+            std::fs::write(legacy_root.join("MEMORY.md"), "legacy sentinel").unwrap();
+            let (gateway_tx, _) = mpsc::unbounded_channel();
+            let (persistence_tx, _) = mpsc::unbounded_channel();
+            let mut config = crate::config::MemoryConfig::default();
+            config.enabled = true;
+            config.mode = crate::config::MemoryMode::V2;
+            config.root_dir_override = Some(v2_root.clone());
+            let actor = create_test_actor_with_memory(
+                50_000,
+                100_000,
+                85,
+                gateway_tx,
+                persistence_tx,
+                Some(config),
+            )
+            .await;
+            let actor = std::sync::Arc::new(actor);
+            let storage = actor.memory.storage().unwrap();
+            storage.ensure_initialized().unwrap();
+            assert_eq!(actor.memory.mode(), Some(crate::config::MemoryMode::V2));
+            assert!(!actor.memory.uses_legacy_pipeline());
+            assert!(!actor.run_memory_flush("v2-test", None).await);
+            assert_eq!(
+                actor
+                    .memory
+                    .flush_count
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                0
+            );
+            let sessions = storage.sessions_dir();
+            std::fs::create_dir_all(&sessions).unwrap();
+            std::fs::write(sessions.join("seeded-legacy-input.md"), "must not be read").unwrap();
+            actor.run_dream_slash_command().await;
+            assert_eq!(
+                actor
+                    .memory
+                    .dream_count
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                0
+            );
+            assert!(!actor.memory.flush_config.enabled);
+            assert_eq!(actor.idle_flush_timeout, None);
+            assert!(!actor.memory.save_on_end);
+            assert!(!actor.memory.initial_injection_config.enabled);
+            assert!(actor.memory.backend_params.is_none());
+            assert!(actor.memory.open_index(&storage).is_none());
+            assert!(actor.memory.search_counter.borrow().is_none());
+            let reminder = actor
+                .first_turn_memory_reminder()
+                .await
+                .expect("v2 sessions inject their isolated manifests");
+            assert!(!reminder.contains("legacy sentinel"));
+            assert!(!reminder.contains("must not be read"));
+            assert!(!actor.memory.dream_config.enabled);
+            assert_eq!(actor.dream_check_timeout, None);
+            assert!(storage.global_dir().starts_with(&v2_root));
+            assert!(storage.workspace_dir().starts_with(&v2_root));
+            assert_eq!(
+                std::fs::read_to_string(legacy_root.join("MEMORY.md")).unwrap(),
+                "legacy sentinel"
+            );
+            actor
+                .execute_builtin_slash_command(BuiltinAction::MemoryToggle { enabled: false })
+                .await
+                .unwrap();
+            assert!(!actor.memory.is_enabled());
+            assert_eq!(actor.memory.mode(), Some(crate::config::MemoryMode::V2));
+            actor
+                .execute_builtin_slash_command(BuiltinAction::MemoryToggle { enabled: true })
+                .await
+                .unwrap();
+            let reenabled_storage = actor.memory.storage().unwrap();
+            assert_eq!(reenabled_storage.global_dir(), storage.global_dir());
+            assert_eq!(reenabled_storage.workspace_dir(), storage.workspace_dir());
+            assert!(!actor.memory.uses_legacy_pipeline());
+            let (gateway_tx, _) = mpsc::unbounded_channel();
+            let (persistence_tx, _) = mpsc::unbounded_channel();
+            let mut disabled_config = crate::config::MemoryConfig::default();
+            disabled_config.enabled = false;
+            disabled_config.mode = crate::config::MemoryMode::V2;
+            disabled_config.root_dir_override = Some(temp.path().join("disabled-memory-v2"));
+            let disabled_actor = create_test_actor_with_memory(
+                50_000,
+                100_000,
+                85,
+                gateway_tx,
+                persistence_tx,
+                Some(disabled_config),
+            )
+            .await;
+            assert!(!disabled_actor.memory.is_enabled());
+            assert_eq!(
+                disabled_actor.memory.mode(),
+                Some(crate::config::MemoryMode::V2),
+                "the selected mode remains pinned even while memory is disabled"
+            );
+            assert!(!disabled_actor.memory.uses_legacy_pipeline());
+            assert!(
+                disabled_actor
+                    .build_local_command_availability(&[])
+                    .memory_configured
+            );
+            let disabled_actor = std::sync::Arc::new(disabled_actor);
+            disabled_actor
+                .execute_builtin_slash_command(BuiltinAction::MemoryToggle { enabled: true })
+                .await
+                .unwrap();
+            assert!(disabled_actor.memory.is_enabled());
+            assert_eq!(
+                disabled_actor.memory.storage().unwrap().mode(),
+                crate::config::MemoryMode::V2
+            );
+            assert!(!disabled_actor.memory.uses_legacy_pipeline());
         })
         .await;
 }

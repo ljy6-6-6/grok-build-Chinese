@@ -13,9 +13,7 @@ pub const GROK_CONFIG_ENV: &str = "GROK_CONFIG";
 pub const GROK_CONFIG_PATH_ENV: &str = "GROK_CONFIG_PATH";
 
 /// Hard cap on a `GROK_CONFIG_PATH` overlay read.
-/// Matches the untrusted-config read cap in `managed_text` (`MAX_CONFIG_BYTES`, also 4 MiB).
 /// A huge file, or a special node like `/dev/zero`, must never stall or OOM the agent, so the read is bounded.
-/// An over-cap or non-regular file falls through to no overlay, the same as the unreadable-path handling.
 const MAX_OVERLAY_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug)]
@@ -104,8 +102,6 @@ fn resolve_overlay(inline: Option<&str>, path: Option<&Path>) -> Option<toml::Va
 
 /// Parse and run the full pipeline for the inline candidate.
 /// Returns `None` when the value is empty, fails to parse, is rejected during post-processing, or reduces to an empty table.
-/// The caller then falls through to the path.
-/// Emptiness is decided by [`finalize_overlay`], after `$VAR` expand, `version_overrides`, campaign stripping, and normalize.
 /// An inline object that carries only stripped keys (for example `version_overrides` or `[[campaigns]]`) does not count as a usable overlay.
 fn resolve_inline_overlay(inline: &str) -> Option<(toml::Value, OverlaySource, Vec<String>)> {
     let trimmed = inline.trim();
@@ -132,7 +128,6 @@ fn resolve_path_overlay(path: &Path) -> Option<(toml::Value, OverlaySource, Vec<
 }
 
 /// Read `GROK_CONFIG_PATH` with a hard byte cap ([`MAX_OVERLAY_BYTES`]).
-/// Returns `None` when the path is missing, unreadable, not a regular file (a fifo, `/dev/zero`), or over the cap.
 /// The caller then falls through to no overlay.
 /// It never logs file content.
 fn read_capped_overlay_file(path: &Path) -> Option<String> {
@@ -172,15 +167,8 @@ fn read_capped_overlay_file(path: &Path) -> Option<String> {
 }
 
 /// Post-parse pipeline and the single overlay choke point; both [`resolve_inline_overlay`] and [`resolve_path_overlay`] call it.
-/// It expands `$VAR`s, applies this layer's `version_overrides`, and takes `[[campaigns]]`.
-/// It then confines the overlay to [`crate::config_override::OVERLAY_ALLOW_PATHS`] and normalizes it.
 /// Fail-closed: the overlay carries only soft tables and leaves, everything else is dropped.
 /// The allowlist runs after `version_overrides`, so a patch cannot re-inject a non-allowlisted table.
-///
-/// Returns `None` when the candidate is rejected (`version_overrides` fails) or finalizes to an empty table (no allowlisted key, for example).
-/// The caller then falls through to the next source instead of counting this as a set-but-empty layer.
-/// This is the single place emptiness is decided.
-/// The `version_overrides` warning is redacted and secret-free (via [`crate::version_overrides::VersionOverrideError::redacted`]).
 fn finalize_overlay(
     mut overlay: toml::Value,
     source_label: &str,

@@ -9,7 +9,6 @@ use std::time::Instant;
 /// Default ring buffer capacity (~10 seconds of fast typing).
 const DEFAULT_CAPACITY: usize = 200;
 /// Snapshot of textarea state captured by `PromptWidget::handle_key`.
-///
 /// Stored on `PromptWidget` after each key; read by `AgentView` when building `RawInputEntry`.
 /// `None` fields mean the key was handled before reaching the textarea (e.g., file search, slash command).
 #[derive(Clone, Debug, Default)]

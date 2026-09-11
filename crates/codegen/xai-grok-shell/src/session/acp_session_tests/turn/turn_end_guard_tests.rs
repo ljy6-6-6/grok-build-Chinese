@@ -7,10 +7,9 @@ use std::collections::HashMap;
 use xai_grok_tools::types::template_renderer::TemplateRenderer;
 use xai_grok_tools::types::tool::ToolKind;
 
-// ── TodoGate pure-function tests ──────────────────────────────────
-//
+// ── TodoGate pure-function tests ──────────────────────────────────.
 // Integration coverage lands via the replay harness.
-// These tests cover the gate's decision function plus the reminder builders
+// These tests cover the gate's decision function plus the reminder builders.
 
 #[test]
 fn todo_gate_fires_when_pending_remains() {
@@ -139,10 +138,9 @@ fn todo_gate_reminder_omits_empty_sections() {
     assert!(!r.contains("backed by a live background task"));
 }
 
-// ── `CollectedTodoGateInput::as_input` partition heuristic ───────
-//
-// The rule "first N in_progress are backed (insertion order); pending is never backed" is the primary fix for the `/pr-babysit` false-positive
-// Earlier tests constructed the partition by hand; these tests exercise the real `as_input` against owned input
+// ── `CollectedTodoGateInput::as_input` partition heuristic ───────.
+// The rule "first N in_progress are backed (insertion order); pending is never backed" is the primary fix for the `/pr-babysit` false-positive.
+// Earlier tests constructed the partition by hand; these tests exercise the real `as_input` against owned input.
 
 fn collected(
     items: &[(&str, &str, TodoStatus)],

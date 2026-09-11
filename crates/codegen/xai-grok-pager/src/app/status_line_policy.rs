@@ -71,6 +71,17 @@ impl AppView {
         draws_a_row(&self.current_ui.status_line)
     }
 
+    /// Session the status row binds to. Welcome has no agent tab, so this is
+    /// None until reveal. Do not bind the hidden home session (invisible subprocess).
+    fn status_line_source_agent(&self) -> Option<crate::app::agent::AgentId> {
+        self.active_view.agent_id()
+    }
+
+    fn status_line_source_view(&self) -> Option<&crate::app::agent_view::AgentView> {
+        self.status_line_source_agent()
+            .and_then(|id| self.agents.get(&id))
+    }
+
     /// A fullscreen subagent draws the whole frame.
     /// Separate from [`Self::draws_a_row`]: the row comes back when the subagent closes, so nothing here may clear it or drop the resize it is owed.
     fn a_subagent_owns_the_frame(&self) -> bool {
@@ -83,7 +94,7 @@ impl AppView {
     }
 
     pub(crate) fn status_line_tick_demand_at(&self, now: Instant) -> TickDemand {
-        let source = self.active_view.agent_id();
+        let source = self.status_line_source_agent();
         status_line_tick_demand(TickInputs {
             // `reserves_a_row`, not `resolve`: a row whose config could not be read still takes space, and the tick paints the problem into it
             row_is_drawn: self.draws_a_row() && !self.a_subagent_owns_the_frame(),
@@ -105,7 +116,7 @@ impl AppView {
     }
 
     pub(crate) fn update_status_line_at(&mut self, now: Instant) {
-        let source = self.active_view.agent_id();
+        let source = self.status_line_source_agent();
         // Above the early return: a run outstanding when the row goes away is still owed its count, and the path below no longer reaches it
         self.status_line.abandon_if_past_deadline(now);
 
@@ -247,7 +258,7 @@ impl AppView {
     }
 
     pub(crate) fn refresh_status_line_for(&mut self, agent_id: crate::app::agent::AgentId) {
-        if self.active_view.agent_id() == Some(agent_id) {
+        if self.status_line_source_agent() == Some(agent_id) {
             self.refresh_status_line_now();
         }
     }
@@ -293,7 +304,7 @@ impl AppView {
     /// The fields the shell cannot fill, since only the client knows what the session is called.
     /// Read here alone, so the overlay and the check agree.
     fn client_owned_fields(&self) -> ClientOwnedFields {
-        let Some(agent) = self.active_agent() else {
+        let Some(agent) = self.status_line_source_view() else {
             return ClientOwnedFields::default();
         };
         ClientOwnedFields {
@@ -305,7 +316,7 @@ impl AppView {
     }
 
     fn shell_status_context(&self) -> Option<StatusLineContext> {
-        let mut ctx = self.active_agent()?.status_context.clone()?;
+        let mut ctx = self.status_line_source_view()?.status_context.clone()?;
         // Destructured, so a field added to the overlay is a compile error here rather than one the staleness check watches and nothing applies
         let ClientOwnedFields { session_name } = self.client_owned_fields();
         ctx.session_name = session_name;
@@ -315,7 +326,7 @@ impl AppView {
     /// The pager's suspend-corrected clock, not `ctx.turn.started_at_ms`.
     /// That stamp is sent for clients with no clock of their own; reading it back here would lose the pause correction.
     fn local_turn_elapsed(&self) -> Option<std::time::Duration> {
-        let agent = self.active_agent()?;
+        let agent = self.status_line_source_view()?;
         (!agent.renders_parked())
             .then(|| agent.turn_elapsed())
             .flatten()
@@ -343,7 +354,7 @@ impl AppView {
     }
 
     fn status_line_term_size(&self) -> RowSize {
-        self.active_agent()
+        self.status_line_source_view()
             .and_then(|agent| agent.last_status_line_size)
             .unwrap_or(RowSize::FALLBACK)
     }

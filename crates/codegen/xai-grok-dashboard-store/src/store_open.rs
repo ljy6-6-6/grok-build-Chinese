@@ -13,16 +13,8 @@ use crate::types::SchemaState;
 
 impl WorkspaceStore {
     /// Create-or-open the store at `db_path`.
-    /// Creates the parent directory 0700 and the database file 0600 before SQLite ever opens it; Windows keeps the default profile ACLs.
-    /// Opens through [`JournalMode`]: WAL locally, TRUNCATE plus a per-host file on network mounts, where each host then has its own workspace.
-    /// Re-tightens file and journal-sibling modes, and initializes or version-gates the schema.
-    ///
-    /// # Errors
-    ///
     /// [`crate::StoreError::Unusable`] when the file is not a SQLite database (never deleted or recreated),
-    /// [`crate::StoreError::Busy`] when the busy budget elapses,
-    /// [`crate::StoreError::Io`] on directory/mode failures or when the path is not a regular file (e.g. a planted symlink),
-    /// [`crate::StoreError::Sqlite`] otherwise.
+    /// [`crate::StoreError::Io`] on directory/mode failures or when the path is not a regular file,
     pub fn open(db_path: &Path) -> Result<Self> {
         if let Some(parent) = db_path.parent() {
             xai_grok_config::create_dir_all_owner_only(parent)?;
@@ -32,7 +24,6 @@ impl WorkspaceStore {
         // O_CREAT|O_EXCL with mode 0o600 runs before SQLite's first open, so the file is never visible at umask defaults
         // SQLite accepts a zero-length file as a fresh database
         // Existing paths are validated without following symlinks
-        // Journal siblings inherit the database mode
         create_owner_only(&effective)?;
         let opened_at = Instant::now();
         let mut conn = mode
@@ -61,7 +52,7 @@ impl WorkspaceStore {
                 if created {
                     tracing::info!(
                         path = %effective.display(),
-                        journal_mode = mode.as_str(),
+                        journal_mode = mode.as_ref(),
                         user_version = USER_VERSION,
                         "workspace store created"
                     );

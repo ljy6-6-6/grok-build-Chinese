@@ -122,6 +122,38 @@ async fn subagent_spawn_context_disables_ask_user_question_from_enabled_parent()
     );
 }
 #[tokio::test]
+async fn subagent_spawn_context_carries_parent_bash_tool_params() {
+    let agent = build_minimal_agent_for_tests();
+    {
+        let mut cfg = agent.cfg.borrow_mut();
+        cfg.toolset.bash.max_timeout_secs = Some(36_000.0);
+        cfg.toolset.bash.output_byte_limit = Some(65_536);
+        cfg.remote_settings = Some(crate::util::config::RemoteSettings {
+            auto_background_on_timeout: Some(false),
+            ..Default::default()
+        });
+    }
+    let sid = acp::SessionId::new("parent-bash-params");
+    agent.insert_resident(&sid, make_test_handle("test-model", false, None));
+    let ctx = agent.build_subagent_spawn_context(sid.0.as_ref());
+    let expected_bash = serde_json::json!({
+        "max_timeout_secs": 36_000.0,
+        "output_byte_limit": 65_536,
+        "auto_background_on_timeout": false,
+        "allow_background_operator": true,
+    });
+    assert_eq!(
+        ctx.tool_params_json.bash,
+        expected_bash.as_object().cloned(),
+        "child bash params must equal the parent's resolved [toolset.bash] (incl. remote fallbacks)"
+    );
+    let spawn_src = include_str!("../../subagent/handle_request.rs");
+    assert!(
+        spawn_src.contains("std::mem::take(&mut ctx.tool_params_json)"),
+        "run_shell_child must forward ctx.tool_params_json into spawn_session_on_thread"
+    );
+}
+#[tokio::test]
 async fn subagent_spawn_context_copies_parent_non_interactive() {
     let agent = build_minimal_agent_for_tests();
     let sid_headless = acp::SessionId::new("parent-headless");
@@ -202,6 +234,7 @@ fn model_entry_with_rate_limit(
     crate::agent::config::ModelEntry {
         info,
         bundled_catalog_entry: false,
+        mtls_cert_dir: None,
         api_key: None,
         env_key: None,
         auth_provider: None,

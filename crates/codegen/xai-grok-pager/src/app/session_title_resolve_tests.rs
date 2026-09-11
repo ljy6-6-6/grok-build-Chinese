@@ -412,8 +412,6 @@ async fn pinned_non_uuid_id_is_not_reinterpreted_as_title() {
 /// Regression: a legacy id duplicated across cwd dirs is ambiguous to the session listings, so its title never reaches selection.
 /// `RelocationView::select` drops ids that appear under multiple paths without a journal before the cwd filter runs.
 /// The pin therefore stays unresolved and the profile peek finds nothing.
-/// Materialization fails closed with the hint instead of resuming under an unverified profile.
-/// `pin_title_resume_finds_saved_profile_and_conflicts` covers the unique-id case where the saved profile is carried.
 #[serial_test::serial(GROK_HOME)]
 #[tokio::test]
 async fn duplicate_legacy_id_is_not_title_addressable() {

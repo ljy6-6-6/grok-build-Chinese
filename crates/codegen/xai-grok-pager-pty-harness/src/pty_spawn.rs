@@ -28,19 +28,8 @@ const APPEARANCE_ENV_VARS: &[&str] = &[
     "COLORFGBG",
 ];
 
-/// Host terminal identity markers stripped from the child environment.
-///
-/// The pager's terminal detection
-/// (`xai-grok-pager-render/src/terminal/mod.rs`:
-/// `detect_terminal_brand_from_env` / `detect_byobu_from_env` /
-/// `detect_multiplexer_from_env` / `detect_tmux_meta_from_env`, plus
-/// `embedded_editor.rs`'s `embedded_editor_from_env`) reads all of these,
-/// so any one leaking from the harness's own host terminal reclassifies the
-/// child: a dev running tests inside tmux leaks `TMUX` (every cell becomes
-/// the remuxed profile), inside Cursor leaks `CURSOR_TRACE_ID` (checked
-/// *before* `TERM_PROGRAM`, so it overrides even a test-injected brand),
-/// inside nvim's `:terminal` leaks `NVIM` (clipboard OSC 52 wrapping).
-/// Keep this list in sync with the detection source above.
+/// Markers the pager's brand/mux/editor detection reads. A leak reclassifies the child (tmux, Cursor before TERM_PROGRAM, nvim OSC 52).
+/// Keep in sync with that detection source.
 const HOST_TERMINAL_ENV_VARS: &[&str] = &[
     // Brand chain (detect_terminal_brand_from_env), in detection order.
     "CURSOR_TRACE_ID",
@@ -109,10 +98,7 @@ impl EnvSink for std::collections::BTreeMap<std::ffi::OsString, std::ffi::OsStri
     }
 }
 
-/// Compute the full Unix child environment: the [`TestSandbox`] baseline when
-/// provided (content-backed spawns), otherwise the inherited parent
-/// environment (terminal-probe and grok-wrap fixtures), plus the hygiene pass
-/// and caller overrides from [`apply_child_env`].
+/// Sandbox baseline or inherited parent env, then the hygiene pass and caller overrides from [`apply_child_env`].
 #[cfg(unix)]
 pub(crate) fn compute_child_env(
     sandbox: Option<&TestSandbox>,
@@ -123,10 +109,7 @@ pub(crate) fn compute_child_env(
         Some(sandbox) => sandbox.env().into_iter().collect(),
         None => std::env::vars_os().collect(),
     };
-    // portable-pty parity: its spawn always seeded SHELL before the builder
-    // env. The sandbox baseline sets one; for inherited-env spawns whose host
-    // lacks SHELL (sanitized CI environments), pin the deterministic default
-    // instead of portable-pty's passwd lookup.
+    // portable-pty always seeded SHELL. Pin `/bin/sh` when the host lacks it instead of a passwd lookup.
     map.entry(std::ffi::OsString::from("SHELL"))
         .or_insert_with(|| std::ffi::OsString::from("/bin/sh"));
     if sandboxed {
@@ -139,14 +122,7 @@ pub(crate) fn compute_child_env(
     map
 }
 
-/// Child working directory, portable-pty parity: the explicit cwd only when it
-/// is a real directory, otherwise the child's own HOME (the sandbox home for
-/// content-backed spawns).
-///
-/// Deviation (like the SHELL default in [`compute_child_env`]): portable-pty
-/// uses `$HOME` unchecked — a bad HOME fails the spawn — then the passwd
-/// home. This path checks HOME `is_dir` and falls back to the parent's cwd,
-/// deliberately trading that spawn failure for test robustness.
+/// Explicit cwd if it is a directory, else the child's HOME. Unlike portable-pty, a bad HOME falls back to the parent cwd instead of failing the spawn.
 #[cfg(unix)]
 pub(crate) fn resolve_child_cwd(
     cwd: Option<&Path>,
@@ -168,26 +144,15 @@ pub(crate) fn resolve_child_cwd(
     std::env::current_dir().context("failed to resolve a working directory for the PTY child")
 }
 
-/// Prepare the child environment hygiene + caller overrides. Callers seed the
-/// sink first: sandboxed spawns from the [`TestSandbox`] baseline (inheritance
-/// cleared), inherited-env spawns from the parent environment. Caller
-/// overrides are always applied last.
+/// Hygiene then caller overrides last. Callers seed the sink first (sandbox baseline or inherited parent env).
 pub(crate) fn apply_child_env<S: EnvSink>(cmd: &mut S, env: &[EnvOp<'_>]) {
     // Set TERM so the pager renders with full color support.
     cmd.set_var(OsStr::new("TERM"), OsStr::new("xterm-256color"));
-    // Strip inherited color opt-outs/overrides for the same reason: a
-    // leaked NO_COLOR (common in agent/CI shells) renders the pager
-    // colorless, making style-sensitive assertions (e.g. the selection
-    // highlight color swap) silently untestable on some hosts. Tests may
-    // re-set these via the `env` list (applied after this).
+    // Leaked NO_COLOR renders colorless and makes style asserts untestable. Tests may re-set these after this pass.
     for color_var in ["NO_COLOR", "CLICOLOR", "CLICOLOR_FORCE"] {
         cmd.remove_var(OsStr::new(color_var));
     }
-    // Strip SSH vars inherited from the parent: the harness PTY is a
-    // local terminal, but `SSH_CONNECTION`/`SSH_TTY` leaking through
-    // makes the pager's terminal detector report SSH and disable the
-    // drag-drop image classifier (see
-    // `try_handle_dropped_paths_paste` in `agent_view.rs`).
+    // Leaked SSH vars make the detector report SSH and disable the drag-drop image classifier.
     for ssh_var in ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "SSH_AUTH_SOCK"] {
         cmd.remove_var(OsStr::new(ssh_var));
     }
@@ -200,10 +165,7 @@ pub(crate) fn apply_child_env<S: EnvSink>(cmd: &mut S, env: &[EnvOp<'_>]) {
     for appearance_var in APPEARANCE_ENV_VARS {
         cmd.remove_var(OsStr::new(appearance_var));
     }
-    // Neutralize parent-terminal identity bleed: agent hosts often export
-    // TERM_PROGRAM=ghostty/iTerm/etc. (and mux/editor markers) which make
-    // the child pager adopt that host's key/modifier/clipboard quirks even
-    // though we only set TERM above.
+    // Host TERM_PROGRAM/mux/editor markers would make the child adopt that terminal's quirks.
     for term_var in HOST_TERMINAL_ENV_VARS {
         cmd.remove_var(OsStr::new(term_var));
     }
@@ -215,27 +177,8 @@ pub(crate) fn apply_child_env<S: EnvSink>(cmd: &mut S, env: &[EnvOp<'_>]) {
     }
 }
 
-/// Spawn `cmd` as the session leader of `master`'s PTY.
-///
-/// Replaces portable-pty's `SlavePty::spawn_command` on Unix (its
-/// `CommandBuilder` exposes no `pre_exec` hook) with an equivalent fork/exec:
-/// default signal dispositions, fresh signal mask, `setsid`, the PTY slave as
-/// controlling terminal on stdio, the leaked-fd sweep, and on Linux
-/// `PR_SET_PDEATHSIG(SIGKILL)` so the kernel reaps the child when the
-/// spawning process dies without userspace cleanup.
-///
-/// pdeathsig caveat: the kernel delivers it when the *spawning thread* dies,
-/// not just the process. Harness spawns happen on the calling test thread
-/// (libtest gives each test its own thread that outlives the test body), a
-/// tokio multi-thread worker (alive until runtime shutdown at the end of the
-/// test), or a `spawn_blocking` closure (the scroll-matrix runner's
-/// `run_cell` `block_on`s the whole cell inside one blocking closure). All
-/// three are safe only because the harness is created AND dropped — killing
-/// the child — before that thread exits; the `spawn_blocking` case is the
-/// sharpest edge, since tokio reaps idle blocking threads (~10s), so a
-/// harness escaping its blocking closure gets its pager SIGKILLed mid-test
-/// with nothing in the logs. Do not spawn a harness from a short-lived
-/// helper thread (or blocking closure) that outlives its work.
+/// Own fork/exec because portable-pty has no pre_exec. Linux PDEATHSIG(SIGKILL) reaps the child if the spawner dies without Drop.
+/// The kernel signals the spawning *thread*. Drop the harness before that thread exits, or an idle `spawn_blocking` worker SIGKILLs the pager mid-test.
 #[cfg(unix)]
 pub(crate) fn spawn_pty_session_child(
     mut cmd: std::process::Command,
@@ -250,13 +193,8 @@ pub(crate) fn spawn_pty_session_child(
     let tty = std::ffi::CString::new(tty.into_os_string().into_vec())
         .context("PTY slave tty name contains a NUL byte")?;
 
-    // Parent-death safety net first: pre_exec hooks run in registration
-    // order, so pdeathsig is armed as the child's first post-fork action,
-    // minimizing the unprotected window. SIGKILL (not the helper's SIGTERM
-    // default) so even a child that cannot service a catchable signal is
-    // reaped. The binding survives the exec because test fixtures are
-    // non-setuid with no file capabilities (the kernel clears PDEATHSIG
-    // across a privileged exec).
+    // First post-fork action, so the unprotected window is minimal. SIGKILL reaps a child that cannot service TERM.
+    // Survives exec only for non-setuid fixtures; the kernel clears PDEATHSIG across a privileged exec.
     #[cfg(target_os = "linux")]
     xai_tty_utils::kill_on_parent_death_std_with(&mut cmd, libc::SIGKILL);
 
@@ -280,11 +218,8 @@ pub(crate) fn spawn_pty_session_child(
 /// (which this spawn path replaces).
 #[cfg(unix)]
 fn pty_session_pre_exec(tty: &std::ffi::CStr) -> io::Result<()> {
-    // SAFETY: runs in the forked child between fork and exec, so it calls only
-    // async-signal-safe libc functions; error paths only wrap the raw errno
-    // via `io::Error::last_os_error()` (no allocation). The one exception is
-    // the final /dev/fd sweep, which portable-pty's own pre_exec performs
-    // identically.
+    // SAFETY: fork-to-exec child; only async-signal-safe libc, errno wrapped without allocation.
+    // The /dev/fd sweep matches portable-pty's own pre_exec.
     unsafe {
         // Clear inherited signal dispositions and mask…
         for signo in [
@@ -301,11 +236,7 @@ fn pty_session_pre_exec(tty: &std::ffi::CStr) -> io::Result<()> {
         libc::sigemptyset(&mut empty_set);
         libc::sigprocmask(libc::SIG_SETMASK, &empty_set, std::ptr::null_mut());
 
-        // …become a session (and thus process-group) leader, so the harness's
-        // group kill takes the child's own descendants with it. Raw setsid
-        // (not the shared detach helper) is deliberate: the helper's EPERM
-        // fallback to setpgid would leave the child sessionless-but-grouped
-        // and break the TIOCSCTTY acquisition below…
+        // Session leader so a group kill takes descendants. Raw setsid: the detach helper's setpgid fallback would break TIOCSCTTY.
         if libc::setsid() == -1 {
             return Err(io::Error::last_os_error());
         }
@@ -330,11 +261,7 @@ fn pty_session_pre_exec(tty: &std::ffi::CStr) -> io::Result<()> {
             libc::close(fd);
         }
 
-        // …and close host fds leaked past the stdio triple. This also closes
-        // std's CLOEXEC exec-status pipe, so an exec failure (e.g. a bad
-        // binary path) surfaces as a successful spawn plus an instant child
-        // exit instead of a spawn error — parity with portable-pty's own
-        // pre_exec sweep, which this path replaces.
+        // Also closes std's exec-status pipe, so a bad binary is a successful spawn plus instant exit — parity with portable-pty.
         portable_pty::unix::close_random_fds();
     }
     Ok(())
@@ -346,13 +273,7 @@ mod tests {
 
     use super::*;
 
-    /// Every host-terminal marker the pager's detection chain reads must be
-    /// stripped from the child env. The pollution is seeded directly into the
-    /// sink (the same map inherited entries land in, so `remove_var` takes the
-    /// identical path) rather than via process-global `set_var` (racy under
-    /// parallel tests). Exercises the `CommandBuilder` sink (the Windows spawn
-    /// path); `unix_child_env_strips_markers_and_keeps_sandbox_baseline`
-    /// covers the map sink the Unix spawn feeds to `std::process::Command`.
+    /// Seed into the sink, not process-global `set_var` (racy under parallel tests). This covers the Windows CommandBuilder sink.
     #[test]
     fn apply_child_env_strips_all_host_terminal_markers() {
         let mut cmd = CommandBuilder::new("true");
@@ -445,10 +366,7 @@ mod tests {
         assert_eq!(cmd.get_env("GROK_LEADER_SOCKET"), None);
     }
 
-    /// The Unix spawn path feeds a plain env map to `std::process::Command`.
-    /// The sandbox baseline must win over nothing-inherited, the hygiene pass
-    /// must strip host markers seeded into the map (the inherited-env mode
-    /// stores parent vars in this same map), and caller ops apply last.
+    /// Sandbox baseline wins, hygiene strips markers seeded into the same map, caller ops apply last.
     #[cfg(unix)]
     #[test]
     fn unix_child_env_strips_markers_and_keeps_sandbox_baseline() {

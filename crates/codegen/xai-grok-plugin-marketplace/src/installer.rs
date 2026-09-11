@@ -41,6 +41,7 @@ pub fn install_from_marketplace(
     provenance: MarketplaceProvenance,
     registry: &mut InstallRegistry,
 ) -> Result<MarketplaceInstallResult, InstallError> {
+    let _install_span = tracing::info_span!("marketplace.install").entered();
     // Each plugin gets its own repo key and symlink.
     let plugin_relative_path =
         MarketplaceRelativePath::parse(plugin_relative_path).map_err(|e| {
@@ -96,19 +97,7 @@ pub fn install_from_marketplace(
 }
 
 /// Install a plugin from a remote git URL (superpowers-style marketplace).
-///
 /// Clones the plugin repo and installs it via the standard git install pipeline; pins to `git_sha` if set, otherwise uses `git_ref` or HEAD.
-///
-/// # Security
-///
-/// Marketplace plugins are **not cryptographically signed**.
-/// A remote install without `git_sha` tracks a mutable ref (branch/tag/HEAD) and can be substituted by anyone who can push that ref.
-/// Prefer publishing `sha` in `plugin-index.json` and installing with that pin.
-///
-/// `require_sha` (from [`crate::config::load_require_sha`]) fails such installs closed.
-/// It covers every path that fetches plugin code from a remote git URL (marketplace `remote_url` entries, direct installs, git updates).
-/// It does NOT cover plugins vendored inside a marketplace source itself.
-/// Those come from the synced source checkout, whose branch is not yet pinnable.
 pub fn install_from_remote_url(
     url: &str,
     git_ref: Option<&str>,
@@ -119,6 +108,7 @@ pub fn install_from_remote_url(
     registry: &mut InstallRegistry,
     require_sha: bool,
 ) -> Result<MarketplaceInstallResult, InstallError> {
+    let _install_span = tracing::info_span!("marketplace.install").entered();
     let subdir = subdir
         .map(|s| {
             MarketplaceRelativePath::parse(s)
@@ -389,7 +379,6 @@ pub fn update_from_marketplace_entry_transactional(
     registry.insert(repo_key.clone(), new_repo);
     if let Err(save_error) = registry.save() {
         // The directory swap already succeeded (final_path holds the new plugin).
-        // Roll the filesystem back to the previous install so it stays consistent with the on-disk registry, which still holds the old record
         // Only revert the registry record once the files are actually restored
         // Otherwise we would leave the new files on disk while the registry claims the old version
         let fs_rolled_back = remove_path_if_exists(&final_path).is_ok()
@@ -919,10 +908,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&install_dir);
         std::fs::create_dir_all(&install_dir).unwrap();
         // Build the registry against an explicit tempdir rather than going through `InstallRegistry::load()`.
-        // `load()` resolves the install dir via the process-global `grok_home()` `OnceLock` (first-write-wins). A parallel
-        // test in this binary can cache the real `~/.grok` before this runs,
-        // which would leak the registry tests into the real home and make them
-        // order-dependent and flaky.
+        // `load()` resolves the install dir via the process-global `grok_home()` `OnceLock` (first-write-wins). A parallel test in this binary can cache the real `~/.grok` before this runs, which would leak the registry tests into the real home and make them order-dependent and flaky.
         let mut registry = InstallRegistry::empty(install_dir);
         f(&mut registry)
     }

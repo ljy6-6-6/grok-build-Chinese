@@ -267,7 +267,7 @@ impl Drop for StreamSpanTiming {
             Stage::Start => TtftOutcome::RequestError,
             Stage::RequestBuilt | Stage::HeadersRead => TtftOutcome::HttpError,
         };
-        region.span().record(TTFT_OUTCOME, outcome.as_str());
+        region.span().record(TTFT_OUTCOME, outcome.as_ref());
         region.close();
     }
 }
@@ -344,7 +344,8 @@ struct HeldSpan {
     returned_at: Instant,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, strum::AsRefStr, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 enum TtftOutcome {
     Content,
     Error,
@@ -354,22 +355,9 @@ enum TtftOutcome {
     HttpError,
 }
 
-impl TtftOutcome {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Content => "content",
-            Self::Error => "error",
-            Self::EndOfStream => "end_of_stream",
-            Self::Dropped => "dropped",
-            Self::RequestError => "request_error",
-            Self::HttpError => "http_error",
-        }
-    }
-}
-
 impl HeldSpan {
     fn release(mut self, outcome: TtftOutcome) {
-        self.region.span().record(TTFT_OUTCOME, outcome.as_str());
+        self.region.span().record(TTFT_OUTCOME, outcome.as_ref());
         if let Some(segment) = self.segment.take() {
             segment.close();
         }

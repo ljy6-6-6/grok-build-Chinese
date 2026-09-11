@@ -28,18 +28,8 @@ pub fn session_id_for_direct_load(query: &str) -> Option<&str> {
     Some(q)
 }
 
-/// Derive a short repo display name from a CWD path.
-///
-/// Uses the last 2 normal path components joined by `-`.
-/// For paths with only one normal component (e.g., `/xai`), returns that component alone.
-/// Does not perform tilde expansion; callers provide absolute paths.
-/// Returns `"unknown"` for empty input.
-///
-/// Examples: `/home/user/fw/1` becomes `"fw-1"`, `/xai` becomes `"xai"`, `/` becomes `"/"`.
-///
-/// Shared by the session-list builder (which stamps each entry's `repo_name`) and the picker pinning below.
-/// That keeps the current-cwd key matching a group key.
-/// Callers pass the *live* cwd (`app.cwd` / `agent.session.cwd`) so a project switch (`Effect::SetWorkingDir`) is reflected immediately.
+/// Derive a short repo display name from a CWD path. For paths with only one normal component
+/// (e.g., `/xai`), returns that component alone.
 pub(crate) fn repo_name_from_cwd(cwd: &str) -> String {
     let path = std::path::Path::new(cwd);
     let components: Vec<&str> = path
@@ -200,13 +190,9 @@ impl SessionPickerLanes {
     }
 }
 
-/// Loading gate for a session picker's spinner.
-/// True while no loaded entry passes the source filter and the native fetch or foreign scan is still in flight.
-/// The filter check (not `entries.is_none()`) matters: the fast foreign scan can land rows the default Grok view hides before the native list
-/// arrives.
-/// The empty state must wait until both lanes settle.
-/// Shared by rendering, redraw forcing, and tick demand so the three cannot drift.
-/// A spinner that renders without demanding ticks parks on its first frame.
+/// Loading gate for a session picker's spinner. The empty state must wait until both lanes settle.
+/// Shared by rendering, redraw forcing, and tick demand so the three cannot drift. A spinner that
+/// renders without demanding ticks parks on its first frame.
 pub(crate) fn loading_spinner_active(
     entries: Option<&[SessionPickerEntry]>,
     source_filter: SourceFilter,
@@ -239,13 +225,8 @@ pub(crate) fn loading_spinner_active(
 // Source filter
 // ---------------------------------------------------------------------------
 
-/// Filter session entries by native, headless, remote, or external source.
-///
-/// Default is [`Self::Grok`]: native Grok sessions only (local / remote / conversation).
-/// That keeps Claude/Codex/Cursor foreign sessions and `grok -p` one-shots out of `/resume`.
-/// `f` cycles Grok, Headless, External, All, Local, Remote, then back to Grok.
-/// Entering or leaving `Headless` refetches.
-/// The shell excludes headless rows from every other page's fetch, so a client-side refilter of the cached page could never populate it.
+/// Filter session entries by native, headless, remote, or external source. Default is
+/// [`Self::Grok`]: native Grok sessions only (local / remote / conversation).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SourceFilter {
     /// Native Grok sessions only; excludes Claude/Codex/Cursor foreign rows.
@@ -322,11 +303,8 @@ impl SourceFilter {
     }
 
     /// Returns `true` if a session with the given `source` string and `session_kind` passes the filter.
-    ///
-    /// grok.com conversations carry `source == "conversation"` and live remotely, so they pass the `Remote` filter (and `Grok` / `All`) but not
-    /// `Local`.
-    /// Foreign sources (`claude` / `codex` / `cursor`) only pass `External` and `All`.
-    /// Headless rows pass only `Headless`; every other page excludes them, mirroring the server-side fetch policy.
+    /// Foreign sources (`claude` / `codex` / `cursor`) only pass `External` and `All`. Headless rows
+    /// pass only `Headless`; every other page excludes them, mirroring the server-side fetch policy.
     pub fn matches(self, source: &str, session_kind: Option<&str>) -> bool {
         let is_headless = session_kind == Some("headless");
         match self {
@@ -464,20 +442,16 @@ fn selectable_fallback<T>(map: &[Option<T>], preferred: usize) -> Option<usize> 
 // Filtering
 // ---------------------------------------------------------------------------
 
-/// Case-insensitive substring match (callers pass a pre-lowercased query).
-///
-/// Deliberately not an ordered-chars subsequence match.
-/// That matched so loosely (e.g. "rc" hitting "rust-check") that spurious title rows drowned out the results users actually searched for.
+/// Case-insensitive substring match (callers pass a pre-lowercased query). Deliberately not an
+/// ordered-chars subsequence match. That matched so loosely (e.g. "rc" hitting "rust-check") that
+/// spurious title rows drowned out the results users actually searched for.
 pub(crate) fn fuzzy_matches_session(name: &str, query: &str) -> bool {
     query.is_empty() || name.to_lowercase().contains(query)
 }
 
-/// The query the picker's local fuzzy filter should apply on top of the current entries.
-///
-/// When `entries_query` (the query the entries were server-fetched with) matches the live query, the entries are already filtered server-side.
-/// The server matches message content as well as title, so the local fuzzy match is skipped: re-applying it would hide content-only hits.
-/// Every consumer of [`filter_session_entries`] / [`build_entry_map`] on picker state must use this.
-/// Then input handling, rendering, and cursor re-anchoring agree on row indices.
+/// The query the picker's local fuzzy filter should apply on top of the current entries. The server
+/// matches message content as well as title, so the local fuzzy match is skipped: re-applying it
+/// would hide content-only hits.
 pub(crate) fn effective_filter_query<'a>(
     live_query: &'a str,
     entries_query: Option<&str>,
@@ -489,10 +463,9 @@ pub(crate) fn effective_filter_query<'a>(
     }
 }
 
-/// Filter session entries by query and source filter, returning indices of matching entries.
-///
-/// When the query is empty, all entries match the text filter.
-/// The `source_filter` is always applied (entries whose `source` field does not pass [`SourceFilter::matches`] are excluded).
+/// Filter session entries by query and source filter, returning indices of matching entries. When
+/// the query is empty, all entries match the text filter. The `source_filter` is always applied
+/// (entries whose `source` field does not pass [`SourceFilter::matches`] are excluded).
 pub(crate) fn filter_session_entries(
     entries: Option<&[SessionPickerEntry]>,
     query: &str,
@@ -1327,12 +1300,7 @@ mod tests {
             None,
         );
 
-        // Expected layout (sorted by repo_name):
-        //   0: None          (header "repo-a")
-        //   1: Fuzzy(orig=1)  (s1 under repo-a)
-        //   2: Fuzzy(orig=2)  (s2 under repo-a)
-        //   3: None          (header "repo-b")
-        //   4: Fuzzy(orig=0)  (s0 under repo-b)
+        // Expected layout (sorted by repo_name): 0: None (header "repo-a").
         assert_eq!(map.len(), 5);
         assert!(map[0].is_none(), "repo-a header");
         assert!(
@@ -1388,13 +1356,7 @@ mod tests {
             None,
         );
 
-        // Expected:
-        //   0: None            (header "repo-a")
-        //   1: Fuzzy(orig=0)   (s0 under repo-a)
-        //   2: None            (header "repo-b")
-        //   3: Fuzzy(orig=1)   (s1 under repo-b)
-        //   4: None            (content header)
-        //   5: Content(idx=1)  (s_new; s0 deduped)
+        // Expected: 0: None (header "repo-a").
         assert_eq!(map.len(), 6);
         assert!(map[0].is_none(), "repo-a header");
         assert!(matches!(

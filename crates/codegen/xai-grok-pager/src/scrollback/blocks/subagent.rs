@@ -60,11 +60,8 @@ pub struct SubagentBlock {
     pub is_background: bool,
     /// Lifecycle kind.
     pub kind: SubagentBlockKind,
-    /// Live activity label from the child session's turn tracker.
-    ///
-    /// Updated on each `SubagentProgress` tick while the subagent is running.
-    /// Shown inline in the collapsed scrollback line (e.g. "Thinking", "Running: cargo build").
-    /// The user sees interactive progress without opening the subagent view.
+    /// Live activity label from the child session's turn tracker. The user sees interactive progress without opening
+    /// the subagent view.
     pub activity_label: Option<String>,
 }
 

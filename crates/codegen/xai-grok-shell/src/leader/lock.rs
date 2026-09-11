@@ -31,14 +31,9 @@ pub fn compute_ws_url_suffix(ws_url: &str) -> String {
     format!("-{:08x}", hash as u32)
 }
 
-/// Env var that overrides the leader socket path and, by extension, the sibling `.lock` path.
-/// Set by the `--leader-socket` flag, or exported directly.
-/// Lets a developer sandbox a leader instance away from the default
-/// `~/.grok/leader.sock` — e.g. run a local branch build's leader without
-/// colliding with an installed stable leader on the same machine.
-/// Both the client (`connect_or_spawn`) and the leader (`run_leader`) honor it, and the spawned leader subprocess inherits it.
-/// All parties therefore bind the same path.
-/// When set, the WS-URL-derived suffix (`compute_ws_url_suffix`) is bypassed entirely.
+/// Env var that overrides the leader socket path and, by extension, the sibling `.lock` path. Set by the `--leader-socket` flag, or exported directly.
+/// Lets a developer sandbox a leader instance away from the default `~/.grok/leader.sock` — e.g. run a local branch build's leader without colliding with an installed stable leader on the same machine.
+/// Both the client (`connect_or_spawn`) and the leader (`run_leader`) honor it, and the spawned leader subprocess inherits it. All parties therefore bind the same path. When set, the WS-URL-derived suffix (`compute_ws_url_suffix`) is bypassed entirely.
 pub const LEADER_SOCKET_ENV: &str = "GROK_LEADER_SOCKET";
 
 /// The explicit socket-path override, if [`LEADER_SOCKET_ENV`] is set and non-empty.
@@ -116,19 +111,9 @@ pub enum LockError {
     Timeout(Duration),
 }
 
-/// Lock manager for the leader process using OS-level file locking (flock).
-///
-/// The lock file serves two purposes:
-/// 1. Exclusive lock indicates who is the leader (or who is spawning)
-/// 2. File contents store the leader's PID for diagnostics
-///
-/// How the lock is used:
-/// - Leader holds exclusive lock for its entire lifetime
-/// - Clients use try_lock to check if leader exists and coordinate spawning
-///
-/// Cleanup behavior:
-/// - If lock is held when dropped (crash/exit), files are cleaned up
-/// - If `release()` is called before drop, files are NOT cleaned up (handoff to leader)
+/// Lock manager for the leader process using OS-level file locking (flock). The lock file serves two purposes: Exclusive lock indicates who is the leader (or who is spawning)
+/// File contents store the leader's PID for diagnostics How the lock is used: Leader holds exclusive lock for its entire lifetime Clients use try_lock to check if leader exists and coordinate spawning
+/// Cleanup behavior: If lock is held when dropped (crash/exit), files are cleaned up If `release()` is called before drop, files are NOT cleaned up (handoff to leader)
 #[derive(Debug)]
 pub struct LeaderLock {
     lock_path: PathBuf,
@@ -176,7 +161,6 @@ impl LeaderLock {
     }
 
     /// Try to acquire exclusive lock without blocking.
-    ///
     /// Returns `Ok(true)` if lock acquired, `Ok(false)` if already held by another process.
     /// After acquiring, call `write_pid()` to record the leader's PID.
     pub fn try_acquire(&mut self) -> Result<bool, LockError> {
@@ -192,13 +176,9 @@ impl LeaderLock {
         }
     }
 
-    /// Acquire exclusive lock with a bounded wait, re-opening the lock-file path on every attempt.
-    ///
-    /// Polls `try_lock_exclusive()` every 200ms until acquired or the timeout elapses (`LockError::Timeout`).
+    /// Acquire exclusive lock with a bounded wait, re-opening the lock-file path on every attempt. Polls `try_lock_exclusive()` every 200ms until acquired or the timeout elapses (`LockError::Timeout`).
     /// The re-open matters on the leader path: a client on the old flow unlinks the lock file in its `Drop` when it times out.
-    /// The winner must therefore acquire on the freshly re-created inode; a single held fd would keep polling the stale, unlinked inode forever.
-    ///
-    /// Async so the 200ms poll yields to the Tokio runtime instead of blocking a worker thread; `run_leader` calls this on the multi-thread runtime.
+    /// The winner must therefore acquire on the freshly re-created inode; a single held fd would keep polling the stale, unlinked inode forever. Async so the 200ms poll yields to the Tokio runtime instead of blocking a worker thread; `run_leader` calls this on the multi-thread runtime.
     pub(crate) async fn acquire_reopen_timeout(
         &mut self,
         timeout: Duration,

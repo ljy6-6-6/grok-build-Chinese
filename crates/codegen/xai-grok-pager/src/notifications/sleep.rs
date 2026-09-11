@@ -6,7 +6,6 @@
 use std::cell::Cell;
 
 /// Prevents idle sleep while an agent turn is running.
-///
 /// Calls are idempotent: repeated `inhibit()` or `release()` calls are no-ops when already in the requested state.
 /// On `Drop`, any held assertion is released.
 pub struct SleepInhibitor {
@@ -106,10 +105,9 @@ impl SleepInhibitor {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
         xai_tty_utils::detach_std_command(&mut cmd);
-        // The spawned process is the lock holder: `systemd-inhibit` keeps the idle-inhibit fd itself and runs `sleep infinity` as its child
-        // That is the same pid `release()` SIGTERMs on a clean turn end
-        // Bind that pid to us so a crashed or killed grok (SIGKILL, `panic=abort` SIGABRT, no Drop runs) cannot leave it running forever
-        // A leaked `systemd-inhibit` holds the idle lock and pid slots on shared hosts
+        // The spawned process is the lock holder: `systemd-inhibit` keeps the idle-inhibit fd itself and runs `sleep
+        // infinity` as its child. Bind that pid to us so a crashed or killed grok (SIGKILL, `panic=abort` SIGABRT, no Drop
+        // runs) cannot leave it running forever.
         xai_tty_utils::kill_on_parent_death_std(&mut cmd);
         #[allow(clippy::disallowed_methods)] // bound by kill-on-parent-death; released each turn
         let result = cmd.spawn();

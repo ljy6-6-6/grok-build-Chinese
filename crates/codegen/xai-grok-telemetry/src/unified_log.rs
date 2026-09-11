@@ -126,10 +126,9 @@ struct LogWriter {
     /// `None` on platforms with no cheap stable file id, where only disappearance is detectable.
     identity: Option<FileIdentity>,
     last_maintenance: Instant,
-    /// Set when `path` stopped resolving to our inode **and** reopening it failed; writes are dropped while it is set.
-    /// Appending to the old descriptor would land bytes in a file no reader can find and no process will ever trim.
-    /// Dropping them loses nothing (they were already unreadable) and stops an invisible file growing on a disk that may already be full.
-    /// Cleared by the next successful reopen, retried on the maintenance cadence.
+    /// Set when `path` stopped resolving to our inode and reopening it failed; writes are dropped while it is set. Appending
+    /// to the old descriptor would land bytes in a file no reader can find and no process will ever trim. Dropping them loses
+    /// nothing (they were already unreadable) and stops an invisible file growing on a disk that may already be full.
     detached: bool,
 }
 
@@ -142,16 +141,9 @@ static WRITER: LazyLock<Mutex<Option<LogWriter>>> = LazyLock::new(|| Mutex::new(
 /// See [`redirect_to_temp_for_tests`].
 static TEST_REDIRECT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Redirect all subsequent unified-log writes **and** snapshot reads to a
-/// per-process file under the system temp directory, so test binaries stop
-/// writing synthetic events into the developer's real
-/// `~/.grok/logs/unified.jsonl` (those bursts inflate exactly the counters
-/// an incident responder greps for).
 /// Runtime-activated rather than a cargo feature: Bazel compiles production and test targets with one shared feature set.
-/// A feature gate would therefore leak into production builds.
-///
-/// Idempotent and safe at any point: an already-open writer is re-pointed, so an emit that precedes the redirect cannot pin the real path.
-/// Test binaries install it pre-main via `#[ctor]`.
+/// A feature gate would therefore leak into production builds. Idempotent and safe at any point: an already-open writer
+/// is re-pointed, so an emit that precedes the redirect cannot pin the real path.
 pub fn redirect_to_temp_for_tests() {
     TEST_REDIRECT.store(true, std::sync::atomic::Ordering::Relaxed);
     if let Ok(mut guard) = WRITER.lock() {
@@ -166,14 +158,9 @@ fn log_path() -> PathBuf {
     grok_home().join(LOG_DIR).join(LOG_FILE)
 }
 
-/// Owner-only (0o700), freshly-created directory for the test redirect.
-///
-/// The stream carries path metadata and credential tail fragments, and the system temp dir is world-writable on Linux.
-/// A pre-planted directory or symlink would let another local user read the file.
-/// It could also make the writer and [`trim_file`] operate through a symlink onto a victim file.
-/// The non-recursive `create` fails on any pre-existing path instead of adopting it, and the nanos component makes the name unpredictable.
-/// Panicking on failure is deliberate: this branch only runs in test binaries.
-/// Silently falling back would reopen the hole via `open_writer_at`'s `create_dir_all`.
+/// Owner-only (0o700), freshly-created directory for the test redirect. The non-recursive `create` fails on any
+/// pre-existing path instead of adopting it, and the nanos component makes the name unpredictable. Panicking on failure
+/// is deliberate: this branch only runs in test binaries.
 fn test_log_dir() -> &'static PathBuf {
     static TEST_LOG_DIR: OnceLock<PathBuf> = OnceLock::new();
     TEST_LOG_DIR.get_or_init(|| {
@@ -222,10 +209,9 @@ fn open_writer() -> Option<LogWriter> {
     open_writer_at(log_path())
 }
 
-/// Open (creating if needed) a writer for an explicit path.
-///
-/// Split from [`open_writer`] so a writer re-points at **its own** path when healing a stale handle rather than re-resolving `$GROK_HOME`.
-/// That also makes the healing path testable against a temp directory.
+/// Open (creating if needed) a writer for an explicit path. Split from [`open_writer`] so a writer re-points at its own
+/// path when healing a stale handle rather than re-resolving `$GROK_HOME`. That also makes the healing path testable
+/// against a temp directory.
 fn open_writer_at(path: PathBuf) -> Option<LogWriter> {
     if let Some(parent) = path.parent()
         && let Err(e) = fs::create_dir_all(parent)
@@ -254,14 +240,9 @@ fn open_writer_at(path: PathBuf) -> Option<LogWriter> {
 }
 
 impl LogWriter {
-    /// Re-point at the live file if ours was replaced or removed, and trim if the file has grown past [`MAX_SIZE`].
-    ///
-    /// The size check reads the **real** file rather than a per-process byte counter.
-    /// A counter only sees this process's own writes, so writers sharing one log each believed they were under the cap.
-    /// Orphaned writers were observed at 8.5 MB against the 5 MB cap.
-    ///
-    /// Returns whether the handle is safe to write to.
-    /// `false` means the file was replaced or removed and reopening failed, so the caller drops the entry instead of appending somewhere unreadable.
+    /// The size check reads the real file rather than a per-process byte counter. A counter only sees this process's own
+    /// writes, so writers sharing one log each believed they were under the cap. `false` means the file was replaced or
+    /// removed and reopening failed, so the caller drops the entry instead of appending somewhere unreadable.
     fn maintain(&mut self) -> bool {
         if self.last_maintenance.elapsed() < MAINTENANCE_INTERVAL {
             return !self.detached;
@@ -320,33 +301,13 @@ fn write_entry(entry: &LogEntry) {
     write_lines(&line);
 }
 
-/// Drop the oldest lines from the file, keeping roughly the last half, **preserving the inode**.
-///
-/// Rewrites the retained tail at offset 0 and truncates to match.
 /// This must not go through a temp file and rename: every other process holds an `O_APPEND` descriptor on this inode.
-/// Swapping a fresh file in underneath them leaves each one appending to an unlinked inode that nothing can read and nothing will ever trim.
-/// One developer machine accumulated roughly 26 MB across six orphaned inodes while the visible log held only the most recent trimmer's writes.
-///
-/// Truncating in place gives up the rename's crash-atomicity so concurrent writers keep working.
-/// A crash between the write and the `set_len` leaves the tail followed by stale bytes, at most a few garbled lines in a line-delimited log.
-/// A sibling appending *during* the rewrite may lose that one line to the truncation.
-///
-/// The whole read-modify-write is held under an exclusive advisory lock on the log itself; trimming in place is only safe for one process at a time.
-///
-/// Known limitation: a single line longer than half the file leaves no newline to cut at, and the trim is skipped rather than split that line.
-/// The log then stays over its cap until a shorter line arrives.
+/// Known limitation: a single line longer than half the file leaves no newline to cut at, and the trim is skipped rather
+/// than split that line. The log then stays over its cap until a shorter line arrives.
 pub fn trim_file(path: &std::path::Path) {
-    // One trimmer at a time, across processes
-    // Writers decide on the real on-disk size, so when the log crosses the cap every process reaches here inside the same maintenance window
-    // Two of them interleaving a multi-megabyte rewrite at offset 0 would splice one tail into the other
-    // Worse, a trimmer that reads while another is mid-rewrite sees the new tail written over the old head and computes its own tail from that
-    //
     // `try_lock`, not `lock`: a contended trim is one somebody else is already doing, so there is nothing to wait for
-    // Waiting would park this process's writer mutex on a foreign process's I/O
-    //
-    // A trimmer that decided to trim just before another one finished will find a freshly halved file and halve it again
-    // Losing another half of an over-budget diagnostic log is cheaper than interleaved rewrites, so the size is deliberately not re-checked here
-    // Callers trim on their own terms and the unit tests trim small files directly
+    // Waiting would park this process's writer mutex on a foreign process's I/O. Losing another half of an over-budget
+    // diagnostic log is cheaper than interleaved rewrites, so the size is deliberately not re-checked here.
     let Ok(mut file) = OpenOptions::new().read(true).write(true).open(path) else {
         return;
     };
@@ -405,10 +366,8 @@ pub fn emit(lvl: LogLevel, msg: &str, sid: Option<&str>, ctx: Option<serde_json:
     write_entry(&entry);
 }
 
-/// Ingest a batch of log entries from a client (pager or desktop).
-///
-/// Called by the `x.ai/log` notification handler.
-/// Entries from [`LogSource::Shell`] are rejected to prevent spoofing.
+/// Ingest a batch of log entries from a client (pager or desktop). Called by the `x.ai/log` notification handler. Entries
+/// from [`LogSource::Shell`] are rejected to prevent spoofing.
 pub fn ingest_client_entries(src: LogSource, entries: &[ClientLogEntry]) {
     if matches!(src, LogSource::Shell) || entries.is_empty() {
         return;
@@ -457,10 +416,8 @@ pub fn path() -> PathBuf {
     log_path()
 }
 
-/// Read the current unified log file and return its contents.
-///
-/// Returns `None` if the log file doesn't exist or can't be read.
-/// Used by diagnostic uploads to capture the log state at a point in time.
+/// Read the current unified log file and return its contents. Returns `None` if the log file doesn't exist or can't be
+/// read. Used by diagnostic uploads to capture the log state at a point in time.
 pub fn snapshot_log() -> Option<Vec<u8>> {
     let path = log_path();
     // Flush pending writes before reading.
@@ -476,10 +433,9 @@ pub fn snapshot_log() -> Option<Vec<u8>> {
     }
 }
 
-/// Read the unified log and return only entries belonging to the given session.
-///
-/// Parses each JSONL line, keeps entries where `"sid"` matches `session_id`, and returns the filtered lines as JSONL bytes.
-/// Returns `None` if the log is empty or contains no entries for this session.
+/// Read the unified log and return only entries belonging to the given session. Parses each JSONL line, keeps entries
+/// where `"sid"` matches `session_id`, and returns the filtered lines as JSONL bytes. Returns `None` if the log is empty
+/// or contains no entries for this session.
 pub fn snapshot_session_log(session_id: &str) -> Option<Vec<u8>> {
     let path = log_path();
     if let Ok(mut guard) = WRITER.lock()

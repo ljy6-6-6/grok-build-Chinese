@@ -299,6 +299,10 @@ impl AgentView {
         let Some((req, tx)) = self.pending_elicitation.take() else {
             return;
         };
+        // Mandatory ingress wins: evict an open feedback modal before the promoted elicitation stashes the composer.
+        self.displace_feedback_modal(
+            crate::views::feedback_modal::FeedbackModalDisplacement::McpElicitation,
+        );
         let stashed = self.stash_prompt_for_elicitation();
         self.elicitation_view = Some(ElicitationViewState::from_request(req, stashed, Some(tx)));
     }
@@ -411,9 +415,7 @@ impl AgentView {
     }
 
     /// Stash the composer draft for an opening elicitation card.
-    ///
     /// Returns `None` (composer untouched) when an earlier card (permission, question, plan approval) already displaced the session draft.
-    /// The live composer then holds that card's followup or freeform text, or nothing.
     /// Stashing that would make this card later restore an empty draft over the one the earlier card puts back.
     pub(crate) fn stash_prompt_for_elicitation(
         &mut self,

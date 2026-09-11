@@ -136,6 +136,7 @@ fn external_stream_end_to_end() {
         hook_rewrote: false,
         duration_ms: 3,
         tool_result_size_bytes: None,
+        model_id: "grok".into(),
         file_path: None,
         parameters: Some(serde_json::json!({ "command": CANARY_CMD })),
         tool_use_id: Some("call-gates-off".into()),

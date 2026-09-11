@@ -166,7 +166,6 @@ pub fn elicit_result_from_wire(
 
 /// The message and mode-tagged fields of a supported, size-validated elicitation request.
 /// This is exactly what [`McpElicitExtRequest`] still needs on top of the session/tool-call identifiers the shell adds.
-///
 /// [`McpElicitExtRequest`]: xai_grok_tools::mcp_elicitation::McpElicitExtRequest
 #[derive(Debug, Clone)]
 pub struct WireElicitFields {

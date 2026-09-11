@@ -1,14 +1,14 @@
 pub mod changelog;
+pub mod dual_clock;
 pub mod event_id;
 pub mod grok_home;
 pub mod secure_file;
+pub mod subprocess;
 pub mod tips;
 pub mod uname;
 pub use xai_grok_shared::clipboard;
 pub use xai_grok_shared::stderr::{stderr_lock, with_locked_stderr};
-/// Generate a pseudo-random f64 in [0.0, 1.0).
-///
-/// Entropy comes entirely from `RandomState::new()`, which the OS seeds (via `getrandom`) on each call.
+/// Generate a pseudo-random f64 in [0.0, 1.0). Entropy comes entirely from `RandomState::new()`, which the OS seeds (via `getrandom`) on each call.
 /// Dividing the top 53 hash bits by `2^53` stays uniform where casting a full `u64` to `f64` would collide values above `2^52`.
 /// Not cryptographically secure; suitable for sampling and feature rollouts, not for security-sensitive uses.
 pub fn random_f64() -> f64 {
@@ -22,6 +22,54 @@ pub fn random_f64() -> f64 {
 /// Returns `true` with probability `rate` (0.0 to 1.0).
 pub fn probabilistic_sample(rate: f64) -> bool {
     random_f64() < rate
+}
+/// Expand a leading `~` to the home directory; other paths pass through.
+pub fn expand_home(s: &str) -> std::path::PathBuf {
+    if let Some(stripped) = s.strip_prefix("~/") {
+        if let Some(home) = xai_dirs::home_dir() {
+            return home.join(stripped);
+        }
+    } else if s == "~"
+        && let Some(home) = xai_dirs::home_dir()
+    {
+        return home;
+    }
+    std::path::PathBuf::from(s)
+}
+#[cfg(test)]
+mod expand_home_tests {
+    use super::expand_home;
+    #[test]
+    fn passthrough_for_absolute_path() {
+        assert_eq!(
+            expand_home("/abs/path"),
+            std::path::PathBuf::from("/abs/path")
+        );
+    }
+    #[test]
+    fn passthrough_for_relative_path() {
+        assert_eq!(
+            expand_home("rel/path"),
+            std::path::PathBuf::from("rel/path")
+        );
+    }
+    #[test]
+    fn bare_tilde() {
+        let home = xai_dirs::home_dir().expect("home_dir required for this test");
+        assert_eq!(expand_home("~"), home);
+    }
+    #[test]
+    fn tilde_slash() {
+        let home = xai_dirs::home_dir().expect("home_dir required for this test");
+        assert_eq!(expand_home("~/foo/bar"), home.join("foo/bar"));
+    }
+    #[test]
+    fn does_not_handle_user_tilde() {
+        assert_eq!(
+            expand_home("~bob/path"),
+            std::path::PathBuf::from("~bob/path")
+        );
+    }
 }
 fn matches_trusted_base_url(candidate: &str, trusted_base: &str) -> bool {
     let Ok(candidate) = reqwest::Url::parse(candidate) else {
@@ -41,16 +89,12 @@ fn matches_trusted_base_url(candidate: &str, trusted_base: &str) -> bool {
         && candidate.port_or_known_default() == trusted.port_or_known_default()
         && path_matches
 }
-/// Production cli-chat-proxy base only (compiled-in constant).
-///
-/// Unlike [`is_cli_chat_proxy_url`], this rejects loopback and staging/dev hosts.
-/// Used for security-sensitive remote kill-switches.
+/// Production cli-chat-proxy base only (compiled-in constant). Unlike [`is_cli_chat_proxy_url`], this rejects loopback and staging/dev hosts. Used for security-sensitive remote kill-switches.
 /// Those must not become env toggles via `GROK_CLI_CHAT_PROXY_BASE_URL` (or similar) pointing at an attacker-controlled origin.
 pub fn is_prod_cli_chat_proxy_url(url: &str) -> bool {
     matches_trusted_base_url(url, crate::env::PROD_CLI_CHAT_PROXY_BASE_URL)
 }
 /// True for configured first-party cli-chat-proxy routes, excluding arbitrary loopback URLs.
-///
 /// Unlike [`is_cli_chat_proxy_url`], this only trusts the exact compiled or environment-selected route.
 /// It is suitable for xAI-only request extensions.
 pub fn is_trusted_cli_chat_proxy_url(url: &str) -> bool {
@@ -74,12 +118,8 @@ pub fn is_cli_chat_proxy_url(url: &str) -> bool {
     }
     false
 }
-/// True for xAI-operated endpoints (`*.x.ai`, cli-chat-proxy, and optional non-production xAI hosts when that feature is enabled).
-/// `disable_api_key_auth` refuses keys only for these; other hosts are BYOK and exempt.
-/// Safe against invalid URLs and suffix attacks (`evil-x.ai.example`).
-///
-/// Scheme-agnostic so credential *refusal* fails closed.
-/// To decide where to *attach* a credential, use [`is_xai_api_bearer_url`].
+/// True for xAI-operated endpoints (`*.x.ai`, cli-chat-proxy, and optional non-production xAI hosts when that feature is enabled). `disable_api_key_auth` refuses keys only for these; other hosts are BYOK and exempt.
+/// Safe against invalid URLs and suffix attacks (`evil-x.ai.example`). Scheme-agnostic so credential *refusal* fails closed. To decide where to *attach* a credential, use [`is_xai_api_bearer_url`].
 pub fn is_xai_api_url(url: &str) -> bool {
     is_xai_api_url_impl(url, false)
 }
@@ -143,9 +183,8 @@ pub fn truncate(s: &str, max_chars: usize) -> &str {
     &s[..end]
 }
 /// Check if a process is still alive.
-///
-/// - Unix: `kill(pid, 0)` via `nix`. True if the process exists (even under a different UID); false only on ESRCH.
-/// - Windows: `OpenProcess(SYNCHRONIZE)` then `WaitForSingleObject(0)`. True while running; false on exit, absence, or open failure.
+/// Unix: `kill(pid, 0)` via `nix`. True if the process exists (even under a different UID); false only on ESRCH.
+/// Windows: `OpenProcess(SYNCHRONIZE)` then `WaitForSingleObject(0)`. True while running; false on exit, absence, or open failure.
 #[cfg(unix)]
 pub fn is_process_alive(pid: u32) -> bool {
     use nix::errno::Errno;
@@ -183,11 +222,8 @@ pub enum KillSignal {
 pub fn kill_process_by_pid(pid: u32) -> std::io::Result<()> {
     kill_process_with_signal(pid, KillSignal::Term)
 }
-/// Terminate a process by PID with a chosen signal. Idempotent: already-dead is `Ok`.
-///
-/// - Unix: `SIGTERM`/`SIGKILL` via `nix::sys::signal::kill`; ESRCH maps to `Ok`.
-/// - Windows: `OpenProcess(PROCESS_TERMINATE)` then `TerminateProcess`; ERROR_INVALID_PARAMETER maps to `Ok`.
-///   `TerminateProcess` is already forceful, so `signal` is ignored.
+/// Terminate a process by PID with a chosen signal. Idempotent: already-dead is `Ok`. Unix: `SIGTERM`/`SIGKILL` via `nix::sys::signal::kill`; ESRCH maps to `Ok`.
+/// Windows: `OpenProcess(PROCESS_TERMINATE)` then `TerminateProcess`; ERROR_INVALID_PARAMETER maps to `Ok`. `TerminateProcess` is already forceful, so `signal` is ignored.
 pub fn kill_process_with_signal(pid: u32, signal: KillSignal) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -311,10 +347,8 @@ pub fn is_grok_process(pid: u32) -> bool {
         cmd.status().is_ok_and(|s| s.success())
     }
 }
-/// Stricter [`is_grok_process`] for the path that auto-kills zombie leaders.
-/// On macOS/BSD it matches the name via `ps` instead of liveness-only, so it never SIGKILLs a recycled PID now owned by an unrelated process.
-/// Linux/Windows already match exactly, so this delegates there.
-/// Use the permissive [`is_grok_process`] for operator-driven `grok leaders kill`.
+/// Stricter [`is_grok_process`] for the path that auto-kills zombie leaders. On macOS/BSD it matches the name via `ps` instead of liveness-only, so it never SIGKILLs a recycled PID now owned by an unrelated process.
+/// Linux/Windows already match exactly, so this delegates there. Use the permissive [`is_grok_process`] for operator-driven `grok leaders kill`.
 pub fn is_grok_process_strict(pid: u32) -> bool {
     #[cfg(all(not(target_os = "linux"), not(windows)))]
     {

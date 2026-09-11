@@ -57,9 +57,6 @@ pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 pub(crate) type SharedLivenessSlot = Arc<parking_lot::Mutex<Option<TransportLivenessHandle>>>;
 
 /// Release the client's liveness slot, dropping any handle it held.
-///
-/// Both watcher-exit arms (transport closed, transient state drift) clear the slot.
-/// A later [`McpClient::arm_liveness_watcher`] can then install a fresh handle.
 /// The taken handle is dropped outside the critical section; the lock is held for nanoseconds.
 fn clear_liveness_slot(slot: &SharedLivenessSlot) {
     let stale_handle = slot.lock().take();
@@ -67,8 +64,6 @@ fn clear_liveness_slot(slot: &SharedLivenessSlot) {
 }
 
 /// RAII handle for the per-client liveness task.
-///
-/// Dropping the handle makes the `DropGuard` cancel the `CancellationToken`.
 /// The polling task then wakes from `select!` on the next tick and exits cleanly without emitting.
 /// There is no public `abort()` or `stop()`: the contract is "tie the handle to the client".
 pub struct TransportLivenessHandle {
@@ -94,30 +89,8 @@ impl TransportLivenessHandle {
 }
 
 /// Spawn a one-shot transport-liveness poller for a `Ready` client.
-///
-/// # Parameters
-///
-/// - `server_name`: bound to emitted events.
-/// - `client`: `Arc<McpClient>` whose `liveness_check` we poll.
-/// - `poll_interval`: tick period.
-/// - `on_event`: sink for `TransportClosed` if observed.
-/// - `liveness_slot`: shared Arc to the owning `McpClient`'s `liveness_handle` field.
-///   Cleared from inside the task before exit.
-///
-/// # Contract
-///
-/// - Caller MUST have already observed the client transition to [`crate::servers::ClientStateKind::Ready`].
-///   [`McpClient::arm_liveness_watcher`] enforces this.
-/// - The poller exits silently on transient non-`Ready` states; only `Ready` with a closed transport produces an event.
-/// - The send may fail if the dispatcher has dropped its receiver (subagent teardown, session shutdown).
-///   That's logged at debug and the task exits; there's no retry.
-///
-/// # Why `tokio::time::interval` and not `sleep_until`
-///
-/// `interval` ticks immediately on first poll, which gives us instant detection of "the transport was already closed when the handle was spawned".
-/// That is a real failure mode if a handshake races a shutdown event from the server.
-/// One example is Ctrl+C against an stdio server that died between the `Ready` write and the spawn.
-/// The `MissedTickBehavior::Skip` default is fine: the worst case under a runtime stall is "we don't poll for a while", which only delays detection.
+/// Caller must already have observed `Ready`; only `Ready` with a closed transport emits, and a dropped receiver exits without retry.
+/// `interval` ticks immediately so a transport already closed at spawn is detected; missed ticks are skipped.
 pub fn spawn_transport_liveness(
     server_name: McpServerName,
     client: Arc<McpClient>,
@@ -154,10 +127,7 @@ pub fn spawn_transport_liveness(
                                 "transport liveness watcher detected closed transport",
                             );
                             // Clear our own slot before exiting so a subsequent `arm_liveness_watcher` can install a fresh handle
-                            //
-                            // Clearing the slot drops the taken `TransportLivenessHandle`
-                            // Its `DropGuard` cancels the very `CancellationToken` this task is `select!`ing on
-                            // That is benign because we `return` immediately
+                            // Its `DropGuard` cancels the very `CancellationToken` this task is `select!`ing on That is benign because we `return` immediately
                             // But DO NOT add any post-`return` work that re-enters the `select!`; it would race this self-cancel
                             clear_liveness_slot(&liveness_slot);
 

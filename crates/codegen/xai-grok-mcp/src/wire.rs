@@ -10,10 +10,8 @@
 pub const MCP_CALL: &str = "x.ai/mcp/call";
 
 /// Reverse zero-IPC tool-invocation method (agent to client): `x.ai/mcp/sdk_call`.
-///
 /// The agent invokes a tool in the SDK's in-process MCP server by sending the MCP JSON-RPC message back to the client over the ACP reverse channel.
 /// It is distinct from [`MCP_CALL`] so the two disjoint schemas don't share a method string for metrics/tracing.
-/// See the agent-side ACP invoker that handles this method.
 pub const MCP_SDK_CALL: &str = "x.ai/mcp/sdk_call";
 
 /// `session/new` `_meta` key listing in-process SDK MCP servers: `x.ai/mcp/servers`.

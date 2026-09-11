@@ -201,9 +201,55 @@ async fn set_auto_mode_off_clears_side_query_flag() {
         .await;
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn plan_mode_enter_and_exit_leave_permission_manager_untouched() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _grx) =
+                tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _prx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            install_real_permissions(&mut actor);
+
+            actor.permissions.set_auto_mode(true);
+            actor
+                .handle_session_mode(acp::SessionModeId::new("plan"))
+                .await;
+            assert!(
+                actor.permissions.is_auto_mode(),
+                "entering plan mode must keep auto mode"
+            );
+            actor
+                .handle_session_mode(acp::SessionModeId::new("default"))
+                .await;
+            assert!(
+                actor.permissions.is_auto_mode(),
+                "leaving plan mode must keep auto mode"
+            );
+
+            actor.permissions.set_yolo_mode(true);
+            actor
+                .handle_session_mode(acp::SessionModeId::new("plan"))
+                .await;
+            assert!(
+                actor.permissions.is_yolo_mode(),
+                "entering plan mode must keep always-approve"
+            );
+            actor
+                .handle_session_mode(acp::SessionModeId::new("default"))
+                .await;
+            assert!(
+                actor.permissions.is_yolo_mode(),
+                "leaving plan mode must keep always-approve"
+            );
+        })
+        .await;
+}
+
 #[test]
 fn session_meta_auto_mode_key_resolution() {
-    use crate::agent::mvp_agent::resolve_session_auto_mode;
+    use crate::session::auto_mode::resolve_session_auto_mode;
 
     let meta = serde_json::json!({"autoMode": true});
     assert!(resolve_session_auto_mode(meta.as_object(), false, false));
@@ -226,7 +272,7 @@ fn session_meta_auto_mode_key_resolution() {
 
 #[test]
 fn explicit_auto_request_overrides_stale_launch_yolo() {
-    use crate::agent::mvp_agent::resolve_session_auto_mode;
+    use crate::session::auto_mode::resolve_session_auto_mode;
 
     let meta = serde_json::json!({"yoloMode": false, "autoMode": true});
     let request_meta = meta.as_object();

@@ -22,10 +22,9 @@ pub(super) fn dispatch_share_session(app: &mut AppView) -> Vec<Effect> {
     vec![]
 }
 
-/// Monotonic generation for usage-modal fetches.
-/// Each open stamps the modal and its effects with a fresh value.
-/// A reply from a previous open (same session, modal closed and reopened) then can't overwrite newer results.
-/// `0` is reserved for the minimal-mode paths, which never touch the modal.
+/// Monotonic generation for usage-modal fetches, shared by the agent-hosted and dashboard-hosted modal.
+/// A reply from a previous open (modal closed and reopened) then can't overwrite newer results.
+/// `0` is reserved for background refreshes (minimal-mode paths, startup/login `FetchAppBilling`), which never settle a modal.
 static USAGE_FETCH_NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn next_usage_fetch_nonce() -> u64 {
@@ -51,6 +50,9 @@ pub(super) fn open_usage_info_modal(
     use crate::views::modal::ActiveModal;
     use crate::views::usage_modal::{UsageInfoContext, UsageInfoModalState};
 
+    if matches!(app.active_view, ActiveView::AgentDashboard) {
+        return open_dashboard_usage_modal(app, tab);
+    }
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
@@ -113,6 +115,43 @@ pub(super) fn open_usage_info_modal(
     agent.active_modal = Some(ActiveModal::UsageInfo {
         state: Box::new(state),
     });
+    effects
+}
+
+/// Session-less variant: no session tabs to fetch, so only the account allowance is refreshed (agent-less `FetchAppBilling`).
+/// `chat_kind` follows the process-wide `--chat` flag, which is what every session created from this dashboard would carry.
+fn open_dashboard_usage_modal(
+    app: &mut AppView,
+    tab: crate::views::usage_modal::UsageInfoTab,
+) -> Vec<Effect> {
+    use crate::views::usage_modal::{UsageInfoContext, UsageInfoModalState};
+
+    let chat_kind = app.chat_mode;
+    let billing_reachable =
+        app.usage_visible && !chat_kind && app.usage_billing_redirect_url.is_none();
+    let ctx = UsageInfoContext {
+        session_id: None,
+        usage_visible: app.usage_visible,
+        chat_kind,
+        billing_redirect_url: app.usage_billing_redirect_url.clone(),
+        subscription_tier: app.subscription_tier.clone(),
+    };
+    let Some(dashboard) = app.dashboard.as_mut() else {
+        return vec![];
+    };
+    if let Some(state) = dashboard.usage_modal.as_mut() {
+        state.set_tab(tab);
+        return vec![];
+    }
+    let mut state = UsageInfoModalState::new(tab, ctx);
+    let mut effects = Vec::new();
+    if billing_reachable {
+        let nonce = next_usage_fetch_nonce();
+        state.fetch_nonce = nonce;
+        state.billing_loading = true;
+        effects.push(Effect::FetchAppBilling { nonce });
+    }
+    dashboard.usage_modal = Some(Box::new(state));
     effects
 }
 
@@ -180,21 +219,6 @@ fn is_current_coding_data_write(app: &AppView, seq: u64, agent_id: AgentId) -> b
     false
 }
 
-/// Take the parked /feedback trace upload only when it waits on exactly this write generation.
-fn take_pending_feedback_trace_upload(
-    app: &mut AppView,
-    seq: u64,
-) -> Option<crate::app::app_view::PendingFeedbackTraceUpload> {
-    if app
-        .feedback_trace_upload_pending
-        .as_ref()
-        .is_some_and(|p| p.seq == seq)
-    {
-        return app.feedback_trace_upload_pending.take();
-    }
-    None
-}
-
 fn log_coding_data_consent_selected(
     source: xai_grok_telemetry::events::CodingDataConsentSource,
     opted_in: bool,
@@ -209,18 +233,6 @@ fn log_coding_data_consent_selected(
     });
 }
 
-/// What [`set_coding_data_sharing_tracked`] did.
-/// Callers sequencing work on the write (e.g. a parked /feedback trace upload) branch on a typed outcome instead of pattern-matching the effect list.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SharingWriteOutcome {
-    /// A guard refused the change (ZDR / non-admin team member).
-    Refused,
-    /// The preference already matched; nothing to write.
-    AlreadySet,
-    /// A write was dispatched under this `coding_data_write_seq` generation.
-    Claimed(u64),
-}
-
 /// Set coding-data-sharing preference.
 /// The shell owns this setting and stores it in auth metadata (persists via ACP ext-request, NOT `~/.grok/config.toml`).
 pub(super) fn set_coding_data_sharing(
@@ -228,14 +240,6 @@ pub(super) fn set_coding_data_sharing(
     opted_in: bool,
     source: xai_grok_telemetry::events::CodingDataConsentSource,
 ) -> Vec<Effect> {
-    set_coding_data_sharing_tracked(app, opted_in, source).0
-}
-
-pub(super) fn set_coding_data_sharing_tracked(
-    app: &mut AppView,
-    opted_in: bool,
-    source: xai_grok_telemetry::events::CodingDataConsentSource,
-) -> (Vec<Effect>, SharingWriteOutcome) {
     // ── Guard 1: Enterprise ZDR ──────────────────────────────────────
     if app.is_zdr {
         let message = app.locale.named_static_text(
@@ -243,7 +247,7 @@ pub(super) fn set_coding_data_sharing_tracked(
             "✗ Cannot change: Zero Data Retention enabled",
         );
         app.show_toast(message);
-        return (vec![], SharingWriteOutcome::Refused);
+        return vec![];
     }
     // ── Guard 2: Non-admin team member ───────────────────────────────
     if app.team_name.is_some() {
@@ -257,7 +261,7 @@ pub(super) fn set_coding_data_sharing_tracked(
                 "✗ Data sharing is controlled by your team admin",
             );
             app.show_toast(message);
-            return (vec![], SharingWriteOutcome::Refused);
+            return vec![];
         }
     }
     let agent_id = coding_data_sharing_agent_id(app);
@@ -271,7 +275,7 @@ pub(super) fn set_coding_data_sharing_tracked(
         effects.extend(ack_privacy_banner(app));
     }
     if prev == opted_in {
-        return (effects, SharingWriteOutcome::AlreadySet);
+        return effects;
     }
 
     if opted_in {
@@ -297,13 +301,12 @@ pub(super) fn set_coding_data_sharing_tracked(
         rollback_to_opted_in: prev,
         seq,
     });
-    (effects, SharingWriteOutcome::Claimed(seq))
+    effects
 }
 
 /// Scrub an untrusted error string for toast display.
 /// Substitutes a generic placeholder when the input exceeds 120 chars or contains control / bidi-override characters.
 /// That prevents escape-sequence injection and visual spoofing.
-/// Full error stays in tracing logs.
 pub(super) fn scrub_error_for_toast(error: &str) -> String {
     const MAX_TOAST_ERROR_LEN: usize = 120;
     if error.len() > MAX_TOAST_ERROR_LEN
@@ -531,9 +534,6 @@ pub(super) fn dispatch_show_tasks(app: &mut AppView) -> Vec<Effect> {
 /// Open the hidden `/gboom` easter egg as a modal over the active agent view.
 /// Requires a graphics-capable terminal (kitty protocol or iTerm2); otherwise a toast explains why nothing happened.
 /// On session-less views (dashboard, welcome) this is a silent no-op.
-///
-/// Targets the top-level agent view (where the prompt lives), not a focused subagent view.
-/// The modal's tick and draw run on the top-level view, mirroring the video viewer.
 pub(super) fn dispatch_open_gboom(app: &mut AppView) -> Vec<Effect> {
     use crate::terminal::image::{GraphicsProtocol, detect_graphics_protocol};
     let unsupported = app.locale.named_static_text(
@@ -572,7 +572,7 @@ pub(super) fn notify_session_ready(
     notification_service.notify(NotificationEvent {
         kind: NotificationEventKind::SessionReady,
         title: "Grok".into(),
-        body: NotificationEventKind::SessionReady.as_str().into(),
+        body: NotificationEventKind::SessionReady.as_ref().into(),
         session_id: agent.session.session_id.as_ref().map(|s| s.0.to_string()),
     });
 }
@@ -585,14 +585,7 @@ pub(super) fn handle_coding_data_sharing_updated(
     opted_in: bool,
     seq: u64,
 ) -> Vec<Effect> {
-    // Taken even for superseded replies: uploading on stale consent would be wrong
-    let parked_upload = take_pending_feedback_trace_upload(app, seq);
     if !is_current_coding_data_write(app, seq, agent_id) {
-        // A dropped parked upload persisted nothing, so undo the in-session latch (same as the failure path)
-        // "Nothing happened" must always leave the card offerable again
-        if parked_upload.is_some() {
-            app.feedback_trace_choice_latched = false;
-        }
         return vec![];
     }
     // Re-anchor mirror to server-confirmed value (defense-in-depth against server reshaping the boolean)
@@ -614,20 +607,6 @@ pub(super) fn handle_coding_data_sharing_updated(
             effects.extend(ack_privacy_banner(app));
         }
     }
-    // The opt-in landed: release the parked upload and persist the deferred consent
-    if let Some(pending) = parked_upload {
-        if opted_in {
-            effects.push(Effect::UploadFeedbackTrace {
-                agent_id: pending.agent_id,
-                session_id: pending.session_id,
-            });
-            effects.push(super::notes::persist_trace_upload_consent());
-        } else {
-            // The write round-tripped but the server-confirmed state is still opted out
-            // Nothing uploaded or persisted, so undo the latch like the failure path does
-            app.feedback_trace_choice_latched = false;
-        }
-    }
     effects
 }
 
@@ -638,11 +617,6 @@ pub(super) fn handle_coding_data_sharing_failed(
     rollback_to_opted_in: bool,
     seq: u64,
 ) -> Vec<Effect> {
-    // The opt-in never landed: drop the parked upload (the storage proxy would still refuse it) and undo the in-session latch
-    // Nothing was persisted, so a later /feedback may offer the card again
-    if take_pending_feedback_trace_upload(app, seq).is_some() {
-        app.feedback_trace_choice_latched = false;
-    }
     // A superseded failure must not revert
     // `rollback_to_opted_in` predates the newer write, so applying it would undo a change the user made after this one was sent
     // It must not toast either: nothing the user is looking at failed

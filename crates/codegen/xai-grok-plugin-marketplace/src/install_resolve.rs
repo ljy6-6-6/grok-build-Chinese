@@ -74,13 +74,7 @@ pub enum QualifierResolveError {
 }
 
 /// Resolve a qualifier to exactly one registered source index.
-///
-/// A bare `owner/repo` matches GitHub git sources.
-/// `local/<slug>` and `git/<slug>` match local/git sources by slugified name.
-/// Both also keep the `owner/repo` interpretation so a GitHub source owned by `git`/`local` still resolves.
-/// A qualifier also matches a source's registered `name`, exactly or slugified.
-/// `<plugin>@<marketplace-name>` is the only pin for non-github.com hosts (e.g. GitHub Enterprise) that have no `owner/repo` form.
-/// When more than one source matches, the result is [`QualifierResolveError::Ambiguous`].
+/// `<plugin>@<marketplace-name>` is the only pin for non-github.com hosts that have no `owner/repo` form.
 pub fn resolve_qualified_source(
     qualifier: &str,
     sources: &[MarketplaceSource],
@@ -149,7 +143,6 @@ pub enum BareNameError {
 }
 
 /// Choose which scanned entry to install for a bare `<name>` (case-insensitive).
-///
 /// One match wins outright.
 /// With several matches, a single official-source copy wins (reporting the others); otherwise the result is ambiguous.
 pub fn select_bare_name(

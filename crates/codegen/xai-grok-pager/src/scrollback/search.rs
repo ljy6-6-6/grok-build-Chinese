@@ -38,12 +38,8 @@ pub struct ScrollbackMatch {
     pub byte_range: Range<usize>,
 }
 
-/// Per-entry cache of searchable source text plus a query scan over it.
-///
-/// [`sync`](Self::sync) rebuilds the cache only when scrollback content changes.
-/// [`find`](Self::find) scans the cache without touching the scrollback.
-/// The cache is stored as an `Arc<[IndexedEntry]>`.
-/// [`entries_arc`](Self::entries_arc) hands it to the background daemon with a cheap pointer clone.
+/// Per-entry cache of searchable source text plus a query scan over it. `sync` rebuilds the cache only when
+/// scrollback content changes. `find` scans the cache without touching the scrollback.
 #[derive(Debug, Default)]
 pub struct ScrollbackSearchIndex {
     entries: Arc<[IndexedEntry]>,
@@ -62,13 +58,8 @@ impl ScrollbackSearchIndex {
         Self::default()
     }
 
-    /// Rebuild the cached text when scrollback content changed since the last sync.
-    /// Returns `true` if it rebuilt and `false` on the no-op early return.
-    /// A no-op when `content_generation` is unchanged, so scrolling and viewport changes never trigger work.
-    ///
-    /// Re-derives every entry's source text wholesale, and content changes (e.g. streaming) bump the key often.
-    /// Callers should therefore sync on query change or search open, not every frame.
-    /// Per-entry incremental updates are left until profiling on large sessions calls for them.
+    /// Rebuild the cached text when scrollback content changed since the last sync. A no-op when `content_generation`
+    /// is unchanged, so scrolling and viewport changes never trigger work.
     pub fn sync(&mut self, state: &ScrollbackState) -> bool {
         if self.built_generation == Some(state.content_generation()) {
             return false;
@@ -92,19 +83,14 @@ impl ScrollbackSearchIndex {
         self.entries.clone()
     }
 
-    /// All matches for `matcher`, in scrollback order.
-    /// Call [`sync`](Self::sync) first so the cache reflects current content.
-    ///
-    /// Retained for the benchmark and unit tests; the production path scans on the daemon thread via [`scan_matches`].
-    ///
-    /// An empty query yields nothing (an empty pattern would otherwise match at every byte); zero-width matches are skipped for the same reason.
+    /// All matches for `matcher`, in scrollback order. Call `sync` first so the cache reflects current content. An
+    /// empty query yields nothing (an empty pattern would otherwise match at every byte).
     pub fn find(&self, matcher: &TextMatcher) -> Vec<ScrollbackMatch> {
         scan_matches(&self.entries, matcher)
     }
 }
 
 /// Scan `entries` for every match of `matcher`, in scrollback order.
-///
 /// Shared by the synchronous [`ScrollbackSearchIndex::find`] and the background [`SearchDaemon`].
 /// An empty query yields nothing (an empty pattern would otherwise match at every byte); zero-width matches are skipped for the same reason.
 fn scan_matches(entries: &[IndexedEntry], matcher: &TextMatcher) -> Vec<ScrollbackMatch> {
@@ -150,11 +136,9 @@ struct SearchSnapshot {
     query: String,
 }
 
-/// Work sent from the UI thread to the daemon.
-///
-/// Each keystroke is one atomic `Update` carrying the latest query plus, only when content changed, the new corpus.
-/// Bundling them means the daemon can never wake having seen a new corpus but not yet the matching query.
-/// A split like that would publish one stale result before correcting.
+/// Work sent from the UI thread to the daemon. Each keystroke is one atomic `Update` carrying the latest query
+/// plus, only when content changed, the new corpus. Bundling them means the daemon can never wake having seen a new
+/// corpus but not yet the matching query. A split like that would publish one stale result before correcting.
 enum SearchMsg {
     Update {
         /// New corpus to scan, or `None` to keep the corpus the daemon holds.
@@ -177,10 +161,9 @@ struct DrainedUpdate {
     stop: bool,
 }
 
-/// Coalesce all currently-pending messages, keeping the newest corpus and the newest query.
-/// A burst of keystrokes then triggers a single scan of the latest query.
-/// A later `None` corpus means "unchanged" and must not clobber a corpus carried by an earlier message in the burst.
-/// `Stop` always wins and ends draining immediately.
+/// Coalesce all currently-pending messages, keeping the newest corpus and the newest query. A later `None` corpus
+/// means "unchanged" and must not clobber a corpus carried by an earlier message in the burst. `Stop` always wins
+/// and ends draining immediately.
 fn drain_to_latest(first: SearchMsg, rx: &Receiver<SearchMsg>) -> DrainedUpdate {
     let mut out = DrainedUpdate::default();
     let mut msg = first;
@@ -277,18 +260,8 @@ impl Drop for SearchDaemon {
     }
 }
 
-/// An interactive search session over the scrollback.
-/// Owns the query editor, derived matcher, cached index, background scan daemon, latest match list, and a cursor into it.
-///
-/// Matching runs off-thread.
-/// [`update_query`](Self::update_query) only enqueues the corpus and query for the daemon; it never scans.
-/// Results arrive later via [`poll`](Self::poll).
-/// `n` / `N` navigation ([`next`](Self::next) / [`prev`](Self::prev)) stays synchronous since the match list is already in hand by then.
-///
-/// The lifecycle has two phases.
-/// While **composing**, the user is still editing the query and each edit re-queries.
-/// [`accept`](Self::accept) freezes the query and switches to **browsing**.
-/// Canceling is dropping the state (the owner holds it as an `Option`), which stops the daemon thread, so there is no `cancel` method.
+/// An interactive search session over the scrollback. `update_query` only enqueues the corpus and query for the
+/// daemon. it never scans.
 #[derive(Debug)]
 pub struct ScrollbackSearchState {
     /// Canonical editable query and cursor.
@@ -330,7 +303,6 @@ impl ScrollbackSearchState {
     }
 
     /// Replace the canonical query, recompile its derived matcher, and enqueue the latest corpus/query snapshot for the background scan.
-    ///
     /// The corpus is only re-synced and re-sent when scrollback content changed since the last send.
     /// Steady-state keystrokes therefore just push a query string.
     pub fn update_query(&mut self, query: &str, state: &ScrollbackState) {
@@ -399,7 +371,6 @@ impl ScrollbackSearchState {
 
     /// Pick up the latest scan results from the daemon.
     /// Returns `true` when the results changed (so the caller can redraw / reveal the new match).
-    ///
     /// On a change the cursor parks on the first match, preserving the old "jump to the first match when the query changes" behavior.
     pub fn poll(&mut self) -> bool {
         // Hold the lock only for the cheap compares (and, on a real change, an Arc-pointer clone)
@@ -676,7 +647,6 @@ mod tests {
     }
 
     /// Send a query and wait for the daemon to publish its result.
-    ///
     /// One `update_query` is one atomic `Update`, so it yields exactly one snapshot bump; break on the first `poll` that observes it.
     /// Panics if the daemon never responds so a wedged daemon shows up here, not as a confusing downstream assertion.
     fn update_and_wait(search: &mut ScrollbackSearchState, query: &str, state: &ScrollbackState) {
@@ -1102,10 +1072,9 @@ mod tests {
 
     #[test]
     fn coalesced_burst_carries_corpus_forward_to_last_query() {
-        // Settle once so the daemon holds the corpus, then fire a burst of queries back-to-back
-        // No polling happens between sends, so the messages coalesce in the channel
-        // None of the burst updates carry a corpus (content is unchanged), so the daemon must reuse the corpus it holds and settle on the LAST query
-        // This exercises drain_to_latest coalescing and corpus carry-forward (`Update.corpus` is `None`) end-to-end through the daemon
+        // Settle once so the daemon holds the corpus, then fire a burst of queries back-to-back. No polling happens
+        // between sends, so the messages coalesce in the channel. None of the burst updates carry a corpus (content is
+        // unchanged), so the daemon must reuse the corpus it holds and settle on the LAST query.
         let state = state_with(&["alpha", "alpha beta", "beta gamma"]);
         let mut search = ScrollbackSearchState::open();
         update_and_wait(&mut search, "alpha", &state);

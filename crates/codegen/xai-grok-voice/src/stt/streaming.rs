@@ -46,10 +46,9 @@ impl StreamingSttSession {
                 .map_err(|e| VoiceError::WebSocket(format!("auth header: {e}")))?,
         );
 
-        // These headers identify the client so the backend can attribute and meter voice usage, mirroring the sampler and imagine request paths
-        // Billing itself follows the `Authorization` bearer (per-user for OAuth, BYOK key owner otherwise); these only enrich attribution
-        // They are skipped when empty (e.g. the probe binary and tests) or when a value isn't a valid header.
-        // A skip is never fatal: the connection is fully authorized without them
+        // These headers identify the client so the backend can attribute and meter voice usage, mirroring the sampler and
+        // imagine request paths. Billing itself follows the `Authorization` bearer (per-user for OAuth, BYOK key owner
+        // otherwise); these only enrich attribution. A skip is never fatal: the connection is fully authorized without them
         insert_optional_header(
             &mut request,
             "x-grok-client-identifier",
@@ -190,11 +189,9 @@ impl StreamingSttSession {
 
 impl Drop for StreamingSttSession {
     fn drop(&mut self) {
-        // Dropping a `JoinHandle` only detaches the task; it does not stop it
-        // Abort both halves so an abandoned setup tears the socket down immediately
-        // (`connect` can return `Err` after `wait_ready` fails, or the caller can fail to open the mic after a successful connect.)
-        // Otherwise the writer would emit a stray `audio.done` and the reader would linger on an idle connection
-        // On the healthy path both tasks have already finished (audio drained, `audio.done` flushed) before drop, so these aborts are no-ops
+        // Abort both halves so an abandoned setup tears the socket down immediately (`connect` can return `Err` after
+        // `wait_ready` fails, or the caller can fail to open the mic after a successful connect.). Otherwise the writer would
+        // emit a stray `audio.done` and the reader would linger on an idle connection.
         self._writer_task.abort();
         self._reader_task.abort();
     }

@@ -8,20 +8,8 @@ use crate::render::wrapping::{
     byte_offset_to_display_col, byte_range_to_row_cols, wrap_byte_ranges_matching,
 };
 
-/// Invert (REVERSED) the buffer cells covering every match of `re` in `text`.
-///
-/// Run as a post-pass after a line has been drawn, so matches are highlighted regardless of the underlying colors.
-///
-/// - `area`: the pane area; `area.x` / `area.width` bound painting horizontally.
-/// - `row_y`: buffer row of the line's first visible row.
-/// - `viewport_bottom`: exclusive bottom row; wrapped rows at or below it stop.
-/// - `skip`: leading wrapped rows of this line clipped above the viewport.
-/// - `prefix_w`: display column where `text` begins (e.g. a line-number gutter).
-/// - `text`: plain text the regex runs against (logical order; RTL matches are mapped to visual columns to match painted cells).
-/// - `single_row`: the line occupies one buffer row (NoWrap, or any 1-row item).
-/// - `map_visual`: whether the caller painted `text` bidi-reordered (via `set_line_safe_bidi`).
-///   Only then are match columns remapped to visual cells.
-///   Callers that paint logically (custom list renderers) pass `false` so highlights are not shifted off the glyphs they paint.
+/// Post-pass invert so matches show regardless of underlying colors. Stops at `viewport_bottom`.
+/// Remap match columns to visual cells only when the caller painted bidi-reordered; logical painters must pass `map_visual = false`.
 #[allow(clippy::too_many_arguments)]
 pub fn paint_match_highlights(
     buf: &mut Buffer,

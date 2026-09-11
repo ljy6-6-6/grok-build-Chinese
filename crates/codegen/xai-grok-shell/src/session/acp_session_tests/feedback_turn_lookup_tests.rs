@@ -2,26 +2,6 @@ use super::turn_texts_for_feedback;
 use xai_grok_sampling_types::ConversationItem;
 
 #[test]
-fn empty_conversation_returns_none() {
-    let conv: Vec<ConversationItem> = vec![];
-    assert_eq!(turn_texts_for_feedback(&conv, 0), (None, None));
-}
-
-#[test]
-fn turn_zero_returns_first_exchange() {
-    let conv = vec![
-        ConversationItem::user("q1"),
-        ConversationItem::assistant("a1"),
-        ConversationItem::user("q2"),
-        ConversationItem::assistant("a2"),
-    ];
-    assert_eq!(
-        turn_texts_for_feedback(&conv, 0),
-        (Some("q1".into()), Some("a1".into()))
-    );
-}
-
-#[test]
 fn turn_n_returns_nth_exchange() {
     let conv = vec![
         ConversationItem::user("q1"),
@@ -31,6 +11,10 @@ fn turn_n_returns_nth_exchange() {
         ConversationItem::user("q3"),
         ConversationItem::assistant("a3"),
     ];
+    assert_eq!(
+        turn_texts_for_feedback(&conv, 0),
+        (Some("q1".into()), Some("a1".into()))
+    );
     assert_eq!(
         turn_texts_for_feedback(&conv, 1),
         (Some("q2".into()), Some("a2".into()))
@@ -44,6 +28,7 @@ fn out_of_range_returns_none() {
         ConversationItem::assistant("only a"),
     ];
     assert_eq!(turn_texts_for_feedback(&conv, 5), (None, None));
+    assert_eq!(turn_texts_for_feedback(&[], 0), (None, None));
 }
 
 #[test]

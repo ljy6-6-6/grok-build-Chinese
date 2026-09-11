@@ -21,10 +21,7 @@ pub fn conversation_has_memory_context(items: &[ConversationItem]) -> bool {
 }
 
 /// Format memory search results as a markdown section for system-reminder injection.
-///
 /// Each result is formatted with score, source, file path, line range, and the snippet in a fenced code block (preserving newlines/markdown).
-/// This matches the output format of the `memory_search` tool.
-///
 /// Returns `None` if results are empty.
 pub fn format_memory_reminder(results: &[MemorySearchResult]) -> Option<String> {
     if results.is_empty() {
@@ -65,6 +62,36 @@ pub fn format_memory_reminder(results: &[MemorySearchResult]) -> Option<String> 
     Some(section)
 }
 
+/// Regenerate and format both bounded v2 manifests for model context.
+pub fn format_v2_memory_context(
+    storage: &crate::session::memory::MemoryStorage,
+) -> Result<String, String> {
+    let global = crate::session::memory::regenerate_scope_manifest(
+        storage.global_dir(),
+        crate::session::memory::V2MemoryScope::Global,
+        crate::session::memory::V2ManifestBudget::default(),
+    )
+    .map_err(|error| error.to_string())?;
+    let workspace = crate::session::memory::regenerate_scope_manifest(
+        storage.workspace_dir(),
+        crate::session::memory::V2MemoryScope::Workspace,
+        crate::session::memory::V2ManifestBudget::default(),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(format!(
+        "{MEMORY_CONTEXT_OPEN_TAG}\n\
+         ## Global memory manifest\n\
+         **Scope root:** `{}`\n\n{}\n\
+         ## Workspace memory manifest\n\
+         **Scope root:** `{}`\n\n{}\n\
+         {MEMORY_CONTEXT_CLOSE_TAG}",
+        storage.global_dir().display(),
+        global.content,
+        storage.workspace_dir().display(),
+        workspace.content,
+    ))
+}
+
 /// Check if a message looks like a greeting or generic opener.
 ///
 /// Used to detect vague first messages that won't produce useful memory search results, so we can fall back to a broader project-context query.
@@ -93,6 +120,46 @@ pub fn is_greeting(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_v2_context_always_contains_both_manifests_and_refreshes() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cwd = temp.path().join("workspace");
+        let root = temp.path().join("memory-v2");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let storage = crate::session::memory::MemoryStorage::new_for_mode(
+            &cwd,
+            Some(&root),
+            crate::config::MemoryMode::V2,
+        );
+        crate::session::memory::v2::ensure_scope_initialized(
+            &root,
+            storage.global_dir(),
+            crate::session::memory::V2MemoryScope::Global,
+        )
+        .unwrap();
+        crate::session::memory::v2::ensure_scope_initialized(
+            &root,
+            storage.workspace_dir(),
+            crate::session::memory::V2MemoryScope::Workspace,
+        )
+        .unwrap();
+
+        let empty = format_v2_memory_context(&storage).unwrap();
+        assert!(empty.contains("## Global memory manifest"));
+        assert!(empty.contains("## Workspace memory manifest"));
+        assert!(empty.contains(&storage.global_dir().display().to_string()));
+        assert!(empty.contains(&storage.workspace_dir().display().to_string()));
+
+        std::fs::write(
+            storage.workspace_dir().join("topics/new.md"),
+            "# New\n\nCurrent.",
+        )
+        .unwrap();
+        let refreshed = format_v2_memory_context(&storage).unwrap();
+        assert!(refreshed.contains("topics/new.md"));
+        assert_ne!(empty, refreshed);
+    }
 
     #[test]
     fn test_format_empty() {

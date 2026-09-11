@@ -16,12 +16,8 @@ use xai_grok_tools::implementations::search_tool;
 use xai_grok_tools::implementations::use_tool;
 use xai_grok_tools::registry::types::{ToolConfig, ToolServerConfig};
 /// Process-global registry of externally-provided toolset presets.
-///
-/// Public presets are enumerated by [`preset_names`] / [`all_toolset_presets`] and resolvable via [`toolset_for_preset`].
-/// Internal presets resolve via [`toolset_for_preset`] only, so they never appear in the workspace manifest or product preset sets.
-///
-/// [`register_toolset_preset`] / [`register_internal_toolset_preset`] MUST run before the first preset resolution in the process.
-/// Presets registered later are visible to subsequent lookups, but any config resolved before registration will not see them.
+/// Public presets are enumerated; internal presets resolve only via [`toolset_for_preset`] and never appear in the manifest.
+/// Register before the first preset resolution — earlier-resolved configs will not see later registrations.
 pub type ToolsetPresetBuilder = fn() -> ToolServerConfig;
 /// Whether a registered preset is enumerated publicly or resolved by name only.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -144,9 +140,8 @@ fn kill_task_tool_config() -> ToolConfig {
     ToolConfig::from(&grok_build::KillTaskTool).with_name("kill_command_or_subagent")
 }
 /// Complete workspace-executable toolset for hub registration.
-///
-/// Extends `default_grok_build_toolset()` with tools that are dynamically injected by `AgentBuilder::build()` or only available in specific modes.
-/// In proxy mode, the workspace server executes ALL tools; the shell has zero local dispatch.
+/// Extends `default_grok_build_toolset()` with tools injected by `AgentBuilder` or available only in specific modes.
+/// In proxy mode the workspace server executes all tools; the shell has zero local dispatch.
 pub fn workspace_grok_build_toolset() -> ToolServerConfig {
     let mut tools = default_grok_build_toolset().tools;
     tools.push((&opencode::OpenCodeWriteTool).into());
@@ -188,10 +183,8 @@ fn grok_computer_toolset() -> ToolServerConfig {
     }
 }
 /// Every named toolset preset, as `(normalized_name, config)` pairs.
-///
-/// Single source of truth: [`toolset_for_preset`] resolves through this table, and the preset-coverage tests iterate it.
-/// A new preset is automatically covered the moment it becomes resolvable.
-/// Native (in-crate) toolset presets.
+/// Single source of truth: [`toolset_for_preset`] resolves through this table, and coverage tests iterate it.
+/// A new preset is covered the moment it becomes resolvable.
 fn native_toolset_presets() -> Vec<(&'static str, ToolServerConfig)> {
     vec![
         ("grok-build", workspace_grok_build_toolset()),
@@ -236,6 +229,9 @@ pub fn toolset_for_preset(preset: &str) -> Option<ToolServerConfig> {
         .or_else(|| registered_toolset_preset(&normalized))
 }
 fn default_grok_build_toolset() -> ToolServerConfig {
+    grok_build_core_toolset_with(true, true)
+}
+fn default_agent_toolset() -> ToolServerConfig {
     grok_build_core_toolset(true)
 }
 /// Same as the parent grok-build list, without `workflow`.
@@ -244,6 +240,12 @@ fn general_purpose_toolset() -> ToolServerConfig {
     grok_build_core_toolset(false)
 }
 fn grok_build_core_toolset(include_workflow: bool) -> ToolServerConfig {
+    grok_build_core_toolset_with(include_workflow, false)
+}
+fn grok_build_core_toolset_with(
+    include_workflow: bool,
+    include_send_feedback: bool,
+) -> ToolServerConfig {
     let mut tools = vec![
         bash_tool_config(),
         (&grok_build::ReadFileTool).into(),
@@ -265,6 +267,9 @@ fn grok_build_core_toolset(include_workflow: bool) -> ToolServerConfig {
     ];
     if include_workflow {
         tools.push((&grok_build::WorkflowTool).into());
+    }
+    if include_send_feedback {
+        tools.push((&grok_build::SendFeedbackTool).into());
     }
     ToolServerConfig {
         tools,
@@ -293,9 +298,7 @@ fn grok_build_concise_toolset() -> ToolServerConfig {
     }
 }
 /// Hashline toolset: anchor-based read/edit/search and standard utilities.
-///
-/// `hashline_tools` should be the 3 hashline `ToolConfig` entries produced by `FileToolset::Hashline.tool_configs(&hashline_config)`.
-/// They carry the scheme parameters as tool params.
+/// `hashline_tools` should be the 3 hashline `ToolConfig` entries; they carry the scheme parameters as tool params.
 pub fn grok_build_hashline_toolset(
     hashline_tools: Vec<xai_grok_tools::registry::types::ToolConfig>,
 ) -> ToolServerConfig {
@@ -340,10 +343,9 @@ fn codex_toolset() -> ToolServerConfig {
         behavior_preset: None,
     }
 }
-/// Read-only toolset for the **explore** subagent.
-///
-/// `run_terminal_command` is intentionally omitted so exploration cannot mutate the workspace: the toolset enforces read-only, not just the prompt.
-/// With no `BashTool`, the background-task helpers (`KillTaskTool`/`TaskOutputTool`) are unnecessary and also omitted.
+/// Read-only toolset for the explore subagent.
+/// `run_terminal_command` is omitted so exploration cannot mutate the workspace — the toolset enforces read-only, not just the prompt.
+/// With no `BashTool`, the background-task helpers are also omitted.
 fn explore_toolset() -> ToolServerConfig {
     ToolServerConfig {
         tools: vec![
@@ -401,11 +403,8 @@ fn grok_build_plan_toolset() -> ToolServerConfig {
         behavior_preset: None,
     }
 }
-/// Orchestrator toolset: read/search/orchestration tools only.
-///
-/// No terminal execution, no file editing.
+/// Orchestrator toolset: read/search/orchestration tools only. No terminal execution, no file editing.
 /// The orchestrator delegates all execution and file modification to subagents.
-/// Retains read_file, grep, list_dir for research, plus the full subagent/skill/MCP/plan stack for orchestration.
 fn orchestrator_toolset() -> ToolServerConfig {
     ToolServerConfig {
         tools: vec![
@@ -526,13 +525,8 @@ fn opencode_toolset() -> ToolServerConfig {
         behavior_preset: None,
     }
 }
-/// Model override for an agent definition.
-///
-/// An `Override` model ID is resolved against available models at subagent spawn time.
-///
-/// In YAML frontmatter / JSON:
-/// - `model: inherit` or omitted → `Inherit`
-/// - `model: grok-3-fast` → `Override("grok-3-fast")`
+/// Model override for an agent definition. An `Override` ID is resolved against available models at subagent spawn.
+/// `model: inherit` or omitted → `Inherit`; a concrete id → `Override`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ModelOverride {
     /// Use the parent session's model.
@@ -633,9 +627,7 @@ where
     Ok(opt)
 }
 /// Eliminates string matching in discovery and ensures built-in names are defined in exactly one place.
-///
-/// `subagent_variants()` returns only the 3 that are exposed to the LLM via the `TaskTool` description.
-/// The remaining 6 are top-level agent profiles resolvable by name but not advertised as subagent types.
+/// `subagent_variants()` returns only the 3 exposed to the LLM. The remaining 6 are resolvable by name but not advertised.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, Display, EnumString, EnumIter, AsRefStr, IntoStaticStr,
 )]
@@ -686,12 +678,8 @@ impl BuiltinAgentName {
         &[Self::GeneralPurpose, Self::Explore, Self::Plan]
     }
 }
-/// Portable agent identity, parsed from .grok/agents/*.md.
-/// Usable as both a top-level agent and a subagent definition.
-///
-/// This is the stable, version-controllable contract.
-/// It does NOT contain session-level policies (compaction, system reminders).
-/// Those are provided by the AgentBuilder at build time.
+/// Portable agent identity, parsed from .grok/agents/*.md. Usable as a top-level agent or a subagent.
+/// Does not contain session-level policies; those are provided by the AgentBuilder at build time.
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentDefinition {
@@ -705,7 +693,7 @@ pub struct AgentDefinition {
     pub(crate) builtin_name: Option<BuiltinAgentName>,
     #[serde(default = "default_prompt_mode")]
     pub prompt_mode: PromptMode,
-    #[serde(default = "default_grok_build_toolset")]
+    #[serde(default = "default_agent_toolset")]
     pub tool_config: ToolServerConfig,
     /// Runtime capability mode that constrains which tool kinds the agent can use.
     /// Applied during subagent spawn in `handle_subagent_request` by filtering the definition's `tool_config` before session creation.
@@ -724,11 +712,8 @@ pub struct AgentDefinition {
     pub inherit_skills: bool,
     #[serde(default = "default_true")]
     pub agents_md: bool,
-    /// When true (the default), the AgentBuilder layers session-level optional tools on top of the agent's declared `tool_config`.
-    /// These are memory_search/get, web_search, web_fetch, lsp, image_gen, video_gen, the OpenCode write fallback, and the plan-mode tools.
-    ///
-    /// Set this to `false` for harnesses that need an exact, minimal toolset.
-    /// In the compat harness, for example, every advertised tool must match the model's trained schema.
+    /// When true (the default), the AgentBuilder layers session-level optional tools on the declared `tool_config`.
+    /// Set false for harnesses that need an exact, minimal toolset matching a trained schema.
     /// The agent's `tool_config` is then used verbatim with only the subagent strip applied.
     #[serde(default = "default_true")]
     pub inject_default_tools: bool,
@@ -768,9 +753,8 @@ pub struct AgentDefinition {
     /// `None` is unrestricted, `Some([t1])` restricts to those types, and `Some([])` blocks spawning.
     #[serde(skip)]
     pub allowed_subagent_types: Option<Vec<String>>,
-    /// Session-operator tool restrictions (`--tools` / `--disallowed-tools`), distinct from the agent author's own `tools`/`disallowed_tools`.
-    /// The builder applies them as a final clamp over the fully-assembled toolset (function and hosted).
-    /// They bind regardless of later `tool_config` mutations and compose with the agent's own filters by intersection.
+    /// Session-operator tool restrictions (`--tools` / `--disallowed-tools`), distinct from the author's own filters.
+    /// Applied as a final clamp over the fully-assembled toolset; compose with the agent's filters by intersection.
     /// `None` means no session restriction.
     #[serde(skip)]
     pub session_tools_allowlist: Option<Vec<String>>,
@@ -870,13 +854,8 @@ impl std::fmt::Display for AgentScope {
     }
 }
 /// Controls which parent MCP servers a subagent inherits.
-///
-/// Deserializes from:
-/// - `"all"` / `"none"` (string, case-insensitive)
-/// - `{ "named": ["slack", "github"] }` / `{ "except": ["internal"] }` (map)
-///
-/// The custom `Deserialize` exists because `serde_yaml` 0.9 uses YAML tags (`!named`) for externally-tagged enum data variants.
-/// Agent definition frontmatter uses the mapping style that JSON also expects.
+/// Custom `Deserialize` because `serde_yaml` 0.9 uses YAML tags for externally-tagged enums.
+/// Frontmatter uses the mapping style that JSON also expects.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum McpInheritance {
@@ -1030,12 +1009,9 @@ impl AgentColor {
     ];
 }
 const _: () = assert!(AgentColor::VALID_VALUES.len() == <AgentColor as strum::EnumCount>::COUNT);
-/// Never fails: `color` is decorative, but a rejected value fails the whole frontmatter parse, and discovery skips agents that fail to parse.
-/// A typo'd or hex color would therefore silently make the agent unspawnable.
-///
-/// Frontmatter is only ever decoded by `serde_yaml`, so the intermediate value is captured as `serde_yaml::Value`.
-/// That type is total for YAML: it also holds tagged scalars and maps with non-string keys, which have no `serde_json::Value` form.
-/// Unrecognized values are dropped to `None` with a warning rather than mapped to a stand-in color the author never wrote.
+/// Never fails: `color` is decorative, but a rejected value fails the whole frontmatter parse and discovery skips the agent.
+/// A typo'd color would silently make the agent unspawnable.
+/// Unrecognized values drop to `None` with a warning rather than a stand-in color the author never wrote.
 fn deserialize_agent_color<'de, D>(deserializer: D) -> Result<Option<AgentColor>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -1191,10 +1167,8 @@ impl serde::Serialize for McpServerRef {
         }
     }
 }
-/// Bash tool config overrides (agent-definition layer).
-///
-/// NOTE: Uses `camelCase` for YAML frontmatter.
-/// The `AgentBuilder` maps these into `xai_grok_tools::registry::types::ToolsetConfig.bash` which uses the tools crate's `BashToolConfig` type.
+/// Bash tool config overrides (agent-definition layer). Uses `camelCase` for YAML frontmatter.
+/// The `AgentBuilder` maps these into the tools crate's `BashToolConfig`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BashConfig {
@@ -1237,17 +1211,7 @@ pub(crate) fn tool_id_matches(list: &[String], id: &str) -> bool {
 }
 impl AgentDefinition {
     /// Parse an agent definition from a Markdown file with YAML frontmatter.
-    ///
-    /// File format:
-    /// ```text
-    /// ---
-    /// name: my-agent
-    /// description: A custom agent
-    /// # ... other fields
-    /// ---
-    ///
-    /// System prompt body goes here...
-    /// ```
+    /// Frontmatter between `---` delimiters; the system prompt body follows.
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self, AgentBuildError> {
         let path = path.as_ref();
         let content = std::fs::read_to_string(path).map_err(AgentBuildError::IoError)?;
@@ -1355,10 +1319,8 @@ impl AgentDefinition {
         self.session_tools_allowed(id)
     }
     /// True iff the active system prompt template for `audience` carries the `<task_completion_discipline>` block.
-    ///
-    /// Used by the runtime turn-end TodoGate to gate firing on sessions whose prompt actually references the rules the gate's reminder text invokes.
-    /// The block has been removed from every built-in template, so this returns `false` unconditionally.
-    /// Kept as a helper so the gate's call-site stays stable in case the block is reintroduced behind a future flag.
+    /// Used by the TodoGate so it only fires when the prompt actually references those rules.
+    /// The block was removed from every built-in template, so this returns `false`; kept so the call-site stays stable.
     pub fn carries_task_completion_discipline(
         &self,
         _audience: crate::prompt::context::PromptAudience,
@@ -1372,9 +1334,8 @@ impl AgentDefinition {
         )
     }
     /// True iff this agent's wire format is non-interchangeable with the stock harness.
-    /// A client-supplied `_meta.agentProfile` must NOT override it.
-    /// Strict iff any of: bespoke `system_prompt` template, bespoke `user_message_template`, or curated toolset (`!inject_default_tools`).
-    /// Stock `grok-build*` agents leave all three at defaults and are non-strict.
+    /// A client-supplied `_meta.agentProfile` must not override it.
+    /// Strict iff bespoke system prompt, bespoke user-message template, or curated toolset (`!inject_default_tools`).
     pub fn is_strict_harness(&self) -> bool {
         use crate::prompt::context::TemplateOverride;
         use crate::prompt::user_message::UserMessageTemplate;
@@ -1425,7 +1386,7 @@ impl AgentDefinition {
             plugin_name: None,
             builtin_name: None,
             prompt_mode: PromptMode::Extend,
-            tool_config: default_grok_build_toolset(),
+            tool_config: default_agent_toolset(),
             capability_mode: None,
             permission_mode: PermissionMode::Default,
             skills: vec![],
@@ -1459,10 +1420,13 @@ impl AgentDefinition {
         }
     }
     pub fn default_grok_build() -> Self {
-        Self::base(
-            BuiltinAgentName::GrokBuild,
-            "Grok Build agent for software engineering tasks.",
-        )
+        Self {
+            tool_config: default_grok_build_toolset(),
+            ..Self::base(
+                BuiltinAgentName::GrokBuild,
+                "Grok Build agent for software engineering tasks.",
+            )
+        }
     }
     /// Concise output format for SFT/RL.
     pub fn grok_build_concise() -> Self {
@@ -1567,10 +1531,8 @@ impl AgentDefinition {
             )
         }
     }
-    /// GBL model with full GrokBuild tools (skills, MCPs, plan mode) that delegates coding/exploration to subagents.
-    ///
+    /// GBL model with full GrokBuild tools that delegates coding/exploration to subagents.
     /// Subagent overrides are applied in `handle_subagent_request`.
-    /// General-purpose children get `implementer_toolset()` and explore children get `explorer_toolset()`, both with the subagent model.
     pub fn grok_build_orchestrator() -> Self {
         Self {
             tool_config: orchestrator_toolset(),
@@ -1582,20 +1544,8 @@ impl AgentDefinition {
             )
         }
     }
-    /// Deserialize an agent definition from a JSON value (e.g. from ACP `_meta.agentProfile`).
-    ///
-    /// Unlike `parse()`, which reads YAML frontmatter and a Markdown body from a file, this method accepts a flat JSON object.
-    /// `promptBody` is an explicit string field rather than the body below `---` delimiters.
-    ///
-    /// ```json
-    /// {
-    ///   "name": "my-agent",
-    ///   "description": "A custom agent profile.",
-    ///   "promptMode": "extend",
-    ///   "permissionMode": "dontAsk",
-    ///   "promptBody": "You are a specialized coding assistant..."
-    /// }
-    /// ```
+    /// Deserialize an agent definition from a JSON value (e.g. ACP `_meta.agentProfile`).
+    /// Unlike `parse()`, this accepts a flat JSON object; `promptBody` is an explicit string field.
     pub fn from_json(value: &serde_json::Value) -> Result<Self, AgentBuildError> {
         let mut def: AgentDefinition = serde_json::from_value(value.clone())
             .map_err(|e| AgentBuildError::ParseError(e.to_string()))?;
@@ -1606,7 +1556,7 @@ impl AgentDefinition {
             }
         }
         if !value.get("toolConfig").is_some_and(|v| v.is_object()) {
-            def.tool_config = default_grok_build_toolset();
+            def.tool_config = default_agent_toolset();
         }
         def.scope = AgentScope::BuiltIn;
         Ok(def)
@@ -1672,6 +1622,13 @@ mod tests {
         assert!(explore.tools.len() < plan.tools.len());
         assert!(plan.tools.len() < gb.tools.len());
     }
+    fn feedback_tool_id() -> String {
+        ToolConfig::from(&grok_build::SendFeedbackTool).id
+    }
+    fn contains_feedback(config: &ToolServerConfig) -> bool {
+        let id = feedback_tool_id();
+        config.tools.iter().any(|tool| tool.id == id)
+    }
     fn grok_computer_exclusive_ids() -> Vec<String> {
         #[allow(unused_mut)]
         let mut ids: Vec<String> = vec![
@@ -1679,6 +1636,84 @@ mod tests {
             ToolConfig::from(&grok_build::KillTerminalCommandTool).id,
         ];
         ids
+    }
+    #[test]
+    fn send_feedback_exposure_is_grok_build_only() {
+        use strum::IntoEnumIterator;
+        let presets = all_toolset_presets();
+        for (name, config) in &presets {
+            let expected = name == "grok-build";
+            let count = config
+                .tools
+                .iter()
+                .filter(|tool| tool.id == feedback_tool_id())
+                .count();
+            assert_eq!(
+                count,
+                usize::from(expected),
+                "preset `{name}` has the wrong send_feedback exposure"
+            );
+        }
+        for builtin in BuiltinAgentName::iter() {
+            let expected = match builtin {
+                BuiltinAgentName::GrokBuild => true,
+                BuiltinAgentName::GrokBuildConcise
+                | BuiltinAgentName::GrokBuildPlan
+                | BuiltinAgentName::GrokBuildPlanNoSubagents
+                | BuiltinAgentName::GrokBuildAskUser
+                | BuiltinAgentName::Codex
+                | BuiltinAgentName::Opencode
+                | BuiltinAgentName::GeneralPurpose
+                | BuiltinAgentName::Explore
+                | BuiltinAgentName::Plan
+                | BuiltinAgentName::BrowserUse
+                | BuiltinAgentName::GrokBuildOrchestrator => false,
+            };
+            assert_eq!(
+                contains_feedback(&builtin.definition().tool_config),
+                expected,
+                "builtin `{builtin}` has the wrong send_feedback exposure"
+            );
+        }
+        for (name, config) in [
+            ("core", grok_build_core_toolset(true)),
+            ("general-purpose", general_purpose_toolset()),
+            ("hashline", grok_build_hashline_toolset(vec![])),
+        ] {
+            assert!(
+                !contains_feedback(&config),
+                "toolset `{name}` leaked send_feedback"
+            );
+        }
+        let workspace = workspace_grok_build_toolset();
+        assert_eq!(
+            workspace
+                .tools
+                .iter()
+                .filter(|tool| tool.id == feedback_tool_id())
+                .count(),
+            1
+        );
+    }
+    #[test]
+    fn defaulted_agent_definitions_omit_send_feedback() {
+        let builtins = AgentDefinition::builtin_defaults("external", "External definition");
+        assert!(!contains_feedback(&builtins.tool_config));
+        assert!(!contains_feedback(
+            &AgentDefinition::browser_use().tool_config
+        ));
+        let serde_default: AgentDefinition = serde_json::from_value(serde_json::json!({
+            "name": "external",
+            "description": "External definition"
+        }))
+        .unwrap();
+        assert!(!contains_feedback(&serde_default.tool_config));
+        let acp = AgentDefinition::from_json(&serde_json::json!({
+            "name": "external",
+            "description": "External definition"
+        }))
+        .unwrap();
+        assert!(!contains_feedback(&acp.tool_config));
     }
     #[test]
     fn grok_computer_preset_is_curated_grok_build_subset() {

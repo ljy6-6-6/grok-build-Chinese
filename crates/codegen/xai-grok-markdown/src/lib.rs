@@ -61,7 +61,6 @@ pub use syntax::Syntect;
 pub use syntax::test_syntect;
 
 /// Render markdown to ratatui Lines with full output including checkpoint.
-///
 /// Runs the `url_scan` pass after parsing so the output's `hyperlinks` matches what `StreamingMarkdownRenderer::finish()` produces for the same input.
 /// The scan detects plain URLs: the pretty-mode `(url)` suffix and bare URLs in prose.
 pub fn render_markdown_ratatui_full(
@@ -114,11 +113,7 @@ pub fn render_markdown_ratatui_with_buffers_width(
 }
 
 /// Render markdown to ratatui Lines and provide `next_link_id` so the streaming renderer can resume link ID assignment across tail re-renders.
-///
-/// `open_code` is an optional incremental highlighter for the trailing still-open fenced code block.
 /// Only the streaming tail re-render passes `Some(cache)`; `finish()` and non-streaming callers pass `None`.
-/// Everything else (closed code blocks, HTML, math, tables, inline) goes through the unchanged batch highlighter.
-/// Output is byte-for-byte identical to the cache-less path; see [`open_code_highlighter`].
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_markdown_ratatui_with_link_id(
     text: &str,

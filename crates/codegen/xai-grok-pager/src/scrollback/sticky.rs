@@ -50,19 +50,12 @@ pub struct RenderedPrompt {
     /// Entry index of the prompt.
     pub entry_idx: usize,
 
-    /// Total height budget for rendering this prompt.
-    /// This is the FULL height the block should render to, including any internal padding, content, ellipsis, etc.
-    /// The block decides how to allocate this space internally.
-    ///
-    /// Range: `min_height <= render_height <= full_height`
+    /// Total height budget for rendering this prompt. This is the FULL height the block should render to, including any
+    /// internal padding, content, ellipsis, etc. The block decides how to allocate this space internally. Range:
+    /// `min_height <= render_height <= full_height`.
     pub render_height: u16,
 
     /// Rows clipped from the TOP (for push effect ONLY).
-    /// This is applied AFTER the block renders to `render_height`.
-    /// - 0 means no clipping (show all rows)
-    /// - > 0 means the header is being pushed off by the next prompt
-    ///
-    /// Visible rows = render_height - clip_top
     pub clip_top: u16,
 }
 
@@ -81,12 +74,9 @@ impl RenderedPrompt {
     }
 }
 
-/// Result of computing sticky header layout for AllTurns view.
-///
-/// This describes what should be rendered in the sticky header area at the top of the viewport.
-/// The content area starts after `header_screen_rows()` rows.
-///
-/// All 1D layout math is encapsulated here; the renderer just asks for screen positions and scroll offsets.
+/// Result of computing sticky header layout for AllTurns view. This describes what should be rendered in the sticky
+/// header area at the top of the viewport. The content area starts after `header_screen_rows()` rows. All 1D layout
+/// math is encapsulated here; the renderer just asks for screen positions and scroll offsets.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StickyHeaderLayout {
     /// The prompt being pushed off screen (clipped at top).
@@ -115,12 +105,8 @@ impl StickyHeaderLayout {
         pushed_visible + gap_between + pinned_visible
     }
 
-    /// Total rows the header occupies on screen, including gap after.
-    /// This is the screen row where content rendering starts.
-    /// During push transition (only pushed, no pinned), there's NO gap after the header.
-    /// This keeps scroll_for_content constant: scroll_offset + header equals the next prompt's y_virtual - 1.
-    /// The gap between the pushed prompt and the next one is rendered in the content area, at that same row.
-    /// For pinned headers, the gap is added after the header for visual separation.
+    /// Total rows the header occupies on screen, including gap after. During push transition (only pushed, no pinned),
+    /// there's NO gap after the header.
     pub fn header_screen_rows(&self) -> u16 {
         if !self.has_header() {
             return 0;
@@ -149,26 +135,8 @@ impl StickyHeaderLayout {
         viewport_height.saturating_sub(self.header_screen_rows())
     }
 
-    /// Calculate scroll offset for content area to maintain bottom line continuity.
-    ///
-    /// # The Key Invariant
-    /// Each c-j/c-k should move the bottom line by exactly 1 row:
-    /// ```text
-    /// bottom_line = scroll_offset + viewport_height - 1
-    /// ```
-    ///
-    /// # How It Works
-    /// With a sticky header of height H (including gap):
-    /// - Content area has (viewport - H) rows
-    /// - For bottom_line to equal scroll_offset + viewport - 1:
-    ///   scroll_for_content + (viewport - H) - 1 = scroll_offset + viewport - 1
-    ///   scroll_for_content = scroll_offset + H
-    ///
-    /// # Gradual Collapse
-    /// As scroll_offset increases and the header shrinks:
-    /// - scroll_offset goes up 1 and header_height goes down 1, so scroll_for_content stays constant
-    /// - content_height goes up 1 (more rows available)
-    /// - bottom_line goes up 1 (new row revealed)
+    /// Each c-j/c-k must move the bottom line by exactly one row: `bottom_line = scroll_offset + viewport_height - 1`.
+    /// With a sticky header of height H, content scroll is `scroll_offset + H`, so a 1-row header shrink cancels a 1-row scroll and the bottom line still advances by one.
     #[inline]
     pub fn scroll_for_content(&self, scroll_offset: usize) -> usize {
         scroll_offset + self.header_screen_rows() as usize
@@ -219,7 +187,6 @@ impl StickyHeaderLayout {
     }
 
     /// Map a header-relative screen row to the entry index of the prompt rendered there.
-    ///
     /// Returns `None` if the row falls on a gap or outside the header area.
     /// `row` is relative to the top of the scrollback area (0-indexed).
     pub fn entry_at_header_row(&self, row: u16) -> Option<usize> {
@@ -248,7 +215,6 @@ impl StickyHeaderLayout {
     }
 
     /// Get the screen area of a header prompt (pushed or pinned) if it matches `entry_idx`.
-    ///
     /// Returns `(start_row, visible_height, is_pushed)` relative to scrollback area top.
     /// `is_pushed` is true for the disappearing prompt (fading away).
     pub fn header_entry_area(&self, entry_idx: usize) -> Option<(u16, u16, bool)> {
@@ -273,21 +239,8 @@ impl StickyHeaderLayout {
     }
 }
 
-/// Compute sticky header layout for AllTurns view.
-///
-/// # Arguments
-/// - `scroll_offset`: How many virtual lines have been scrolled.
-///   The bottom row of the viewport shows virtual line `scroll_offset + viewport_height - 1`.
-/// - `viewport_height`: Height of the viewport in rows.
-/// - `prompts`: All prompt descriptors, **must be sorted by y_virtual ascending**.
-///
-/// # Returns
-/// Layout describing what to render in the sticky header area.
-///
-/// # Algorithm Overview
-/// 1. Find the last prompt that's been scrolled past (y_virtual < scroll_offset)
-/// 2. Calculate render_height (shrinks as we scroll more, down to min_height)
-/// 3. Handle push effect from next prompt approaching (clips from TOP)
+/// Prompts must be sorted by `y_virtual` ascending.
+/// Sticky header is the last prompt scrolled past; render height shrinks toward `min_height` and the next prompt clips from the top.
 pub fn compute_sticky_layout(
     scroll_offset: usize,
     viewport_height: u16,
@@ -322,11 +275,6 @@ pub fn compute_sticky_layout(
         let next_naive_row = next.y_virtual.saturating_sub(scroll_offset);
 
         // Push starts when next prompt would overlap with current header + gap.
-        // We use <= to ensure the transition from pushed to pinned is smooth:
-        // - During push: scroll_for_content = next.y_virtual - 1 (constant)
-        // - At transition: pinned scroll_for_content = scroll_offset + header_pinned + gap
-        // - These are equal when next_naive_row = header_with_gap + 1
-        // - So push while next_naive_row <= header_with_gap
         let header_with_gap = render_height + HEADER_CONTENT_GAP;
         if next_naive_row <= header_with_gap as usize {
             Some((next, next_naive_row))
@@ -346,15 +294,8 @@ pub fn compute_sticky_layout(
                 return StickyHeaderLayout::default();
             }
 
-            // The current (pinned) header is being pushed off as the next prompt approaches.
-            // We clip the current header from the top to make room for the next prompt.
-            //
-            // next_naive_row includes the gap row between entries
-            // The gap row should be in the CONTENT area, not the header.
-            // So pushed_visible = next_naive_row - 1 (excluding the gap).
-            //
-            // If next_naive_row == 1, that means only the gap row is visible (row 0).
-            // The pinned prompt's content is entirely above the viewport, so no pushed header
+            // The current (pinned) header is being pushed off as the next prompt approaches. If next_naive_row == 1, that
+            // means only the gap row is visible (row 0).
             let pushed_visible = (next_naive_row as u16).saturating_sub(1);
 
             if pushed_visible == 0 {
@@ -391,21 +332,9 @@ pub fn compute_sticky_layout(
     }
 }
 
-/// Calculate render height for a prompt in sticky header.
-///
-/// Implements gradual collapse: as the user scrolls past a prompt, its header shrinks from full_height down to min_height.
-///
-/// The shrinking rate matches the scroll rate (1 row per scroll), maintaining bottom line continuity.
-///
-/// # Math
-/// - `scroll_past`: how many rows scrolled past the prompt's top
-/// - `render_height` = full_height - scroll_past (clamped to min_height)
-///
-/// As scroll_past increases by 1:
-/// - render_height decreases by 1
-/// - header shrinks by 1 row
-/// - content_area height increases by 1 row
-/// - So bottom_line increases by 1
+/// Calculate render height for a prompt in sticky header. The shrinking rate matches the scroll rate (1 row per
+/// scroll), maintaining bottom line continuity. render_height decreases by 1. header shrinks by 1 row. content_area
+/// height increases by 1 row. So bottom_line increases by 1.
 fn calculate_render_height(
     prompt: &PromptDescriptor,
     scroll_offset: usize,
@@ -421,11 +350,9 @@ fn calculate_render_height(
     // Height shrinks 1:1 with scroll_past until we hit minimum
     let height = prompt.full_height.saturating_sub(scroll_past);
 
-    // Use prompt's configured min_height (already includes vpad calculation).
-    // Ensure at least 1 row to prevent 0-height headers, and clamp to the prompt's full height
-    // A collapsed sticky header can never be taller than the prompt rendered inline
-    // A lazily-estimated prompt can keep the `MAX_TRUNCATED_HEADER_HEIGHT` seed, never measured because it sits above the viewport when pinned
-    // Without this clamp it would pad a short pinned prompt with empty rows instead of collapsing to its real height
+    // A collapsed sticky header can never be taller than the prompt rendered inline. A lazily-estimated prompt can
+    // keep the `MAX_TRUNCATED_HEADER_HEIGHT` seed, never measured because it sits above the viewport when pinned.
+    // Without this clamp it would pad a short pinned prompt with empty rows instead of collapsing to its real height.
     let min_height = prompt.min_height.max(1).min(prompt.full_height.max(1));
 
     height.max(min_height).min(viewport_height)
@@ -988,11 +915,9 @@ mod tests {
         assert_eq!(layout.scroll_for_content(5), 6);
     }
 
-    // Pushed Header Render Height Tests
-    //
-    // These tests verify that pushed headers use the correct render_height:
-    // - For small prompts (full_height < min_height): use full_height, not inflated
-    // - For large prompts (full_height > render_height): use render_height (collapsed)
+    // Pushed Header Render Height Tests. These tests verify that pushed headers use the correct render_height. For
+    // small prompts (full_height < min_height): use full_height, not inflated. For large prompts (full_height >
+    // render_height): use render_height (collapsed).
 
     /// Test pushed header with small prompt (full_height < MIN_PINNED_HEIGHT).
     ///
@@ -1034,7 +959,6 @@ mod tests {
     }
 
     /// Test pushed header with large prompt (full_height > render_height).
-    ///
     /// Large prompts should use the collapsed render_height, not full_height.
     /// The pushed header then shows the truncated/ellipsis view, not raw bottom lines of the full content.
     #[test]
@@ -1146,10 +1070,7 @@ mod tests {
     /// With 1-line prompts (full_height=3), scrolling up should reveal actual content, not empty padding rows.
     #[test]
     fn test_adjacent_small_prompts_smooth_scroll() {
-        // Three adjacent 1-line prompts (full_height=3 each)
-        // A: y=0-2, gap at y=3
-        // B: y=4-6, gap at y=7
-        // C: y=8-10
+        // Three adjacent 1-line prompts (full_height=3 each). A: y=0-2, gap at y=3. B: y=4-6, gap at y=7. C: y=8-10.
         let prompts = vec![
             PromptDescriptor {
                 entry_idx: 0,
@@ -1306,10 +1227,6 @@ mod tests {
     }
 
     /// Test that a non-sticky prompt pushes the previous sticky prompt off but never becomes pinned itself.
-    ///
-    /// Layout: A (sticky) at y=0, B (non-sticky, e.g. expanded user prompt) at y=7.
-    /// When B approaches, it should push A off.
-    /// When B is scrolled past, no header should appear since B is non-sticky.
     #[test]
     fn test_non_sticky_prompt_pushes_but_never_pins() {
         // A (sticky, small) at y=0, B (non-sticky) at y=12, far enough apart that A reaches min_height before B triggers push

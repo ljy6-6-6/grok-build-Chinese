@@ -135,12 +135,9 @@ fn parse_classifier_output_brace_extract_handles_literal_braces_in_evidence() {
 
 #[test]
 fn parse_classifier_output_bad_first_pass_does_not_short_circuit_when_other_passes_converge() {
-    // The parser chain accumulates bad-confidence errors instead of stopping at the first one
-    // On a bare bad JSON object every pass (strict, fence-strip, brace-extract) lands on the same object, so the diagnostic is the same either way
-    // A case where the passes disagree on which slice to parse is hard to construct
-    // Brace-extract takes the first balanced object, the same slice strict parses; fence-strip only fires when the trimmed input starts with a fence
-    // This test pins the convergent case: no panic and the same diagnostic
-    // `parse_classifier_output_strict_unparseable_then_brace_extract_recovers` below proves the chain proceeds past failed earlier passes
+    // The parser chain accumulates bad-confidence errors instead of stopping at the first one.
+    // On a bare bad JSON object every pass (strict, fence-strip, brace-extract) lands on the same object, so the diagnostic is the same either way A case where the passes disagree on which slice to parse is hard to construct.
+    // Brace-extract takes the first balanced object, the same slice strict parses; fence-strip only fires when the trimmed input starts with a fence.
     let raw = r#"{"category":"stalled_narration","confidence":1.5,"evidence":"bad"}"#;
     let err = parse_classifier_output(raw).expect_err("bad confidence");
     assert!(matches!(err, ClassifierParseError::ConfidenceOutOfRange(c) if (c - 1.5).abs() < 1e-6));

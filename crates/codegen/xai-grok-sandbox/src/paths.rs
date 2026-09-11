@@ -18,10 +18,8 @@ pub(crate) fn sandbox_events_log_path() -> PathBuf {
 
 // ── Device files & directories ──────────────────────────────────────────────
 
-/// Device files that need write access for normal tool operation.
-///
-/// These are individual files (use `allow_file`, not `allow_path`).
-/// Directory nodes under `/dev` belong in [`DEVICE_DIRS`].
+/// Device files that need write access for normal tool operation. These are individual files (use `allow_file`, not
+/// `allow_path`). Directory nodes under `/dev` belong in [`DEVICE_DIRS`].
 #[cfg(all(feature = "enforce", unix))]
 pub(crate) const DEVICE_FILES: &[&str] = &[
     "/dev/null",    // output sink — used by virtually every CLI tool
@@ -79,10 +77,8 @@ pub(crate) fn essential_writable_paths(workspace: &Path) -> Vec<PathBuf> {
     paths
 }
 
-/// Writable directory paths for the strict profile (workspace, sessions, and temp).
-///
-/// Strict may read `grok_home()` but must not write the parent.
-/// Events JSONL lives under `sessions/`.
+/// Writable directory paths for the strict profile (workspace, sessions, and temp). Strict may read `grok_home()` but
+/// must not write the parent. Events JSONL lives under `sessions/`.
 pub(crate) fn essential_writable_paths_strict(workspace: &Path) -> Vec<PathBuf> {
     let mut paths = vec![workspace.to_path_buf(), grok_home().join("sessions")];
     paths.extend(temp_writable_paths());

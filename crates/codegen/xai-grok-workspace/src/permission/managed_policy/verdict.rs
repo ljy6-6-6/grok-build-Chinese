@@ -1,8 +1,5 @@
-//! The single MCP policy verdict API. Nothing calls it in this PR; it is
-//! the target surface the stacked enforcement PR migrates every consumer
-//! onto (session merge, discovery, doctor, `mcp/list`, enable/upsert gates,
-//! inspect, and the agent-level MCP pool), replacing each caller's own
-//! deny/allow/pin reason assembly (e.g. the shell's `McpDisabledReason`).
+//! The single MCP policy verdict API: every shell consumer resolves verdicts here instead of
+//! assembling its own deny/allow/pin reasons.
 
 use std::path::{Path, PathBuf};
 
@@ -17,14 +14,17 @@ pub enum McpVerdict {
 }
 
 /// Why policy blocks an MCP server, attributed to the blocking source. The
-/// `Display` strings are wire/UX payloads (pager rows, doctor details, enable
-/// errors) — do not reword.
+/// `Display` strings (full policy path) are doctor/JSON/log payloads;
+/// [`Self::user_facing_reason`] is the refusal form — do not reword either.
 #[derive(Debug, Clone)]
 pub enum McpBlockReason {
     /// Matches a `deniedMcpServers` entry.
     Deny { source: PathBuf },
-    /// Missing from `allowedMcpServers` (or an active lockdown's grant list).
+    /// Missing from `allowedMcpServers` (or a managed-only lockdown's grant list).
     NotGranted { source: PathBuf },
+    /// The source blocks everything it binds (see `McpServerAllowlist::is_lockdown`),
+    /// so no allow entry could have granted the server.
+    Lockdown { source: PathBuf },
     /// Project-declared and not allowlisted under an
     /// `enableAllProjectMcpServers = false` pin.
     ProjectPin { source: PathBuf },
@@ -34,31 +34,51 @@ impl McpBlockReason {
     /// The policy source the block is attributed to.
     pub fn source(&self) -> &Path {
         match self {
-            Self::Deny { source } | Self::NotGranted { source } | Self::ProjectPin { source } => {
-                source
-            }
+            Self::Deny { source }
+            | Self::NotGranted { source }
+            | Self::Lockdown { source }
+            | Self::ProjectPin { source } => source,
         }
+    }
+
+    /// The blocking policy file by name only, for user-facing refusals.
+    pub fn user_facing_source(&self) -> std::borrow::Cow<'_, str> {
+        user_facing_policy_source(self.source())
+    }
+
+    /// [`Display`](std::fmt::Display) with the blocking policy file reduced to its name — the
+    /// user-facing refusal form; doctor, `--json`, and tracing keep the full path.
+    pub fn user_facing_reason(&self) -> String {
+        self.reason_with(self.user_facing_source())
+    }
+
+    /// The matched rule without its source, for renderers that print the source themselves.
+    pub fn rule(&self) -> &'static str {
+        match self {
+            Self::Deny { .. } => "matches deniedMcpServers",
+            Self::NotGranted { .. } => "not in allowedMcpServers",
+            Self::Lockdown { .. } => "locked down by policy",
+            Self::ProjectPin { .. } => "project MCP disabled by enableAllProjectMcpServers = false",
+        }
+    }
+
+    fn reason_with(&self, source: impl std::fmt::Display) -> String {
+        format!("{} ({source})", self.rule())
     }
 }
 
 impl std::fmt::Display for McpBlockReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Deny { source } => {
-                write!(f, "matches deniedMcpServers ({})", source.display())
-            }
-            Self::NotGranted { source } => {
-                write!(f, "not in allowedMcpServers ({})", source.display())
-            }
-            Self::ProjectPin { source } => {
-                write!(
-                    f,
-                    "project MCP disabled (enableAllProjectMcpServers = false, {})",
-                    source.display()
-                )
-            }
-        }
+        f.write_str(&self.reason_with(self.source().display()))
     }
+}
+
+/// The policy file's name for user-facing refusals; falls back to the full
+/// path when it has no file name (empty/unknown source).
+pub(super) fn user_facing_policy_source(path: &Path) -> std::borrow::Cow<'_, str> {
+    path.file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| path.to_string_lossy())
 }
 
 /// What defined the server, as policy sees it.
@@ -70,46 +90,44 @@ pub struct McpSubject {
 }
 
 impl ManagedSettings {
-    /// The project-pin leg of [`Self::mcp_verdict`] in isolation: the
-    /// `enableAllProjectMcpServers = false` pin blocks a project-scoped
-    /// server with no allow-entry grant. The session merge (and discovery)
-    /// apply this BEFORE the deny/allow verdict — a pinned-off server is
-    /// dropped outright, never tagged — while `mcp_verdict` attributes
-    /// deny/allow first for the reporting surfaces.
+    /// Project-pin leg of [`Self::mcp_verdict`] in isolation: blocks a project-scoped
+    /// server lacking an ownership-satisfying grant (the session merge applies it first).
     pub fn mcp_project_pin_block(
         &self,
         server: &agent_client_protocol::McpServer,
         subject: McpSubject,
     ) -> Option<McpBlockReason> {
-        let source = self.project_mcp.source()?;
-        if !subject.project_scoped || self.mcp_allowlist.matches_allow_entry(server) {
+        let super::PolicyPin::Disabled { source, ownership } = &self.project_mcp else {
+            return None;
+        };
+        if !subject.project_scoped || self.mcp_allowlist.grants_exception(server, *ownership) {
             return None;
         }
         Some(McpBlockReason::ProjectPin {
-            source: source.to_path_buf(),
+            source: source.clone(),
         })
     }
 
-    /// Policy verdict for `server` as defined by `subject`: any binding deny
-    /// wins, then a missing allow grant (lockdown or a restricted source),
-    /// then the project-MCP pin; otherwise allowed.
+    /// Policy verdict for `server`: binding deny, then lockdown or missing allow, then the project-MCP pin; otherwise allowed.
+    /// Session merge applies the pin first; this order is for surfaces, which name the most specific rule.
     pub fn mcp_verdict(
         &self,
         server: &agent_client_protocol::McpServer,
         subject: McpSubject,
     ) -> McpVerdict {
         let policy = &self.mcp_allowlist;
-        if !policy.is_server_allowed(server, subject.origin) {
-            if let Some(denying) = policy.denying_source(server, subject.origin) {
-                return McpVerdict::Blocked(McpBlockReason::Deny {
-                    source: denying.source_path.clone().unwrap_or_default(),
-                });
-            }
-            let source = policy
-                .blocking_allow_source(server, subject.origin)
-                .and_then(|s| s.source_path.clone())
-                .unwrap_or_default();
-            return McpVerdict::Blocked(McpBlockReason::NotGranted { source });
+        if let Some(denying) = policy.denying_source(server, subject.origin) {
+            return McpVerdict::Blocked(McpBlockReason::Deny {
+                source: denying.source_path.clone().unwrap_or_default(),
+            });
+        }
+        if let Some(blocking) = policy.blocking_allow_source(server, subject.origin) {
+            let source = blocking.source_path.clone().unwrap_or_default();
+            return McpVerdict::Blocked(if blocking.is_lockdown() {
+                McpBlockReason::Lockdown { source }
+            } else {
+                McpBlockReason::NotGranted { source }
+            });
         }
         if let Some(reason) = self.mcp_project_pin_block(server, subject) {
             return McpVerdict::Blocked(reason);

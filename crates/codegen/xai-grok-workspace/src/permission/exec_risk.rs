@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::git_content_filters::filter_command_driver;
 use crate::permission::bash_command_splitting::{
     MAX_TRANSPARENT_PREFIX_DEPTH, MAX_WRAPPER_DEPTH, TransparentPrefixPeel,
     peel_transparent_prefixes, unwrap_wrappers_checked,
@@ -252,11 +253,8 @@ pub(crate) const SAFE_GIT_SUBCOMMANDS: &[&str] = &[
     "shortlog",
 ];
 
-/// Options that make an otherwise read-only git verb run repo-configured content drivers or write arbitrary paths.
-/// One table applied to EVERY [`SAFE_GIT_SUBCOMMANDS`] verb, so a new safe verb inherits the policy.
-/// `--filters`/`--textconv` run `filter.*.smudge` / `diff.*.textconv` (`filter.*.smudge` is outside the ambient local-config exec scan).
-/// `--ext-diff` runs the external diff driver; `--output` writes an arbitrary file; `--open-files-in-pager` executes a pager command.
-/// `git grep`'s short-attached `-O<cmd>` form is guarded in [`git_words_have_unsafe_query_option`].
+/// Options that make an otherwise read-only git verb run content drivers or write arbitrary paths.
+/// One table on every [`SAFE_GIT_SUBCOMMANDS`] verb so a new safe verb inherits the policy; `git grep`'s `-O<cmd>` is guarded separately.
 const GIT_QUERY_UNSAFE_OPTIONS: &[&str] = &[
     "--filters",
     "--textconv",
@@ -275,10 +273,8 @@ fn git_query_option_is_unsafe(word: &str) -> bool {
             .any(|full| full.starts_with(flag))
 }
 
-/// Resolve the subcommand index, skipping only the globals modeled as benign: `-C <path>` / `-C<path>` and `--no-pager` / `-P`.
-/// The ambient config scan tracks the cwd that `-C` retargets.
-/// Every other pre-subcommand option fails closed (`None`).
-/// `-c`, `--config-env`, `--git-dir`, `--exec-path`, `--paginate`, `--attr-source`, and more can change what executes or which config is read.
+/// Subcommand index, skipping only benign globals (`-C` / `--no-pager` / `-P`); the ambient scan tracks the cwd `-C` retargets.
+/// Every other pre-subcommand option fails closed: `-c`, `--git-dir`, `--exec-path`, and similar can change what executes or which config is read.
 fn git_safe_query_verb_index(words: &[String]) -> Option<usize> {
     let mut i = 1;
     loop {
@@ -315,12 +311,8 @@ pub(crate) fn git_words_have_unsafe_query_option(words: &[String]) -> bool {
         && words.iter().skip(1).any(|w| w.starts_with("-O"))
 }
 
-/// Single decision point for auto-approvable read-only `git` queries, shared by the manager safe lists and the auto-mode routine heuristic.
-/// Verb policy and flag policy therefore live in one place.
-/// The [`git_has_exec_risk_global`] check is a redundant belt over [`git_safe_query_verb_index`] for odd `-C` value shapes.
-///
-/// Callers pass wrapper-peeled words, and `words[0]` must be literally `git`.
-/// Path-qualified or case-variant "git" binaries fail closed: a different binary with the same basename must not inherit the allowlist.
+/// Single decision point for auto-approvable read-only `git` queries, shared by the manager safe lists and the auto-mode heuristic.
+/// Callers pass wrapper-peeled words; `words[0]` must be literally `git` — path-qualified or case-variant binaries fail closed.
 pub(crate) fn git_words_are_read_only_query(words: &[String]) -> bool {
     if words.first().map(String::as_str) != Some("git") {
         return false;
@@ -356,6 +348,9 @@ fn local_git_config_entry_is_exec(name: &str, value: &str) -> bool {
     {
         return true;
     }
+    if filter_command_driver(&name).is_some() {
+        return true;
+    }
     if let Some(alias) = name.strip_prefix("alias.")
         && SAFE_GIT_SUBCOMMANDS.contains(&alias)
         && value.starts_with('!')
@@ -365,63 +360,14 @@ fn local_git_config_entry_is_exec(name: &str, value: &str) -> bool {
     false
 }
 
-fn path_unreadable(path: &Path) -> bool {
-    // Directories open on Linux, so require a readable regular file after following symlinks.
-    match std::fs::File::open(path) {
-        Ok(f) => match f.metadata() {
-            Ok(meta) => !meta.is_file(),
-            Err(_) => true,
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-        Err(_) => true,
-    }
-}
-
 /// Local/worktree only via libgit2 (include/includeIf). Fail closed on read errors.
 pub(crate) fn local_repo_config_has_exec_risk(cwd: &Path) -> bool {
-    let repo = match git2::Repository::discover(cwd) {
-        Ok(repo) => repo,
-        Err(e)
-            if e.code() == git2::ErrorCode::NotFound
-                && e.class() == git2::ErrorClass::Repository =>
-        {
-            return false;
-        }
-        Err(_) => return true,
-    };
-    // `repo.config()` can still open global levels when local is unreadable.
-    let git_dir = repo.path();
-    let common = repo.commondir();
-    if path_unreadable(&common.join("config"))
-        || path_unreadable(&git_dir.join("config"))
-        || path_unreadable(&git_dir.join("config.worktree"))
-    {
-        return true;
+    match crate::git_content_filters::read_local_git_config_entries(cwd) {
+        None => true,
+        Some(entries) => entries
+            .iter()
+            .any(|(name, value)| local_git_config_entry_is_exec(name, value)),
     }
-    let config = match repo.config() {
-        Ok(c) => c,
-        Err(_) => return true,
-    };
-    let mut entries = match config.entries(None) {
-        Ok(e) => e,
-        Err(_) => return true,
-    };
-    while let Some(entry) = entries.next() {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => return true,
-        };
-        match entry.level() {
-            git2::ConfigLevel::Local | git2::ConfigLevel::Worktree => {}
-            _ => continue,
-        }
-        let name = entry.name().unwrap_or("");
-        let value = entry.value().unwrap_or("");
-        if local_git_config_entry_is_exec(name, value) {
-            return true;
-        }
-    }
-    false
 }
 
 fn is_static_path_operand(p: &str) -> bool {
@@ -805,11 +751,17 @@ mod tests {
             ("[diff \"evil\"]\n\tcommand = /tmp/pwn\n", true),
             ("[diff \"evil\"]\n\ttextconv = /tmp/pwn\n", true),
             ("[alias]\n\tstatus = !/tmp/pwn\n", true),
+            ("[filter \"pwn\"]\n\tclean = /tmp/pwn ; cat\n", true),
             (
                 "[core]\n\trepositoryformatversion = 0\n\tfsmonitor = true\n\
                  [filter \"lfs\"]\n\tclean = git-lfs clean -- %f\n\
                  \tsmudge = git-lfs smudge -- %f\n\
                  \tprocess = git-lfs filter-process\n\
+                 [alias]\n\tst = status\n",
+                true,
+            ),
+            (
+                "[core]\n\trepositoryformatversion = 0\n\tfsmonitor = true\n\
                  [alias]\n\tst = status\n",
                 false,
             ),

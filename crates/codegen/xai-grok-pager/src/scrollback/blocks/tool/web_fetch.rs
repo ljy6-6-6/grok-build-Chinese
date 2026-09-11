@@ -95,7 +95,6 @@ impl WebFetchToolCallBlock {
     }
 
     /// Render the header line: **Fetch** `url`
-    ///
     /// When `max_width` is `Some`, the URL is truncated with ellipsis to fit.
     /// When `None`, the full URL is rendered (for expanded view / fullscreen).
     fn header_line(

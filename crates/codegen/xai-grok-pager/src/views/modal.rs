@@ -20,10 +20,8 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
-/// A blocking confirmation dialog with typed results.
-///
-/// `R` is the result type; each dialog use-case defines its own enum.
-/// Key-matching is generic; labels are computed per-variant at render time.
+/// A blocking confirmation dialog with typed results. `R` is the result type; each dialog use-case
+/// defines its own enum. Key-matching is generic; labels are computed per-variant at render time.
 pub struct ModalConfirmation<R> {
     /// Available options, each mapping a key to a result. Labels are derived from `R` at render time.
     pub options: Vec<ModalOption<R>>,
@@ -67,10 +65,8 @@ impl EditConfirmResult {
     }
 }
 impl ModalConfirmation<EditConfirmResult> {
-    /// Create the edit confirmation modal.
-    ///
-    /// Always shows three options: save (y), discard (n), delete (x).
-    /// Labels are computed dynamically at render time based on `drain_blocked`.
+    /// Create the edit confirmation modal. Always shows three options: save (y), discard (n), delete
+    /// (x). Labels are computed dynamically at render time based on `drain_blocked`.
     pub fn edit_confirm() -> Self {
         Self {
             options: vec![
@@ -162,10 +158,9 @@ pub struct CancelTurnViewState {
     pub active_idx: usize,
     pub running_count: usize,
 }
-/// Returns a ready-to-open DocPicker modal for the how-to guides list.
-///
-/// `previous_palette` is the saved command-palette state.
-/// When provided, pressing Esc in the doc picker restores that palette instead of closing the modal outright.
+/// Returns a ready-to-open DocPicker modal for the how-to guides list. `previous_palette` is the
+/// saved command-palette state. When provided, pressing. EscEsc in the doc picker restores that palette
+/// instead of closing the modal outright.
 pub fn howto_list_modal(previous_palette: Option<PaletteSnapshot>) -> ActiveModal {
     let locale = crate::locale::UiLocale::parse(xai_grok_product::DEFAULT_UI_LOCALE)
         .unwrap_or(crate::locale::UiLocale::EnUs);
@@ -182,6 +177,26 @@ pub fn howto_list_modal_for(
         previous_palette,
         window: ModalWindowState::new(),
         locale,
+    }
+}
+/// Returns a session picker with no rows: the caller still has to send `FetchSessionList` to fill it.
+/// When `previous_palette` holds a saved command palette, Esc restores it instead of closing the modal.
+pub fn session_picker_modal(previous_palette: Option<PaletteSnapshot>) -> ActiveModal {
+    ActiveModal::SessionPicker {
+        state: crate::views::picker::PickerState::default(),
+        entries: None,
+        loading: true,
+        lanes: Default::default(),
+        previous_palette,
+        window: ModalWindowState::new(),
+        content_results: None,
+        content_loading: false,
+        deep_search_seq: 0,
+        generation: 0,
+        detail_seq: 0,
+        entries_query: None,
+        source_filter: crate::views::session_picker::SourceFilter::default(),
+        pending_delete: None,
     }
 }
 /// The currently active modal dialog, if any.
@@ -313,10 +328,9 @@ pub enum ActiveModal {
     UsageInfo {
         state: Box<crate::views::usage_modal::UsageInfoModalState>,
     },
-    /// Reset-settings confirmation, stacked above Settings.
-    ///
-    /// The underlying `SettingsModalState` is moved in/out so cancel preserves the user's filter/scroll position.
-    /// The setting key lives only here (single source of truth for dispatch).
+    /// Reset-settings confirmation, stacked above Settings. The underlying `SettingsModalState` is
+    /// moved in/out so cancel preserves the user's filter/scroll position. The setting key lives only
+    /// here (single source of truth for dispatch).
     ResetSettingsConfirm {
         modal: ModalConfirmation<ResetSettingsResult>,
         /// Setting key being reset.
@@ -382,6 +396,10 @@ pub enum PaletteCommand {
     OpenSettings,
     /// Open the Agents modal (listing all agent definitions).
     OpenAgentsModal,
+    /// Open the feedback modal directly in the full TUI. Minimal mode carries a slash draft instead.
+    OpenFeedbackModal,
+    /// Replace the minimal-mode composer with `/feedback ` so the user can add the required inline text.
+    InsertFeedbackSlash,
 }
 /// Build the default set of palette entries with section grouping.
 pub(crate) fn default_palette_entries(
@@ -444,7 +462,11 @@ pub(crate) fn default_palette_entries(
         PaletteEntry {
             label: "Send Feedback".into(),
             shortcut: "/feedback".into(),
-            command: PaletteCommand::SlashCommand("/feedback ".into()),
+            command: if screen_mode.is_minimal() {
+                PaletteCommand::InsertFeedbackSlash
+            } else {
+                PaletteCommand::OpenFeedbackModal
+            },
         },
         // ── Context ──
         PaletteEntry {
@@ -923,19 +945,6 @@ pub struct ModalRenderResult {
     pub buttons: Vec<ModalButtonHit>,
 }
 /// Render the modal overlay: dim the screen and draw a styled bar at the bottom.
-///
-/// Layout of the bar:
-/// ```text
-/// Save changes?  [ y:save ] [ n:discard ]
-/// ```
-///
-/// - Message in `text_primary` bold
-/// - Each button: dark bg pill, lighter on hover
-/// - Screen above the bar is dimmed to `gray_dim` fg and `bg_base` bg
-///
-/// `bar_area` is the 1-line rect where the bar renders (shortcuts bar slot).
-/// `dim_area` is everything above the bar (to be dimmed).
-/// `hovered_key` is the button key currently under the mouse (if any).
 pub fn render_modal_overlay(
     buf: &mut Buffer,
     modal: &ActiveModal,
@@ -1106,11 +1115,7 @@ pub fn render_cancel_turn_panel_with_locale(
             break;
         }
         let is_cursor = i == state.active_idx;
-        let row_bg = if is_cursor && focused {
-            theme.bg_visual
-        } else {
-            theme.bg_light
-        };
+        let row_bg = theme.bg_light;
         let row_rect = Rect {
             x: content_x.saturating_sub(1),
             y,
@@ -1145,10 +1150,13 @@ pub fn render_cancel_turn_panel_with_locale(
             Span::styled(choice.label_with_locale(locale), label_style),
         ]);
         buf.set_line(content_x, y, &line, content_w as u16);
+        if is_cursor && focused {
+            buf.set_style(row_rect, theme.selection_overlay());
+        }
         y += 1;
     }
     if !focused {
-        crate::render::color::blend_area(buf, area, Some((theme.bg_light, 0.66)), None);
+        crate::render::color::recede_area(buf, area, theme.bg_light, 0.66);
     }
 }
 /// Apply scroll-key dispatch for a DocViewer modal.
@@ -1808,6 +1816,24 @@ mod palette_sharing_tests {
                 "palette row {row:?} names no builtin command"
             );
         }
+    }
+    #[test]
+    fn feedback_palette_entry_uses_a_live_surface_in_each_mode() {
+        let command = |mode| {
+            default_palette_entries(true, &slash(mode))
+                .into_iter()
+                .find(|entry| entry.label == "Send Feedback")
+                .expect("palette offers feedback in every mode")
+                .command
+        };
+        assert!(matches!(
+            command(crate::app::ScreenMode::Minimal),
+            PaletteCommand::InsertFeedbackSlash
+        ));
+        assert!(matches!(
+            command(crate::app::ScreenMode::Fullscreen),
+            PaletteCommand::OpenFeedbackModal
+        ));
     }
     #[test]
     fn edit_prompt_palette_entry_shows_mode_correct_hint() {

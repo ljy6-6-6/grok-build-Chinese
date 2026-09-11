@@ -8,7 +8,6 @@ use ratatui::layout::Rect;
 use crate::render::osc8::{LinkOverlay, LinkTarget};
 
 /// A clickable link region on screen.
-///
 /// A single logical link may span multiple screen rows when word-wrap splits it.
 /// Each row segment is a separate `Rect` in `rects`.
 #[derive(Debug, Clone)]
@@ -54,11 +53,8 @@ impl VisibleLinkMap {
         self.generation != current_generation
     }
 
-    /// Rebuild the link map from a `LinkOverlay` and citation URLs.
-    ///
-    /// Consecutive `OverlayLink`s with the same `id` **and** target are merged into one `VisibleLink` with multiple `rects`.
-    /// Matching entries are segments of a single link that word-wrapped across rows.
-    /// Same `id` alone is not enough: markdown ids restart per document, so two visible messages can both carry `id=0` for different URLs.
+    /// Rebuild the link map from a `LinkOverlay` and citation URLs. Same `id` alone is not enough: markdown ids restart
+    /// per document, so two visible messages can both carry `id=0` for different URLs.
     pub fn rebuild(
         &mut self,
         generation: u64,
@@ -97,15 +93,9 @@ impl VisibleLinkMap {
             }));
     }
 
-    /// Append overlay links (e.g. `/btw`) without changing generation.
-    ///
-    /// The same-id, same-target merge applies only *within this append*.
-    /// Markdown link ids are per-document, so they will not merge with anything appended earlier this frame.
-    /// Earlier entries are the scrollback prefix from [`Self::rebuild`] or a previous [`Self::append_from_overlay`] call from another overlay source.
-    /// Wrapped segments of the same logical link inside `overlay` still merge correctly.
-    ///
-    /// Callers that re-append the same source every frame must [`Self::truncate`] back to the desired prefix length first.
-    /// Otherwise each frame's links will accumulate.
+    /// Append overlay links without changing generation. The same-id, same-target merge applies only *within this
+    /// append*. Callers that re-append the same source every frame must [`Self::truncate`] back to the desired prefix
+    /// length first. Otherwise each frame's links will accumulate.
     pub fn append_from_overlay(&mut self, overlay: &LinkOverlay) {
         let start_len = self.links.len();
         self.push_overlay_links(overlay, start_len, crate::terminal::terminal_context());

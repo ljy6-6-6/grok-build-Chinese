@@ -28,11 +28,8 @@ use crate::scrollback::state::ScrollbackState;
 use crate::scrollback::types::{BlockLine, DisplayMode};
 use crate::theme::Theme;
 
-/// Densified body line count for shrink-to-content (v1: the current-turn body).
-///
-/// Counts only content **after** the last user prompt.
-/// The pin and the ellipsis are layout chrome and are budgeted separately in desired peek content.
-/// `width` is the middle content width (same as the paint area width).
+/// Densified body line count for shrink-to-content (v1: the current-turn body). Counts only content
+/// after the last user prompt.
 pub fn densified_body_line_count(scrollback: &ScrollbackState, width: u16) -> u16 {
     if width == 0 || scrollback.is_empty() {
         return 0;
@@ -46,10 +43,9 @@ pub fn scrollback_has_last_user(scrollback: &ScrollbackState) -> bool {
     find_last_user_idx(scrollback).is_some()
 }
 
-/// Paint a dense live tail into `area`.
-///
-/// Does not call `prepare_layout`, `enable_follow`, or `set_view_mode`.
-/// Those either belong to the viewport lease or would dirty state the attach path needs.
+/// Paint a dense live tail into `area`. Does not call `prepare_layout`, `enable_follow`, or
+/// `set_view_mode`. Those either belong to the viewport lease or would dirty state the attach path
+/// needs.
 pub fn paint_peek_live_tail(scrollback: &ScrollbackState, area: Rect, buf: &mut Buffer) {
     if area.width < 1 || area.height == 0 || scrollback.is_empty() {
         return;
@@ -172,7 +168,7 @@ fn dense_entry_lines(
 ) -> Vec<Line<'static>> {
     let mode = dense_mode(entry);
     let ctx = entry.context_with_mode(width, mode, appearance, cwd);
-    let output = entry.output_with_hooks(&ctx);
+    let output = entry.output_uncached(&ctx);
     let keep_blanks = !entry.is_foldable();
     output
         .lines

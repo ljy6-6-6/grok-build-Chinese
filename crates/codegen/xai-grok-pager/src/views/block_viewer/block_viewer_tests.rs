@@ -146,6 +146,7 @@ fn selected_plain_text_follow_mode_skips_offscreen_lines() {
         pane.items.push(ContentLine {
             content: Line::default(),
             plain_text: String::new(),
+            copy_text_override: None,
             id: start_id + i,
             bg: None,
         });
@@ -371,6 +372,7 @@ fn pin_to_tail_skips_trailing_blanks() {
     pane.items.push(ContentLine {
         content: Line::default(),
         plain_text: String::new(),
+        copy_text_override: None,
         id: hello_id + 1,
         bg: None,
     });

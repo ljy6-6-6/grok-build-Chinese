@@ -719,6 +719,7 @@ async fn resume_session_in_new_worktree(
     session_id: &str,
     restore_code: Option<bool>,
     local_miss: bool,
+    locale: &crate::locale::LocaleContext,
 ) -> anyhow::Result<OpenedSession> {
     let resumed = resume_session_into_worktree(
         acp_tx,
@@ -727,6 +728,7 @@ async fn resume_session_in_new_worktree(
         session_id,
         restore_code,
         local_miss.then_some(session_id),
+        locale,
     )
     .await
     .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -1108,6 +1110,7 @@ pub async fn run_single_turn(
                 &session_id,
                 restore_code,
                 deferred_local_miss,
+                options.locale.as_ref(),
             )
             .await
         }

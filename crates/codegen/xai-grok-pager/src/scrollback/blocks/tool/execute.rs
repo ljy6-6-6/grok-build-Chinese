@@ -1123,6 +1123,7 @@ mod tests {
             appearance,
             is_selected: false,
             cwd: None,
+            locale: Default::default(),
         };
         let plain: Vec<String> = block
             .preamble(&ctx)

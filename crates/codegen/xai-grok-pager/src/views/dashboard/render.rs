@@ -568,6 +568,7 @@ pub fn render_dashboard_with_locale(
     }
 
     if let Some(modal) = state.usage_modal.as_mut() {
+        let default_locale = crate::locale::LocaleContext::default();
         crate::views::usage_modal::render_usage_modal(
             buf,
             area,
@@ -575,6 +576,7 @@ pub fn render_dashboard_with_locale(
             credit_balance,
             /* compact */ false,
             &theme,
+            locale.unwrap_or(&default_locale),
         );
         return None;
     }

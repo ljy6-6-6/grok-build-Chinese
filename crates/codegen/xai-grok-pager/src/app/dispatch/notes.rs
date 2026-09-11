@@ -236,7 +236,8 @@ pub(super) fn dispatch_submit_feedback_modal(
     }
     let text = modal.submitted_text().trim().to_string();
     modal.reconcile_feedback_images();
-    let (encoded_images, dropped) = encode_feedback_image_slice(modal.images());
+    let (encoded_images, dropped) =
+        encode_feedback_image_slice(modal.images(), agent.scrollback.locale());
     if text.is_empty() && encoded_images.is_empty() {
         if let Some(notice) = dropped {
             modal.set_error(notice);
@@ -432,9 +433,10 @@ pub(crate) fn commit_feedback(
 ) -> Option<Effect> {
     // Encode before the emptiness check: encoding can drop attachments, and
     // a report left with no text and no images must not go out blank.
-    let (encoded_images, dropped) = encode_feedback_image_slice(images.as_slice());
+    let (encoded_images, dropped) =
+        encode_feedback_image_slice(images.as_slice(), agent.scrollback.locale());
     // Encoding is done with the records; dropping the owner deletes the staged temp files
-    drop(images, agent.scrollback.locale());
+    drop(images);
     if let Some(notice) = dropped {
         agent.scrollback.push_block(RenderBlock::system(notice));
     }
@@ -576,7 +578,6 @@ pub(super) fn dispatch_send_remember_note_from_command(
 /// Encode a borrowed image snapshot for the POST.
 fn encode_feedback_image_slice(
     images: &[crate::prompt_images::PastedImage],
-
     locale: &crate::locale::LocaleContext,
 ) -> (Vec<xai_grok_shell::session::FeedbackImage>, Option<String>) {
     use base64::Engine as _;
@@ -585,7 +586,8 @@ fn encode_feedback_image_slice(
         .iter()
         .map(crate::prompt_images::load_for_send)
         .collect();
-    let (accepted, notice) = super::inline_feedback::select_feedback_images(&loaded);
+    let (accepted, notice) =
+        super::inline_feedback::select_feedback_images_with_locale(&loaded, locale);
     let encoded = accepted
         .into_iter()
         .filter_map(|index| {

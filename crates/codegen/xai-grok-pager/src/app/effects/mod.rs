@@ -292,6 +292,7 @@ pub(crate) fn execute(
                                     .meta(meta),
                                 &tx,
                                 "Session creation",
+                                locale.as_ref(),
                             )
                             .await
                     };
@@ -392,6 +393,7 @@ pub(crate) fn execute(
                                 &sid,
                                 restore_code,
                                 local_miss,
+                                locale.as_ref(),
                             )
                             .await
                         {

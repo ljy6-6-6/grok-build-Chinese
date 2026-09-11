@@ -2,8 +2,10 @@ use super::*;
 
 #[test]
 fn test_tmp_download_path_is_unique_per_version_and_per_attempt() {
-    // The old `with_extension("tmp")` collapsed every 0.1.x versioned name onto a single `grok-0.1.tmp`
-    // The helper must keep distinct versions distinct AND make repeated attempts (same process, e.g. concurrent tokio tasks) unique.
+    // The old `with_extension("tmp")` collapsed every 0.1.x versioned
+    // name onto a single `grok-0.1.tmp`; the helper must keep distinct
+    // versions distinct AND make repeated attempts (same process, e.g.
+    // concurrent tokio tasks) unique.
     let dest_181 = std::path::Path::new("/home/u/.grok/downloads/grok-0.1.181-linux-x86_64");
     let dest_182 = std::path::Path::new("/home/u/.grok/downloads/grok-0.1.182-linux-x86_64");
 
@@ -32,6 +34,15 @@ fn test_tmp_download_path_is_unique_per_version_and_per_attempt() {
         "temp file must stay in the destination directory for atomic rename"
     );
 }
+
+#[test]
+fn test_needs_update_same_version() {
+    assert_eq!(
+        needs_update("0.1.141", "0.1.141", "stable", false),
+        Some(false)
+    );
+}
+
 #[test]
 fn test_needs_update_invalid_versions() {
     assert_eq!(
@@ -40,6 +51,12 @@ fn test_needs_update_invalid_versions() {
     );
     assert_eq!(needs_update("0.1.141", "garbage", "stable", false), None);
 }
+
+#[test]
+fn test_needs_update_unknown_channel() {
+    assert_eq!(needs_update("0.1.140", "0.1.141", "beta", false), None);
+}
+
 #[test]
 fn test_needs_update_enterprise_channel_behaves_like_stable() {
     // Enterprise uses the same conservative pre-release rules as stable.
@@ -78,7 +95,7 @@ async fn test_atomic_symlink_swap_creates_new_symlink() {
     std::fs::write(&target, "v1").unwrap();
 
     let link = dir.path().join("grok");
-    // No existing symlink, so the swap should create one
+    // No existing symlink — should create one.
     atomic_symlink_swap(&target, &link).await.unwrap();
 
     assert!(link.is_symlink());
@@ -101,6 +118,7 @@ async fn test_atomic_symlink_swap_replaces_existing() {
     std::os::unix::fs::symlink(&target_v1, &link).unwrap();
     assert_eq!(std::fs::read_to_string(&link).unwrap(), "v1");
 
+    // Swap to v2.
     atomic_symlink_swap(&target_v2, &link).await.unwrap();
 
     assert!(link.is_symlink());
@@ -121,10 +139,12 @@ async fn test_atomic_symlink_swap_preserves_old_target() {
     let link = dir.path().join("grok");
     std::os::unix::fs::symlink(&target_v1, &link).unwrap();
 
+    // Swap to v2.
     atomic_symlink_swap(&target_v2, &link).await.unwrap();
 
-    // The old target file must still exist on disk; that is the key property that prevents SIGKILL on macOS
-    // Running processes that have binary-v1 mmap'd can continue to page-fault from it
+    // The old target file must still exist on disk — this is the key
+    // property that prevents SIGKILL on macOS.  Running processes that
+    // have binary-v1 mmap'd can continue to page-fault from it.
     assert!(target_v1.exists(), "old binary must not be deleted");
     assert_eq!(std::fs::read_to_string(&target_v1).unwrap(), "v1-content");
 }
@@ -132,8 +152,9 @@ async fn test_atomic_symlink_swap_preserves_old_target() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_atomic_symlink_swap_no_intermediate_missing_state() {
-    // Verify that the link path always exists during the swap
-    // We can't truly test atomicity without threads, but we can at least verify the path exists before and after
+    // Verify that the link path always exists (is never absent) during
+    // the swap.  We can't truly test atomicity without threads, but we
+    // can at least verify the path exists before and after.
     let dir = tempfile::tempdir().unwrap();
 
     let target_v1 = dir.path().join("binary-v1");
@@ -148,6 +169,7 @@ async fn test_atomic_symlink_swap_no_intermediate_missing_state() {
     atomic_symlink_swap(&target_v2, &link).await.unwrap();
     assert!(link.exists(), "link should exist after swap");
 
+    // No tmp-link file should be left behind.
     let tmp_link = link.with_extension("tmp-link");
     assert!(!tmp_link.exists(), "temp link should be cleaned up");
 }
@@ -155,7 +177,8 @@ async fn test_atomic_symlink_swap_no_intermediate_missing_state() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_atomic_symlink_swap_replaces_regular_file() {
-    // If the canonical path is a regular file (from an old non-symlink installation), the swap should still work by replacing it
+    // If the canonical path is a regular file (from an old non-symlink
+    // installation), the swap should still work by replacing it.
     let dir = tempfile::tempdir().unwrap();
 
     let target = dir.path().join("binary-v2");
@@ -174,7 +197,8 @@ async fn test_atomic_symlink_swap_replaces_regular_file() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_atomic_symlink_swap_succeeds_despite_leftover_tmp_link() {
-    // A leftover .tmp-link from a crashed swap must not block a new swap: each swap uses its own unique temp name, so nothing collides
+    // A leftover .tmp-link from a crashed swap must not block a new swap:
+    // unique per-racer temp names mean no collision.
     let dir = tempfile::tempdir().unwrap();
 
     let target_v1 = dir.path().join("binary-v1");
@@ -205,8 +229,108 @@ fn managed_layout() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBu
 fn test_installer_manages_bin_entrypoints_gate() {
     assert!(installer_manages_bin_entrypoints("internal"));
     assert!(installer_manages_bin_entrypoints("gh-release"));
+    #[cfg(feature = "community-build")]
+    assert!(installer_manages_bin_entrypoints(
+        crate::community_release::COMMUNITY_INSTALLER
+    ));
     assert!(!installer_manages_bin_entrypoints("npm"));
     assert!(!installer_manages_bin_entrypoints("unknown"));
+}
+
+#[cfg(all(
+    feature = "community-build",
+    any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+    )
+))]
+#[tokio::test]
+async fn test_community_entrypoints_share_one_immutable_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    let downloads = dir.path().join("grok-zh-downloads");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(&downloads).unwrap();
+    let target = downloads.join(format!(
+        "grok-zh-1.0.8-{}.1-0.installed",
+        community_unix_platform_suffix()
+    ));
+    std::fs::write(&target, "community").unwrap();
+
+    let primary = swap_community_bin_links(&target, &bin).await.unwrap();
+
+    assert_eq!(primary, bin.join("grok-zh"));
+    for name in ["grok-zh", "agent-zh"] {
+        let link = bin.join(name);
+        assert!(link.is_symlink(), "{name} must be a symlink");
+        assert_eq!(std::fs::read_to_string(link).unwrap(), "community");
+    }
+    assert_eq!(
+        std::fs::read_link(bin.join("agent-zh")).unwrap(),
+        std::path::PathBuf::from("grok-zh")
+    );
+}
+
+#[cfg(all(
+    feature = "community-build",
+    any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+    )
+))]
+#[tokio::test]
+async fn test_community_entrypoints_refuse_unmanaged_existing_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    let downloads = dir.path().join("grok-zh-downloads");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(&downloads).unwrap();
+    let target = downloads.join(format!(
+        "grok-zh-1.0.8-{}.1-0.installed",
+        community_unix_platform_suffix()
+    ));
+    std::fs::write(&target, "community").unwrap();
+
+    std::os::unix::fs::symlink("/tmp/unmanaged-grok", bin.join("grok-zh")).unwrap();
+    let error = swap_community_bin_links(&target, &bin).await.unwrap_err();
+    assert!(error.to_string().contains("unmanaged community link"));
+    assert_eq!(
+        std::fs::read_link(bin.join("grok-zh")).unwrap(),
+        std::path::PathBuf::from("/tmp/unmanaged-grok")
+    );
+
+    std::fs::remove_file(bin.join("grok-zh")).unwrap();
+    std::fs::write(bin.join("agent-zh"), "user file").unwrap();
+    let error = swap_community_bin_links(&target, &bin).await.unwrap_err();
+    assert!(error.to_string().contains("unmanaged entry point"));
+    assert_eq!(
+        std::fs::read_to_string(bin.join("agent-zh")).unwrap(),
+        "user file"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_link_rollback_does_not_overwrite_a_concurrent_winner() {
+    let dir = tempfile::tempdir().unwrap();
+    let link = dir.path().join("grok");
+    std::os::unix::fs::symlink("old", &link).unwrap();
+    let rollback = LinkRollback::capture(&link).await.unwrap();
+    atomic_symlink_swap(std::path::Path::new("ours"), &link)
+        .await
+        .unwrap();
+    atomic_symlink_swap(std::path::Path::new("winner"), &link)
+        .await
+        .unwrap();
+
+    rollback
+        .restore(Some(std::path::Path::new("ours")))
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_link(&link).unwrap(),
+        std::path::PathBuf::from("winner")
+    );
 }
 
 #[cfg(unix)]
@@ -338,12 +462,14 @@ async fn test_sweep_stale_tmp_links_removes_stale_keeps_fresh_and_active() {
     std::os::unix::fs::symlink(&target, &leftover_old).unwrap();
     std::os::unix::fs::symlink(&target, &leftover_new).unwrap();
 
-    // max_age = ZERO: every leftover is stale and removed; the active `grok` link (no `.tmp-link` suffix) is untouched
+    // max_age = ZERO: every leftover is stale and removed; the active
+    // `grok` link (no `.tmp-link` suffix) is untouched.
     sweep_stale_tmp_links(&link, Duration::ZERO).await;
     assert!(!leftover_old.exists() && !leftover_new.exists());
     assert!(link.is_symlink(), "active link must be preserved");
 
-    // A fresh leftover under a real max_age is preserved; it could be a concurrent updater's swap still in flight
+    // A fresh leftover under a real max_age is preserved — it could be a
+    // concurrent racer's in-flight link.
     let fresh = dir.path().join("grok.999-9.tmp-link");
     std::os::unix::fs::symlink(&target, &fresh).unwrap();
     sweep_stale_tmp_links(&link, Duration::from_secs(3600)).await;
@@ -353,7 +479,7 @@ async fn test_sweep_stale_tmp_links_removes_stale_keeps_fresh_and_active() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_atomic_symlink_swap_multiple_sequential_swaps() {
-    // Simulate four sequential swaps, v1 through v4
+    // Simulate v1 -> v2 -> v3 -> v4 sequential swaps.
     let dir = tempfile::tempdir().unwrap();
     let link = dir.path().join("grok");
 
@@ -375,9 +501,30 @@ async fn test_atomic_symlink_swap_multiple_sequential_swaps() {
         assert!(target.exists(), "binary-v{} should still exist", i);
     }
 
+    // No temp files should remain.
     let tmp_link = link.with_extension("tmp-link");
     assert!(!tmp_link.exists(), "no temp link should remain");
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_atomic_symlink_swap_with_absolute_target() {
+    // atomic_symlink_swap stores whatever path is given — if absolute,
+    // readlink returns the absolute path.
+    let dir = tempfile::tempdir().unwrap();
+
+    let binary = dir.path().join("grok-0.1.141");
+    std::fs::write(&binary, "v141").unwrap();
+
+    let link = dir.path().join("grok");
+    atomic_symlink_swap(&binary, &link).await.unwrap();
+
+    assert!(link.is_symlink());
+    // readlink returns the absolute path we passed.
+    assert_eq!(std::fs::read_link(&link).unwrap(), binary);
+    assert_eq!(std::fs::read_to_string(&link).unwrap(), "v141");
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn test_atomic_symlink_swap_with_relative_target() {
@@ -429,7 +576,7 @@ fn test_relative_symlink_target_same_dir() {
 #[test]
 fn test_relative_symlink_target_cross_tree_stays_absolute() {
     // /usr/local/bin/grok -> /home/alice/.grok/downloads/grok-0.1.203
-    // Different grandparents, so the target should stay absolute
+    // Different grandparents — should stay absolute.
     let target = std::path::Path::new("/home/alice/.grok/downloads/grok-0.1.203");
     let link = std::path::Path::new("/usr/local/bin/grok");
     let result = relative_symlink_target(target, link);
@@ -454,7 +601,7 @@ async fn test_relative_symlink_survives_directory_move() {
     std::fs::create_dir_all(&alice_bin).unwrap();
     std::fs::write(alice_downloads.join("grok-0.1.203"), "binary-content").unwrap();
 
-    // Create a relative symlink (what relative_symlink_target produces)
+    // Create a relative symlink (what the fix produces)
     let rel_target = std::path::Path::new("../downloads/grok-0.1.203");
     let link = alice_bin.join("grok");
     atomic_symlink_swap(rel_target, &link).await.unwrap();
@@ -490,11 +637,12 @@ async fn test_relative_symlink_survives_directory_move() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_atomic_symlink_swap_broken_symlink_target() {
-    // If the current symlink is broken (target deleted externally), the swap should still succeed
+    // If the current symlink is broken (target deleted externally),
+    // the swap should still succeed.
     let dir = tempfile::tempdir().unwrap();
 
     let link = dir.path().join("grok");
-    // Create a broken symlink that points to a file that doesn't exist
+    // Create a broken symlink — points to a file that doesn't exist.
     std::os::unix::fs::symlink(dir.path().join("deleted-binary"), &link).unwrap();
     assert!(link.is_symlink());
     assert!(!link.exists(), "broken symlink should not 'exist'");
@@ -536,6 +684,7 @@ fn test_needs_update_prerelease_to_stable_forces_official_install() {
     );
 }
 
+#[cfg(feature = "community-build")]
 #[test]
 fn test_needs_update_ci_prerelease_respects_rollback_policy() {
     let current = "1.0.3-zh.ci.21";
@@ -557,8 +706,8 @@ fn test_needs_update_ci_prerelease_respects_rollback_policy() {
 
 #[test]
 fn test_needs_update_stable_to_alpha_no_install_when_candidate_equal() {
-    // Server returns max(stable, alpha) for alpha channel
-    // When the user's stable version already IS the candidate, no install is needed
+    // Server returns max(stable, alpha) for alpha channel. When the user's
+    // stable version already IS the candidate, no install needed.
     assert_eq!(
         needs_update("0.1.148", "0.1.148", "alpha", false),
         Some(false)
@@ -579,7 +728,7 @@ fn test_needs_update_stable_channel_never_gets_prerelease() {
 
 #[test]
 fn test_needs_update_valid_current_only_upgrades() {
-    // An admissible current version on the target channel gets a pure semver comparison (allow_downgrade=false)
+    // Admissible current on the target channel → pure semver (allow_downgrade=false).
     assert_eq!(
         needs_update("0.1.140", "0.1.141", "stable", false),
         Some(true)
@@ -596,16 +745,19 @@ fn test_needs_update_valid_current_only_upgrades() {
         needs_update("0.1.140", "0.1.139-alpha.5", "alpha", false),
         Some(false)
     );
-    // Alpha to newer alpha: upgrade
+    // Alpha → newer alpha: upgrade.
     assert_eq!(
         needs_update("0.1.148-alpha.1", "0.1.148-alpha.3", "alpha", false),
         Some(true)
     );
-    // Alpha to older alpha: no downgrade (allow_downgrade=false)
+    // Alpha → older alpha: no downgrade (allow_downgrade=false).
     assert_eq!(
         needs_update("0.1.148-alpha.3", "0.1.148-alpha.2", "alpha", false),
         Some(false)
     );
+    assert_eq!(needs_update("1.0.0", "1.0.3", "stable", false), Some(true));
+    assert_eq!(needs_update("1.0.3", "1.0.4", "stable", false), Some(true));
+    assert_eq!(needs_update("1.0.4", "1.0.3", "stable", false), Some(false));
 }
 
 #[test]
@@ -634,6 +786,7 @@ async fn test_cleanup_old_downloads_keeps_current_plus_one() {
     for v in ["0.1.140", "0.1.141", "0.1.142", "0.1.143", "0.1.144"] {
         std::fs::write(d.join(format!("grok-{}-macos-aarch64", v)), v).unwrap();
     }
+    // Current version.
     std::fs::write(d.join("grok-0.1.145-macos-aarch64"), "current").unwrap();
 
     make_all_stale(d);
@@ -674,7 +827,7 @@ async fn test_cleanup_old_downloads_does_not_touch_other_binaries() {
     std::fs::write(d.join("grok-pager-0.1.140-macos-aarch64"), "old-pager").unwrap();
     std::fs::write(d.join("grok-pager-0.1.141-macos-aarch64"), "current-pager").unwrap();
 
-    // Cleanup only grok; pager files must be untouched
+    // Cleanup only grok — pager files must be untouched.
     make_all_stale(d);
 
     cleanup_old_downloads(d, "grok", "0.1.141").await;
@@ -691,7 +844,8 @@ async fn test_cleanup_old_downloads_does_not_touch_other_binaries() {
     );
 }
 
-/// Backdate a file's mtime past [`STALE_TMP_AGE`] so cleanup treats it as an abandoned download / genuinely old binary.
+/// Backdate a file's mtime past [`STALE_TMP_AGE`] so cleanup treats it
+/// as an abandoned download / genuinely old binary.
 fn make_stale(path: &std::path::Path) {
     let old = std::time::SystemTime::now() - (STALE_TMP_AGE + Duration::from_secs(60));
     let f = std::fs::File::options().write(true).open(path).unwrap();
@@ -699,9 +853,10 @@ fn make_stale(path: &std::path::Path) {
         .unwrap();
 }
 
-/// Backdate every file in `dir`.
-/// Cleanup deliberately never deletes a freshly-written binary or temp file (it may belong to a concurrent in-flight install).
-/// Retention-policy tests must therefore age their fixtures to look like real leftovers from previous releases.
+/// Backdate every file in `dir`. Cleanup deliberately never deletes a
+/// freshly-written binary or temp file (it may belong to a concurrent
+/// in-flight install), so retention-policy tests must age their fixtures
+/// to look like real leftovers from previous releases.
 fn make_all_stale(dir: &std::path::Path) {
     for entry in std::fs::read_dir(dir).unwrap() {
         let p = entry.unwrap().path();
@@ -716,10 +871,11 @@ async fn test_cleanup_old_downloads_removes_stale_tmp_keeps_fresh_tmp() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
 
-    // Stale tmp: abandoned by a crashed updater, so it is swept
+    // Stale tmp: abandoned by a crashed updater — swept.
     std::fs::write(d.join("grok-0.1.140-macos-aarch64.tmp"), "partial").unwrap();
     make_stale(&d.join("grok-0.1.140-macos-aarch64.tmp"));
-    // Fresh tmp: a concurrent updater's in-flight download is kept, or its atomic rename would fail with ENOENT
+    // Fresh tmp: a concurrent updater's in-flight download — kept, or
+    // its atomic rename would fail with ENOENT.
     std::fs::write(d.join("grok-0.1.142-macos-aarch64.77-0.tmp"), "inflight").unwrap();
     std::fs::write(d.join("grok-0.1.141-macos-aarch64"), "current").unwrap();
 
@@ -741,18 +897,21 @@ async fn test_cleanup_old_downloads_removes_stale_tmp_keeps_fresh_tmp() {
 
 #[tokio::test]
 async fn test_cleanup_old_downloads_keeps_fresh_versioned_binary() {
-    // A versioned binary written moments ago may be a concurrent installer's just-renamed download whose symlink swap hasn't happened yet
-    // Even when the retention policy would otherwise delete it, it must survive until it ages
+    // A versioned binary written moments ago may be a concurrent
+    // installer's just-renamed download whose symlink swap hasn't
+    // happened yet — even when the retention policy would otherwise
+    // delete it, it must survive until it ages.
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
 
-    // Three old versions and the current: policy would delete .138 and .139
+    // Three old versions + current: policy would delete .138 and .139.
     for v in ["0.1.138", "0.1.139", "0.1.140"] {
         std::fs::write(d.join(format!("grok-{v}-macos-aarch64")), v).unwrap();
     }
     std::fs::write(d.join("grok-0.1.141-macos-aarch64"), "current").unwrap();
     make_all_stale(d);
-    // .138 is re-written NOW, simulating a racer that just renamed its download into place (e.g. a rollback install racing an upgrade).
+    // .138 is re-written NOW — simulating a racer that just renamed its
+    // download into place (e.g. a rollback install racing an upgrade).
     std::fs::write(d.join("grok-0.1.138-macos-aarch64"), "in-flight").unwrap();
 
     cleanup_old_downloads(d, "grok", "0.1.141").await;
@@ -775,7 +934,7 @@ async fn test_cleanup_old_downloads_skips_symlinks() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
 
-    // grok-latest is a symlink, so it must be skipped
+    // grok-latest is a symlink — must be skipped.
     let target = d.join("grok-0.1.141-macos-aarch64");
     std::fs::write(&target, "current").unwrap();
     std::os::unix::fs::symlink(&target, d.join("grok-latest")).unwrap();
@@ -790,6 +949,16 @@ async fn test_cleanup_old_downloads_skips_symlinks() {
     );
     assert!(target.exists(), "current must not be deleted");
 }
+
+#[tokio::test]
+async fn test_cleanup_old_downloads_empty_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    // Should not panic or error on empty directory.
+    make_all_stale(dir.path());
+
+    cleanup_old_downloads(dir.path(), "grok", "0.1.141").await;
+}
+
 #[tokio::test]
 async fn test_cleanup_old_downloads_version_prefix_collision() {
     // Regression test: version "0.1.14" must not protect "0.1.140", "0.1.141", etc.
@@ -810,10 +979,12 @@ async fn test_cleanup_old_downloads_version_prefix_collision() {
         d.join("grok-0.1.14-macos-aarch64").exists(),
         "current 0.1.14"
     );
+    // Newest old version (0.1.141) must survive as N-1.
     assert!(
         d.join("grok-0.1.141-macos-aarch64").exists(),
         "N-1 is 0.1.141"
     );
+    // 0.1.140 and 0.1.13 should be deleted.
     assert!(
         !d.join("grok-0.1.140-macos-aarch64").exists(),
         "0.1.140 should be deleted"
@@ -948,6 +1119,7 @@ async fn test_cleanup_old_downloads_mixed_stable_and_alpha() {
 // reinstall_hint
 // ──────────────────────────────────────────────────────────────────────
 
+#[cfg(not(feature = "community-build"))]
 #[test]
 fn test_reinstall_hint_npm_mentions_npm_command() {
     let hint = reinstall_hint("npm", "stable");
@@ -958,6 +1130,7 @@ fn test_reinstall_hint_npm_mentions_npm_command() {
     );
 }
 
+#[cfg(not(feature = "community-build"))]
 #[test]
 fn test_reinstall_hint_gh_release_mentions_gh_command() {
     let hint = reinstall_hint("gh-release", "stable");
@@ -971,6 +1144,7 @@ fn test_reinstall_hint_gh_release_mentions_gh_command() {
     );
 }
 
+#[cfg(not(feature = "community-build"))]
 #[test]
 fn test_reinstall_hint_internal_mentions_platform_installer() {
     let hint = reinstall_hint("internal", "stable");
@@ -997,6 +1171,7 @@ fn test_reinstall_hint_internal_mentions_platform_installer() {
     }
 }
 
+#[cfg(not(feature = "community-build"))]
 #[test]
 fn test_reinstall_hint_internal_alpha_sets_channel() {
     let hint = reinstall_hint("internal", "alpha");
@@ -1008,15 +1183,14 @@ fn test_reinstall_hint_internal_alpha_sets_channel() {
     } else {
         assert!(
             hint.contains("| GROK_CHANNEL='alpha' bash"),
-            "alpha must set GROK_CHANNEL on bash (the process running \
-             install.sh), not curl: {hint}"
+            "alpha must set GROK_CHANNEL on bash (the process running install.sh), not curl: {hint}"
         );
     }
 }
 
+#[cfg(not(feature = "community-build"))]
 #[test]
 fn test_reinstall_hint_enterprise_uses_enterprise_script() {
-    // Enterprise ships via its own bootstrap script (channel hardcoded there), never install.sh with GROK_CHANNEL
     let hint = reinstall_hint("internal", "enterprise");
     assert!(
         hint.contains("/enterprise-install."),
@@ -1028,9 +1202,9 @@ fn test_reinstall_hint_enterprise_uses_enterprise_script() {
     );
 }
 
+#[cfg(not(feature = "community-build"))]
 #[test]
 fn test_reinstall_hint_malformed_channel_falls_back_to_stable() {
-    // Free-text config channels never reach the shell one-liner unless they are plain [A-Za-z0-9._-] tokens
     for bad in ["al pha", "x'; rm -rf ~;'", "a\"b", ""] {
         let hint = reinstall_hint("internal", bad);
         assert!(
@@ -1040,6 +1214,7 @@ fn test_reinstall_hint_malformed_channel_falls_back_to_stable() {
     }
 }
 
+#[cfg(not(feature = "community-build"))]
 #[test]
 fn test_reinstall_hint_unknown_falls_back_to_internal() {
     // Unknown installer falls back to the same hint as "internal".
@@ -1048,10 +1223,24 @@ fn test_reinstall_hint_unknown_falls_back_to_internal() {
     assert_eq!(unknown, internal);
 }
 
+#[cfg(not(feature = "community-build"))]
 #[test]
 fn test_reinstall_hint_empty_falls_back_to_internal() {
     let hint = reinstall_hint("", "stable");
     assert_eq!(hint, reinstall_hint("internal", "stable"));
+}
+
+#[cfg(feature = "community-build")]
+#[test]
+fn test_reinstall_hint_community_never_names_official_sources() {
+    let hint = reinstall_hint(crate::community_release::COMMUNITY_INSTALLER, "stable");
+    assert!(hint.contains(xai_grok_product::COMMUNITY_RELEASE_REPO));
+    for forbidden in ["x.ai", "@xai-official", "xai-org-shared"] {
+        assert!(
+            !hint.contains(forbidden),
+            "unexpected official source: {hint}"
+        );
+    }
 }
 
 #[test]
@@ -1075,13 +1264,6 @@ fn test_smoke_test_failure_messages_distinguish_causes() {
     assert!(nz.contains("stderr: killed"), "{nz}");
 }
 
-#[test]
-fn test_truncate_err() {
-    assert_eq!(truncate_err("  short  ", 10), "short");
-    assert_eq!(truncate_err("abcdefghij", 8), "abcde...");
-}
-
-/// Every failure kind classifies from its typed source; unmarked errors (npm / gh-release) fall through to `Other`.
 #[test]
 fn test_classify_install_error() {
     let download: anyhow::Error = InstallPhaseError::Download(anyhow::anyhow!("HTTP 404")).into();
@@ -1115,6 +1297,211 @@ fn test_classify_install_error() {
     ] {
         assert_eq!(classify_install_error(&smoke.into()), expected);
     }
+}
+
+#[cfg(all(unix, not(feature = "community-build")))]
+fn assert_decoded_executable(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(path).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o755, "decoded binary must be executable");
+}
+
+#[cfg(all(not(unix), not(feature = "community-build")))]
+fn assert_decoded_executable(_path: &std::path::Path) {}
+
+#[cfg(not(feature = "community-build"))]
+#[tokio::test]
+async fn download_and_decode_round_trips_each_codec() {
+    use std::io::Write;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let payload = b"\x7fELF grok binary payload".to_vec();
+    let zst = zstd::encode_all(&payload[..], 3).unwrap();
+    let gz = {
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(&payload).unwrap();
+        enc.finish().unwrap()
+    };
+
+    for (suffix, codec, body) in [("zst", Codec::Zstd, zst), ("gz", Codec::Gzip, gz)] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/grok-1.2.3-linux-x86_64.{suffix}")))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("grok-1.2.3-linux-x86_64");
+        let url = format!("{}/grok-1.2.3-linux-x86_64.{suffix}", server.uri());
+        download_and_decode(&url, &dest, codec, false)
+            .await
+            .unwrap_or_else(|e| panic!("decode .{suffix}: {e}"));
+
+        assert_eq!(std::fs::read(&dest).unwrap(), payload);
+        assert_decoded_executable(&dest);
+    }
+}
+
+#[cfg(not(feature = "community-build"))]
+#[tokio::test]
+async fn download_and_decode_errs_on_corrupt() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/grok-1.2.3-linux-x86_64.zst"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"not a zstd frame".to_vec()))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("grok-1.2.3-linux-x86_64");
+    let url = format!("{}/grok-1.2.3-linux-x86_64.zst", server.uri());
+    let result = download_and_decode(&url, &dest, Codec::Zstd, false).await;
+    assert!(result.is_err());
+    assert!(
+        !dest.exists(),
+        "bad decode must not publish a partial binary"
+    );
+}
+
+#[cfg(not(feature = "community-build"))]
+#[tokio::test]
+async fn download_cli_artifact_falls_back_to_plain() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let payload = b"\x7fELF grok binary payload".to_vec();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/grok-1.2.3-linux-x86_64"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(payload.clone()))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("grok-1.2.3-linux-x86_64");
+    download_cli_artifact_from_gcs(&server.uri(), "grok-1.2.3-linux-x86_64", &dest, false)
+        .await
+        .expect("fall back to the plain binary when compressed forms are absent");
+    assert_eq!(std::fs::read(&dest).unwrap(), payload);
+    assert_decoded_executable(&dest);
+}
+
+#[cfg(not(feature = "community-build"))]
+#[tokio::test]
+async fn download_cli_artifact_prefers_compressed_over_plain() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let payload = b"\x7fELF grok binary payload".to_vec();
+    let zst = zstd::encode_all(&payload[..], 3).unwrap();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/grok-1.2.3-linux-x86_64.zst"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(zst))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/grok-1.2.3-linux-x86_64"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"PLAIN sentinel".to_vec()))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("grok-1.2.3-linux-x86_64");
+    download_cli_artifact_from_gcs(&server.uri(), "grok-1.2.3-linux-x86_64", &dest, false)
+        .await
+        .expect("prefer the compressed sidecar when present");
+    assert_eq!(std::fs::read(&dest).unwrap(), payload);
+    assert_decoded_executable(&dest);
+}
+
+#[test]
+fn cli_object_candidates_try_windows_exe_first() {
+    assert_eq!(
+        cli_object_candidates("grok-1.2.3-windows-x86_64", true),
+        ["grok-1.2.3-windows-x86_64.exe", "grok-1.2.3-windows-x86_64"]
+    );
+    assert_eq!(
+        cli_object_candidates("grok-1.2.3-linux-x86_64", false),
+        ["grok-1.2.3-linux-x86_64"]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn npm_entry_is_recognized_by_the_binary_location() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let native = root.join("lib/node_modules/@xai-official/grok/bin/grok-native");
+    std::fs::create_dir_all(native.parent().unwrap()).unwrap();
+    std::fs::write(&native, "bin").unwrap();
+    let path_entry = root.join("prefix-bin/grok");
+    std::fs::create_dir_all(path_entry.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&native, &path_entry).unwrap();
+
+    let resolved = std::fs::canonicalize(&path_entry).unwrap();
+    assert!(is_under_node_modules(&resolved));
+    assert!(!is_under_node_modules(&root.join("home/bin/grok")));
+}
+
+#[test]
+fn test_corrected_arch() {
+    assert_eq!(corrected_arch("macos", "x86_64", true), "aarch64");
+    assert_eq!(corrected_arch("macos", "x86_64", false), "x86_64");
+    assert_eq!(corrected_arch("macos", "aarch64", true), "aarch64");
+    assert_eq!(corrected_arch("linux", "x86_64", true), "x86_64");
+    assert_eq!(corrected_arch("windows", "x86_64", true), "x86_64");
+}
+
+#[cfg(feature = "community-build")]
+#[test]
+fn test_community_version_output_must_match_release_version() {
+    assert!(community_version_output_matches(
+        "grok-zh 1.2.3 (abcdef0) [stable]\n",
+        "1.2.3"
+    ));
+    assert!(!community_version_output_matches(
+        "grok-zh 1.2.2 (abcdef0)\n",
+        "1.2.3"
+    ));
+    assert!(!community_version_output_matches(
+        "grok 1.2.3 (abcdef0)\n",
+        "1.2.3"
+    ));
+}
+
+#[test]
+fn test_effective_auto_update_respects_distribution_default_and_overrides() {
+    assert_eq!(
+        effective_auto_update_enabled(None),
+        crate::default_auto_update_enabled()
+    );
+    assert!(effective_auto_update_enabled(Some(true)));
+    assert!(!effective_auto_update_enabled(Some(false)));
+    #[cfg(feature = "community-build")]
+    assert!(!effective_auto_update_enabled(None));
+    #[cfg(not(feature = "community-build"))]
+    assert!(effective_auto_update_enabled(None));
+}
+
+#[test]
+fn test_background_update_decisions_keep_default_off_metadata_only() {
+    assert!(!should_skip_cached_background_check(false, true));
+    assert!(!should_start_background_download(false, true));
+    assert!(should_skip_cached_background_check(true, true));
+    assert!(should_start_background_download(true, true));
+    assert!(!should_start_background_download(true, false));
+}
+
+#[test]
+fn test_truncate_err() {
+    assert_eq!(truncate_err("  short  ", 10), "short");
+    assert_eq!(truncate_err("abcdefghij", 8), "abcde...");
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -1183,6 +1570,113 @@ fn test_update_status_optional_none_serializes_to_null() {
     assert!(v["error"].is_null());
     assert_eq!(v["updateAvailable"], false);
 }
+
+#[test]
+fn test_update_status_with_error_field_serialized() {
+    let s = UpdateStatus {
+        current_version: "0.1.150".to_string(),
+        latest_version: None,
+        update_available: false,
+        installer: Some("npm".to_string()),
+        channel: "stable".to_string(),
+        auto_update: Some(true),
+        error: Some("npm view failed: ENETUNREACH".to_string()),
+    };
+    let v = serde_json::to_value(&s).unwrap();
+    assert_eq!(v["error"], "npm view failed: ENETUNREACH");
+}
+
+#[test]
+fn test_update_status_alpha_channel_serialized() {
+    let s = UpdateStatus {
+        current_version: "0.1.150-alpha.1".to_string(),
+        latest_version: Some("0.1.150-alpha.2".to_string()),
+        update_available: true,
+        installer: Some("npm".to_string()),
+        channel: "alpha".to_string(),
+        auto_update: Some(true),
+        error: None,
+    };
+    let v = serde_json::to_value(&s).unwrap();
+    assert_eq!(v["channel"], "alpha");
+    assert_eq!(v["currentVersion"], "0.1.150-alpha.1");
+    assert_eq!(v["latestVersion"], "0.1.150-alpha.2");
+}
+
+#[test]
+fn test_update_status_json_is_valid_single_object() {
+    // Whatever we add to UpdateStatus in the future, the serialization
+    // must remain a single JSON object (not an array, primitive, etc.).
+    let s = make_status();
+    let json = serde_json::to_string(&s).unwrap();
+    assert!(json.starts_with('{'), "must be a JSON object: {json}");
+    assert!(json.ends_with('}'), "must be a JSON object: {json}");
+    // Single line: no embedded newlines (the wire format is one line).
+    assert!(!json.contains('\n'), "must be single line: {json}");
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// print_update_status — exercise both code paths via JSON serialization
+// (the human path writes to stdout/stderr which is hard to capture
+//  without altering the function signature).
+// ──────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_print_update_status_json_returns_ok() {
+    let s = make_status();
+    // We can't easily capture stdout, but we can confirm the function
+    // doesn't panic or return Err on a well-formed status.
+    print_update_status(&s, true).unwrap();
+}
+
+#[test]
+fn test_print_update_status_human_returns_ok_when_update_available() {
+    let s = make_status();
+    print_update_status(&s, false).unwrap();
+}
+
+#[test]
+fn test_print_update_status_human_returns_ok_when_no_installer() {
+    let s = UpdateStatus {
+        current_version: "0.1.150".to_string(),
+        latest_version: None,
+        update_available: false,
+        installer: None,
+        channel: "stable".to_string(),
+        auto_update: None,
+        error: None,
+    };
+    print_update_status(&s, false).unwrap();
+}
+
+#[test]
+fn test_print_update_status_human_returns_ok_with_error() {
+    let s = UpdateStatus {
+        current_version: "0.1.150".to_string(),
+        latest_version: None,
+        update_available: false,
+        installer: Some("npm".to_string()),
+        channel: "stable".to_string(),
+        auto_update: Some(true),
+        error: Some("network down".to_string()),
+    };
+    print_update_status(&s, false).unwrap();
+}
+
+#[test]
+fn test_print_update_status_human_returns_ok_when_up_to_date() {
+    let s = UpdateStatus {
+        current_version: "0.1.150".to_string(),
+        latest_version: Some("0.1.150".to_string()),
+        update_available: false,
+        installer: Some("npm".to_string()),
+        channel: "stable".to_string(),
+        auto_update: Some(true),
+        error: None,
+    };
+    print_update_status(&s, false).unwrap();
+}
+
 // ──────────────────────────────────────────────────────────────────────
 // needs_update — additional edge cases
 // ──────────────────────────────────────────────────────────────────────
@@ -1199,14 +1693,14 @@ fn test_needs_update_empty_latest_returns_none() {
 
 #[test]
 fn test_needs_update_whitespace_returns_none() {
-    // Leading/trailing whitespace is not stripped; semver::parse rejects it
+    // Leading/trailing whitespace is not stripped — semver::parse rejects.
     assert_eq!(needs_update("  0.1.141", "0.1.142", "stable", false), None);
     assert_eq!(needs_update("0.1.141", "0.1.142  ", "stable", false), None);
 }
 
 #[test]
 fn test_needs_update_channel_is_case_sensitive() {
-    // "STABLE", "Stable", "ENTERPRISE" etc. are not recognized; the channel must be exact lowercase.
+    // "STABLE", "Stable", "ENTERPRISE" etc. are not recognized — must be exact lowercase.
     assert_eq!(needs_update("0.1.140", "0.1.141", "STABLE", false), None);
     assert_eq!(needs_update("0.1.140", "0.1.141", "Stable", false), None);
     assert_eq!(needs_update("0.1.140", "0.1.141", "ALPHA", false), None);
@@ -1272,15 +1766,24 @@ fn test_needs_update_alpha_to_beta_same_base_is_upgrade_per_semver() {
 
 #[test]
 fn test_needs_update_with_build_metadata_uses_semver_crate_ordering() {
-    // SUBTLE: per the semver SPEC, build metadata (after `+`) MUST be ignored when determining version precedence. This
-    // means CI publishers MUST NOT publish multiple builds of the same version differing only in build metadata. Today our
-    // pipeline doesn't, so this is latent; the test locks in the surprising behavior so it can't change silently
+    // SUBTLE: per the semver SPEC, build metadata (after `+`) MUST be
+    // ignored when determining version precedence. However the `semver`
+    // crate's `PartialOrd` impl compares build metadata lexicographically
+    // for differing values. So `0.1.141+xyz > 0.1.141+abc` returns true
+    // here even though spec-wise they are equal.
+    //
+    // This means CI publishers MUST NOT publish multiple builds of the
+    // same version differing only in build metadata, or auto-update will
+    // bounce users between them. Today our pipeline doesn't, so this is
+    // latent — but the test locks in the surprising behavior so it can't
+    // change silently.
     assert_eq!(
         needs_update("0.1.141+abc", "0.1.141+xyz", "stable", false),
         Some(true),
         "semver crate orders by build metadata lexicographically (contra spec)"
     );
-    // No build metadata vs with build metadata: the semver crate treats a version with build metadata as greater than the same version without it
+    // No build metadata vs with build metadata: semver crate treats
+    // a version with build > the same version without it.
     assert_eq!(
         needs_update("0.1.141", "0.1.141+abc", "stable", false),
         Some(true)
@@ -1303,7 +1806,8 @@ fn test_needs_update_alpha_channel_with_invalid_versions_returns_none() {
 
 #[test]
 fn test_needs_update_alpha_channel_treats_release_as_higher_than_prerelease() {
-    // On alpha channel, a release version is semver-higher than its matching pre-release: 0.1.150 > 0.1.150-alpha.99
+    // On alpha channel, a release version is semver-higher than its
+    // matching pre-release: 0.1.150 > 0.1.150-alpha.99.
     assert_eq!(
         needs_update("0.1.150-alpha.99", "0.1.150", "alpha", false),
         Some(true)
@@ -1312,7 +1816,8 @@ fn test_needs_update_alpha_channel_treats_release_as_higher_than_prerelease() {
 
 #[test]
 fn test_needs_update_stable_does_not_install_when_pre_and_pre() {
-    // current is pre-release, latest is also pre-release on stable channel: latest is rejected as pre-release, so no install
+    // current is pre-release, latest is also pre-release on stable channel:
+    // latest is rejected as pre-release, so no install.
     assert_eq!(
         needs_update("0.1.150-alpha.1", "0.1.151-alpha.1", "stable", false),
         Some(false)
@@ -1325,14 +1830,14 @@ fn test_needs_update_stable_does_not_install_when_pre_and_pre() {
 
 #[test]
 fn test_needs_update_downgrade_stable_when_allowed() {
-    // Rollback scenario: stable pointer moved from 0.2.7 to 0.2.5
-    // GCS/internal installer: allow_downgrade=true triggers the update
+    // Rollback scenario: stable pointer moved from 0.2.7 → 0.2.5.
+    // GCS/internal installer: allow_downgrade=true → triggers update.
     assert_eq!(needs_update("0.2.7", "0.2.5", "stable", true), Some(true));
 }
 
 #[test]
 fn test_needs_update_downgrade_stable_blocked_when_disallowed() {
-    // Same rollback scenario but npm installer: allow_downgrade=false blocks the update
+    // Same rollback scenario but npm installer: allow_downgrade=false → no update.
     assert_eq!(needs_update("0.2.7", "0.2.5", "stable", false), Some(false));
 }
 
@@ -1357,7 +1862,7 @@ fn test_needs_update_downgrade_enterprise_when_allowed() {
 
 #[test]
 fn test_needs_update_same_version_unaffected_by_allow_downgrade() {
-    // Same version means no update regardless of allow_downgrade setting
+    // Same version → no update regardless of allow_downgrade setting.
     assert_eq!(needs_update("0.2.5", "0.2.5", "stable", true), Some(false));
     assert_eq!(needs_update("0.2.5", "0.2.5", "stable", false), Some(false));
     assert_eq!(needs_update("0.2.5", "0.2.5", "alpha", true), Some(false));
@@ -1374,13 +1879,14 @@ fn test_needs_update_upgrade_unaffected_by_allow_downgrade() {
 
 #[test]
 fn test_needs_update_downgrade_major_version_when_allowed() {
-    // Major version downgrade (e.g. a v2 to v1 rollback).
+    // Major version downgrade (e.g. v2 → v1 rollback).
     assert_eq!(needs_update("2.0.0", "1.99.99", "stable", true), Some(true));
 }
 
 #[test]
 fn test_needs_update_downgrade_prerelease_still_rejected_on_stable() {
-    // Even with allow_downgrade=true, pre-release targets are rejected on stable/enterprise channels (safety net)
+    // Even with allow_downgrade=true, pre-release targets are rejected on
+    // stable/enterprise channels (safety net).
     assert_eq!(
         needs_update("0.2.7", "0.2.5-alpha.1", "stable", true),
         Some(false)
@@ -1431,9 +1937,20 @@ fn test_installer_allows_downgrade_gh_release() {
     assert!(installer_allows_downgrade("gh-release"));
 }
 
+#[cfg(feature = "community-build")]
+#[test]
+fn test_installer_blocks_automatic_community_release_downgrade() {
+    let allow_downgrade = installer_allows_downgrade(crate::community_release::COMMUNITY_INSTALLER);
+    assert!(!allow_downgrade);
+    assert_eq!(
+        needs_update("1.0.8-zh.ci.59", "1.0.5", "stable", allow_downgrade),
+        Some(false)
+    );
+}
+
 #[test]
 fn test_installer_allows_downgrade_npm_blocked() {
-    // npm registries can return stale/misconfigured versions, so no downgrade is allowed
+    // npm registries can return stale/misconfigured versions — no downgrade.
     assert!(!installer_allows_downgrade("npm"));
 }
 
@@ -1447,6 +1964,19 @@ fn test_installer_allows_downgrade_unknown_blocked() {
 // ──────────────────────────────────────────────────────────────────────
 // detect_platform
 // ──────────────────────────────────────────────────────────────────────
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[test]
+fn test_detect_platform_returns_known_os() {
+    let (os, arch) = detect_platform().unwrap();
+    assert!(
+        os == "macos" || os == "linux" || os == "windows",
+        "got os={os}"
+    );
+    assert!(arch == "x86_64" || arch == "aarch64", "got arch={arch}");
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
@@ -1474,16 +2004,6 @@ fn test_detect_platform_matches_compile_time_cfg() {
     }
 }
 
-/// Rosetta correction applies exactly to macos/x86_64 on Apple Silicon; every other (os, arch, host) combination keeps the compile-time arch.
-#[test]
-fn test_corrected_arch() {
-    assert_eq!(corrected_arch("macos", "x86_64", true), "aarch64");
-    assert_eq!(corrected_arch("macos", "x86_64", false), "x86_64");
-    assert_eq!(corrected_arch("macos", "aarch64", true), "aarch64");
-    assert_eq!(corrected_arch("linux", "x86_64", true), "x86_64");
-    assert_eq!(corrected_arch("windows", "x86_64", true), "x86_64");
-}
-
 // ──────────────────────────────────────────────────────────────────────
 // cleanup_old_downloads — additional edge cases
 // ──────────────────────────────────────────────────────────────────────
@@ -1495,18 +2015,28 @@ async fn test_cleanup_old_downloads_invalid_current_version_is_no_op() {
     std::fs::write(d.join("grok-0.1.140-macos-aarch64"), "v140").unwrap();
     std::fs::write(d.join("grok-0.1.141-macos-aarch64"), "v141").unwrap();
 
-    // An invalid version string makes cleanup early-return without deleting
+    // Invalid version string → cleanup must early-return without deleting.
     make_all_stale(d);
 
     cleanup_old_downloads(d, "grok", "not-a-version").await;
     assert!(d.join("grok-0.1.140-macos-aarch64").exists());
     assert!(d.join("grok-0.1.141-macos-aarch64").exists());
 }
+
+#[tokio::test]
+async fn test_cleanup_old_downloads_missing_dir_no_panic() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("does-not-exist");
+    // Must not panic when the directory doesn't exist.
+    cleanup_old_downloads(&missing, "grok", "0.1.141").await;
+}
+
 #[tokio::test]
 async fn test_cleanup_old_downloads_files_with_non_digit_suffix_skipped() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
-    // Files matching prefix but with a non-digit-leading suffix must be ignored (e.g. grok-latest, grok-pager-* when prefix is grok).
+    // Files matching prefix but with a non-digit-leading suffix must be
+    // ignored (e.g. grok-latest, grok-pager-* when prefix is grok).
     std::fs::write(d.join("grok-latest"), "alias").unwrap();
     std::fs::write(d.join("grok-pager-0.1.141-macos-aarch64"), "pager").unwrap();
     std::fs::write(d.join("grok-0.1.140-macos-aarch64"), "v140").unwrap();
@@ -1525,7 +2055,8 @@ async fn test_cleanup_old_downloads_files_with_non_digit_suffix_skipped() {
 async fn test_cleanup_old_downloads_unparseable_version_skipped() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
-    // Files with the prefix and a leading digit but unparseable as semver are ignored (not deleted, not counted)
+    // Files with prefix + digit but unparseable as semver are ignored
+    // (not deleted, not counted).
     std::fs::write(d.join("grok-9garbage-macos-aarch64"), "junk").unwrap();
     std::fs::write(d.join("grok-0.1.141-macos-aarch64"), "current").unwrap();
 
@@ -1564,7 +2095,7 @@ async fn test_cleanup_old_downloads_only_one_old_keeps_it() {
 
     cleanup_old_downloads(d, "grok", "0.1.141").await;
 
-    // Only one old version, so it is kept as N-1
+    // Only one old version → keep it as N-1.
     assert!(d.join("grok-0.1.140-macos-aarch64").exists(), "N-1 kept");
     assert!(d.join("grok-0.1.141-macos-aarch64").exists(), "current");
 }
@@ -1634,9 +2165,31 @@ async fn test_cleanup_old_downloads_tmp_files_deleted_even_when_unparseable() {
     );
     assert!(d.join("grok-0.1.141-macos-aarch64").exists());
 }
+
+#[tokio::test]
+async fn test_cleanup_old_downloads_three_olds_keeps_only_newest() {
+    // Regression: keep exactly N-1, not N-2 or older.
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    for v in ["0.1.138", "0.1.139", "0.1.140"] {
+        std::fs::write(d.join(format!("grok-{}-macos-aarch64", v)), v).unwrap();
+    }
+    std::fs::write(d.join("grok-0.1.141-macos-aarch64"), "current").unwrap();
+
+    make_all_stale(d);
+
+    cleanup_old_downloads(d, "grok", "0.1.141").await;
+
+    assert!(d.join("grok-0.1.141-macos-aarch64").exists(), "current");
+    assert!(d.join("grok-0.1.140-macos-aarch64").exists(), "N-1 only");
+    assert!(!d.join("grok-0.1.139-macos-aarch64").exists());
+    assert!(!d.join("grok-0.1.138-macos-aarch64").exists());
+}
+
 #[tokio::test]
 async fn test_cleanup_old_downloads_darwin_platform_recognized() {
-    // The `darwin` alias for macOS is in PLATFORM_OS; versions on grok-X.Y.Z-darwin-* layouts must split correctly
+    // The `darwin` alias for macOS is in PLATFORM_OS — versions on
+    // grok-X.Y.Z-darwin-* layouts must split correctly.
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
     std::fs::write(d.join("grok-0.1.140-darwin-arm64"), "v140").unwrap();
@@ -1651,28 +2204,71 @@ async fn test_cleanup_old_downloads_darwin_platform_recognized() {
 }
 
 // ──────────────────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────
+// UpdateRunMode
+// ──────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_update_run_mode_is_copy_clone_debug() {
+    // The ergonomic Copy/Clone/Debug derives must not regress: we pass
+    // `run_mode` by value through several layers.
+    let m1 = UpdateRunMode::Blocking;
+    let m2 = m1; // Copy
+    let m3 = m1; // Copy again, m1 not moved
+    assert!(matches!(m1, UpdateRunMode::Blocking));
+    assert!(matches!(m2, UpdateRunMode::Blocking));
+    assert!(matches!(m3, UpdateRunMode::Blocking));
+    // Debug exists.
+    let _ = format!("{:?}", UpdateRunMode::NonBlocking);
+}
+
+// ──────────────────────────────────────────────────────────────────────
 // Constants — lock them in so silent renames are caught.
 // ──────────────────────────────────────────────────────────────────────
 
 #[test]
 fn test_user_facing_constants_are_stable() {
-    assert_eq!(PROMPT_UPDATE_NOW, "Update now? [Y/n/d]");
+    assert_eq!(
+        PROMPT_UPDATE_NOW,
+        if cfg!(feature = "community-build") {
+            "现在更新？[Y/n/d]"
+        } else {
+            "Update now? [Y/n/d]"
+        }
+    );
     assert_eq!(
         MSG_AUTO_UPDATE_BACKGROUND,
-        "Auto-update running in background."
+        if cfg!(feature = "community-build") {
+            "正在后台自动更新。"
+        } else {
+            "Auto-update running in background."
+        }
     );
     assert_eq!(
         MSG_RUN_UPDATE_MANUAL,
-        "Run `grok update` to get the latest version."
+        if cfg!(feature = "community-build") {
+            "运行 `grok-zh update` 获取最新版本。"
+        } else {
+            "Run `grok update` to get the latest version."
+        }
     );
 }
 
-// ────────────────────────────────────────────────────────────────────── env_installer — env-var based, must run
-// serially. GROK_INSTALLER (npm | internal | gh-release | gh); GROK_MANAGED_BY_NPM → npm; GROK_MANAGED_BY_INTERNAL →
-// internal. ──────────────────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────
+// env_installer — env-var based, must run serially.
+//
+// Resolution order (matches function body):
+//   1. GROK_INSTALLER (npm | internal | gh-release | gh)
+//   2. GROK_MANAGED_BY_NPM       → npm
+//   3. GROK_MANAGED_BY_INTERNAL  → internal
+//   4. npm_config_user_agent      → npm
+//   5. None
+// ──────────────────────────────────────────────────────────────────────
 
-/// Snapshot every installer-related env var so the test can clear them at start and restore them at end.
-/// Without the guard, a parent shell that sets e.g. `npm_config_user_agent` (as `npm run` always does) makes every "no env vars" test misbehave.
+/// Snapshot every installer-related env var so the test can clear them
+/// at start and restore them at end. Without this, a parent shell that
+/// sets e.g. `npm_config_user_agent` (which happens whenever you run via
+/// `npm run`) silently makes every "no env vars" test misbehave.
 struct InstallerEnvGuard {
     prev: Vec<(&'static str, Option<std::ffi::OsString>)>,
 }
@@ -1763,9 +2359,10 @@ fn test_env_installer_explicit_uppercase_normalized() {
 #[test]
 #[serial_test::serial]
 fn test_env_installer_explicit_unknown_value_returns_none() {
-    // CRITICAL: when the explicit env var is set to something we don't recognize, we early-return None
-    // This means we do NOT fall through to the other env vars or to config
-    // So `GROK_INSTALLER=brew` disables the env-installer detection entirely
+    // CRITICAL: when the explicit env var is set to something we don't
+    // recognize, we early-return None. This means we do NOT fall through
+    // to the other env vars or to config. So `GROK_INSTALLER=brew`
+    // disables the env-installer detection entirely.
     let _g = InstallerEnvGuard::isolate();
     unsafe { std::env::set_var("GROK_INSTALLER", "brew") };
     // Even if MANAGED_BY_NPM is also set, the explicit var wins (and rejects).
@@ -1796,7 +2393,7 @@ fn test_env_installer_managed_by_npm() {
 #[test]
 #[serial_test::serial]
 fn test_env_installer_managed_by_npm_any_value() {
-    // The check is `is_some`, so any value (including empty) wins
+    // The check is `is_some` — any value (including empty) wins.
     let _g = InstallerEnvGuard::isolate();
     unsafe { std::env::set_var("GROK_MANAGED_BY_NPM", "") };
     assert_eq!(env_installer(), Some("npm"));
@@ -1824,6 +2421,21 @@ fn test_env_installer_npm_config_user_agent_implies_npm() {
     };
     assert_eq!(env_installer(), Some("npm"));
 }
+
+#[test]
+#[serial_test::serial]
+fn test_env_installer_managed_by_npm_wins_over_npm_config_user_agent() {
+    // Both set: the order in env_installer is MANAGED_BY_NPM checked first,
+    // so MANAGED_BY_NPM wins. (Result is the same — both → npm — but the
+    // resolution path matters for future maintainers.)
+    let _g = InstallerEnvGuard::isolate();
+    unsafe {
+        std::env::set_var("GROK_MANAGED_BY_NPM", "1");
+        std::env::set_var("npm_config_user_agent", "npm/10");
+    }
+    assert_eq!(env_installer(), Some("npm"));
+}
+
 #[test]
 #[serial_test::serial]
 fn test_env_installer_explicit_internal_wins_over_npm_managed() {
@@ -1851,7 +2463,7 @@ fn test_create_temp_npmrc_no_token_returns_none() {
 #[test]
 #[serial_test::serial]
 fn test_create_temp_npmrc_empty_token_returns_none() {
-    // An empty token is not a real token, so no file is written
+    // An empty token is not a real token — must not write a file.
     let _g = InstallerEnvGuard::isolate();
     unsafe { std::env::set_var("NPM_TOKEN", "") };
     let result = create_temp_npmrc(None).unwrap();
@@ -1915,7 +2527,7 @@ fn test_create_temp_npmrc_custom_registry_extracts_host_and_path() {
         .expect("file written");
     let body = std::fs::read_to_string(&path).unwrap();
 
-    // Host and path must be preserved (trailing slash stripped per impl)
+    // Host + path must be preserved (trailing slash stripped per impl).
     assert!(
         body.contains("npm.example.com/repository/npm"),
         "registry host+path: {body}"
@@ -1944,7 +2556,8 @@ fn test_create_temp_npmrc_custom_registry_with_port() {
 #[test]
 #[serial_test::serial]
 fn test_create_temp_npmrc_invalid_registry_url_falls_back_to_default() {
-    // If the registry string doesn't parse as a URL, fall back to the public npm host so the auth token isn't silently lost
+    // If the registry string doesn't parse as a URL, fall back to the
+    // public npm host so the auth token isn't silently lost.
     let _g = InstallerEnvGuard::isolate();
     unsafe { std::env::set_var("NPM_TOKEN", "tok") };
     let path = create_temp_npmrc(Some("not a url"))
@@ -1962,7 +2575,7 @@ fn test_create_temp_npmrc_invalid_registry_url_falls_back_to_default() {
 #[test]
 #[serial_test::serial]
 fn test_create_temp_npmrc_file_perms_are_0600() {
-    // The file contains an auth token, so it must be readable only by owner
+    // The file contains an auth token — must be readable only by owner.
     use std::os::unix::fs::PermissionsExt;
     let _g = InstallerEnvGuard::isolate();
     unsafe { std::env::set_var("NPM_TOKEN", "secret") };
@@ -1981,7 +2594,8 @@ fn test_create_temp_npmrc_file_perms_are_0600() {
 #[test]
 #[serial_test::serial]
 fn test_create_temp_npmrc_unique_path_per_pid() {
-    // Two parallel installs would clobber each other if the path didn't include the PID
+    // Two parallel installs would clobber each other if the path didn't
+    // include the PID. Verify the filename includes the current PID.
     let _g = InstallerEnvGuard::isolate();
     unsafe { std::env::set_var("NPM_TOKEN", "tok") };
     let path = create_temp_npmrc(None).unwrap().expect("file written");
@@ -2102,7 +2716,8 @@ async fn test_windows_replace_exe_locked_file_renames_aside() {
 #[cfg(windows)]
 #[tokio::test]
 async fn test_windows_replace_exe_rollback_on_copy_failure() {
-    // No stale .old: the aside IS grok.exe.old, so this pins the non-diverted rollback branch (rename .old back onto dest)
+    // No stale .old: the aside IS grok.exe.old, so this pins the
+    // non-diverted rollback branch (rename .old back onto dest).
     use std::os::windows::fs::OpenOptionsExt;
     const FILE_SHARE_READ: u32 = 0x00000001;
     const FILE_SHARE_DELETE: u32 = 0x00000004;
@@ -2119,7 +2734,8 @@ async fn test_windows_replace_exe_rollback_on_copy_failure() {
         .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
         .open(&dest)
         .unwrap();
-    // Exclusive src lock: both copies fail with a sharing violation, so the rename runs and the second copy triggers the rollback
+    // Exclusive src lock: both copies fail with a sharing violation, so
+    // the rename runs and the second copy triggers the rollback.
     let _src_lock = std::fs::OpenOptions::new()
         .read(true)
         .share_mode(0)
@@ -2171,8 +2787,9 @@ async fn test_windows_replace_exe_empty_binary() {
 #[cfg(windows)]
 #[tokio::test]
 async fn test_windows_replace_exe_locked_stale_old_does_not_block_update() {
-    // A leftover .old can still be a running image (the session live during the previous update), which cannot be deleted
-    // The rename must divert to a unique aside instead of failing on the locked name
+    // A leftover .old can still be a running image (the session live
+    // during the previous update): undeletable, so the rename must
+    // divert to a unique aside instead of failing on the locked name.
     use std::os::windows::fs::OpenOptionsExt;
     const FILE_SHARE_READ: u32 = 0x00000001;
     const FILE_SHARE_DELETE: u32 = 0x00000004;
@@ -2229,7 +2846,8 @@ async fn test_windows_replace_exe_locked_stale_old_does_not_block_update() {
 #[cfg(windows)]
 #[tokio::test]
 async fn test_windows_replace_exe_rollback_restores_from_diverted_aside() {
-    // Copy failure after a divert must roll dest back from the unique aside, not the hardcoded .old (which still holds the locked image)
+    // Copy failure after a divert must roll dest back from the unique
+    // aside, not the hardcoded .old (which still holds the locked image).
     use std::os::windows::fs::OpenOptionsExt;
     const FILE_SHARE_READ: u32 = 0x00000001;
     const FILE_SHARE_DELETE: u32 = 0x00000004;
@@ -2254,7 +2872,8 @@ async fn test_windows_replace_exe_rollback_restores_from_diverted_aside() {
         .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
         .open(&dest)
         .unwrap();
-    // Exclusive src lock: both copies fail with a sharing violation, so the rename sequence runs and the second copy triggers the rollback
+    // Exclusive src lock: both copies fail with a sharing violation, so
+    // the rename dance runs and the second copy triggers the rollback.
     let _src_lock = std::fs::OpenOptions::new()
         .read(true)
         .share_mode(0)
@@ -2285,8 +2904,9 @@ async fn test_windows_replace_exe_rollback_restores_from_diverted_aside() {
 #[cfg(windows)]
 #[tokio::test]
 async fn test_windows_replace_exe_sweeps_accumulated_asides() {
-    // Asides pile up while superseded sessions keep running
-    // A later update must collect the no-longer-locked ones, but never another executable's leftovers
+    // Asides pile up while superseded sessions keep running; a later
+    // update must collect the no-longer-locked ones — but never another
+    // executable's leftovers.
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("new.exe");
     std::fs::write(&src, "new").unwrap();
@@ -2311,165 +2931,4 @@ async fn test_windows_replace_exe_sweeps_accumulated_asides() {
         agent_old.exists(),
         "other executables' leftovers must be untouched"
     );
-}
-
-#[cfg(unix)]
-fn assert_decoded_executable(path: &std::path::Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let mode = std::fs::metadata(path).unwrap().permissions().mode();
-    assert_eq!(mode & 0o777, 0o755, "decoded binary must be executable");
-}
-#[cfg(not(unix))]
-fn assert_decoded_executable(_path: &std::path::Path) {}
-
-#[tokio::test]
-async fn download_and_decode_round_trips_each_codec() {
-    use std::io::Write;
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    let payload = b"\x7fELF grok binary payload".to_vec();
-    let zst = zstd::encode_all(&payload[..], 3).unwrap();
-    let gz = {
-        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        enc.write_all(&payload).unwrap();
-        enc.finish().unwrap()
-    };
-
-    for (suffix, codec, body) in [("zst", Codec::Zstd, zst), ("gz", Codec::Gzip, gz)] {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path(format!("/grok-1.2.3-linux-x86_64.{suffix}")))
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
-            .mount(&server)
-            .await;
-
-        let dir = tempfile::tempdir().unwrap();
-        let dest = dir.path().join("grok-1.2.3-linux-x86_64");
-        let url = format!("{}/grok-1.2.3-linux-x86_64.{suffix}", server.uri());
-        download_and_decode(&url, &dest, codec, false)
-            .await
-            .unwrap_or_else(|e| panic!("decode .{suffix}: {e}"));
-
-        assert_eq!(
-            std::fs::read(&dest).unwrap(),
-            payload,
-            ".{suffix} decode mismatch"
-        );
-        assert_decoded_executable(&dest);
-    }
-}
-
-#[tokio::test]
-async fn download_and_decode_errs_on_corrupt() {
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/grok-1.2.3-linux-x86_64.zst"))
-        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"not a zstd frame".to_vec()))
-        .mount(&server)
-        .await;
-
-    let dir = tempfile::tempdir().unwrap();
-    let dest = dir.path().join("grok-1.2.3-linux-x86_64");
-    let url = format!("{}/grok-1.2.3-linux-x86_64.zst", server.uri());
-    let result = download_and_decode(&url, &dest, Codec::Zstd, false).await;
-
-    assert!(
-        result.is_err(),
-        "a corrupt .zst must error so the caller falls back"
-    );
-    assert!(
-        !dest.exists(),
-        "no partial binary published from a bad decode"
-    );
-}
-
-#[tokio::test]
-async fn download_cli_artifact_falls_back_to_plain() {
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    let payload = b"\x7fELF grok binary payload".to_vec();
-    let server = MockServer::start().await; // only the plain object exists; .zst/.gz 404
-    Mock::given(method("GET"))
-        .and(path("/grok-1.2.3-linux-x86_64"))
-        .respond_with(ResponseTemplate::new(200).set_body_bytes(payload.clone()))
-        .mount(&server)
-        .await;
-
-    let dir = tempfile::tempdir().unwrap();
-    let dest = dir.path().join("grok-1.2.3-linux-x86_64");
-    download_cli_artifact_from_gcs(&server.uri(), "grok-1.2.3-linux-x86_64", &dest, false)
-        .await
-        .expect("fall back to the plain binary when compressed forms are absent");
-
-    assert_eq!(std::fs::read(&dest).unwrap(), payload);
-    assert_decoded_executable(&dest);
-}
-
-#[tokio::test]
-async fn download_cli_artifact_prefers_compressed_over_plain() {
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    let payload = b"\x7fELF grok binary payload".to_vec();
-    let zst = zstd::encode_all(&payload[..], 3).unwrap();
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/grok-1.2.3-linux-x86_64.zst"))
-        .respond_with(ResponseTemplate::new(200).set_body_bytes(zst))
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/grok-1.2.3-linux-x86_64"))
-        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"PLAIN sentinel".to_vec()))
-        .mount(&server)
-        .await;
-
-    let dir = tempfile::tempdir().unwrap();
-    let dest = dir.path().join("grok-1.2.3-linux-x86_64");
-    download_cli_artifact_from_gcs(&server.uri(), "grok-1.2.3-linux-x86_64", &dest, false)
-        .await
-        .expect("prefer the compressed sidecar when present");
-
-    assert_eq!(
-        std::fs::read(&dest).unwrap(),
-        payload,
-        "decoded compressed payload must win over the plain object"
-    );
-    assert_decoded_executable(&dest);
-}
-
-#[test]
-fn cli_object_candidates_try_windows_exe_first() {
-    assert_eq!(
-        cli_object_candidates("grok-1.2.3-windows-x86_64", true),
-        ["grok-1.2.3-windows-x86_64.exe", "grok-1.2.3-windows-x86_64"]
-    );
-    assert_eq!(
-        cli_object_candidates("grok-1.2.3-linux-x86_64", false),
-        ["grok-1.2.3-linux-x86_64"]
-    );
-}
-
-/// The npm-installed binary lives under node_modules, so its canonicalized
-/// path names the installer even with config wiped.
-#[cfg(unix)]
-#[test]
-fn npm_entry_is_recognized_by_the_binary_location() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path();
-    let native = root.join("lib/node_modules/@xai-official/grok/bin/grok-native");
-    std::fs::create_dir_all(native.parent().unwrap()).unwrap();
-    std::fs::write(&native, "bin").unwrap();
-    let path_entry = root.join("prefix-bin/grok");
-    std::fs::create_dir_all(path_entry.parent().unwrap()).unwrap();
-    std::os::unix::fs::symlink(&native, &path_entry).unwrap();
-
-    let resolved = std::fs::canonicalize(&path_entry).unwrap();
-    assert!(super::is_under_node_modules(&resolved));
-    assert!(!super::is_under_node_modules(&root.join("home/bin/grok")));
 }

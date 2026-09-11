@@ -1435,6 +1435,7 @@ fn enter_on_paste_pseudo_row_opens_detail() {
 #[test]
 fn esc_in_detail_returns_to_browse() {
     let mut mode = ShortcutsHelpMode::Detail {
+        identity: None,
         title: "Send".into(),
         keys_line: "Enter".into(),
         body: "Send the message".into(),
@@ -1468,6 +1469,7 @@ fn detail_mode_ignores_vim_keys() {
         _ => u16::MAX,
     };
     let detail = || ShortcutsHelpMode::Detail {
+        identity: None,
         title: "Send".into(),
         keys_line: "Enter".into(),
         body: "line one\nline two".into(),
@@ -1535,6 +1537,7 @@ fn handle_modal_key_esc_in_detail_is_back_not_close() {
     let mut window = crate::views::modal_window::ModalWindowState::default();
     let collapsed = no_collapsed();
     let mut mode = ShortcutsHelpMode::Detail {
+        identity: None,
         title: "Send".into(),
         keys_line: "Enter".into(),
         body: "Send the message".into(),
@@ -1583,6 +1586,7 @@ fn esc_in_browse_closes_via_picker() {
 fn ctrl_dot_closes_from_detail_mode() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let mut mode = ShortcutsHelpMode::Detail {
+        identity: None,
         title: "Send".into(),
         keys_line: "Enter".into(),
         body: "body".into(),

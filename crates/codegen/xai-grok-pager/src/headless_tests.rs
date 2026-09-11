@@ -407,10 +407,17 @@ async fn worktree_resume_loads_reported_session_without_re_restoring_code() {
     );
     let spec = WorktreeSpec::from_cli(Some(""), Some("v1.2")).unwrap();
 
-    let opened =
-        resume_session_in_new_worktree(&tx, source.path(), &spec, "orig", Some(true), false)
-            .await
-            .unwrap();
+    let opened = resume_session_in_new_worktree(
+        &tx,
+        source.path(),
+        &spec,
+        "orig",
+        Some(true),
+        false,
+        &crate::locale::LocaleContext::default(),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(opened.session_id.0.as_ref(), "forked-in-worktree");
     assert_eq!(opened.cwd, eff_cwd);
@@ -444,14 +451,30 @@ async fn worktree_resume_failure_carries_local_miss_hint_like_the_tui() {
     let (tx, _log) = spawn_fake_agent(serde_json::json!({"error": "archive unavailable"}), Ok("x"));
     let spec = WorktreeSpec::default();
 
-    let hinted = resume_session_in_new_worktree(&tx, source.path(), &spec, "my title", None, true)
-        .await
-        .unwrap_err()
-        .to_string();
-    let plain = resume_session_in_new_worktree(&tx, source.path(), &spec, "my title", None, false)
-        .await
-        .unwrap_err()
-        .to_string();
+    let hinted = resume_session_in_new_worktree(
+        &tx,
+        source.path(),
+        &spec,
+        "my title",
+        None,
+        true,
+        &crate::locale::LocaleContext::default(),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    let plain = resume_session_in_new_worktree(
+        &tx,
+        source.path(),
+        &spec,
+        "my title",
+        None,
+        false,
+        &crate::locale::LocaleContext::default(),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
 
     assert_eq!(
         plain,

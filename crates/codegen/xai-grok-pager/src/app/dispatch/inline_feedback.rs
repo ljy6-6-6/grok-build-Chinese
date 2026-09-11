@@ -20,6 +20,14 @@ pub(super) const FEEDBACK_STORE_BUSY_NOTICE: &str = "Could not save the feedback
 pub(crate) fn select_feedback_images(
     images: &[Option<(Vec<u8>, String)>],
 ) -> (Vec<usize>, Option<String>) {
+    select_feedback_images_with_locale(images, &crate::locale::LocaleContext::default())
+}
+
+/// Same attachment policy in every locale; only the human-readable notice changes.
+pub(crate) fn select_feedback_images_with_locale(
+    images: &[Option<(Vec<u8>, String)>],
+    locale: &crate::locale::LocaleContext,
+) -> (Vec<usize>, Option<String>) {
     let mut accepted = Vec::new();
     let mut over_count = 0usize;
     let mut unsupported = 0usize;
@@ -53,30 +61,57 @@ pub(crate) fn select_feedback_images(
         const MIB: usize = 1024 * 1024;
         let mut reasons = Vec::new();
         if over_count > 0 {
-            reasons.push(format!(
-                "{over_count} over the {MAX_FEEDBACK_IMAGES}-image limit"
-            ));
+            reasons.push(
+                locale
+                    .named_text(
+                        "feedback.images.over_limit",
+                        "{count} over the {limit}-image limit",
+                    )
+                    .replace("{count}", &over_count.to_string())
+                    .replace("{limit}", &MAX_FEEDBACK_IMAGES.to_string()),
+            );
         }
         if unsupported > 0 {
-            reasons.push(format!(
-                "{unsupported} in a format feedback can't carry (PNG, JPEG, or GIF only)"
-            ));
+            reasons.push(
+                locale
+                    .named_text(
+                        "feedback.images.unsupported",
+                        "{count} in a format feedback can't carry (PNG, JPEG, or GIF only)",
+                    )
+                    .replace("{count}", &unsupported.to_string()),
+            );
         }
         if too_large > 0 {
-            reasons.push(format!(
-                "{too_large} over the size limit ({} MB each, {} MB combined)",
-                MAX_FEEDBACK_IMAGE_BYTES / MIB,
-                MAX_FEEDBACK_IMAGE_TOTAL_BYTES / MIB,
-            ));
+            reasons.push(
+                locale
+                    .named_text(
+                        "feedback.images.too_large",
+                        "{count} over the size limit ({each} MB each, {total} MB combined)",
+                    )
+                    .replace("{count}", &too_large.to_string())
+                    .replace("{each}", &(MAX_FEEDBACK_IMAGE_BYTES / MIB).to_string())
+                    .replace(
+                        "{total}",
+                        &(MAX_FEEDBACK_IMAGE_TOTAL_BYTES / MIB).to_string(),
+                    ),
+            );
         }
         if unreadable > 0 {
-            reasons.push(format!("{unreadable} unreadable"));
+            reasons.push(
+                locale
+                    .named_text("feedback.images.unreadable", "{count} unreadable")
+                    .replace("{count}", &unreadable.to_string()),
+            );
         }
         let plural = if dropped == 1 { "" } else { "s" };
-        format!(
-            "Dropped {dropped} image{plural} from the feedback: {}.",
-            reasons.join(", ")
-        )
+        locale
+            .named_text(
+                "feedback.images.dropped",
+                "Dropped {dropped} image{plural} from the feedback: {reasons}.",
+            )
+            .replace("{dropped}", &dropped.to_string())
+            .replace("{plural}", plural)
+            .replace("{reasons}", &reasons.join(", "))
     });
     (accepted, notice)
 }
@@ -213,4 +248,75 @@ pub(super) fn read_feedback_draft_images(
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod localization_tests {
+    use super::*;
+    use crate::locale::{LocaleContext, LocaleSource, ResolvedLocale, UiLocale};
+
+    fn chinese() -> LocaleContext {
+        LocaleContext::new(ResolvedLocale {
+            locale: UiLocale::ZhCn,
+            source: LocaleSource::Cli,
+        })
+    }
+
+    #[test]
+    fn zh_localization_feedback_image_policy_preserves_selection_and_english_notice() {
+        let images = vec![
+            Some((vec![1, 2, 3], "image/png".to_owned())),
+            Some((vec![4], "image/svg+xml".to_owned())),
+            None,
+        ];
+        let (english_indices, english_notice) = select_feedback_images(&images);
+        let (chinese_indices, chinese_notice) =
+            select_feedback_images_with_locale(&images, &chinese());
+        assert_eq!(english_indices, vec![0]);
+        assert_eq!(chinese_indices, english_indices);
+        assert_eq!(
+            english_notice.as_deref(),
+            Some(
+                "Dropped 2 images from the feedback: 1 in a format feedback can't carry (PNG, JPEG, or GIF only), 1 unreadable."
+            )
+        );
+        let notice = chinese_notice.expect("rejected attachments have a notice");
+        assert!(notice.contains("已从反馈中移除 2 张图片"));
+        assert!(notice.contains("PNG、JPEG 或 GIF"));
+        assert!(notice.contains("1 张无法读取"));
+        assert!(!notice.contains('{'), "all placeholders must be expanded");
+    }
+
+    #[test]
+    fn zh_localization_feedback_image_policy_keeps_limits_and_empty_success() {
+        let locale = chinese();
+        let valid = Some((vec![1], "image/png".to_owned()));
+        let images = vec![valid.clone(); MAX_FEEDBACK_IMAGES];
+        assert_eq!(select_feedback_images_with_locale(&images, &locale).1, None);
+
+        let mut over_limit = images;
+        over_limit.push(valid);
+        let (indices, notice) = select_feedback_images_with_locale(&over_limit, &locale);
+        assert_eq!(indices.len(), MAX_FEEDBACK_IMAGES);
+        assert_eq!(indices, select_feedback_images(&over_limit).0);
+        let notice = notice.unwrap();
+        assert!(notice.contains(&format!("1 张超出 {MAX_FEEDBACK_IMAGES} 张图片上限")));
+        assert!(!notice.contains('{'));
+        assert!(
+            select_feedback_images(&over_limit)
+                .1
+                .unwrap()
+                .starts_with("Dropped 1 image from")
+        );
+
+        let oversized = vec![Some((
+            vec![0; MAX_FEEDBACK_IMAGE_BYTES + 1],
+            "image/png".to_owned(),
+        ))];
+        let (indices, notice) = select_feedback_images_with_locale(&oversized, &locale);
+        assert!(indices.is_empty());
+        let notice = notice.unwrap();
+        assert!(notice.contains("1 张超过大小限制"));
+        assert!(!notice.contains('{'));
+    }
 }

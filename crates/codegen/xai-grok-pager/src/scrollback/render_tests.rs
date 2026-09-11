@@ -150,6 +150,7 @@ fn render_with_selection_boundaries(
         &[],
         None,
         None,
+        None,
     )
 }
 
@@ -2569,6 +2570,7 @@ fn tool_header_link_target_overlay_covers_path_after_bullet() {
         appearance: appearance.clone(),
         is_selected: false,
         cwd: Some(cwd.clone()),
+        locale: Default::default(),
     };
     let painted = entry.block.output(&ctx);
     let header = &painted.lines[0];
@@ -3685,4 +3687,59 @@ fn dim_from_entry_stays_visible_on_terminal_theme() {
         "RGB themes keep the gray_dim fg overwrite"
     );
     assert!(!cell.modifier.contains(Modifier::DIM));
+}
+
+// Retain the community regression alongside the complete upstream test suite.
+#[test]
+fn markdown_wrapped_session_media_path_fully_linkified() {
+    // Regression: imagine-tool prose whose long session path soft-wraps
+    // across rows. The whole path must be clickable (one overlay region
+    // per row, all pointing at the full file:// URL) — not just the
+    // leading path fragment on the first row.
+    let path = "/Users/alice/.grok/sessions/%2FUsers%2Falice%2Fcode%2Fxai/\
+                    019e0000-0000-7000-8000-000000000001/images/1.jpg";
+    let entries = vec![make_markdown_entry(&format!(
+        "Image generated and saved to {path}\n"
+    ))];
+    // Narrow viewport so the path wraps across several rows.
+    let viewport = Rect::new(0, 0, 40, 20);
+    let result = render_with_scratch(&entries, viewport, 0, None);
+
+    let expected_url = url::Url::from_file_path(path).unwrap();
+    let path_links: Vec<_> = result
+        .link_overlay
+        .links()
+        .iter()
+        .filter(|l| {
+            resolve_link_target(&l.target)
+                .and_then(|resolved| resolved.osc8_url)
+                .is_some_and(|url| url.as_ref() == expected_url.as_str())
+        })
+        .collect();
+    assert!(
+        path_links.len() >= 2,
+        "wrapped path should yield one overlay region per visual row, got: {:?}",
+        result
+            .link_overlay
+            .links()
+            .iter()
+            .map(|l| (
+                resolve_link_target(&l.target)
+                    .and_then(|resolved| resolved.osc8_url)
+                    .expect("url"),
+                l.screen_row,
+                l.col_start,
+                l.col_end
+            ))
+            .collect::<Vec<_>>()
+    );
+    // Regions land on consecutive distinct rows.
+    let mut rows: Vec<u16> = path_links.iter().map(|l| l.screen_row).collect();
+    rows.dedup();
+    assert_eq!(
+        rows.len(),
+        path_links.len(),
+        "each visual row gets one region"
+    );
+    assert!(rows.windows(2).all(|w| w[1] == w[0] + 1));
 }

@@ -64,18 +64,7 @@ pub fn render_prompt(
     Option<(u16, u16)>,
     Option<crate::terminal::overlay::PostFlush>,
 ) {
-    render_prompt_with_locale(
-        area,
-        buf,
-        focus,
-        prompt,
-        info,
-        pad_left,
-        pad_right,
-        compact,
-        placeholder,
-        None,
-    )
+    render_prompt_with_locale(area, buf, focus, prompt, info, compact, placeholder, None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -85,8 +74,6 @@ pub fn render_prompt_with_locale(
     focus: WelcomePromptFocus,
     prompt: &mut PromptWidget,
     info: &PromptInfo<'_>,
-    pad_left: u16,
-    pad_right: u16,
     compact: bool,
     placeholder: &'static str,
     locale: Option<&crate::locale::LocaleContext>,

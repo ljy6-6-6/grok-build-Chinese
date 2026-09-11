@@ -239,6 +239,7 @@ pub(crate) async fn resume_session_into_worktree(
     session_id: &str,
     restore_code: Option<bool>,
     local_miss: Option<&str>,
+    locale: &crate::locale::LocaleContext,
 ) -> Result<ResumedWorktree, WorktreeRpcError> {
     // Sanitize before appending the hint; the sanitizer collapses disk-full chains whole.
     let fail = |detail: &str| {
@@ -255,7 +256,7 @@ pub(crate) async fn resume_session_into_worktree(
             .into(),
     );
     let started = std::time::Instant::now();
-    let resp = match acp_send_bounded(req, acp_tx, "Worktree session resume").await {
+    let resp = match acp_send_bounded(req, acp_tx, "Worktree session resume", locale).await {
         Ok(resp) => {
             tracing::info!(
                 session_id,

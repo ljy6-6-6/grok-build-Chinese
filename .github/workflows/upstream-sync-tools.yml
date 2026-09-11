@@ -1,0 +1,35 @@
+name: Upstream sync review tools
+on:
+  push:
+    branches: [sync/upstream-1.0.24]
+    paths: [.github/workflows/upstream-sync-tools.yml]
+permissions:
+  contents: read
+jobs:
+  tools:
+    if: github.repository == 'JoyElliot/grok-build-Chinese' && github.ref == 'refs/heads/sync/upstream-1.0.24'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Prepare Rust 1.94.0 syntax and formatting checker
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.94.0 --profile minimal --component rustfmt
+          root=$(rustc +1.94.0 --print sysroot)
+          mkdir -p "$RUNNER_TEMP/review-tools/bin" "$RUNNER_TEMP/review-tools/lib"
+          cp "$root/bin/rustfmt" "$RUNNER_TEMP/review-tools/bin/"
+          ldd "$root/bin/rustfmt"
+          for lib in $(ldd "$root/bin/rustfmt" | awk '/=> \/.*rustup/ {print $3}'); do
+            cp -L "$lib" "$RUNNER_TEMP/review-tools/lib/"
+          done
+          "$RUNNER_TEMP/review-tools/bin/rustfmt" --version
+          tar -C "$RUNNER_TEMP" -czf "$RUNNER_TEMP/review-tools.tar.gz" review-tools
+          sha256sum "$RUNNER_TEMP/review-tools.tar.gz"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: upstream-sync-review-tools-${{ github.run_id }}
+          path: ${{ runner.temp }}/review-tools.tar.gz
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error

@@ -193,7 +193,13 @@ pub fn render_dashboard_with_locale(
         state.grouping
     };
     let rows = if workspace_dashboard_enabled {
-        build_rows_with_workspace(agents, row_inputs, &state.filter, home)
+        build_rows_with_workspace(
+            agents,
+            row_inputs,
+            &state.filter,
+            home,
+            Some(state.ui_locale()),
+        )
     } else {
         // The dashboard is not anchored to a specific agent; treat every row equally for
         // highlighting while retaining the locale-aware legacy roster renderer.

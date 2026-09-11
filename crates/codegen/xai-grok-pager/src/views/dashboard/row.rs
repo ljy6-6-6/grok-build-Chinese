@@ -190,6 +190,7 @@ pub(crate) fn build_rows_with_workspace(
     inputs: WorkspaceRowInputs<'_>,
     filter: &Filter,
     home: Option<&str>,
+    locale: Option<&LocaleContext>,
 ) -> Vec<DashboardRow> {
     let live_by_session: HashMap<&str, (AgentId, &AgentView)> = agents
         .iter()
@@ -227,7 +228,9 @@ pub(crate) fn build_rows_with_workspace(
                 return None;
             }
             if let Some((id, agent)) = live {
-                return Some(top_level_row(id, agent, is_pinned, home));
+                return Some(top_level_row_with_locale(
+                    id, agent, is_pinned, false, home, locale,
+                ));
             }
             Some(workspace_member_row(member, is_pinned, home))
         })
@@ -237,7 +240,9 @@ pub(crate) fn build_rows_with_workspace(
         if is_empty_idle_top_level(agent) {
             return None;
         }
-        Some(top_level_row(*id, agent, false, home))
+        Some(top_level_row_with_locale(
+            *id, agent, false, false, home, locale,
+        ))
     }));
     apply_filter(&mut rows, filter, home);
     sort_rows(&mut rows, inputs.grouping(), &reorder);
@@ -1251,6 +1256,7 @@ mod tests {
                 provisional,
             },
             &Filter::None,
+            None,
             None,
         )
     }
@@ -2410,6 +2416,7 @@ mod tests {
                 provisional: &[],
             },
             &Filter::Substring("l".into()),
+            None,
             None,
         );
         assert_eq!(

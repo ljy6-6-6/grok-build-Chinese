@@ -13699,8 +13699,8 @@ dependencies = [
  "urlencoding",
  "which",
  "xai-dirs",
- "xai-grok-product",
  "xai-grok-env",
+ "xai-grok-product",
  "xai-grok-version",
  "xai-tty-utils",
 ]
@@ -13862,14 +13862,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "xai-grok-locale"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "windows-sys 0.59.0",
-]
-
-[[package]]
 name = "xai-grok-image"
 version = "0.1.0"
 dependencies = [
@@ -13877,6 +13869,14 @@ dependencies = [
  "image",
  "thiserror 2.0.18",
  "xai-test-utils",
+]
+
+[[package]]
+name = "xai-grok-locale"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -15007,13 +15007,13 @@ dependencies = [
  "wiremock",
  "xai-dirs",
  "xai-grok-extra-ca",
- "xai-grok-product",
  "xai-grok-login",
+ "xai-grok-product",
  "xai-grok-shell",
  "xai-grok-telemetry",
  "xai-grok-tools",
  "xai-grok-version",
- "zip",
+ "zip 3.0.0",
  "zstd",
 ]
 

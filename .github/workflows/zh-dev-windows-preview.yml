@@ -229,6 +229,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "提示词建议模型白名单测试失败：$LASTEXITCODE" }
           cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-pager --lib zh_localization_
           if ($LASTEXITCODE -ne 0) { throw "中文界面定向测试失败：$LASTEXITCODE" }
+          cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-pager --lib 'scrollback::render::tests::'
+          if ($LASTEXITCODE -ne 0) { throw "上游滚动区渲染回归测试失败：$LASTEXITCODE" }
+          cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-pager --lib 'views::shortcuts_help::tests::'
+          if ($LASTEXITCODE -ne 0) { throw "上游快捷键帮助回归测试失败：$LASTEXITCODE" }
           cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-pager-minimal --lib zh_localization_
           if ($LASTEXITCODE -ne 0) { throw "精简界面中文定向测试失败：$LASTEXITCODE" }
           cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-pager --lib free_usage_upsell_shows_three_options_with_exact_labels

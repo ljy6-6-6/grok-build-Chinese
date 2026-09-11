@@ -2148,6 +2148,7 @@ pub(super) fn workspace_rows(
         inputs,
         filter,
         crate::views::dashboard::render::cached_home(),
+        Some(app.locale.as_ref()),
     );
     (rows, inputs.grouping())
 }

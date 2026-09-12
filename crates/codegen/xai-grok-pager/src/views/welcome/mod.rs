@@ -1189,6 +1189,8 @@ fn render_welcome_blocked(
             compact,
             prompt_max_height(&layout_input),
         ));
+    } else {
+        layout_input.prompt_height = Some(0);
     }
     // Force the stacked layout: this renderer only paints the stacked logo/menu rects, which the hero-box layout would leave empty
     let layout = WelcomeLayout::compute_stacked(layout_input);

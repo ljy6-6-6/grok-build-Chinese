@@ -289,12 +289,43 @@ mod locale_tests {
             locale: crate::locale::UiLocale::ZhCn,
             source: crate::locale::LocaleSource::Cli,
         });
-        for (locale, title, search, loading, select) in [
-            (None, "Open session", "search:", "Loading…", "Enter select"),
-            (Some(&locale), "打开会话", "搜索：", "加载中…", "Enter 选择"),
+        for (locale, search_active, title, search, loading, select) in [
+            (
+                None,
+                false,
+                "Open session",
+                "/ to search",
+                "Loading…",
+                "Enter select",
+            ),
+            (
+                None,
+                true,
+                "Open session",
+                "search:",
+                "Loading…",
+                "Enter select",
+            ),
+            (
+                Some(&locale),
+                false,
+                "打开会话",
+                "/ 开始搜索",
+                "加载中…",
+                "Enter 选择",
+            ),
+            (
+                Some(&locale),
+                true,
+                "打开会话",
+                "搜索：",
+                "加载中…",
+                "Enter 选择",
+            ),
         ] {
             assert_eq!(dashboard_picker_title(locale), title);
             let mut surface = SessionPickerSurface::new(1);
+            surface.state.search_active = search_active;
             let area = Rect::new(0, 0, 120, 30);
             let mut buf = Buffer::empty(area);
             let theme = Theme::default();

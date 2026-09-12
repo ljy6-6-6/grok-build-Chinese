@@ -806,7 +806,7 @@ mod tests {
         let theme = Theme::current();
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
-        render(&mut buf, area, &mut a, ListPanel::Mcps, &theme);
+        render(&mut buf, area, &mut a, ListPanel::Mcps, &theme, None);
 
         let text = buffer_text(&buf);
         let row = |name: &str| {
@@ -850,15 +850,23 @@ mod tests {
 
     #[test]
     fn resume_panel_pins_hidden_external_hint_above_scrolling_list() {
-        // More native rows than the panel fits: the hint must stay pinned
+        // More Headless rows than the panel fits: the hint must stay pinned
         // above the list instead of scrolling away with it.
         let mut entries: Vec<_> = (0..20)
-            .map(|i| session_entry(&format!("native-{i}")))
+            .map(|i| {
+                let mut entry = session_entry(&format!("native-{i}"));
+                entry.session_kind = Some("headless".into());
+                entry
+            })
             .collect();
         let mut foreign = session_entry("claude-session");
         foreign.source = "claude".into();
         entries.push(foreign);
         let mut a = with_resume(entries);
+        let Some(ActiveModal::SessionPicker { source_filter, .. }) = &mut a.active_modal else {
+            panic!("expected session picker");
+        };
+        *source_filter = xai_grok_pager::views::session_picker::SourceFilter::Headless;
         let theme = Theme::current();
         let area = Rect::new(0, 0, 80, 10);
         let mut buf = Buffer::empty(area);
@@ -870,12 +878,13 @@ mod tests {
             "hidden foreign rows must stay explained while the list scrolls:\n{text}"
         );
         assert!(
-            text.find("external session hidden") < text.find("native-"),
+            text.find("external session hidden").expect("pinned hint")
+                < text.find("native-").expect("visible Headless row"),
             "the hint must be pinned above the first list row:\n{text}"
         );
         assert!(
             !text.contains("claude-session"),
-            "foreign row stays hidden under the default filter:\n{text}"
+            "foreign row stays hidden under the Headless filter:\n{text}"
         );
     }
 

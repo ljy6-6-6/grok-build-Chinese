@@ -18,6 +18,16 @@ fn make_markdown_entry(text: &str) -> ScrollbackEntry {
     ScrollbackEntry::new(RenderBlock::agent_message(text))
 }
 
+fn test_home_path(relative: &str) -> std::path::PathBuf {
+    let mut path = xai_dirs::home_dir().expect("test home directory");
+    path.extend(relative.split('/'));
+    path
+}
+
+fn test_home_url(relative: &str) -> url::Url {
+    url::Url::from_file_path(test_home_path(relative)).expect("absolute home file URL")
+}
+
 /// Compute EntryLayoutInfo for a set of entries (heights and gap_after).
 /// Uses default appearance. Gap rule: all stubs are groupable and expanded, so every gap is 1.
 fn compute_layouts(
@@ -1606,7 +1616,7 @@ fn markdown_wrapped_project_media_path_fully_linkified() {
     // Regression: imagine-tool prose whose long, percent-encoded media path soft-wraps across rows
     // The whole path must be clickable, not just the leading fragment on the first row
     // Each visual row gets one overlay region, all pointing at the full file:// URL
-    let path = "/Users/alice/.grok/projects/%2FUsers%2Falice%2Fcode%2Fxai/\
+    let path = "~/.grok/projects/%2FUsers%2Falice%2Fcode%2Fxai/\
                 019e0000-0000-7000-8000-000000000001/images/1.jpg";
     let entries = vec![make_markdown_entry(&format!(
         "Image generated and saved to {path}\n"
@@ -1615,7 +1625,7 @@ fn markdown_wrapped_project_media_path_fully_linkified() {
     let viewport = Rect::new(0, 0, 40, 20);
     let result = render_with_scratch(&entries, viewport, 0, None);
 
-    let expected_url = url::Url::from_file_path(path).unwrap();
+    let expected_url = test_home_url(path.strip_prefix("~/").unwrap());
     let path_links: Vec<_> = result
         .link_overlay
         .links()
@@ -1741,7 +1751,7 @@ fn collapsed_block_body_urls_not_visible() {
 fn collapsed_block_header_file_path_is_scanned() {
     // File paths in the command header line should be linkified even when the block is collapsed
     let mut entries = vec![ScrollbackEntry::new(RenderBlock::execute_with_output(
-        "cd /Users/foo/project && ls",
+        "cd ~/grok-render-tests/project && ls",
         "file1\nfile2",
         None::<String>,
     ))];
@@ -1760,9 +1770,9 @@ fn collapsed_block_header_file_path_is_scanned() {
                 .expect("url")
         })
         .collect();
+    let expected_url = test_home_url("grok-render-tests/project");
     assert!(
-        urls.iter()
-            .any(|u| u.starts_with("file:///Users/foo/project")),
+        urls.iter().any(|u| u.as_ref() == expected_url.as_str()),
         "file path in collapsed header should be linkified, got: {urls:?}"
     );
 }
@@ -1871,12 +1881,12 @@ fn collapse_header_entry_does_not_leak_links_but_visible_group_entries_do() {
     // Smallest shape the truncation fold can produce for an expanded group: 3 entries, header count = group_len - 1 = 2
     let mut entries = vec![
         ScrollbackEntry::new(RenderBlock::execute_with_output(
-            "cd /Users/foo/hidden && ls",
+            "cd ~/grok-render-tests/hidden && ls",
             "out",
             None::<String>,
         )),
         ScrollbackEntry::new(RenderBlock::execute_with_output(
-            "cat /Users/foo/visible/file.txt",
+            "cat ~/grok-render-tests/visible/file.txt",
             "out",
             None::<String>,
         )),
@@ -1952,16 +1962,18 @@ fn collapse_header_entry_does_not_leak_links_but_visible_group_entries_do() {
             )
         })
         .collect();
+    let hidden_url = test_home_url("grok-render-tests/hidden");
+    let visible_url = test_home_url("grok-render-tests/visible/file.txt");
     assert!(
         links
             .iter()
-            .all(|(_, url)| !url.contains("/Users/foo/hidden")),
+            .all(|(_, url)| !url.starts_with(hidden_url.as_str())),
         "collapse-header entry's hidden line must not be linkified, got: {links:?}"
     );
     assert!(
         links
             .iter()
-            .any(|(row, url)| *row == 1 && url.contains("/Users/foo/visible/file.txt")),
+            .any(|(row, url)| *row == 1 && url == visible_url.as_str()),
         "visible group entry below the collapse header must still be linkified, got: {links:?}"
     );
 }
@@ -2553,9 +2565,9 @@ fn tool_header_link_target_overlay_covers_path_after_bullet() {
     use crate::scrollback::types::{BlockContext, selectable_cols};
     use unicode_width::UnicodeWidthStr;
 
-    let abs = "/Users/me/project/src/foo.rs";
-    let cwd = std::path::PathBuf::from("/Users/me/project");
-    let mut entry = ScrollbackEntry::new(RenderBlock::edit(abs, None));
+    let cwd = test_home_path("grok-render-tests/project");
+    let abs = cwd.join("src").join("foo.rs");
+    let mut entry = ScrollbackEntry::new(RenderBlock::edit(abs.to_string_lossy(), None));
     entry.display_mode = DisplayMode::Collapsed;
 
     let mut appearance = AppearanceConfig::default();
@@ -2584,7 +2596,7 @@ fn tool_header_link_target_overlay_covers_path_after_bullet() {
     let target = header.link_target.as_ref().expect("link target on header");
     assert_eq!(
         target,
-        &crate::render::osc8::LinkTarget::File(Arc::from(std::path::Path::new(abs)))
+        &crate::render::osc8::LinkTarget::File(Arc::from(abs.as_path()))
     );
 
     let cols = selectable_cols(&header.content, &header.selectable)
@@ -2671,38 +2683,46 @@ fn file_link_policy(
 
 #[test]
 fn official_vscode_remote_delegates_scanned_absolute_path() {
-    let path = "/worktree/src/main.rs";
-    let entry = make_markdown_entry(path);
-    let viewport = Rect::new(0, 0, 80, 5);
-    let (result, buf) =
-        render_with_scratch_and_buffer(std::slice::from_ref(&entry), viewport, 0, None);
-    let link = result
-        .link_overlay
-        .links()
-        .iter()
-        .find(|link| matches!(&link.target, crate::render::osc8::LinkTarget::File(_)))
-        .expect("scanned file target");
+    // The scanner accepts POSIX absolute paths and home-relative paths.
+    for path in [
+        #[cfg(unix)]
+        "/worktree/src/main.rs",
+        "~/grok-render-tests/src/main.rs",
+    ] {
+        let entry = make_markdown_entry(path);
+        let viewport = Rect::new(0, 0, 80, 5);
+        let (result, buf) =
+            render_with_scratch_and_buffer(std::slice::from_ref(&entry), viewport, 0, None);
+        let link = result
+            .link_overlay
+            .links()
+            .iter()
+            .find(|link| matches!(&link.target, crate::render::osc8::LinkTarget::File(_)))
+            .expect("scanned file target");
 
-    assert!((0..viewport.height).any(|row| buffer_row_text(&buf, row).contains(path)));
-    assert_eq!(link.presentation, LinkPresentation::SelfResolvingPath);
-    assert_eq!(
-        file_link_policy(link, &official_vscode_remote_context()),
-        crate::render::osc8::ResolvedLinkTarget {
-            osc8_url: None,
-            open_target: None,
-        }
-    );
+        assert!((0..viewport.height).any(|row| buffer_row_text(&buf, row).contains(path)));
+        assert_eq!(link.presentation, LinkPresentation::SelfResolvingPath);
+        assert_eq!(
+            file_link_policy(link, &official_vscode_remote_context()),
+            crate::render::osc8::ResolvedLinkTarget {
+                osc8_url: None,
+                open_target: None,
+            }
+        );
+    }
 }
 
 #[test]
 fn official_vscode_remote_tool_headers_delegate_only_self_resolving_paint() {
-    let cwd = std::path::PathBuf::from("/worktree");
-    let target = "/worktree/src/nested/main.rs";
+    let cwd = test_home_path("grok-render-tests/worktree");
+    let relative = std::path::Path::new("src").join("nested").join("main.rs");
+    let target = cwd.join(&relative);
+    let relative_paint = relative.to_string_lossy();
     let terminal = official_vscode_remote_context();
 
     for (name, block) in [
-        ("Read", RenderBlock::read(target, None)),
-        ("Edit", RenderBlock::edit(target, None)),
+        ("Read", RenderBlock::read(target.to_string_lossy(), None)),
+        ("Edit", RenderBlock::edit(target.to_string_lossy(), None)),
     ] {
         for (mode, width, expected_paint, expected_presentation) in [
             (
@@ -2720,7 +2740,7 @@ fn official_vscode_remote_tool_headers_delegate_only_self_resolving_paint() {
             (
                 DisplayMode::Expanded,
                 80,
-                "src/nested/main.rs",
+                relative_paint.as_ref(),
                 LinkPresentation::SelfResolvingPath,
             ),
         ] {
@@ -2760,7 +2780,7 @@ fn official_vscode_remote_tool_headers_delegate_only_self_resolving_paint() {
             assert!(path_links.iter().all(|link| {
                 assert_eq!(
                     link.target,
-                    crate::render::osc8::LinkTarget::File(Arc::from(std::path::Path::new(target)))
+                    crate::render::osc8::LinkTarget::File(Arc::from(target.as_path()))
                 );
                 let policy = file_link_policy(link, &terminal);
                 policy.osc8_url.is_some() == expected_owned
@@ -2799,18 +2819,27 @@ fn official_vscode_remote_tool_headers_delegate_only_self_resolving_paint() {
 
 #[test]
 fn basename_headers_stay_grok_owned_for_duplicate_and_outside_targets() {
-    let cwd = std::path::PathBuf::from("/worktree");
+    let cwd = test_home_path("grok-render-tests/worktree");
     let terminal = official_vscode_remote_context();
     let cases = [
-        ("duplicate-a", "/worktree/src/a/main.rs"),
-        ("duplicate-b", "/worktree/src/b/main.rs"),
-        ("outside", "/opt/service/main.rs"),
+        (
+            "duplicate-a",
+            test_home_path("grok-render-tests/worktree/src/a/main.rs"),
+        ),
+        (
+            "duplicate-b",
+            test_home_path("grok-render-tests/worktree/src/b/main.rs"),
+        ),
+        (
+            "outside",
+            test_home_path("grok-render-tests/service/main.rs"),
+        ),
     ];
 
     for (name, target) in cases {
         for (tool, block) in [
-            ("Read", RenderBlock::read(target, None)),
-            ("Edit", RenderBlock::edit(target, None)),
+            ("Read", RenderBlock::read(target.to_string_lossy(), None)),
+            ("Edit", RenderBlock::edit(target.to_string_lossy(), None)),
         ] {
             let entry = ScrollbackEntry::new(block);
             let viewport = Rect::new(0, 0, 80, 5);
@@ -2832,10 +2861,13 @@ fn basename_headers_stay_grok_owned_for_duplicate_and_outside_targets() {
                 .map(|row| buffer_row_text(&buf, row).trim_end().to_owned())
                 .find(|row| row.contains("main.rs"))
                 .unwrap_or_else(|| panic!("{tool} {name} painted basename"));
-            assert!(!painted.contains('/'), "{tool} {name}: {painted}");
+            assert!(
+                !painted.contains('/') && !painted.contains('\\'),
+                "{tool} {name}: {painted}"
+            );
             assert_eq!(
                 link.target,
-                crate::render::osc8::LinkTarget::File(Arc::from(std::path::Path::new(target))),
+                crate::render::osc8::LinkTarget::File(Arc::from(target.as_path())),
                 "{tool} {name} semantic target"
             );
             assert_eq!(link.presentation, LinkPresentation::Opaque, "{tool} {name}");
@@ -2848,8 +2880,8 @@ fn basename_headers_stay_grok_owned_for_duplicate_and_outside_targets() {
 
 #[test]
 fn long_read_header_link_is_clipped_to_offset_content_area() {
-    let path = "/outside/a/very/long/path/that/is/clipped/main.rs";
-    let mut entry = ScrollbackEntry::new(RenderBlock::read(path, None));
+    let path = test_home_path("grok-render-tests/outside/a/very/long/path/that/is/clipped/main.rs");
+    let mut entry = ScrollbackEntry::new(RenderBlock::read(path.to_string_lossy(), None));
     entry.display_mode = DisplayMode::Expanded;
     let viewport = Rect::new(11, 0, 24, 5);
 
@@ -2872,8 +2904,9 @@ fn long_read_header_link_is_clipped_to_offset_content_area() {
 
 #[test]
 fn explicit_tool_link_clips_before_u16_conversion() {
-    let path = format!("/outside/{}.rs", "x".repeat(70_000));
-    let mut entry = ScrollbackEntry::new(RenderBlock::read(path, None));
+    let path =
+        test_home_path("grok-render-tests/outside").join(format!("{}.rs", "x".repeat(70_000)));
+    let mut entry = ScrollbackEntry::new(RenderBlock::read(path.to_string_lossy(), None));
     entry.display_mode = DisplayMode::Expanded;
     let viewport = Rect::new(9, 0, 40, 5);
 
@@ -3696,7 +3729,7 @@ fn markdown_wrapped_session_media_path_fully_linkified() {
     // across rows. The whole path must be clickable (one overlay region
     // per row, all pointing at the full file:// URL) — not just the
     // leading path fragment on the first row.
-    let path = "/Users/alice/.grok/sessions/%2FUsers%2Falice%2Fcode%2Fxai/\
+    let path = "~/.grok/sessions/%2FUsers%2Falice%2Fcode%2Fxai/\
                     019e0000-0000-7000-8000-000000000001/images/1.jpg";
     let entries = vec![make_markdown_entry(&format!(
         "Image generated and saved to {path}\n"
@@ -3705,7 +3738,7 @@ fn markdown_wrapped_session_media_path_fully_linkified() {
     let viewport = Rect::new(0, 0, 40, 20);
     let result = render_with_scratch(&entries, viewport, 0, None);
 
-    let expected_url = url::Url::from_file_path(path).unwrap();
+    let expected_url = test_home_url(path.strip_prefix("~/").unwrap());
     let path_links: Vec<_> = result
         .link_overlay
         .links()

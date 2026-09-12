@@ -1,0 +1,42 @@
+# macOS CI 构建耗时
+
+macOS 复合 action 由预览和正式 Release 工作流共同调用。`release_build` 决定编译配置；版本、平台、安装包布局和更新协议不参与这一切换。
+
+| 调用 | 编译配置 | 缓存 |
+| --- | --- | --- |
+| 正式 Release（`release_build: 'true'`） | 保留 `release-dist`：Thin LTO、codegen-units=1、debug=1 | 保留原 `release-dist` 缓存键和目录 |
+| CI 预览（`release_build: 'false'`） | `release` + `release-dist` features；关闭跨 crate LTO 和 debug，codegen-units=16；shell 使用 opt-level=1/codegen-units=16 | 独立的 preview 缓存键及 `release` 目录 |
+
+预览配置与 Windows CI 已使用的编译优化等级一致，用于加快试包。预览二进制的优化等级不代表正式 macOS Release；实际配置写入包内 `BUILD-INFO.txt`。两种模式均保留 ARM64 Mach-O、版本、归档校验及安装器冒烟。
+
+## 缓存与测量
+
+- `zh-dev` 的 push/手动预览，以及 `sync/upstream-*` 的手动预览成功后，可保存依赖、目标产物和宿主构建缓存。PR、其他事件/分支和正式 Release 不写入这些缓存。
+- 编译缓存继续按工具链、目标、配置、构建输入和 Cargo.lock 区分。首次切换预览配置会重新建立产物缓存；不把这轮当作缓存充分命中的性能结果。
+- 维持 3 路 Cargo 并行和 `CARGO_INCREMENTAL=0`。没有增加整个 debug/test 目录缓存，避免未经测量扩大缓存体积。
+- `macos-build.py` 添加 `--timings`，以 10 秒为目标间隔记录 Cargo 及其子进程的 RSS 总和、rustc 数量和 runner swap 用量，CSV 保留实际采样时刻。采样 RSS 会重复计算共享页，也可能错过瞬时峰值；不能作为独占内存或精确峰值。
+- 探测失败或进程已消失时保留为 `null` 并记录原因，不记作零。Cargo 的失败退出码直接传回工作流；取消或异常时清理独立进程组，覆盖 Cargo 和编译器后代。
+- 独立的 `grok-zh-macos-build-monitor-<run>-<attempt>` artifact 包含 `runner.json`、`samples.csv`、`summary.json` 和 Cargo timings。诊断文件不加入安装归档。
+
+## 优化前基线
+
+基线为 [CI 34700710020](https://github.com/JoyElliot/grok-build-Chinese/actions/runs/34700710020)，提交 `7a2eb52e485d13c7b48c0a79a374eafe33703bdc`，版本 `1.0.24-zh.ci.88`。三平台及汇总成功，专用分支限定的 macOS 真账号冒烟按规则跳过。
+
+| macOS 阶段 | 耗时 |
+| --- | --- |
+| 三类缓存恢复（均回退到已有缓存） | 2 分 04 秒 |
+| 格式与基础本地化验证 | 9 分 29 秒 |
+| Cargo `release-dist` 编译 | **132 分 02 秒** |
+| 打包和安装器验证 | 19 秒 |
+| 上传软件包 | 3 秒 |
+
+优化收益须用后续同目标、同工具链 CI 的实际构建日志验证，并同时注明缓存命中情况。这里的基线是构建耗时，不是终端 UI 帧时间或运行时性能基准。
+
+## 本地验证
+
+```text
+python .github/scripts/tests/test_macos_build.py
+python .github/scripts/tests/test_package_protocol.py
+```
+
+macOS 的真实编译、资源采样、Mach-O、权限和安装器验证由 Apple Silicon CI 执行。正式 Release 的 profile 保持测试单独覆盖，不能用预览提速参数覆盖正式配置。

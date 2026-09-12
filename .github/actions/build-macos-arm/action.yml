@@ -75,6 +75,15 @@ runs:
             exit 1
           fi
 
+      - name: 选择 macOS 编译配置
+        env:
+          IS_RELEASE_BUILD: ${{ inputs.release_build }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/macos-build.py configure \
+            --release-build "${IS_RELEASE_BUILD}" >> "${GITHUB_ENV}"
+
       - name: 配置固定版本的 Rust、DotSlash 和 protoc
         shell: bash
         run: |
@@ -128,30 +137,31 @@ runs:
             grok-zh-cargo-home-${{ env.CARGO_CACHE_SCHEMA }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml', 'bin/protoc') }}-
             grok-zh-cargo-home-${{ env.CARGO_CACHE_SCHEMA }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-
 
-      - name: 恢复 Cargo macOS release-dist 缓存
+      - name: 恢复 Cargo macOS 编译缓存
         id: cargo_target_cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ runner.temp }}/grok-zh-target/${{ env.TARGET }}/release-dist
-          key: grok-zh-target-${{ env.CARGO_CACHE_SCHEMA }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-dist-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml', 'bin/protoc') }}-${{ hashFiles('Cargo.lock') }}
+          path: ${{ runner.temp }}/grok-zh-target/${{ env.TARGET }}/${{ env.MACOS_CARGO_PROFILE }}
+          key: grok-zh-target-${{ env.CARGO_CACHE_SCHEMA }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-${{ env.MACOS_PROFILE_CACHE_KEY }}-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml', 'bin/protoc') }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            grok-zh-target-${{ env.CARGO_CACHE_SCHEMA }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-dist-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml', 'bin/protoc') }}-
-            grok-zh-target-${{ env.CARGO_CACHE_SCHEMA }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-dist-
+            grok-zh-target-${{ env.CARGO_CACHE_SCHEMA }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-${{ env.MACOS_PROFILE_CACHE_KEY }}-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml', 'bin/protoc') }}-
+            grok-zh-target-${{ env.CARGO_CACHE_SCHEMA }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-${{ env.MACOS_PROFILE_CACHE_KEY }}-
 
       - name: 恢复 Cargo macOS 宿主构建缓存
         id: cargo_host_cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ runner.temp }}/grok-zh-target/release-dist
-          key: grok-zh-host-${{ env.CARGO_CACHE_SCHEMA }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-dist-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml', 'bin/protoc') }}-${{ hashFiles('Cargo.lock') }}
+          path: ${{ runner.temp }}/grok-zh-target/${{ env.MACOS_CARGO_PROFILE }}
+          key: grok-zh-host-${{ env.CARGO_CACHE_SCHEMA }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-${{ env.MACOS_PROFILE_CACHE_KEY }}-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml', 'bin/protoc') }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            grok-zh-host-${{ env.CARGO_CACHE_SCHEMA }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-dist-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml', 'bin/protoc') }}-
-            grok-zh-host-${{ env.CARGO_CACHE_SCHEMA }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-dist-
+            grok-zh-host-${{ env.CARGO_CACHE_SCHEMA }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-${{ env.MACOS_PROFILE_CACHE_KEY }}-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml', 'bin/protoc') }}-
+            grok-zh-host-${{ env.CARGO_CACHE_SCHEMA }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-${{ env.MACOS_PROFILE_CACHE_KEY }}-
 
       - name: 验证格式与基础本地化
         shell: bash
         run: |
           set -euo pipefail
+          python3 .github/scripts/tests/test_macos_build.py
           python3 packaging/macos/tests/test_install_lock.py
           # protoc 会写入 DOTSLASH_CACHE，必须在缓存恢复完成后再调用。
           "${PROTOC}" --version
@@ -161,15 +171,25 @@ runs:
           cargo test --frozen -j "${CARGO_BUILD_JOBS}" \
             -p xai-grok-update --features community-build --lib
 
-      - name: 构建 macOS ARM64
+      - name: 构建并监控 macOS ARM64
+        env:
+          IS_RELEASE_BUILD: ${{ inputs.release_build }}
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --frozen -j "${CARGO_BUILD_JOBS}" \
-            --target "${TARGET}" \
-            -p xai-grok-pager-bin \
-            --profile release-dist \
-            --features release-dist
+          python3 .github/scripts/macos-build.py build \
+            --release-build "${IS_RELEASE_BUILD}"
+
+      - name: 上传 macOS 构建监控与 Cargo timings
+        if: ${{ always() && env.MACOS_BUILD_REPORT_DIR != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: grok-zh-macos-build-monitor-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.MACOS_BUILD_REPORT_DIR }}
+            ${{ runner.temp }}/grok-zh-target/cargo-timings
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: 打包并验证未签名构建
         env:
@@ -179,7 +199,7 @@ runs:
           set -euo pipefail
           dist="${GITHUB_WORKSPACE}/dist"
           package="${dist}/${PACKAGE_NAME}"
-          built_bin="${CARGO_TARGET_DIR}/${TARGET}/release-dist/grok-zh"
+          built_bin="${CARGO_TARGET_DIR}/${TARGET}/${MACOS_CARGO_PROFILE}/grok-zh"
           mkdir -p "${package}"
           chmod 0755 "${package}"
           if [[ ! -f "${built_bin}" ]]; then
@@ -228,7 +248,7 @@ runs:
           Upstream source revision: ${source_rev}
           Repository: ${GITHUB_REPOSITORY}
           Target: ${TARGET}
-          Profile: release-dist (Thin LTO, codegen-units=1, split-debuginfo=off)
+          Profile: ${MACOS_PROFILE_DESCRIPTION}
           Rust: ${rustc_info}
           Cargo: ${cargo_info}
           DotSlash: ${dotslash_info}
@@ -409,28 +429,30 @@ runs:
           - 制品：[${PACKAGE_NAME}](${{ steps.preview_artifact.outputs.artifact-url }})
           - Actions Artifact SHA-256：\`${{ steps.preview_artifact.outputs.artifact-digest }}\`
           - 目标：\`${TARGET}\`
+          - 编译配置：\`${MACOS_PROFILE_DESCRIPTION}\`
+          - 本轮允许保存 Cargo 缓存：\`${MACOS_CACHE_WRITABLE}\`
           - 软件包外层校验：\`${ARCHIVE_NAME}.sha256\`
           - 软件包内层校验：\`SHA256SUMS.txt\`
           - 已在 Apple Silicon runner 上执行二次安装、入口链接与 \`grok-zh --version\` 验证。
           - ${usage_note}
           EOF
 
-      - name: 保存 Cargo macOS release 缓存
-        if: ${{ success() && inputs.release_build != 'true' && github.ref == 'refs/heads/zh-dev' && steps.cargo_target_cache.outputs.cache-hit != 'true' }}
+      - name: 保存 Cargo macOS 编译缓存
+        if: ${{ success() && env.MACOS_CACHE_WRITABLE == 'true' && steps.cargo_target_cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ runner.temp }}/grok-zh-target/${{ env.TARGET }}/release-dist
+          path: ${{ runner.temp }}/grok-zh-target/${{ env.TARGET }}/${{ env.MACOS_CARGO_PROFILE }}
           key: ${{ steps.cargo_target_cache.outputs.cache-primary-key }}
 
       - name: 保存 Cargo macOS 宿主构建缓存
-        if: ${{ success() && inputs.release_build != 'true' && github.ref == 'refs/heads/zh-dev' && steps.cargo_host_cache.outputs.cache-hit != 'true' }}
+        if: ${{ success() && env.MACOS_CACHE_WRITABLE == 'true' && steps.cargo_host_cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ runner.temp }}/grok-zh-target/release-dist
+          path: ${{ runner.temp }}/grok-zh-target/${{ env.MACOS_CARGO_PROFILE }}
           key: ${{ steps.cargo_host_cache.outputs.cache-primary-key }}
 
       - name: 保存 Cargo 依赖缓存
-        if: ${{ success() && inputs.release_build != 'true' && github.ref == 'refs/heads/zh-dev' && steps.cargo_home_cache.outputs.cache-hit != 'true' }}
+        if: ${{ success() && env.MACOS_CACHE_WRITABLE == 'true' && steps.cargo_home_cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |

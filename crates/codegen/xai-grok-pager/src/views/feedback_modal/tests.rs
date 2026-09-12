@@ -3,6 +3,7 @@ use super::*;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use unicode_width::UnicodeWidthStr;
 
 use crate::input::line_editor::LineEditor;
 use crate::prompt_images::PastedImage;
@@ -52,10 +53,16 @@ fn draft(id: &str, details: &str, taxonomy: FeedbackTaxonomy) -> FeedbackDraft {
 fn buffer_text(buf: &Buffer) -> String {
     (buf.area.top()..buf.area.bottom())
         .map(|y| {
-            (buf.area.left()..buf.area.right())
-                .filter_map(|x| buf.cell((x, y)))
-                .map(|cell| cell.symbol())
-                .collect::<String>()
+            let mut line = String::new();
+            let mut skip = 0usize;
+            for x in buf.area.left()..buf.area.right() {
+                let symbol = buf[(x, y)].symbol();
+                if skip == 0 {
+                    line.push_str(symbol);
+                }
+                skip = skip.max(symbol.width()).saturating_sub(1);
+            }
+            line
         })
         .collect::<Vec<_>>()
         .join("\n")

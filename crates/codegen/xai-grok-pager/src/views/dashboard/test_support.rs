@@ -1,16 +1,22 @@
 //! Helpers shared by the dashboard render and chrome test modules.
 
 use ratatui::buffer::Buffer;
+use unicode_width::UnicodeWidthStr;
 
 use super::row::DashboardRow;
 use super::state::{DashboardRowId, RowState};
 
-/// Helper: read buffer row-by-row so multi-cell substring checks see the visible text in left-to-right order.
+/// Read visible text row-by-row, skipping wide-glyph continuation cells.
 pub(super) fn buf_to_text(buf: &Buffer) -> String {
     let mut content = String::new();
-    for y in 0..buf.area.height {
-        for x in 0..buf.area.width {
-            content.push_str(buf[(x, y)].symbol());
+    for y in buf.area.top()..buf.area.bottom() {
+        let mut skip = 0usize;
+        for x in buf.area.left()..buf.area.right() {
+            let symbol = buf[(x, y)].symbol();
+            if skip == 0 {
+                content.push_str(symbol);
+            }
+            skip = skip.max(symbol.width()).saturating_sub(1);
         }
         content.push('\n');
     }

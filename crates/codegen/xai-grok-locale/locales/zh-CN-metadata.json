@@ -826,6 +826,8 @@
   "settings.setting.theme.choice.rosepine-moon.description": "柔和的深色主题，使用淡紫强调色，需要真彩色支持。",
   "settings.setting.theme.choice.oscura-midnight.label": "Oscura Midnight",
   "settings.setting.theme.choice.oscura-midnight.description": "深邃暗色主题，使用暖色强调色，需要真彩色支持。",
+  "settings.setting.theme.choice.terminal.label": "终端",
+  "settings.setting.theme.choice.terminal.description": "使用终端自身的背景色和文本颜色。",
   "settings.setting.permission_mode.choice.default.label": "默认",
   "settings.setting.permission_mode.choice.default.description": "使用智能体默认的权限行为（目前等同于“询问”）。",
   "settings.setting.permission_mode.choice.ask.label": "询问",

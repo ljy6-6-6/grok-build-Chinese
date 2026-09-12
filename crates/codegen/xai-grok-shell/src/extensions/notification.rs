@@ -2131,7 +2131,7 @@ mod tests {
             serde_json::from_value::<SessionUpdate>(old_json).unwrap(),
             SessionUpdate::HookAnnotation {
                 message: "legacy hook text".into(),
-                kind: None,
+                kind: HookAnnotationKind::Note,
             }
         );
 
@@ -2144,8 +2144,32 @@ mod tests {
             serde_json::from_value::<SessionUpdate>(future_json).unwrap(),
             SessionUpdate::HookAnnotation {
                 message: "future hook text".into(),
-                kind: Some(HookAnnotationKind::Unknown),
+                kind: HookAnnotationKind::Unknown,
             }
+        );
+    }
+
+    #[test]
+    fn hook_annotation_default_kind_keeps_legacy_wire_shape() {
+        let legacy = SessionUpdate::HookAnnotation {
+            message: "legacy hook text".into(),
+            kind: HookAnnotationKind::Note,
+        };
+        let value = serde_json::to_value(&legacy).unwrap();
+        assert!(value.get("kind").is_none());
+        assert_eq!(
+            serde_json::from_value::<SessionUpdate>(value).unwrap(),
+            legacy
+        );
+        let unknown = SessionUpdate::HookAnnotation {
+            message: "future hook text".into(),
+            kind: HookAnnotationKind::Unknown,
+        };
+        let value = serde_json::to_value(&unknown).unwrap();
+        assert_eq!(value["kind"], "unknown");
+        assert_eq!(
+            serde_json::from_value::<SessionUpdate>(value).unwrap(),
+            unknown
         );
     }
 

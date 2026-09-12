@@ -441,6 +441,7 @@ impl WelcomeLayout {
             changelog_height,
             compact,
             announcement,
+            logo_hidden,
             prompt_height,
             ..
         } = input;
@@ -1178,7 +1179,6 @@ fn render_welcome_blocked(
         menu_height,
         compact,
         prompt_compact: compact,
-        prompt_height,
         ..Default::default()
     };
     // The login screen paints the home draft (logout keeps it), so it measures the box the same way home does

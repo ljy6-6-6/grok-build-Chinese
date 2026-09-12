@@ -221,6 +221,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "xai-grok-update 测试失败：$LASTEXITCODE" }
           cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-shell --lib session_summary
           if ($LASTEXITCODE -ne 0) { throw "中文会话标题测试失败：$LASTEXITCODE" }
+          cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-shell --lib hook_annotation_
+          if ($LASTEXITCODE -ne 0) { throw "Hook 注解兼容性测试失败：$LASTEXITCODE" }
           cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-shell --lib 'builtin::tests::'
           if ($LASTEXITCODE -ne 0) { throw "内置中文更新日志测试失败：$LASTEXITCODE" }
           cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-shell --lib bundled_model_provenance_survives_acp_but_config_override_clears_it

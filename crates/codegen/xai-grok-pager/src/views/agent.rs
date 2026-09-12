@@ -857,6 +857,7 @@ pub fn build_hints(
         is_editing_queued,
         fold_label,
         group_header_label,
+        tab_label,
         thinking_label,
         show_done,
         selected_supports_copy,
@@ -868,7 +869,6 @@ pub fn build_hints(
         vim_mode,
         is_subagent_view,
         is_turn_running,
-        esc_would_cancel_turn,
         has_queued_follow_up,
         selected_is_user_prompt,
         selected_is_agent_message,
@@ -887,6 +887,7 @@ pub fn build_hints_with_locale(
     is_editing_queued: bool,
     fold_label: Option<&'static str>,
     group_header_label: Option<&'static str>,
+    tab_label: &'static str,
     thinking_label: &'static str,
     show_done: bool,
     selected_supports_copy: bool,
@@ -898,7 +899,6 @@ pub fn build_hints_with_locale(
     vim_mode: bool,
     is_subagent_view: bool,
     is_turn_running: bool,
-    esc_would_cancel_turn: bool,
     has_queued_follow_up: bool,
     selected_is_user_prompt: bool,
     selected_is_agent_message: bool,
@@ -1260,6 +1260,58 @@ mod tests {
     fn first_two_labels(hints: &[HintItem]) -> Vec<&str> {
         hints.iter().take(2).map(|h| h.label.as_ref()).collect()
     }
+    #[test]
+    fn zh_localization_dock_hints_keep_tab_target_and_ctrl_c_binding() {
+        let registry = ActionRegistry::defaults();
+        let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+            locale: crate::locale::UiLocale::ZhCn,
+            source: crate::locale::LocaleSource::Cli,
+        });
+        for locale in [None, Some(&locale)] {
+            for running in [false, true] {
+                let hints = build_hints_with_locale(
+                    ActivePane::Dock,
+                    prompt_focus_hint(),
+                    &PromptWidget::default(),
+                    &registry,
+                    false,
+                    None,
+                    None,
+                    "custom tab target",
+                    "expand thinking",
+                    false,
+                    false,
+                    None,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    running,
+                    false,
+                    false,
+                    false,
+                    false,
+                    None,
+                    locale,
+                );
+                let tab = hints
+                    .iter()
+                    .find(|hint| hint.keys == vec![crate::key!(Tab)])
+                    .unwrap();
+                assert_eq!(tab.label, "custom tab target");
+                assert_eq!(
+                    hints
+                        .iter()
+                        .any(|hint| hint.keys == vec![crate::key!('c', CONTROL)]),
+                    running,
+                );
+                assert!(!hints.iter().any(|hint| hint.keys == vec![crate::key!(Esc)]));
+            }
+        }
+    }
+
     #[test]
     fn demotion_hint_uses_registered_ctrl_b_binding() {
         let registry = ActionRegistry::defaults();

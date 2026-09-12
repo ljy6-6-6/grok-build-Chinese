@@ -52,7 +52,8 @@ pub(super) fn min_content_height(
     info_height: u16,
     prompt_height: u16,
 ) -> u16 {
-    let inner = super::logo::full_logo_line_count_for(input.logo_hidden)
+    let logo_hidden = input.logo_hidden.unwrap_or_else(super::logo::logo_hidden);
+    let inner = super::logo::full_logo_line_count_for(logo_hidden)
         .max(right_col_height(input.menu_height, info_height));
     let hero_box_height = 2 + V_PAD * 2 + inner;
     let gap_after_error = if input.error_height > 0 { 1u16 } else { 0 };
@@ -87,7 +88,7 @@ fn left_col_width(logo_hidden: bool) -> u16 {
 /// A taller draft never reflows the slot: when the box no longer fits beside it, this returns
 /// `None` and the caller falls back to the stacked layout.
 pub(super) fn compute_hero_box(input: &WelcomeLayoutInput<'_>) -> Option<WelcomeLayout> {
-    let logo_hidden = input.logo_hidden;
+    let logo_hidden = input.logo_hidden.unwrap_or_else(super::logo::logo_hidden);
     let content_area = input.content_area;
     let error_height = input.error_height;
     let menu_height = input.menu_height;
@@ -682,6 +683,25 @@ mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     use ratatui::style::Style;
+
+    #[test]
+    fn zh_localization_hero_layout_honors_explicit_logo_override() {
+        for hidden in [false, true] {
+            let input = WelcomeLayoutInput {
+                content_area: Rect::new(0, 0, 140, 80),
+                menu_height: 4,
+                logo_hidden: Some(hidden),
+                ..Default::default()
+            };
+            let layout = compute_hero_box(&input).expect("ample space for hero layout");
+            assert_eq!(layout.hero_logo.width == 0, hidden);
+            assert_eq!(
+                layout.hero_logo.height,
+                super::super::logo::full_logo_line_count_for(hidden)
+            );
+            assert!(min_content_height(&input, 0, PROMPT_HEIGHT) <= input.content_area.height);
+        }
+    }
 
     fn extract_text(buf: &Buffer, x: u16, y: u16, width: u16) -> String {
         (x..x + width)

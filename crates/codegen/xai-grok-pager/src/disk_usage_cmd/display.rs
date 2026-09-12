@@ -318,7 +318,7 @@ fn count_verb(n: u64) -> &'static str {
 }
 
 fn kind_cell(wt: &WorktreeUsage, locale: Option<&crate::locale::LocaleContext>) -> String {
-    let kind = localized_kind(wt.kind.as_str(), locale);
+    let kind = localized_kind(wt.kind.as_ref(), locale);
     match &wt.registration {
         Registration::Untracked => {
             text(locale, "du.kind.untracked", "untracked ({kind})").replace("{kind}", &kind)

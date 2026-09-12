@@ -451,6 +451,8 @@ impl SessionEvent {
             SessionEvent::HookAnnotation { message, kind } => {
                 localized_hook_annotation(locale, *kind, message)
             }
+            // Hook-owned verdict text is opaque; only the block chrome is ours.
+            SessionEvent::HookOutcome { message } => message.clone(),
             SessionEvent::ModelUnavailable {
                 new_model_id,
                 reason,
@@ -483,6 +485,27 @@ impl SessionEvent {
             SessionEvent::Recap { summary, auto: _ } => {
                 text("scrollback.session_event.recap", "Recap — {summary}")
                     .replace("{summary}", summary)
+            }
+            SessionEvent::PlanModeEnteredByAgent { permission } => text(
+                "scrollback.session_event.plan_mode_entered",
+                "Agent entered plan mode · active permission mode: {permission} · file edits outside session plan.md blocked until plan mode exits",
+            )
+            .replace("{permission}", permission.as_canonical()),
+            SessionEvent::PlanReviewClosed {
+                outcome,
+                permission,
+            } => {
+                let (id, english) = match outcome {
+                    PlanReviewOutcome::Approved => (
+                        "scrollback.session_event.plan_review_approved",
+                        "Plan approved · plan mode off · active permission mode: {permission}",
+                    ),
+                    PlanReviewOutcome::Abandoned => (
+                        "scrollback.session_event.plan_review_abandoned",
+                        "Plan abandoned · plan mode off · active permission mode: {permission}",
+                    ),
+                };
+                text(id, english).replace("{permission}", permission.as_canonical())
             }
         }
     }
@@ -979,6 +1002,53 @@ mod tests {
             locale: crate::locale::UiLocale::ZhCn,
             source: crate::locale::LocaleSource::Cli,
         })
+    }
+
+    #[test]
+    fn zh_localization_new_session_events_preserve_payloads_and_permissions() {
+        let zh = zh_locale();
+        let en = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+            locale: crate::locale::UiLocale::EnUs,
+            source: crate::locale::LocaleSource::Cli,
+        });
+        let payload = "blocked by guard: {permission} /tmp/plan.md — 原始输出";
+        let hook = SessionEvent::HookOutcome {
+            message: payload.into(),
+        };
+        assert_eq!(hook.message_with_locale(&zh), payload);
+        assert_eq!(hook.message_with_locale(&en), hook.message());
+        for permission in [
+            PermissionLabel::Ask,
+            PermissionLabel::Auto,
+            PermissionLabel::AlwaysApprove,
+        ] {
+            let entered = SessionEvent::PlanModeEnteredByAgent { permission };
+            assert_eq!(entered.message_with_locale(&en), entered.message());
+            assert_eq!(
+                entered.message_with_locale(&zh),
+                format!(
+                    "代理已进入计划模式 · 当前权限模式：{} · 退出计划模式前，禁止编辑会话 plan.md 以外的文件",
+                    permission.as_canonical(),
+                )
+            );
+            for (outcome, verdict) in [
+                (PlanReviewOutcome::Approved, "批准"),
+                (PlanReviewOutcome::Abandoned, "放弃"),
+            ] {
+                let closed = SessionEvent::PlanReviewClosed {
+                    outcome,
+                    permission,
+                };
+                assert_eq!(closed.message_with_locale(&en), closed.message());
+                assert_eq!(
+                    closed.message_with_locale(&zh),
+                    format!(
+                        "计划已{verdict} · 计划模式已关闭 · 当前权限模式：{}",
+                        permission.as_canonical(),
+                    )
+                );
+            }
+        }
     }
 
     #[test]

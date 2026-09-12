@@ -19,6 +19,17 @@ pub enum SessionPickerHost {
 /// Shared by dashboard picker paint and input so a copy change cannot update only one site.
 pub(crate) const DASHBOARD_PICKER_TITLE: &str = "Open session";
 
+/// Paint and input routing must resolve the same display title.
+pub(crate) fn dashboard_picker_title(
+    locale: Option<&crate::locale::LocaleContext>,
+) -> &'static str {
+    locale
+        .map(|locale| {
+            locale.named_static_text("session_picker.open_session", DASHBOARD_PICKER_TITLE)
+        })
+        .unwrap_or(DASHBOARD_PICKER_TITLE)
+}
+
 /// State for one session-picker incarnation.
 /// Host-agnostic: everything a picker accumulates between open and dismiss, nothing about how a host renders it or maps its keys.
 #[derive(Debug)]
@@ -88,6 +99,7 @@ pub(crate) struct SessionPickerRenderCtx<'a> {
     pub(crate) source_filter: crate::views::session_picker::SourceFilter,
     pub(crate) pending_delete: bool,
     pub(crate) chat_mode: bool,
+    pub(crate) locale: Option<&'a crate::locale::LocaleContext>,
 }
 
 pub(crate) fn render_session_picker(
@@ -129,24 +141,33 @@ fn render_simple_session_picker_modal(
     use crate::views::modal_window::{ModalSizing, ModalWindowConfig, Shortcut};
     use crate::views::picker::{self, PickerField};
 
+    let text = |id: &str, english: &'static str| {
+        ctx.locale
+            .map(|locale| locale.named_static_text(id, english))
+            .unwrap_or(english)
+    };
     let mut shortcuts = vec![
         Shortcut {
-            label: "\u{2191}\u{2193} nav",
+            label: text("picker.shortcut.nav", "\u{2191}\u{2193} nav"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "Enter select",
+            label: text("picker.shortcut.select", "Enter select"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "Esc close",
+            label: text("picker.shortcut.close", "Esc close"),
             clickable: false,
             id: 0,
         },
     ];
-    crate::views::modal_window::push_vim_nav_search_hint(&mut shortcuts, ctx.state.search_active);
+    crate::views::modal_window::push_vim_nav_search_hint_with_locale(
+        &mut shortcuts,
+        ctx.state.search_active,
+        ctx.locale,
+    );
     let modal_config = ModalWindowConfig {
         title,
         tabs: None,
@@ -170,7 +191,7 @@ fn render_simple_session_picker_modal(
     };
 
     let content = modal.content;
-    picker::render_picker_search_bar(
+    picker::render_picker_search_bar_with_locale(
         buf,
         content.x,
         content.y,
@@ -180,6 +201,7 @@ fn render_simple_session_picker_modal(
         ctx.state.search_active,
         true,
         Some(theme.bg_base),
+        ctx.locale,
     );
     ctx.state.filter_area = None;
     let separator_y = content.y + 1;
@@ -199,11 +221,12 @@ fn render_simple_session_picker_modal(
     let sessions = ctx.sessions.unwrap_or(&[]);
     let filtered =
         crate::app::app_view::filter_session_entries(ctx.sessions, query, ctx.source_filter);
-    let built = crate::views::session_picker::build_session_entry_data(
+    let built = crate::views::session_picker::build_session_entry_data_with_locale(
         sessions,
         &filtered,
         ctx.state,
         content.width,
+        ctx.locale,
     );
     let fields: Vec<Vec<PickerField<'_>>> = built
         .iter()
@@ -232,7 +255,7 @@ fn render_simple_session_picker_modal(
             .height
             .saturating_sub(separator_y.saturating_add(1).saturating_sub(content.y)),
     };
-    let content_hit = picker::render_picker_content_with_scrollbar_x(
+    let content_hit = picker::render_picker_content_with_scrollbar_x_and_locale(
         buf,
         entries_area,
         theme,
@@ -244,6 +267,7 @@ fn render_simple_session_picker_modal(
         ctx.loading,
         ctx.tick,
         modal.inner_x + modal.inner_width - 1,
+        ctx.locale,
     );
     crate::views::picker::PickerHitAreas {
         close_button: Rect::default(),
@@ -252,5 +276,72 @@ fn render_simple_session_picker_modal(
         entry_indices: content_hit.entry_indices,
         tab_rects: vec![],
         filter_rect: None,
+    }
+}
+
+#[cfg(test)]
+mod locale_tests {
+    use super::*;
+
+    #[test]
+    fn zh_localization_dashboard_picker_threads_locale_to_modal_chrome() {
+        let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+            locale: crate::locale::UiLocale::ZhCn,
+            source: crate::locale::LocaleSource::Cli,
+        });
+        for (locale, title, search, loading, select) in [
+            (None, "Open session", "search:", "Loading…", "Enter select"),
+            (Some(&locale), "打开会话", "搜索：", "加载中…", "Enter 选择"),
+        ] {
+            assert_eq!(dashboard_picker_title(locale), title);
+            let mut surface = SessionPickerSurface::new(1);
+            let area = Rect::new(0, 0, 120, 30);
+            let mut buf = Buffer::empty(area);
+            let theme = Theme::default();
+            let hit = render_session_picker(
+                area,
+                &mut buf,
+                &theme,
+                SessionPickerRenderMode::Modal {
+                    window: &mut surface.window,
+                    title: dashboard_picker_title(locale),
+                },
+                &mut SessionPickerRenderCtx {
+                    state: &mut surface.state,
+                    sessions: None,
+                    cwd: std::path::Path::new("/repo"),
+                    loading: true,
+                    pending_hint: None,
+                    shortcuts_area: None,
+                    content_results: None,
+                    content_loading: false,
+                    entries_query: None,
+                    tick: 0,
+                    grouped: true,
+                    source_filter: Default::default(),
+                    pending_delete: false,
+                    chat_mode: false,
+                    locale,
+                },
+            );
+            let mut screen = String::new();
+            for y in area.y..area.y + area.height {
+                for x in area.x..area.x + area.width {
+                    if let Some(cell) = buf.cell((x, y)) {
+                        screen.push_str(cell.symbol());
+                    }
+                }
+                screen.push('\n');
+            }
+            let screen = screen.replace(' ', "");
+            for label in [title, search, loading, select] {
+                assert!(
+                    screen.contains(&label.replace(' ', "")),
+                    "missing {label:?} in {screen}"
+                );
+            }
+            assert!(hit.search_bar.width > 0);
+            assert!(hit.item_rects.is_empty());
+        }
     }
 }

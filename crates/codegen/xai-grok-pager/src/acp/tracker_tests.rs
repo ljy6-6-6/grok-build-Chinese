@@ -2475,6 +2475,34 @@ fn activity_writing_tool_call_labels_localize_without_translating_subjects() {
         "正在准备 (Linear) List Issues…"
     );
 }
+#[test]
+fn zh_localization_feedback_writing_label_keeps_ordinal_and_tool_identity() {
+    let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+        locale: crate::locale::UiLocale::ZhCn,
+        source: crate::locale::LocaleSource::Cli,
+    });
+    let names = xai_grok_tools::tool_taxonomy::WRITING_TOOL_WIRE_NAMES
+        .iter()
+        .filter(|(_, kind)| matches!(kind, xai_grok_tools::types::tool::ToolKind::Feedback))
+        .map(|(name, _)| *name)
+        .collect::<Vec<_>>();
+    assert!(!names.is_empty(), "feedback wire names must be covered");
+    for name in names {
+        for (ordinal, en, zh) in [
+            (1, "Writing feedback draft…", "正在编写反馈草稿…"),
+            (2, "Writing feedback draft (2)…", "正在编写反馈草稿 (2)…"),
+        ] {
+            let writing = WritingToolCall {
+                tool_name: Some(name.to_owned()),
+                ordinal: std::num::NonZeroU32::new(ordinal).unwrap(),
+            };
+            assert_eq!(writing.label(), en);
+            assert_eq!(writing.label_with_locale(Some(&locale)), zh);
+            assert_eq!(writing.tool_name.as_deref(), Some(name));
+        }
+    }
+}
+
 /// First-party tools with long argument streams read as friendly phrases
 /// (wire spellings pinned per toolset); tiny-payload read-style tools keep
 /// the raw-name fallback.

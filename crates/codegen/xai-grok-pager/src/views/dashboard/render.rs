@@ -529,7 +529,7 @@ pub fn render_dashboard_with_locale(
             &theme,
             crate::views::session_picker_surface::SessionPickerRenderMode::Modal {
                 window: &mut surface.window,
-                title: crate::views::session_picker_surface::DASHBOARD_PICKER_TITLE,
+                title: crate::views::session_picker_surface::dashboard_picker_title(locale),
             },
             &mut crate::views::session_picker_surface::SessionPickerRenderCtx {
                 state: &mut surface.state,
@@ -546,6 +546,7 @@ pub fn render_dashboard_with_locale(
                 source_filter: surface.source_filter,
                 pending_delete: false,
                 chat_mode: false,
+                locale,
             },
         );
         surface.state.hit_areas = (hit_areas.search_bar.width > 0).then_some(hit_areas);

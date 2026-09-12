@@ -111,7 +111,7 @@ pub fn print_table_with_locale(
         .clamp(5, 24);
     let type_width = records
         .iter()
-        .map(|r| UnicodeWidthStr::width(kind_label(r.kind.as_str(), locale).as_ref()))
+        .map(|r| UnicodeWidthStr::width(kind_label(r.kind.as_ref(), locale).as_ref()))
         .fold(UnicodeWidthStr::width(type_header.as_ref()), usize::max);
     writeln!(
         out,
@@ -131,7 +131,7 @@ pub fn print_table_with_locale(
         let branch = rec.git_ref.as_deref().unwrap_or(detached.as_ref());
         let label = rec.label().unwrap_or("");
         let path = abbreviate_home(&rec.path);
-        let kind = kind_label(rec.kind.as_str(), locale);
+        let kind = kind_label(rec.kind.as_ref(), locale);
         // AGE is ASCII, so format-width padding is width-true; every other
         // cell pads by display width.
         writeln!(

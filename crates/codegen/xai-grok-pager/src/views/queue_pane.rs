@@ -895,7 +895,7 @@ impl QueuePane {
             focused,
             layout_cfg,
             overlay_area,
-            is_turn_running,
+            can_send_now,
             None,
         );
     }
@@ -908,7 +908,7 @@ impl QueuePane {
         focused: bool,
         layout_cfg: &LayoutConfig,
         overlay_area: Option<Rect>,
-        is_turn_running: bool,
+        can_send_now: bool,
         locale: Option<&crate::locale::LocaleContext>,
     ) {
         // Detect a theme switch and refresh the list chrome style. Its
@@ -1731,6 +1731,35 @@ mod tests {
             delete.x,
             "[edit] must sit flush against [cancel] (no gap to leak through)"
         );
+    }
+
+    #[test]
+    fn zh_localization_send_now_gate_and_hit_target_stay_in_sync() {
+        let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+            locale: crate::locale::UiLocale::ZhCn,
+            source: crate::locale::LocaleSource::Cli,
+        });
+        for locale in [None, Some(&locale)] {
+            let mut pane = QueuePane::new();
+            let mut local = std::collections::VecDeque::new();
+            local.push_back(local_prompt(1, "msg"));
+            pane.sync_from_merged(&local, &[], None, None, &Default::default());
+            let id = pane.entry_ids()[0];
+            pane.list_state.select_by_id(id);
+            let area = Rect::new(0, 0, 100, 1);
+            let mut buf = Buffer::empty(area);
+            let layout_cfg = crate::appearance::LayoutConfig::default();
+            pane.render_with_locale(area, &mut buf, true, &layout_cfg, None, false, locale);
+            assert!(pane.send_now.rect.is_none());
+            pane.render_with_locale(area, &mut buf, true, &layout_cfg, None, true, locale);
+            let target = pane.send_now.rect.expect("send-now target");
+            for x in target.x..target.x + target.width {
+                assert_eq!(pane.send_now_click(x, target.y), Some(id));
+            }
+            pane.render_with_locale(area, &mut buf, true, &layout_cfg, None, false, locale);
+            assert!(pane.send_now.rect.is_none());
+            assert_eq!(pane.send_now_click(target.x, target.y), None);
+        }
     }
 
     #[test]

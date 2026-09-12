@@ -232,7 +232,9 @@ impl WritingToolCall {
                             ToolKind::Workflow => {
                                 Some(("turn.writing.workflow", "Writing workflow{ordinal}…"))
                             }
-                            ToolKind::Feedback => Some("Writing feedback draft"),
+                            ToolKind::Feedback => {
+                                Some(("turn.writing.feedback", "Writing feedback draft{ordinal}…"))
+                            }
                             ToolKind::ImageGen => Some((
                                 "turn.writing.image_prompt",
                                 "Writing image prompt{ordinal}…",

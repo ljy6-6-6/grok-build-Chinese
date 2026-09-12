@@ -74,7 +74,7 @@ pub fn localized_model_name(
     let Some(effort) = reasoning_effort else {
         return model_name;
     };
-    let effort = effort.as_str();
+    let effort = effort.as_ref();
     let label = locale
         .map(|locale| {
             locale

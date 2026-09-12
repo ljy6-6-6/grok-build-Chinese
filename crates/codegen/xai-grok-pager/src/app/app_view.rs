@@ -1206,7 +1206,11 @@ impl AppView {
         );
         let non_selectable: Vec<bool> = entry_map.iter().map(Option::is_none).collect();
         let config = PickerConfig {
-            title: Some(crate::views::session_picker_surface::DASHBOARD_PICKER_TITLE),
+            title: Some(
+                crate::views::session_picker_surface::dashboard_picker_title(Some(
+                    self.locale.as_ref(),
+                )),
+            ),
             show_search_hint: true,
             expandable: false,
             esc_clears_query: false,

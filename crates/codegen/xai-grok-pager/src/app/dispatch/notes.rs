@@ -1000,8 +1000,7 @@ pub(super) fn handle_memory_note_saved(
                     agent.scrollback.locale(),
                     "memory_note.saved_v2",
                     "Memory note saved",
-                )
-                .into_owned();
+                );
                 agent
                     .scrollback
                     .push_block(crate::scrollback::block::RenderBlock::system(message));

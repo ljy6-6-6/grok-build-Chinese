@@ -422,8 +422,6 @@ fn join_header_rows(header: String, rows: Vec<String>) -> String {
 mod tests {
     use super::*;
     use crate::app::subagent::SubagentInfo;
-    use std::sync::Arc;
-    use std::time::Instant;
     use xai_grok_shell::extensions::notification::{PromptUsage, PromptUsageModel};
 
     fn zh_locale() -> crate::locale::LocaleContext {
@@ -434,46 +432,11 @@ mod tests {
     }
 
     fn explore_subagent() -> SubagentInfo {
-        let now = Instant::now();
-        SubagentInfo {
-            subagent_id: Arc::from("sa-1"),
-            child_session_id: Arc::from("child-1"),
-            description: Arc::from("Workspace smoke-test probe"),
-            subagent_type: Arc::from("explore"),
-            persona: None,
-            role: Some(Arc::from("explore")),
-            model: None,
-            context_source: None,
-            resumed_from: None,
-            capability_mode: None,
-            workflow_run_id: None,
-            context_normalized: false,
-            parent_prompt_id: None,
-            started_at: now,
-            last_progress_at: now,
-            finished: false,
-            status: None,
-            error: None,
-            duration_ms: None,
-            tool_calls: None,
-            turns: None,
-            turn_count: None,
-            tool_call_count: None,
-            tokens_used: None,
-            context_window_tokens: None,
-            context_usage_pct: None,
-            tools_used: Vec::new(),
-            error_count: None,
-            activity_label: None,
-            is_background: false,
-            pending_kill: false,
-            kill_requested_at: None,
-            scrollback_entry_id: None,
-            prompt: None,
-            child_cwd: None,
-            worktree_path: None,
-            transcript: Default::default(),
-        }
+        let mut info = crate::app::subagent::test_support::make_info();
+        info.child_session_id = "child-1".into();
+        info.description = "Workspace smoke-test probe".into();
+        info.attempt.role = Some("explore".into());
+        info
     }
 
     fn model_row(input: u64, output: u64, ticks: Option<i64>) -> PromptUsageModel {

@@ -1693,7 +1693,7 @@ mod resolve_turn_activity_tests {
         let mut view = running_view();
         view.set_locale_recursive(&zh_locale());
         let mut info = running_child("Test subagent toolchain");
-        info.activity_label = Some("思考中…".into());
+        info.attempt.activity_label = Some("思考中…".into());
         view.subagent_sessions.insert("child-1".into(), info);
         let Some(TurnActivity::Waiting(reason)) = view.resolve_turn_activity() else {
             panic!("expected waiting activity");
@@ -1712,7 +1712,7 @@ mod resolve_turn_activity_tests {
         assert_eq!(reason.label(), "子智能体：scan src/…");
 
         let mut earlier = running_child("audit dashboard");
-        earlier.started_at = std::time::Instant::now() - std::time::Duration::from_secs(5);
+        earlier.attempt.started_at = std::time::Instant::now() - std::time::Duration::from_secs(5);
         view.subagent_sessions.insert("child-0".into(), earlier);
         let Some(TurnActivity::Waiting(reason)) = view.resolve_turn_activity() else {
             panic!("expected waiting activity");

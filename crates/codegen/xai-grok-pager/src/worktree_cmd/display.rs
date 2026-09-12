@@ -111,7 +111,7 @@ pub fn print_table_with_locale(
         .clamp(5, 24);
     let type_width = records
         .iter()
-        .map(|r| UnicodeWidthStr::width(kind_label(r.kind.as_ref(), locale).as_ref()))
+        .map(|r| UnicodeWidthStr::width(kind_label(r.kind.as_ref(), locale).as_str()))
         .fold(UnicodeWidthStr::width(type_header.as_ref()), usize::max);
     writeln!(
         out,

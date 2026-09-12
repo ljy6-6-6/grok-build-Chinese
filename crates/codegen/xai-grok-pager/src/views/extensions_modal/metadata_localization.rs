@@ -797,6 +797,7 @@ mod tests {
             setup_values: Default::default(),
             tools: vec![],
             enabled: true,
+            blocked_reason: None,
             source: "managed".into(),
             wire_source: McpWireSource::Managed,
             plugin_name: None,

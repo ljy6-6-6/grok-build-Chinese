@@ -384,7 +384,19 @@ jobs:
           $rgArchive = Join-Path $env:RUNNER_TEMP 'ripgrep.zip'
           $rgExtract = Join-Path $env:RUNNER_TEMP 'ripgrep'
           $rgUri = "https://github.com/BurntSushi/ripgrep/releases/download/$rgVersion/ripgrep-$rgVersion-x86_64-pc-windows-msvc.zip"
-          Invoke-WebRequest -Uri $rgUri -OutFile $rgArchive
+          $rgDownloadAttempts = 3
+          for ($attempt = 1; $attempt -le $rgDownloadAttempts; $attempt++) {
+            try {
+              Invoke-WebRequest -Uri $rgUri -OutFile $rgArchive `
+                -ConnectionTimeoutSeconds 120 -OperationTimeoutSeconds 120
+              break
+            } catch {
+              if ($attempt -eq $rgDownloadAttempts) { throw }
+              $retryDelay = 5 * $attempt
+              Write-Warning "ripgrep 下载失败（第 $attempt 次），将在 $retryDelay 秒后重试：$($_.Exception.Message)"
+              Start-Sleep -Seconds $retryDelay
+            }
+          }
           Expand-Archive -LiteralPath $rgArchive -DestinationPath $rgExtract
           $rgSource = Get-ChildItem -LiteralPath $rgExtract -Filter rg.exe -Recurse -File |
             Select-Object -First 1

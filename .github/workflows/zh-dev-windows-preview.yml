@@ -18,12 +18,17 @@ on:
         description: 可选的内嵌版本（默认为 CI 构建编号）
         required: false
         type: string
+      parallel_run:
+        description: 保留同分支正在运行的 CI，同时启动本轮
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
 
 concurrency:
-  group: zh-dev-multiplatform-${{ github.ref }}
+  group: zh-dev-multiplatform-${{ github.ref }}${{ inputs.parallel_run && format('-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 jobs:

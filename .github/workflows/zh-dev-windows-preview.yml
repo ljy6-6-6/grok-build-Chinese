@@ -27,8 +27,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  windows-gnu-preview:
-    name: Windows x64 GNU 预览版
+  windows-gnu-validation:
+    name: Windows x64 GNU 验证
     runs-on: windows-2022
     timeout-minutes: 180
     env:
@@ -37,7 +37,6 @@ jobs:
       CARGO_INCREMENTAL: "0"
       CARGO_NET_RETRY: "10"
       CARGO_HTTP_TIMEOUT: "120"
-      RESOURCE_SAMPLE_SECONDS: "5"
       RUSTUP_TOOLCHAIN: 1.94.0-x86_64-pc-windows-gnu
       TARGET: x86_64-pc-windows-gnu
 
@@ -47,132 +46,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: 选择预览版本
-        id: preview
-        shell: pwsh
-        env:
-          REQUESTED_VERSION: ${{ inputs.version }}
-        run: |
-          $requested = $env:REQUESTED_VERSION
-          if ([string]::IsNullOrWhiteSpace($requested)) {
-            $manifest = Get-Content `
-              -LiteralPath 'crates/codegen/xai-grok-pager-bin/Cargo.toml'
-            $versionLine = $manifest |
-              Where-Object { $_ -match '^version\s*=\s*"([^"]+)"\s*$' } |
-              Select-Object -First 1
-            if (!$versionLine -or $versionLine -notmatch '^version\s*=\s*"([^"]+)"\s*$') {
-              throw '无法读取 pager-bin 软件包版本。'
-            }
-            $version = "$($matches[1])-zh.ci.$env:GITHUB_RUN_NUMBER"
-          } else {
-            $version = $requested.Trim()
-          }
-          $semverPattern = '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?$'
-          if ($version.Length -gt 64 -or $version -notmatch $semverPattern) {
-            throw "版本无效：$version"
-          }
-          "GROK_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "PACKAGE_NAME=grok-zh-$version-windows-x86_64-gnu" |
-            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "package_name=grok-zh-$version-windows-x86_64-gnu" |
-            Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-
-      - name: 配置固定版本的 Rust、MinGW 和 protoc
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          rustup toolchain install $env:RUSTUP_TOOLCHAIN `
-            --profile minimal --component rustfmt --component rust-src
-
-          $sysroot = (& rustc --print sysroot).Trim()
-          $rustc = Join-Path $sysroot 'bin\rustc.exe'
-          $rustdoc = Join-Path $sysroot 'bin\rustdoc.exe'
-          if (!(Test-Path -LiteralPath $rustc)) {
-            throw "缺少固定版本的 rustc：$rustc"
-          }
-
-          $mingw = 'C:\mingw64\bin'
-          $gcc = Join-Path $mingw 'gcc.exe'
-          $gxx = Join-Path $mingw 'g++.exe'
-          $ar = Join-Path $mingw 'ar.exe'
-          foreach ($tool in @($gcc, $gxx, $ar)) {
-            if (!(Test-Path -LiteralPath $tool)) {
-              throw "缺少必需的 MinGW 工具：$tool"
-            }
-          }
-
-          $protocVersion = '29.3'
-          $protocArchive = Join-Path $env:RUNNER_TEMP "protoc-$protocVersion-win64.zip"
-          $protocRoot = Join-Path $env:RUNNER_TEMP "protoc-$protocVersion"
-          $protocUri = "https://github.com/protocolbuffers/protobuf/releases/download/v$protocVersion/protoc-$protocVersion-win64.zip"
-          Invoke-WebRequest -Uri $protocUri -OutFile $protocArchive
-          $protocHash = (Get-FileHash -LiteralPath $protocArchive -Algorithm SHA256).Hash
-          if ($protocHash -ne '57EA59E9F551AD8D71FFAA9B5CFBE0CA1F4E720972A1DB7EC2D12AB44BFF9383') {
-            throw "protoc SHA-256 校验值异常：$protocHash"
-          }
-          Expand-Archive -LiteralPath $protocArchive -DestinationPath $protocRoot
-          $protoc = Join-Path $protocRoot 'bin\protoc.exe'
-          if (!(Test-Path -LiteralPath $protoc)) {
-            throw "下载的 protoc 缺失：$protoc"
-          }
-
-          $targetDir = Join-Path $env:RUNNER_TEMP 'grok-zh-target'
-          $cargoHome = Join-Path $env:RUNNER_TEMP 'grok-zh-cargo'
-
-          $mingw | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-          "RUSTC=$rustc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "RUSTDOC=$rustdoc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "PROTOC=$protoc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "CARGO_HOME=$cargoHome" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "CARGO_TARGET_DIR=$targetDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=$gcc" |
-            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "CC=$gcc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "CXX=$gxx" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "AR=$ar" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
-          & $rustc -Vv
-          & $gcc --version
-          & $protoc --version
-
-      - name: 恢复 Cargo 依赖缓存
-        id: cargo_home_cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+      - name: 准备 Windows GNU 预览环境
+        id: windows_setup
+        uses: ./.github/actions/setup-windows-gnu
         with:
-          path: |
-            ${{ runner.temp }}/grok-zh-cargo/registry
-            ${{ runner.temp }}/grok-zh-cargo/git
-          key: grok-zh-cargo-home-${{ env.CARGO_CACHE_SCHEMA }}-${{ github.ref_name }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            grok-zh-cargo-home-${{ env.CARGO_CACHE_SCHEMA }}-${{ github.ref_name }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml') }}-
-            grok-zh-cargo-home-${{ env.CARGO_CACHE_SCHEMA }}-zh-dev-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml') }}-
-            grok-zh-cargo-home-${{ env.CARGO_CACHE_SCHEMA }}-zh-dev-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-
-            grok-zh-cargo-home-v1-zh-dev-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-
-
-      - name: 恢复 Cargo GNU release 缓存
-        id: cargo_target_cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-        with:
-          path: ${{ runner.temp }}/grok-zh-target/${{ env.TARGET }}/release
-          key: grok-zh-target-${{ env.CARGO_CACHE_SCHEMA }}-${{ github.ref_name }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-lto0-debug0-cgu16-shellopt1-shellcgu16-feature-release-dist-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            grok-zh-target-${{ env.CARGO_CACHE_SCHEMA }}-${{ github.ref_name }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-lto0-debug0-cgu16-shellopt1-shellcgu16-feature-release-dist-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml') }}-
-            grok-zh-target-${{ env.CARGO_CACHE_SCHEMA }}-zh-dev-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-lto0-debug0-cgu16-shellopt1-shellcgu16-feature-release-dist-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml') }}-
-            grok-zh-target-${{ env.CARGO_CACHE_SCHEMA }}-zh-dev-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-lto0-debug0-cgu16-shellopt1-shellcgu16-feature-release-dist-
-
-      # Explicit --target builds keep proc macros and build scripts outside the
-      # target triple directory. Cache them separately to retain old cache hits.
-      - name: 恢复 Cargo GNU 宿主构建缓存
-        id: cargo_host_cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-        with:
-          path: ${{ runner.temp }}/grok-zh-target/release
-          key: grok-zh-host-${{ env.CARGO_CACHE_SCHEMA }}-${{ github.ref_name }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-lto0-debug0-cgu16-shellopt1-shellcgu16-feature-release-dist-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            grok-zh-host-${{ env.CARGO_CACHE_SCHEMA }}-${{ github.ref_name }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-lto0-debug0-cgu16-shellopt1-shellcgu16-feature-release-dist-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml') }}-
-            grok-zh-host-${{ env.CARGO_CACHE_SCHEMA }}-zh-dev-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-lto0-debug0-cgu16-shellopt1-shellcgu16-feature-release-dist-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml') }}-
-            grok-zh-host-${{ env.CARGO_CACHE_SCHEMA }}-zh-dev-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-lto0-debug0-cgu16-shellopt1-shellcgu16-feature-release-dist-
+          version: ${{ inputs.version }}
 
       - name: 验证 Windows 安装程序
         shell: pwsh
@@ -213,8 +91,6 @@ jobs:
           }
           "已验证 $count 个 zh-CN 条目。"
 
-          cargo fetch --locked --target $env:TARGET
-          if ($LASTEXITCODE -ne 0) { throw "cargo fetch 失败：$LASTEXITCODE" }
           cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-locale
           if ($LASTEXITCODE -ne 0) { throw "xai-grok-locale 测试失败：$LASTEXITCODE" }
           cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-update --features community-build --lib
@@ -239,6 +115,56 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "精简界面中文定向测试失败：$LASTEXITCODE" }
           cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-pager --lib free_usage_upsell_shows_three_options_with_exact_labels
           if ($LASTEXITCODE -ne 0) { throw "免费账户升级选项测试失败：$LASTEXITCODE" }
+
+  windows-gnu-build:
+    name: Windows x64 GNU 编译打包
+    runs-on: windows-2022
+    timeout-minutes: 180
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_CACHE_SCHEMA: v2
+      CARGO_INCREMENTAL: "0"
+      CARGO_NET_RETRY: "10"
+      CARGO_HTTP_TIMEOUT: "120"
+      RESOURCE_SAMPLE_SECONDS: "5"
+      RUSTUP_TOOLCHAIN: 1.94.0-x86_64-pc-windows-gnu
+      TARGET: x86_64-pc-windows-gnu
+
+    steps:
+      - name: 检出 zh-dev
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+
+      - name: 准备 Windows GNU 预览环境
+        id: windows_setup
+        uses: ./.github/actions/setup-windows-gnu
+        with:
+          version: ${{ inputs.version }}
+
+      - name: 恢复 Cargo GNU release 缓存
+        id: cargo_target_cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ runner.temp }}/grok-zh-target/${{ env.TARGET }}/release
+          key: grok-zh-target-${{ env.CARGO_CACHE_SCHEMA }}-${{ github.ref_name }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-lto0-debug0-cgu16-shellopt1-shellcgu16-feature-release-dist-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            grok-zh-target-${{ env.CARGO_CACHE_SCHEMA }}-${{ github.ref_name }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-lto0-debug0-cgu16-shellopt1-shellcgu16-feature-release-dist-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+            grok-zh-target-${{ env.CARGO_CACHE_SCHEMA }}-zh-dev-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-lto0-debug0-cgu16-shellopt1-shellcgu16-feature-release-dist-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+            grok-zh-target-${{ env.CARGO_CACHE_SCHEMA }}-zh-dev-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-lto0-debug0-cgu16-shellopt1-shellcgu16-feature-release-dist-
+
+      # Explicit --target builds keep proc macros and build scripts outside the
+      # target triple directory. Cache them separately to retain old cache hits.
+      - name: 恢复 Cargo GNU 宿主构建缓存
+        id: cargo_host_cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ runner.temp }}/grok-zh-target/release
+          key: grok-zh-host-${{ env.CARGO_CACHE_SCHEMA }}-${{ github.ref_name }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-lto0-debug0-cgu16-shellopt1-shellcgu16-feature-release-dist-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            grok-zh-host-${{ env.CARGO_CACHE_SCHEMA }}-${{ github.ref_name }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-lto0-debug0-cgu16-shellopt1-shellcgu16-feature-release-dist-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+            grok-zh-host-${{ env.CARGO_CACHE_SCHEMA }}-zh-dev-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-lto0-debug0-cgu16-shellopt1-shellcgu16-feature-release-dist-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+            grok-zh-host-${{ env.CARGO_CACHE_SCHEMA }}-zh-dev-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-lto0-debug0-cgu16-shellopt1-shellcgu16-feature-release-dist-
 
       - name: 构建并监控 Windows 预览版（J${{ env.CARGO_BUILD_JOBS }}）
         id: windows_build
@@ -545,7 +471,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: grok-zh-windows-${{ github.run_id }}-${{ github.run_attempt }}
-          path: dist/${{ steps.preview.outputs.package_name }}
+          path: dist/${{ steps.windows_setup.outputs.package_name }}
           if-no-files-found: error
           compression-level: 6
           retention-days: 7
@@ -556,9 +482,9 @@ jobs:
           $artifactUrl = '${{ steps.preview_artifact.outputs.artifact-url }}'
           $artifactDigest = '${{ steps.preview_artifact.outputs.artifact-digest }}'
           $monitorArtifactUrl = '${{ steps.monitor_artifact.outputs.artifact-url }}'
-          $cargoHomeCacheHit = '${{ steps.cargo_home_cache.outputs.cache-hit }}'
+          $cargoHomeCacheHit = '${{ steps.windows_setup.outputs.cargo-home-cache-hit }}'
           $cargoTargetCacheHit = '${{ steps.cargo_target_cache.outputs.cache-hit }}'
-          $cargoHomeMatchedKey = '${{ steps.cargo_home_cache.outputs.cache-matched-key }}'
+          $cargoHomeMatchedKey = '${{ steps.windows_setup.outputs.cargo-home-cache-matched-key }}'
           $cargoTargetMatchedKey = '${{ steps.cargo_target_cache.outputs.cache-matched-key }}'
           if ($cargoHomeCacheHit -eq 'true') {
             $cargoHomeCacheStatus = '精确命中'
@@ -575,8 +501,9 @@ jobs:
             $cargoTargetCacheStatus = '未命中（首次或缓存已失效）'
           }
           @"
-          ## Windows GNU 预览版
+          ## Windows GNU 编译产物
 
+          - 完整验收结果以“Windows x64 GNU 预览版”检查为准，它同时要求测试与编译成功。
           - 版本：``$env:GROK_VERSION``
           - 制品：[$env:PACKAGE_NAME]($artifactUrl)
           - 制品 SHA-256：``$artifactDigest``
@@ -607,13 +534,44 @@ jobs:
           key: ${{ steps.cargo_host_cache.outputs.cache-primary-key }}
 
       - name: 保存 Cargo 依赖缓存
-        if: ${{ success() && github.ref_name == 'zh-dev' && steps.cargo_home_cache.outputs.cache-hit != 'true' }}
+        if: ${{ success() && github.ref_name == 'zh-dev' && steps.windows_setup.outputs.cargo-home-cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
             ${{ runner.temp }}/grok-zh-cargo/registry
             ${{ runner.temp }}/grok-zh-cargo/git
-          key: ${{ steps.cargo_home_cache.outputs.cache-primary-key }}
+          key: ${{ steps.windows_setup.outputs.cargo-home-cache-primary-key }}
+
+  # Keep the existing Windows check as the acceptance gate for both runners.
+  windows-gnu-preview:
+    name: Windows x64 GNU 预览版
+    if: ${{ always() }}
+    needs:
+      - windows-gnu-validation
+      - windows-gnu-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      VALIDATION_RESULT: ${{ needs.windows-gnu-validation.result }}
+      BUILD_RESULT: ${{ needs.windows-gnu-build.result }}
+    steps:
+      - name: 验证 Windows 测试与编译均成功
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'Windows validation: %s\nWindows build: %s\n' \
+            "${VALIDATION_RESULT}" "${BUILD_RESULT}"
+          if [[ "${VALIDATION_RESULT}" != success || "${BUILD_RESULT}" != success ]]; then
+            echo '::error::Windows 测试或编译未成功。'
+            exit 1
+          fi
+          {
+            echo '## Windows GNU 预览检查通过'
+            echo
+            echo '- 本地化、安装器与协议验证：成功'
+            echo '- 产物编译与打包：成功'
+            echo '- 两个作业使用独立的 Windows runner，各自执行 J4 Cargo 任务。'
+          } >> "${GITHUB_STEP_SUMMARY}"
 
   linux-x64-gnu-preview:
     name: Linux x64 GNU 预览版

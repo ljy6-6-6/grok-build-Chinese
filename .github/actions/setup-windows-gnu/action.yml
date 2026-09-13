@@ -1,0 +1,132 @@
+name: Setup Windows GNU preview
+description: Select a preview version, prepare the pinned Windows tools, and fetch Cargo dependencies.
+inputs:
+  version:
+    description: Optional embedded preview version; defaults to the CI run number.
+    required: false
+    default: ''
+outputs:
+  package_name:
+    description: Windows preview package directory name.
+    value: ${{ steps.preview.outputs.package_name }}
+  cargo-home-cache-hit:
+    description: Whether the Cargo dependency cache key matched exactly.
+    value: ${{ steps.cargo_home_cache.outputs.cache-hit }}
+  cargo-home-cache-matched-key:
+    description: The restored Cargo dependency cache key.
+    value: ${{ steps.cargo_home_cache.outputs.cache-matched-key }}
+  cargo-home-cache-primary-key:
+    description: The current Cargo dependency cache key for the build job to save.
+    value: ${{ steps.cargo_home_cache.outputs.cache-primary-key }}
+runs:
+  using: composite
+  steps:
+    - name: 选择预览版本
+      id: preview
+      shell: pwsh
+      env:
+        REQUESTED_VERSION: ${{ inputs.version }}
+      run: |
+        $requested = $env:REQUESTED_VERSION
+        if ([string]::IsNullOrWhiteSpace($requested)) {
+          $manifest = Get-Content `
+            -LiteralPath 'crates/codegen/xai-grok-pager-bin/Cargo.toml'
+          $versionLine = $manifest |
+            Where-Object { $_ -match '^version\s*=\s*"([^"]+)"\s*$' } |
+            Select-Object -First 1
+          if (!$versionLine -or $versionLine -notmatch '^version\s*=\s*"([^"]+)"\s*$') {
+            throw '无法读取 pager-bin 软件包版本。'
+          }
+          $version = "$($matches[1])-zh.ci.$env:GITHUB_RUN_NUMBER"
+        } else {
+          $version = $requested.Trim()
+        }
+        $semverPattern = '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?$'
+        if ($version.Length -gt 64 -or $version -notmatch $semverPattern) {
+          throw "版本无效：$version"
+        }
+        "GROK_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        "PACKAGE_NAME=grok-zh-$version-windows-x86_64-gnu" |
+          Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        "package_name=grok-zh-$version-windows-x86_64-gnu" |
+          Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+    - name: 配置固定版本的 Rust、MinGW 和 protoc
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+
+        rustup toolchain install $env:RUSTUP_TOOLCHAIN `
+          --profile minimal --component rustfmt --component rust-src
+
+        $sysroot = (& rustc --print sysroot).Trim()
+        $rustc = Join-Path $sysroot 'bin\rustc.exe'
+        $rustdoc = Join-Path $sysroot 'bin\rustdoc.exe'
+        if (!(Test-Path -LiteralPath $rustc)) {
+          throw "缺少固定版本的 rustc：$rustc"
+        }
+
+        $mingw = 'C:\mingw64\bin'
+        $gcc = Join-Path $mingw 'gcc.exe'
+        $gxx = Join-Path $mingw 'g++.exe'
+        $ar = Join-Path $mingw 'ar.exe'
+        foreach ($tool in @($gcc, $gxx, $ar)) {
+          if (!(Test-Path -LiteralPath $tool)) {
+            throw "缺少必需的 MinGW 工具：$tool"
+          }
+        }
+
+        $protocVersion = '29.3'
+        $protocArchive = Join-Path $env:RUNNER_TEMP "protoc-$protocVersion-win64.zip"
+        $protocRoot = Join-Path $env:RUNNER_TEMP "protoc-$protocVersion"
+        $protocUri = "https://github.com/protocolbuffers/protobuf/releases/download/v$protocVersion/protoc-$protocVersion-win64.zip"
+        Invoke-WebRequest -Uri $protocUri -OutFile $protocArchive
+        $protocHash = (Get-FileHash -LiteralPath $protocArchive -Algorithm SHA256).Hash
+        if ($protocHash -ne '57EA59E9F551AD8D71FFAA9B5CFBE0CA1F4E720972A1DB7EC2D12AB44BFF9383') {
+          throw "protoc SHA-256 校验值异常：$protocHash"
+        }
+        Expand-Archive -LiteralPath $protocArchive -DestinationPath $protocRoot
+        $protoc = Join-Path $protocRoot 'bin\protoc.exe'
+        if (!(Test-Path -LiteralPath $protoc)) {
+          throw "下载的 protoc 缺失：$protoc"
+        }
+
+        $targetDir = Join-Path $env:RUNNER_TEMP 'grok-zh-target'
+        $cargoHome = Join-Path $env:RUNNER_TEMP 'grok-zh-cargo'
+
+        $mingw | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+        "RUSTC=$rustc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        "RUSTDOC=$rustdoc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        "PROTOC=$protoc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        "CARGO_HOME=$cargoHome" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        "CARGO_TARGET_DIR=$targetDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        "CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=$gcc" |
+          Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        "CC=$gcc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        "CXX=$gxx" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        "AR=$ar" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+        & $rustc -Vv
+        & $gcc --version
+        & $protoc --version
+
+    - name: 恢复 Cargo 依赖缓存
+      id: cargo_home_cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+      with:
+        path: |
+          ${{ runner.temp }}/grok-zh-cargo/registry
+          ${{ runner.temp }}/grok-zh-cargo/git
+        key: grok-zh-cargo-home-${{ env.CARGO_CACHE_SCHEMA }}-${{ github.ref_name }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: |
+          grok-zh-cargo-home-${{ env.CARGO_CACHE_SCHEMA }}-${{ github.ref_name }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+          grok-zh-cargo-home-${{ env.CARGO_CACHE_SCHEMA }}-zh-dev-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+          grok-zh-cargo-home-${{ env.CARGO_CACHE_SCHEMA }}-zh-dev-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-
+          grok-zh-cargo-home-v1-zh-dev-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-
+
+    - name: 获取当前 runner 的 Cargo 依赖
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        cargo fetch --locked --target $env:TARGET
+        if ($LASTEXITCODE -ne 0) { throw "cargo fetch 失败：$LASTEXITCODE" }
